@@ -121,6 +121,40 @@ struct V2GatewayForegroundAuthorizationTests {
         try await stream.finish()
     }
 
+    @Test("unregister revokes the foreground fast path before suspended interest cleanup")
+    func unregisterRevokesBeforeInterestCleanup() async throws {
+        let registry = V2DeviceConnectionRegistry()
+        let interests = SuspendedAuthorizationInterestCleanup()
+        await registry.configureUserSyncInterests(V2SharedGroupEventWakeInterests(underlying: interests))
+        let session = V2GatewaySession(
+            limits: try .init(maximumInFlightRequests: 2),
+            authenticator: ExpiringAuthorizationAuthenticator(userID: "00000000-0000-0000-0000-000000000e03"),
+            capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission(),
+            now: { Date(timeIntervalSince1970: 10) }
+        )
+        let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])
+        let connectionID = UUID()
+        let stream = V2GatewayByteStream(frameLimits: limits, session: session,
+            handler: AuthorizationCommandHandler(), connectionID: connectionID, registry: registry)
+        let writes = AuthorizationWriteCount()
+        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            foregroundWriter: { _ in writes.increment() }))
+        try await authenticate(stream, limits: limits)
+        await interests.waitForActivation()
+        let prepared = try #require(V2PreparedGatewayGroupEventAvailable(
+            roomID: try RoomID("00000000-0000-0000-0000-000000000e04"),
+            highWatermark: 1, directEvent: nil, frameLimits: limits, protocolVersion: version))
+        #expect(stream.submitGroupEventAvailable(prepared))
+        let close = Task { await registry.unregister(connectionID: connectionID) }
+        await interests.waitForRemoval()
+        #expect(!stream.submitGroupEventAvailable(prepared))
+        #expect(writes.read() == 1)
+        await interests.releaseRemoval()
+        await close.value
+        try await stream.finish()
+        await registry.shutdownRealtimeRecovery()
+    }
+
     private func authenticate(_ stream: V2GatewayByteStream, limits: V2FrameLimits) async throws {
         let device = "00000000-0000-0000-0000-000000000A02"
         var hello = IMV2Envelope()
@@ -155,9 +189,38 @@ private final class AuthorizationWriteCount: Sendable {
 }
 
 private struct ExpiringAuthorizationAuthenticator: V2GatewayAuthenticator {
+    var userID = "user-a"
     func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
-        try .init(userID: .init("user-a"), expiresAt: Date(timeIntervalSince1970: 11))
+        try .init(userID: .init(userID), expiresAt: Date(timeIntervalSince1970: 11))
     }
+}
+
+private actor SuspendedAuthorizationInterestCleanup: V2GroupEventWakeInterestManaging {
+    private var activated = false
+    private var activationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var removal: CheckedContinuation<Void, Never>?
+    private var removalWaiters: [CheckedContinuation<Void, Never>] = []
+    func activate(roomID _: RoomID) {
+        activated = true
+        for waiter in activationWaiters { waiter.resume() }
+        activationWaiters.removeAll()
+    }
+    func deactivate(roomID _: RoomID) async {
+        await withCheckedContinuation { continuation in
+            removal = continuation
+            for waiter in removalWaiters { waiter.resume() }
+            removalWaiters.removeAll()
+        }
+    }
+    func waitForActivation() async {
+        if activated { return }
+        await withCheckedContinuation { activationWaiters.append($0) }
+    }
+    func waitForRemoval() async {
+        if removal != nil { return }
+        await withCheckedContinuation { removalWaiters.append($0) }
+    }
+    func releaseRemoval() { removal?.resume(); removal = nil }
 }
 
 private struct AuthorizationCommandHandler: V2GatewayCommandHandler {

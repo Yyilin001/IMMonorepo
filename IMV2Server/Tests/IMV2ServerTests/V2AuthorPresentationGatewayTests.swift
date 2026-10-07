@@ -2,6 +2,7 @@
 @testable import IMV2ServerContracts
 import Foundation
 import IMV2Core
+import IMV2ActorContracts
 import NIOCore
 import NIOEmbedded
 import Synchronization
@@ -12,6 +13,45 @@ import Testing
 
 @Suite("Negotiated author supplements through Gateway", .timeLimit(.minutes(1)))
 struct V2AuthorPresentationGatewayTests {
+    @Test("Owner body ingress offers authors only while membership remains valid", arguments: [false, true])
+    func ownerBodyAuthorSupplement(direct: Bool) async throws {
+        let f = try Fixture(withIngress: true), bodies = Mutex(0), supplements = Mutex(0)
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let ownerIngress = try await f.registry.configureRoomSubscriptionIngress(authority: authority)
+        #expect(await f.stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            foregroundWriter: { _ in bodies.withLock { $0 += 1 } }, authorPresentationWriter: { write in
+                write.enqueueIfCurrent { supplements.withLock { $0 += 1 } }
+            }))
+        _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
+        let fence = try await f.installOwnerBaseline(ownerIngress)
+        let event = try direct ? f.directEvent(recipients: [f.user, f.author]) : f.groupEvent(revision: 0)
+        let body = V2RealtimeRoomEvent(roomID: f.room, highWatermark: 1,
+            sourceEventID: event.sourceEventID, roomSequence: 1, projectionKind: event.projectionKind,
+            payload: event.payload, recipientUserIDs: event.recipientUserIDs,
+            groupMembershipRevision: event.groupMembershipRevision)
+        #expect(await ownerIngress.applyRoomSubscription(.init(fence: fence, deliverySequence: 2,
+            authorizationSequence: 1, payload: .event(body, members: [.init(userID: f.user, memberRevision: 0)])), authenticatedServiceID: "owner",
+            sourceShardID: "rooms") == .appliedThrough(2))
+        try await wait { supplements.withLock { $0 == 1 } }
+        #expect(bodies.withLock { $0 == 1 })
+        #expect(f.reads.count == 1)
+        #expect(await ownerIngress.applyRoomSubscription(.init(fence: fence, deliverySequence: 3,
+            authorizationSequence: 2, payload: .revoke(userID: f.user, memberRevision: 0)),
+            authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(3))
+        let late = V2RealtimeRoomEvent(roomID: f.room, highWatermark: 2,
+            sourceEventID: EventID(uuid: UUID()), roomSequence: 2, projectionKind: body.projectionKind,
+            payload: try JSONSerialization.data(withJSONObject: ["event_type": "message.accepted",
+                "room_id": f.room.rawValue, "room_sequence": 2, "sender_user_id": f.author.rawValue]),
+            recipientUserIDs: body.recipientUserIDs,
+            groupMembershipRevision: body.groupMembershipRevision)
+        #expect(await ownerIngress.applyRoomSubscription(.init(fence: fence, deliverySequence: 4,
+            authorizationSequence: 2, payload: .event(late, members: [.init(userID: f.user, memberRevision: 0)])), authenticatedServiceID: "owner",
+            sourceShardID: "rooms") == .appliedThrough(4))
+        #expect(bodies.withLock { $0 == 1 })
+        #expect(f.reads.count == 1)
+        try await f.stream.finish(); await f.registry.shutdownRealtimeRecovery(); await f.dispatcher.close()
+    }
+
     @Test("authorized ordinary and prepared attachment pages write their body before a bounded author supplement", arguments: [false, true])
     func pageAuthorsFollowBody(prepared: Bool) async throws {
         let users = (0..<80).map { _ in UserID(uuid: UUID()) }, output = Mutex<[Data]>([])
@@ -116,6 +156,7 @@ struct V2AuthorPresentationGatewayTests {
     @Test("actual NIO author writes wait for no body backlog even after the socket becomes writable", arguments: [false, true])
     func nioBodyBacklog(direct: Bool) async throws {
         let f = try Fixture(withIngress: true), channel = NIOAsyncTestingChannel()
+        let owner = try await f.registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority())
         try await channel.testingEventLoop.executeInContext {
             let handler = try V2NIOGatewayChannelHandler(stream: f.stream,
                 maximumQueuedInboundBytes: 65_536, maximumQueuedInboundChunks: 4,
@@ -126,13 +167,16 @@ struct V2AuthorPresentationGatewayTests {
         try await channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1)).get()
         try await wait { await f.stream.supportsRequiredNotifications() }
         _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
+        let fence = try await f.installOwnerBaseline(owner)
         let event = try direct ? f.directEvent(recipients: [f.user, f.author]) : f.groupEvent(revision: 0)
         let prepared = try #require(direct
             ? V2PreparedGatewayGroupEventAvailable(roomID: f.room, highWatermark: 1, directEvent: event, frameLimits: f.limits)
             : V2PreparedGatewayGroupEventAvailable(groupEvents: [event], frameLimits: f.limits))
         let bodyWriter = try #require(f.stream.prepareNIOGroupEventAvailable(prepared)).writer
         channel.isWritable = false
-        #expect(direct ? f.registry.submitForegroundDirectEvent(event) : f.registry.submitForegroundGroupEvents([event]))
+        #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 2, authorizationSequence: 1,
+            payload: .event(V2RealtimeRoomEvent(event), members: [.init(userID: f.user, memberRevision: 0)])),
+            authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
         try await wait { await f.dispatcher.statistics().reading == 0 && f.reads.count == 1 }
         try await wait { await f.dispatcher.statistics().writing == 0 }
         try await channel.testingEventLoop.executeInContext {}
@@ -144,78 +188,117 @@ struct V2AuthorPresentationGatewayTests {
         try await wait { await f.dispatcher.statistics().reading == 0 && f.reads.count == 2 }
         try await wait { await f.dispatcher.statistics().writing == 0 }
         #expect(await f.dispatcher.statistics().deliveredFrames == 0)
-        #expect(try await channel.readOutbound(as: ByteBuffer.self) == nil)
+        #expect(try await f.readBusinessOutbound(channel) == nil)
         #expect(channel.isActive)
         bodyWriter.resumeAfterWritabilityChange()
         try await wait { !bodyWriter.hasPendingFrames }
         try await channel.testingEventLoop.executeInContext {}
-        let body = try #require(await channel.readOutbound(as: ByteBuffer.self))
+        let body = try #require(await f.readBusinessOutbound(channel))
         let notification = try f.decode(Data(body.readableBytesView)).groupEventAvailable
-        #expect(direct ? !notification.eventPayload.isEmpty : notification.liveEvents.count == 1)
+        #expect(!notification.eventPayload.isEmpty)
+        #expect(notification.highWatermark == 1)
         #expect(await f.dispatcher.offer(connectionID: f.connectionID, roomID: f.room, authors: [f.author]))
         try await wait { await f.dispatcher.statistics().deliveredFrames == 1 }
-        let authors = try #require(await channel.readOutbound(as: ByteBuffer.self))
+        let authors = try #require(await f.readBusinessOutbound(channel))
         #expect(try f.decode(Data(authors.readableBytesView)).authorPresentationDelta.payload.isEmpty == false)
-        try await f.stream.finish(); await f.ingress?.close(); await f.dispatcher.close()
+        try await f.stream.finish(); await f.registry.shutdownRealtimeRecovery(); await f.ingress?.close(); await f.dispatcher.close()
         _ = try await channel.finish()
     }
 
-    @Test("authorized committed group delivery hands off author hints after the shared body", arguments: [false, true])
-    func committedGroupDelivery(synchronous: Bool) async throws {
+    @Test("authorized committed group delivery hands off author hints after the shared body")
+    func committedGroupDelivery() async throws {
         let f = try Fixture(withIngress: true), order = Mutex<[String]>([])
+        let owner = try await f.registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority())
         #expect(await f.stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             foregroundWriter: { _ in order.withLock { $0.append("body") } }, authorPresentationWriter: { write in
                 write.enqueueIfCurrent { order.withLock { $0.append("author") } }
             }))
         _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
-        // The connection subscribed at revision 0; another commit revision is
-        // neither a body recipient nor an author-hint recipient.
-        #expect(f.registry.submitForegroundGroupEvents([try f.groupEvent(revision: 1)]))
+        let fence = try await f.installOwnerBaseline(owner)
+        // The Owner's recipient membership must match the installed tenure.
+        // A stale recipient cannot offer either body or author work.
+        #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 2, authorizationSequence: 1,
+            payload: .event(V2RealtimeRoomEvent(try f.groupEvent(revision: 1)),
+                members: [.init(userID: f.user, memberRevision: 1)])),
+            authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
         #expect(order.withLock { $0.isEmpty })
         #expect(f.ingress?.statistics().retainedKeys == 0)
-        let event = try f.groupEvent(revision: 0)
-        if synchronous { #expect(f.registry.submitForegroundGroupEvents([event])) }
-        else { await f.registry.notifyForegroundGroupEvents([event]) }
+        let event = V2RealtimeRoomEvent(roomID: f.room, highWatermark: 2,
+            sourceEventID: EventID(uuid: UUID()), roomSequence: 2, projectionKind: "message",
+            payload: try JSONSerialization.data(withJSONObject: ["event_type": "message.accepted",
+                "room_id": f.room.rawValue, "room_sequence": 2, "sender_user_id": f.author.rawValue]),
+            recipientUserIDs: [], groupMembershipRevision: 0)
+        #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 3, authorizationSequence: 1,
+            payload: .event(event, members: [.init(userID: f.user, memberRevision: 0)])),
+            authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(3))
         #expect(order.withLock { $0.first } == "body")
         try await wait { await f.dispatcher.statistics().deliveredFrames == 1 }
         #expect(order.withLock { $0 } == ["body", "author"])
         #expect(f.reads.count == 1)
-        try await f.stream.finish(); await f.ingress?.close(); await f.dispatcher.close()
+        try await f.stream.finish(); await f.registry.shutdownRealtimeRecovery(); await f.ingress?.close(); await f.dispatcher.close()
     }
 
-    @Test("direct author supplements follow body submission and exact recipient selection", arguments: ["fast", "async-prepared", "async-unprepared"])
-    func committedDirectDelivery(path: String) async throws {
-        let f = try Fixture(withIngress: true, preparedForeground: path != "async-unprepared")
-        let order = Mutex<[String]>([])
-        let writer: @Sendable (Data) async -> Void = { bytes in
-            if let envelope = try? f.decode(bytes), case .groupEventAvailable = envelope.body {
-                order.withLock { $0.append("body") }
-            }
-        }
-        if path == "fast" {
-            #expect(await f.stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: writer,
-                foregroundWriter: { _ in order.withLock { $0.append("body") } }, authorPresentationWriter: { write in
-                    write.enqueueIfCurrent { order.withLock { $0.append("author") } }
-                }))
-        } else {
-            #expect(await f.stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: writer,
-                authorPresentationWriter: { write in write.enqueueIfCurrent { order.withLock { $0.append("author") } } }))
-        }
+    @Test("Owner direct delivery offers authors only for exact recipients and non-excluded devices")
+    func committedDirectDelivery() async throws {
+        let f = try Fixture(withIngress: true), order = Mutex<[String]>([])
+        let owner = try await f.registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority())
+        #expect(await f.stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            foregroundWriter: { _ in order.withLock { $0.append("body") } }, authorPresentationWriter: { write in
+                write.enqueueIfCurrent { order.withLock { $0.append("author") } }
+            }))
         _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
-        func deliver(_ event: V2DirectRoomLiveEvent) async {
-            if path == "fast" { #expect(f.registry.submitForegroundDirectEvent(event)) }
-            else { await f.registry.notifyForegroundDirectEvent(event) }
+        let fence = try await f.installOwnerBaseline(owner)
+        func deliver(_ sequence: UInt64, recipients: Set<UserID>, excluded: UUID? = nil) async throws {
+            let event = V2RealtimeRoomEvent(roomID: f.room, highWatermark: sequence,
+                sourceEventID: EventID(uuid: UUID()), roomSequence: sequence, projectionKind: "message",
+                payload: try JSONSerialization.data(withJSONObject: ["event_type": "message.accepted",
+                    "room_id": f.room.rawValue, "room_sequence": sequence, "sender_user_id": f.author.rawValue]),
+                recipientUserIDs: recipients, excludedConnectionID: excluded)
+            #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: sequence + 1,
+                authorizationSequence: 1, payload: .event(event, members: [.init(userID: f.user, memberRevision: 0)])),
+                authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(sequence + 1))
         }
-        await deliver(try f.directEvent(recipients: [f.author]))
-        await deliver(try f.directEvent(recipients: [f.user, f.author], excluded: f.connectionID))
+        try await deliver(1, recipients: [f.author])
+        try await deliver(2, recipients: [f.user, f.author], excluded: f.connectionID)
         #expect(order.withLock { $0.isEmpty })
         #expect(f.reads.count == 0)
         #expect(f.ingress?.statistics().retainedKeys == 0)
-        await deliver(try f.directEvent(recipients: [f.user, f.author]))
+        try await deliver(3, recipients: [f.user, f.author])
         #expect(order.withLock { $0.first } == "body")
         try await wait { await f.dispatcher.statistics().deliveredFrames == 1 }
         #expect(order.withLock { $0 } == ["body", "author"])
         #expect(f.reads.count == 1)
+        try await f.stream.finish(); await f.registry.shutdownRealtimeRecovery(); await f.ingress?.close(); await f.dispatcher.close()
+    }
+
+    @Test("async transport completes prepared and ordinary bodies before optional author work", arguments: [false, true])
+    func asyncTransportBodyOrdering(prepared: Bool) async throws {
+        let f = try Fixture(withIngress: true), order = Mutex<[String]>([])
+        let attached = await f.stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { bytes in
+            if let envelope = try? f.decode(bytes), case .groupEventAvailable = envelope.body {
+                #expect(envelope.groupEventAvailable.roomSequence == 1)
+                order.withLock { $0.append("body") }
+            }
+        }, authorPresentationWriter: { write in
+            write.enqueueIfCurrent { order.withLock { $0.append("author") } }
+        })
+        #expect(attached)
+        _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
+        let event = try f.directEvent(recipients: [f.user, f.author])
+        let accepted: Bool
+        if prepared {
+            let frame = try #require(V2PreparedGatewayGroupEventAvailable(roomID: f.room,
+                highWatermark: 1, directEvent: event, frameLimits: f.limits))
+            accepted = await f.stream.sendGroupEventAvailable(frame)
+        } else {
+            accepted = await f.stream.sendGroupEventAvailable(roomID: f.room, highWatermark: 1, directEvent: event)
+        }
+        #expect(accepted)
+        #expect(order.withLock { $0 } == ["body"])
+        f.stream.offerAuthorPresentation(try #require(V2AuthorPresentationHints(directEvent: event)),
+            to: try #require(f.ingress))
+        try await wait { await f.dispatcher.statistics().deliveredFrames == 1 }
+        #expect(order.withLock { $0 } == ["body", "author"])
         try await f.stream.finish(); await f.ingress?.close(); await f.dispatcher.close()
     }
 
@@ -226,16 +309,20 @@ struct V2AuthorPresentationGatewayTests {
         #expect(ingress.submit(connectionID: UUID(), roomID: RoomID(uuid: UUID()), viewID: UUID(), authors: [UserID(uuid: UUID())]))
         try await wait { await held.waiting }
         let f = try Fixture(providedIngress: ingress), bodies = Mutex(0)
+        let owner = try await f.registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority())
         #expect(await f.stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             foregroundWriter: { _ in bodies.withLock { $0 += 1 } }, authorPresentationWriter: { _ in false }))
         _ = try await f.login(); _ = try await f.stream.receive(f.subscribe(UUID()))
+        let fence = try await f.installOwnerBaseline(owner)
         let event = try direct ? f.directEvent(recipients: [f.user, f.author]) : f.groupEvent(revision: 0)
-        #expect(direct ? f.registry.submitForegroundDirectEvent(event) : f.registry.submitForegroundGroupEvents([event]))
+        #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 2, authorizationSequence: 1,
+            payload: .event(V2RealtimeRoomEvent(event), members: [.init(userID: f.user, memberRevision: 0)])),
+            authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
         #expect(bodies.withLock { $0 } == 1)
         #expect(ingress.statistics().rejected == 1)
         #expect(ingress.statistics().activeConsumers == 1)
         #expect(f.reads.count == 0)
-        await held.release(); try await f.stream.finish()
+        await held.release(); try await f.stream.finish(); await f.registry.shutdownRealtimeRecovery()
         await ingress.close(); await f.dispatcher.close()
     }
 
@@ -411,7 +498,7 @@ struct V2AuthorPresentationGatewayTests {
             return f.reads.count == 1 && stats.reading == 0 && stats.writing == 0 && stats.outputBytes == 0
         }
         #expect(channel.isActive)
-        let output = try await channel.readOutbound(as: ByteBuffer.self)
+        let output = try await f.readBusinessOutbound(channel)
         #expect((output == nil) == congested)
         if let output { #expect(try f.decode(Data(output.readableBytesView)).authorPresentationDelta.payload.isEmpty == false) }
         _ = try await channel.finish(acceptAlreadyClosed: true)
@@ -471,7 +558,7 @@ private final class Fixture: Sendable {
     let limits: V2FrameLimits
     init(deny: Bool = false, payloadLimit: Int = 65_536,
          withIngress: Bool = false, providedIngress: V2AuthorPresentationIngress? = nil,
-         preparedPages: Bool = false, preparedForeground: Bool = true,
+         preparedPages: Bool = false,
          page: (@Sendable (IMV2GroupEventPull) async throws -> IMV2Envelope)? = nil,
          maximumAuthorConnections: Int = 10_000, sharedDispatcher: V2AuthorPresentationDispatcher? = nil,
          admission: any V2AuthenticatedGatewayCommandAdmitting = V2AllowingGatewayCommandAdmission()) throws {
@@ -485,9 +572,21 @@ private final class Fixture: Sendable {
             return try .init(serverNowUnixMilliseconds: 1, results: request.keys.map { .unavailable($0) })
         })
         ingress = try providedIngress ?? (withIngress ? .init(configuration: .init(), dispatcher: dispatcher) : nil)
-        registry = .init(foregroundFrameLimits: ingress == nil || !preparedForeground ? nil : limits, authorPresentationIngress: ingress)
+        registry = .init(foregroundFrameLimits: ingress == nil ? nil : limits, authorPresentationIngress: ingress)
         stream = .init(frameLimits: limits, session: session, handler: Handler(deny: deny, commands: commands, page: page), connectionID: connectionID,
                        registry: registry, authorPresentationDispatcher: dispatcher, authorPresentationIngress: ingress)
+    }
+    func installOwnerBaseline(_ ingress: V2GatewayRoomSubscriptionIngress) async throws -> V2RoomSubscriptionFence {
+        let fence = V2RoomSubscriptionFence(activation: .init(roomID: room,
+            owner: try .init(shardID: "rooms", epoch: 0), activationEpoch: try .init(1),
+            host: .init(hostID: try .init("author-owner"), incarnationID: UUID())),
+            subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+        try #require(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "owner",
+            deadline: .now + .seconds(20)))
+        #expect(await ingress.applyRoomSubscription(.init(fence: fence, deliverySequence: 1, authorizationSequence: 1,
+            payload: .baseline(members: [.init(userID: user, memberRevision: 0)])),
+            authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))
+        return fence
     }
     func encode(_ value: IMV2Envelope, version: UInt8 = UInt8(IMV2ProtocolVersion.current)) throws -> Data {
         var envelope = value
@@ -497,6 +596,17 @@ private final class Fixture: Sendable {
     func decode(_ bytes: Data) throws -> IMV2Envelope {
         var decoder = V2FrameDecoder(limits: limits)
         return try V2ServerProtobufFrameCodec.decode(#require(decoder.append(bytes).first))
+    }
+    // Authenticated coverage controls share the NIO FIFO with business frames.
+    // Ignore only that explicit control kind; unexpected business output remains
+    // visible to the body-ordering and optional-congestion assertions.
+    func readBusinessOutbound(_ channel: NIOAsyncTestingChannel) async throws -> ByteBuffer? {
+        while let output = try await channel.readOutbound(as: ByteBuffer.self) {
+            let envelope = try decode(Data(output.readableBytesView))
+            if case .realtimeCoverage = envelope.body { continue }
+            return output
+        }
+        return nil
     }
     func login(offered: Bool = true) async throws -> UUID? {
         var hello = IMV2Envelope(); hello.requestID = 1

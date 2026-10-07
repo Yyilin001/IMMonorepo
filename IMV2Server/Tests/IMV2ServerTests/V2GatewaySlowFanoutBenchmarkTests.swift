@@ -36,33 +36,8 @@ struct V2GatewaySlowFanoutBenchmarkTests {
         let socketBufferBytes = Int(ProcessInfo.processInfo.environment["IMV2_SLOW_FANOUT_SOCKET_BUFFER_BYTES"] ?? "4096") ?? 4096
         try #require((4_096...1_048_576).contains(socketBufferBytes))
         let frameBytes = 1_024
-        let directory = FileManager.default.temporaryDirectory
-            .appending(path: "imv2-slow-fanout-\(UUID())")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let cert = directory.appending(path: "cert.pem")
-        let key = directory.appending(path: "key.pem")
-        let openssl = Process()
-        openssl.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        openssl.arguments = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-            "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
-            "-keyout", key.path, "-out", cert.path]
-        openssl.standardOutput = FileHandle.nullDevice
-        openssl.standardError = FileHandle.nullDevice
-        try openssl.run()
-        openssl.waitUntilExit()
-        try #require(openssl.terminationStatus == 0)
-        let certificates = try NIOSSLCertificate.fromPEMFile(cert.path)
-        var serverTLS = TLSConfiguration.makeServerConfiguration(
-            certificateChain: certificates.map { .certificate($0) },
-            privateKey: .privateKey(try NIOSSLPrivateKey(file: key.path, format: .pem)))
-        serverTLS.minimumTLSVersion = .tlsv13
-        let serverContext = try NIOSSLContext(configuration: serverTLS)
-        var clientTLS = TLSConfiguration.makeClientConfiguration()
-        clientTLS.minimumTLSVersion = .tlsv13
-        clientTLS.trustRoots = .certificates(certificates)
-        let clientContext = try NIOSSLContext(configuration: clientTLS)
-
+        let tls = try makeGatewayTestTLSContexts()
+        let serverContext = tls.server, clientContext = tls.client
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 8)
         let scheduler = V2NIOForegroundWriteScheduler()
         let metrics = V2GatewayTransportMetrics()

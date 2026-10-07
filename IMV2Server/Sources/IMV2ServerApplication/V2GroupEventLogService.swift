@@ -114,16 +114,5 @@ public struct V2GroupEventLogService: Sendable {
         directRoomLogEventCache?.enqueueCommittedPlainDirectEvent(event)
     }
 
-    /// 用已校验的跨网关前台中继结果填充本网关的恢复缓存。
-    ///
-    /// 核心 NATS 本身允许丢消息，因此这些记录绝不替代持久化房间日志：
-    /// 序号缺失、邮箱溢出或进程重启仍会回退到 PostgreSQL。
-    /// 在通知套接字之前先入队，可消除客户端看到更高水位后立刻要求本网关补洞的常见竞态；
-    /// 缓存候选不携带身份信息，每个分页仍受存储的最新成员修订栅栏约束。
-    ///
-    /// - Parameter events: 已校验的实时事件列表。
-    public func recordRelayedForegroundEvents(_ events: [V2DirectRoomLiveEvent]) {
-        guard let directRoomLogEventCache else { return }
-        directRoomLogEventCache.enqueueCommittedPlainDirectEvents(events)
-    }
+
 }

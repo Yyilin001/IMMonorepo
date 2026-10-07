@@ -1,6 +1,6 @@
 import Crypto
 import Distributed
-import DistributedCluster
+@testable import DistributedCluster
 import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
@@ -151,6 +151,26 @@ struct V2RoomClusterDiscoveryTests {
             }
             return member.status == .joining || member.status == .up
         }
+
+        // Close the actual transport channel, keeping both systems and the
+        // exact signed beacon/endpoint alive. Cached remote controls must use
+        // a newly handshaken channel without a membership down/replacement.
+        let association = try #require(callerSystem._cluster?.getSpecificExistingAssociation(with: first.beacon.id.node))
+        let oldChannel = try #require(association.lock.withLock { () -> (any Channel)? in
+            if case .associated(let channel) = association.state { return channel }; return nil
+        })
+        try await oldChannel.close().get()
+        try await waitUntil(discovery: discovery) {
+            guard let current = callerSystem._cluster?.getSpecificExistingAssociation(with: first.beacon.id.node) else { return false }
+            let reconnected = current.lock.withLock { () -> Bool in
+                guard case .associated(let channel) = current.state else { return false }
+                return channel.isActive && channel !== oldChannel
+            }
+            guard reconnected else { return false }
+            return try await caller.candidates(for: owner).first?.identity == first.descriptor.identity
+        }
+        let sameMember = try #require(await callerSystem.cluster.membershipSnapshot.member(first.beacon.id.node))
+        #expect(sameMember.status < .down)
 
         try await hostSystem.shutdown().wait()
         hostSystem = await makeSystem(port: port)

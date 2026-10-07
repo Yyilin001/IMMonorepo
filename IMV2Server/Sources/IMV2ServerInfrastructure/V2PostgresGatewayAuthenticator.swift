@@ -12,6 +12,7 @@ import SQLKit
 public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
     /// 令牌和设备状态的数据库依赖。
     private let database: any Database
+    private let schema: String
     /// 查询令牌摘要所需的密钥。
     private let tokenKey: V2AccessTokenHMACKey
     /// 用于查询与完成后期限检查的时间来源。
@@ -33,9 +34,21 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         activityWriteGate: V2DeviceActivityWriteGate = .init()
     ) {
         self.database = database
+        self.schema = "im_v2"
         self.tokenKey = tokenKey
         self.now = now
         self.activityWriteGate = activityWriteGate
+    }
+
+    public init(database: any Database, tokenKey: V2AccessTokenHMACKey, schema: String) throws {
+        guard schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else {
+            throw V2GatewayAuthenticationError.corruptPersistenceState
+        }
+        self.database = database
+        self.tokenKey = tokenKey
+        self.schema = schema
+        self.now = Date.init
+        self.activityWriteGate = .init()
     }
 
     /// 按令牌摘要和设备标识查询有效、未撤销的普通账户会话。
@@ -61,10 +74,13 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
         guard let row = try await database.raw("""
-            SELECT token.user_id, LEAST(token.expires_at, device.session_expires_at) AS expires_at
-            FROM im_v2.device_access_tokens AS token
-            JOIN im_v2.auth_devices AS device
+            SELECT token.user_id, LEAST(token.expires_at, device.session_expires_at) AS expires_at,
+                   coalesce(control.latest_change_version,0) AS credential_control_version
+            FROM \(unsafeRaw: schema).device_access_tokens AS token
+            JOIN \(unsafeRaw: schema).auth_devices AS device
               ON device.user_id = token.user_id AND device.device_id = token.device_id
+            LEFT JOIN \(unsafeRaw: schema).realtime_device_control_versions AS control
+              ON control.user_id = device.user_id AND control.device_id = device.device_id
             WHERE token.token_hmac = \(bind: tokenKey.digest(accessToken))
               AND token.device_id = \(bind: deviceUUID)
               AND token.expires_at > \(bind: observedAt)
@@ -73,7 +89,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
               AND device.session_expires_at > \(bind: observedAt)
               AND NOT EXISTS (
                   SELECT 1
-                  FROM im_v2.special_accounts AS special
+                  FROM \(unsafeRaw: schema).special_accounts AS special
                   WHERE special.account_user_id = token.user_id
                     AND special.status = 'active'
               )
@@ -84,6 +100,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
               v2PostgresTimestampCanEncode(row.expiresAt) else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
+        guard row.credentialControlVersion >= 0 else { throw V2GatewayAuthenticationError.corruptPersistenceState }
         guard row.expiresAt > completedAt else { throw V2GatewayAuthenticationError.unauthenticated }
         guard let userID = try? UserID(row.userID.uuidString) else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
@@ -93,7 +110,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         if let activityCutoff = v2PostgresPastTimestamp(now: observedAt, interval: 60),
            await activityWriteGate.shouldWrite(deviceID: deviceID, at: observedAt) {
             try? await database.raw("""
-                UPDATE im_v2.auth_devices
+                UPDATE \(unsafeRaw: schema).auth_devices
                 SET last_active_at = \(bind: observedAt)
                 WHERE user_id = \(bind: row.userID)
                   AND device_id = \(bind: deviceUUID)
@@ -101,7 +118,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
                        OR last_active_at < \(bind: activityCutoff))
                 """).run()
         }
-        return .init(userID: userID, expiresAt: row.expiresAt)
+        return .init(userID: userID, expiresAt: row.expiresAt, credentialControlVersion: row.credentialControlVersion)
     }
 }
 
@@ -159,6 +176,7 @@ private struct V2AuthenticatedSessionRow: Decodable {
     let userID: UUID
     /// 令牌到期时间与设备会话到期时间中的较早值。
     let expiresAt: Date
+    let credentialControlVersion: Int64
     /// 把 Swift 属性映射到认证 SQL 查询列名。
-    enum CodingKeys: String, CodingKey { case userID = "user_id", expiresAt = "expires_at" }
+    enum CodingKeys: String, CodingKey { case userID = "user_id", expiresAt = "expires_at", credentialControlVersion = "credential_control_version" }
 }

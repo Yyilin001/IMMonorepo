@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import IMV2ActorContracts
 
 /// 相邻发送或相邻资料可见性读取各自可以共享轮次；两类不能混合。
@@ -25,6 +26,17 @@ public struct V2RoomTurnContext: Sendable {
     public let turnID: UUID
     /// 共享数据库批处理器使用此预算的剩余部分，不能再启动独立的批处理等待。
     public let batchDeadline: ContinuousClock.Instant
+    /// Exact Host-confirmed authority, capped by room lease safety and service qualification.
+    /// Filled at dispatch by the Host, never decoded from a remote request.
+    public let activationValidUntil: ContinuousClock.Instant?
+    public let queueWaitDuration: Duration
+
+    public init(token: V2RoomActivationToken, turnID: UUID, batchDeadline: ContinuousClock.Instant,
+                activationValidUntil: ContinuousClock.Instant? = nil, queueWaitDuration: Duration = .zero) {
+        self.token = token; self.turnID = turnID; self.batchDeadline = batchDeadline
+        self.activationValidUntil = activationValidUntil
+        self.queueWaitDuration = queueWaitDuration
+    }
 }
 
 public struct V2RoomTurnItem<Request: Sendable>: Sendable {
@@ -62,12 +74,25 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private let clock = ContinuousClock()
     private var phase: V2RoomActivationPhase = .ready
     private var nextOrdinal: UInt64 = 0
-    private var queue: [Entry] = []
+    private var queue = EntryQueue()
     private var executing: [Entry] = []
     private var unresolved: [V2RoomCommandPermit] = []
     private var reservation: HeldReservation?
     private var consumer: Task<Void, Never>?
-    private var lastActivity: ContinuousClock.Instant
+    // One timestamp, written only at the existing actual activity boundaries.
+    // The Host can cheaply rule out a not-yet-idle lane without an actor hop;
+    // retirement still uses this lane's atomic admission/ownership check.
+    private let activity: Mutex<ContinuousClock.Instant>
+    private var lastActivity: ContinuousClock.Instant {
+        get { activity.withLock { $0 } }
+        set { activity.withLock { $0 = newValue } }
+    }
+    private var pendingAdmissions = 0
+    private var deadlines = V2RoomTurnDeadlines()
+    private var deadlineWake: Task<Void, Never>?
+    private var deadlineWakeID: UUID?
+    private var deadlineWakeAt: ContinuousClock.Instant?
+    private var processingDeadlines = false
 
     public init(
         token: V2RoomActivationToken,
@@ -83,18 +108,27 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         self.classify = classify
         self.execute = execute
         self.onUncertain = onUncertain
-        self.lastActivity = ContinuousClock.now
+        self.activity = Mutex(ContinuousClock.now)
+    }
+
+    /// A recent observation can only skip a premature probe. An old observation
+    /// never grants retirement; beginIdleDrain must still validate atomically.
+    nonisolated func wasActive(after cutoff: ContinuousClock.Instant) -> Bool {
+        activity.withLock { $0 > cutoff }
     }
 
     public func submit(
         encodedRequest: Data,
         deadline: ContinuousClock.Instant
     ) async throws -> Response {
+        V2SendPathTrace.current?.mark("lane_submit_enter")
         let requestID = UUID()
         return try await withTaskCancellationHandler {
             guard phase == .ready else { throw rejection() }
             guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
             guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            pendingAdmissions += 1
+            defer { pendingAdmissions -= 1 }
             let permit = try await budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
             // 准入曾等待另一个 Actor；须重新检查全部本地条件。
             guard phase == .ready, !Task.isCancelled, clock.now < deadline else {
@@ -121,17 +155,14 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             nextOrdinal += 1
             let ordinal = nextOrdinal
             let admittedAt = clock.now
+            V2SendPathTrace.current?.mark("lane_admitted")
             return try await withCheckedThrowingContinuation { continuation in
-                let timer = Task { [weak self] in
-                    do { try await ContinuousClock().sleep(until: deadline) }
-                    catch { return }
-                    await self?.withdraw(requestID, reason: .deadlineExceeded)
-                }
                 queue.append(Entry(
                     id: requestID, permit: permit, request: request, ordinal: ordinal,
                     admittedAt: admittedAt, deadline: deadline, continuation: continuation,
-                    reservationGrant: nil, reservationContinuation: nil, timer: timer
+                    reservationGrant: nil, reservationContinuation: nil
                 ))
+                trackDeadline(queueEntryID: requestID, deadline: deadline)
                 lastActivity = admittedAt
                 startConsumerIfNeeded()
             }
@@ -146,6 +177,17 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         if phase == .ready { phase = .draining }
     }
 
+    /// The activity check and admission cutoff share the Lane's isolation.
+    /// A Host snapshot from before a suspended/newly completed turn cannot
+    /// retire this lane; even admission awaiting the shared budget prevents it.
+    public func beginIdleDrain(ifLastActivityAtOrBefore cutoff: ContinuousClock.Instant) -> Bool {
+        guard phase == .ready, pendingAdmissions == 0,
+              queue.isEmpty, executing.isEmpty, unresolved.isEmpty, reservation == nil,
+              lastActivity <= cutoff else { return false }
+        phase = .draining
+        return true
+    }
+
     /// 将普通轮次之外的协调器屏障入队。截止时间覆盖等待和持有阶段；
     /// 已获准的屏障到期时，不会悄然解锁同一激活供后续命令使用。
     public func reserve(requestID: UUID, deadline: ContinuousClock.Instant) async throws -> V2RoomReservation {
@@ -156,6 +198,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             let boundedDeadline = min(deadline, clock.now + configuration.reservationTimeout.duration)
             guard clock.now < boundedDeadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
             let bytes = try JSONEncoder().encode(grant)
+            pendingAdmissions += 1
+            defer { pendingAdmissions -= 1 }
             let permit = try await budget.acquireReservation(roomID: token.roomID, encodedRequest: bytes)
             guard phase == .ready, !Task.isCancelled, clock.now < boundedDeadline, nextOrdinal < UInt64.max else {
                 let failure = phase != .ready ? rejection() : V2RoomCallFailure.notAccepted(
@@ -167,16 +211,12 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             nextOrdinal += 1
             let admittedAt = clock.now
             return try await withCheckedThrowingContinuation { continuation in
-                let timer = Task { [weak self] in
-                    do { try await ContinuousClock().sleep(until: boundedDeadline) }
-                    catch { return }
-                    await self?.withdraw(grant.reservationID, reason: .deadlineExceeded)
-                }
                 queue.append(Entry(
                     id: grant.reservationID, permit: permit, request: nil, ordinal: nextOrdinal,
                     admittedAt: admittedAt, deadline: boundedDeadline, continuation: nil,
-                    reservationGrant: grant, reservationContinuation: continuation, timer: timer
+                    reservationGrant: grant, reservationContinuation: continuation
                 ))
+                trackDeadline(queueEntryID: grant.reservationID, deadline: boundedDeadline)
                 lastActivity = admittedAt
                 startConsumerIfNeeded()
             }
@@ -204,7 +244,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
               !held.dispatched, phase == .ready || phase == .draining
         else { return false }
         reservation = nil
-        held.entry.timer.cancel()
+        forgetDeadline(held.entry.id)
         lastActivity = clock.now
         await budget.release(held.entry.permit)
         startConsumerIfNeeded()
@@ -218,7 +258,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         guard let held = reservation, held.entry.reservationGrant == grant,
               held.dispatched, phase == .ready || phase == .draining
         else { return false }
-        held.entry.timer.cancel()
+        forgetDeadline(held.entry.id)
         reservation = nil
         lastActivity = clock.now
         if completion == .outcomeUnknown {
@@ -264,6 +304,51 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         return true
     }
 
+    func deadlineTrackingSnapshot() -> (entries: Int, hasWake: Bool) {
+        (deadlines.count, deadlineWake != nil)
+    }
+
+    private func trackDeadline(queueEntryID: UUID, deadline: ContinuousClock.Instant) {
+        deadlines.insert(id: queueEntryID, deadline: deadline)
+        scheduleDeadlineWake()
+    }
+
+    private func forgetDeadline(_ id: UUID) {
+        deadlines.remove(id)
+        scheduleDeadlineWake()
+    }
+
+    private func scheduleDeadlineWake() {
+        guard !processingDeadlines else { return }
+        guard let next = deadlines.first else {
+            deadlineWake?.cancel(); deadlineWake = nil
+            deadlineWakeID = nil; deadlineWakeAt = nil
+            return
+        }
+        // An earlier wake remains safe after its entry is withdrawn. It will
+        // inspect the current index, without firing a stale request callback.
+        if deadlineWake != nil, let deadlineWakeAt, deadlineWakeAt <= next.deadline { return }
+        deadlineWake?.cancel()
+        let id = UUID(), wake = next.deadline
+        deadlineWakeID = id; deadlineWakeAt = wake
+        deadlineWake = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: wake) }
+            catch { return }
+            await self?.deadlineWakeFired(id)
+        }
+    }
+
+    private func deadlineWakeFired(_ id: UUID) async {
+        guard deadlineWakeID == id else { return }
+        deadlineWake = nil; deadlineWakeID = nil; deadlineWakeAt = nil
+        processingDeadlines = true
+        defer { processingDeadlines = false; scheduleDeadlineWake() }
+        while let next = deadlines.first, next.deadline <= clock.now {
+            deadlines.remove(next.id)
+            await withdraw(next.id, reason: .deadlineExceeded)
+        }
+    }
+
     private func rejection() -> V2RoomCallFailure {
         .notAccepted(phase == .uncertain ? .leaseLost : .retired)
     }
@@ -277,9 +362,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private func consume() async {
         while phase == .ready || phase == .draining {
             guard !queue.isEmpty else { break }
-            // Legacy sends collect in the physical-owner batcher. Durable send
-            // operations execute here, so this lane owns their single collection
-            // window, measured from the first request's original admission.
+            // This is the only room sequencer. Durable sends normally collect
+            // compatible work already queued, without waiting for new arrivals.
             guard phase == .ready || phase == .draining else { break }
             // 计时器回调可能尚未运行。不能只因执行器赢得调度竞争，
             // 就分发已过期的请求。
@@ -287,7 +371,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                 await withdraw(entry.id, reason: .deadlineExceeded)
             }
             guard let head = queue.first else { continue }
-            if schedulingClass(head) == .sendOperation {
+            if schedulingClass(head) == .sendOperation && configuration.durableSendCollectionWindowEnabled {
                 let collectionDeadline = min(head.admittedAt + configuration.batchWait.duration, head.deadline)
                 if clock.now < collectionDeadline {
                     do { try await clock.sleep(until: collectionDeadline) }
@@ -299,7 +383,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                 }
             }
             if let grant = head.reservationGrant {
-                var entry = queue.removeFirst()
+                guard var entry = queue.removeFirst() else { continue }
                 let continuation = entry.reservationContinuation
                 entry.reservationContinuation = nil
                 reservation = HeldReservation(entry: entry, dispatched: false)
@@ -310,7 +394,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             var count = 1
             var bytes = head.permit.byteCount
             if headClass == .send || headClass == .sendOperation {
-                for entry in queue.dropFirst() {
+                for entry in queue.prefix(configuration.maximumCommandsPerTurn).dropFirst() {
                     guard schedulingClass(entry) == headClass,
                           entry.deadline > clock.now,
                           count < configuration.maximumCommandsPerTurn,
@@ -323,7 +407,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                       (1...100).contains(headTargets) {
                 var targets = headTargets
                 let byteLimit = min(configuration.maximumBytesPerTurn, 64 * 1_024)
-                for entry in queue.dropFirst() {
+                for entry in queue.prefix(configuration.maximumCommandsPerTurn).dropFirst() {
                     guard case .profileVisibility(let nextTargets) = schedulingClass(entry),
                           (1...100).contains(nextTargets), nextTargets <= 100 - targets,
                           entry.deadline > clock.now,
@@ -335,21 +419,37 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                     targets += nextTargets
                 }
             }
-            executing = Array(queue.prefix(count))
-            queue.removeFirst(count)
+            executing = []
+            for _ in 0..<count {
+                if let entry = queue.removeFirst() { executing.append(entry) }
+            }
             let turn = V2RoomTurn(
                 context: V2RoomTurnContext(
                     token: token, turnID: UUID(),
-                    batchDeadline: min(head.admittedAt + configuration.batchWait.duration, head.deadline)
+                    batchDeadline: min(head.admittedAt + configuration.batchWait.duration, head.deadline),
+                    queueWaitDuration: head.admittedAt.duration(to: .now)
                 ),
                 items: executing.compactMap { entry in
                     entry.request.map { .init(ordinal: entry.ordinal, request: $0, deadline: entry.deadline) }
                 }
             )
-            let completion = await V2RoomTurnScope.$roomID.withValue(token.roomID) {
-                await execute(turn)
+            let operationIDs = executing.compactMap { entry -> String? in
+                guard let request = entry.request as? V2RoomRequest,
+                      case .messaging(.sendOperation(let command)) = request else { return nil }
+                return try? command.identity.operation.rawOperationID
             }
+            let trace = V2SendPathTrace.enabled && !operationIDs.isEmpty
+                ? V2SendPathTrace(operations: operationIDs, segment: "room_actor") : nil
+            trace?.record("room_queue_wait", from: head.admittedAt)
+            trace?.mark("turn_execute_dispatch")
+            let completion = await V2RoomTurnScope.$roomID.withValue(token.roomID) {
+                await V2SendPathTrace.$current.withValue(trace) { await execute(turn) }
+            }
+            trace?.mark("turn_execute_return")
+            let finishStartedAt = ContinuousClock.now
             await finish(completion)
+            trace?.record("lane_finish", from: finishStartedAt)
+            trace?.finish()
         }
         consumer = nil
     }
@@ -362,12 +462,12 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         switch completion {
         case .committed(let values) where values.count == entries.count:
             for (entry, value) in zip(entries, values) {
-                entry.timer.cancel()
+                forgetDeadline(entry.id)
                 entry.continuation?.resume(returning: value)
             }
         case .rolledBack(let reason):
             for entry in entries {
-                entry.timer.cancel()
+                forgetDeadline(entry.id)
                 entry.continuation?.resume(throwing: V2RoomCallFailure.rolledBack(reason))
             }
             if reason == .leaseLost || reason == .staleActivation { uncertain = true }
@@ -375,7 +475,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             // 格式错误的执行器结果无法安全地与调用方逐一对应。
             uncertain = true
             for entry in entries {
-                entry.timer.cancel()
+                forgetDeadline(entry.id)
                 entry.continuation?.resume(throwing: V2RoomCallFailure.outcomeUnknown)
             }
         }
@@ -390,9 +490,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     }
 
     private func withdraw(_ id: UUID, reason: V2RoomFailureReason) async {
-        if let index = queue.firstIndex(where: { $0.id == id }) {
-            let entry = queue.remove(at: index)
-            entry.timer.cancel()
+        if let entry = queue.remove(id) {
+            forgetDeadline(entry.id)
             entry.continuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             entry.reservationContinuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             await budget.release(entry.permit)
@@ -401,7 +500,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             // 直到执行器报告实际事务结果。
             let continuation = executing[index].continuation
             executing[index].continuation = nil
-            executing[index].timer.cancel()
+            forgetDeadline(id)
             continuation?.resume(throwing: V2RoomCallFailure.outcomeUnknown)
         } else if reservation?.entry.id == id {
             // 授权返回后若协调器失联，须采取保守处理：
@@ -414,10 +513,10 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     }
 
     private func rejectQueued(reason: V2RoomFailureReason) async {
-        let rejected = queue
+        let rejected = queue.prefix(queue.count)
         queue.removeAll()
         for entry in rejected {
-            entry.timer.cancel()
+            forgetDeadline(entry.id)
             entry.continuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             entry.reservationContinuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             await budget.release(entry.permit)
@@ -431,8 +530,61 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private func quarantineReservation() {
         guard let held = reservation else { return }
         reservation = nil
-        held.entry.timer.cancel()
+        forgetDeadline(held.entry.id)
         unresolved.append(held.entry.permit)
+    }
+
+    /// Room-local FIFO. Taking the head and withdrawing a queued request do
+    /// not scan or move the remaining commands. Batch inspection visits only
+    /// the existing turn limit; execution and reservation ownership stay in
+    /// the Lane, outside this waiting queue.
+    private struct EntryQueue: Sendable {
+        private struct Node: Sendable {
+            let entry: Entry
+            var previous: UUID?
+            var next: UUID?
+        }
+        private var nodes: [UUID: Node] = [:]
+        private var head: UUID?
+        private var tail: UUID?
+        var count: Int { nodes.count }
+        var isEmpty: Bool { nodes.isEmpty }
+        var first: Entry? { head.flatMap { nodes[$0]?.entry } }
+
+        mutating func append(_ entry: Entry) {
+            precondition(nodes[entry.id] == nil)
+            nodes[entry.id] = .init(entry: entry, previous: tail, next: nil)
+            if let tail { nodes[tail]?.next = entry.id } else { head = entry.id }
+            tail = entry.id
+        }
+
+        mutating func remove(_ id: UUID) -> Entry? {
+            guard let node = nodes.removeValue(forKey: id) else { return nil }
+            if let previous = node.previous { nodes[previous]?.next = node.next }
+            else { head = node.next }
+            if let next = node.next { nodes[next]?.previous = node.previous }
+            else { tail = node.previous }
+            return node.entry
+        }
+
+        mutating func removeFirst() -> Entry? {
+            guard let head else { return nil }
+            return remove(head)
+        }
+
+        func prefix(_ limit: Int) -> [Entry] {
+            var result: [Entry] = []
+            var current = head
+            while result.count < limit, let id = current, let node = nodes[id] {
+                result.append(node.entry)
+                current = node.next
+            }
+            return result
+        }
+
+        mutating func removeAll() {
+            nodes.removeAll(); head = nil; tail = nil
+        }
     }
 
     private struct HeldReservation: Sendable {
@@ -450,6 +602,5 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         var continuation: CheckedContinuation<Response, any Error>?
         let reservationGrant: V2RoomReservation?
         var reservationContinuation: CheckedContinuation<V2RoomReservation, any Error>?
-        let timer: Task<Void, Never>
     }
 }

@@ -11,18 +11,21 @@ public struct V2RoomRefQueryClient: Sendable,
     V2GatewayRoomMembershipDirectoryHandling, V2GroupRolePolicyBaselineReading,
     V2RoomStateReading, V2RoomLatestVisibleReading {
     private let caller: V2RoomRefUserCaller
+    private let directory: V2RoomDirectory?
     private let maximumConcurrentRooms: Int
 
     public init(directory: V2RoomDirectory, callTimeout: Duration = .seconds(10),
                 maximumConcurrentRooms: Int = 8) {
         precondition((1...100).contains(maximumConcurrentRooms))
         self.caller = .init(directory: directory, timeout: callTimeout)
+        self.directory = directory
         self.maximumConcurrentRooms = maximumConcurrentRooms
     }
 
     init(caller: V2RoomRefUserCaller, maximumConcurrentRooms: Int = 8) {
         precondition((1...100).contains(maximumConcurrentRooms))
         self.caller = caller
+        self.directory = nil
         self.maximumConcurrentRooms = maximumConcurrentRooms
     }
 
@@ -59,7 +62,37 @@ public struct V2RoomRefQueryClient: Sendable,
         }
     }
 
-    var callTimeout: Duration { caller.timeout }
+    public var callTimeout: Duration { caller.timeout }
+
+    public func states(keys: [V2RoomStateReadKey], deadline: ContinuousClock.Instant,
+                       onSettled: @escaping @Sendable ([V2RoomStateReadKey: Result<V2RoomStateReadResult, any Error>]) async -> Void)
+        async throws -> [V2RoomStateReadKey: Result<V2RoomStateReadResult, any Error>] {
+        guard keys.count <= 128, Set(keys).count == keys.count, let directory else {
+            throw V2RoomRecoveryReadError.invalidRequest
+        }
+        let queries = keys.map { V2ActorRoomRecoveryItemQuery(roomID: $0.roomID, actorUserID: $0.viewerUserID, kind: .state) }
+        @Sendable func decoded(_ outcomes: [V2RoomRecoveryQueryOutcome]) -> [V2RoomStateReadKey: Result<V2RoomStateReadResult, any Error>] {
+            Dictionary(uniqueKeysWithValues: outcomes.map { outcome in
+                let key = V2RoomStateReadKey(roomID: outcome.query.roomID, viewerUserID: outcome.query.actorUserID)
+                let value: Result<V2RoomStateReadResult, any Error>
+                switch outcome.result {
+                case .failure(let failure): value = .failure(failure)
+                case .success(let response):
+                    do {
+                        guard case .recovery(.state(let wire)) = response else { throw V2ActorRoomRecoveryWireError.invalidResult }
+                        let state = try wire.domainValue()
+                        if case .state(let snapshot) = state, snapshot.roomID != key.roomID { throw V2ActorRoomRecoveryWireError.invalidResult }
+                        value = .success(state)
+                    } catch { value = .failure(error) }
+                }
+                return (key, value)
+            })
+        }
+        let outcomes = try await directory.recoveryStates(queries, deadline: deadline) { values in
+            await onSettled(decoded(values))
+        }
+        return decoded(outcomes)
+    }
 
     func readerCandidates(roomID: RoomID, messageID: MessageID, actorUserID: UserID,
                           cursor: String?, pageSize: Int,

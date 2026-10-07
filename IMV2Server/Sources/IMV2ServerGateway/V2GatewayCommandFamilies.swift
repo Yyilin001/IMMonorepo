@@ -6,6 +6,14 @@ import IMV2Core
 
 // Each family owns protobuf conversion for its commands. The outer handler owns
 // dispatch, the common error map, telemetry and Gateway admission.
+/// Only constructed after decoding and authenticating a durable operation.
+/// The typed failure proves admission was refused or the turn rolled back.
+struct V2GatewayMessageOverloadFailure: Error {
+    let identity: V2OperationIdentity
+    let fingerprint: V2OperationFingerprint
+    let failure: V2RoomCallFailure
+}
+
 struct V2GatewayMessageCommands: Sendable {
     let messageSendOperations: any V2GatewayMessageSendOperationHandling
     let messageLimits: V2MessageCommandLimits
@@ -17,7 +25,20 @@ struct V2GatewayMessageCommands: Sendable {
               command.command.senderUserID == identity.userID,
               case .room(let roomID) = operationIdentity.scope,
               roomID == command.command.roomID else { return v2GatewayErrorEnvelope(code: "FORBIDDEN", retryable: false) }
-        let result = try await messageSendOperations.sendOperation(command)
+        V2SendPathTrace.current?.setOperation(try command.identity.operation.rawOperationID)
+        V2SendPathTrace.current?.mark("gateway_send_dispatch")
+        defer { V2SendPathTrace.current?.mark("gateway_send_return") }
+        let operationFingerprint = try command.fingerprint
+        let result: V2MessageSendOperationRecoveryResult
+        do { result = try await messageSendOperations.sendOperation(command) }
+        catch let failure as V2RoomCallFailure {
+            switch failure {
+            case .notAccepted(.overloaded), .rolledBack(.overloaded):
+                throw V2GatewayMessageOverloadFailure(identity: operationIdentity,
+                    fingerprint: operationFingerprint, failure: failure)
+            default: throw failure
+            }
+        }
         var response = IMV2Envelope()
         response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: result)
         return response
@@ -27,7 +48,16 @@ struct V2GatewayMessageCommands: Sendable {
         let request = try V2MessageSendOperationWireCodec.decode(recovery: wire)
         guard request.identity.accountID == identity.userID,
               case .room = request.identity.scope else { return v2GatewayErrorEnvelope(code: "FORBIDDEN", retryable: false) }
-        let result = try await messageSendOperations.recoverSendOperation(request)
+        let result: V2MessageSendOperationRecoveryResult
+        do { result = try await messageSendOperations.recoverSendOperation(request) }
+        catch let failure as V2RoomCallFailure {
+            switch failure {
+            case .notAccepted(.overloaded), .rolledBack(.overloaded):
+                throw V2GatewayMessageOverloadFailure(identity: request.identity,
+                    fingerprint: request.fingerprint, failure: failure)
+            default: throw failure
+            }
+        }
         var response = IMV2Envelope()
         response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: result)
         return response

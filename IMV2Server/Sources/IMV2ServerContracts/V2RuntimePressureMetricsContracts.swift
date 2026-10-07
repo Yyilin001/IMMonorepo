@@ -13,6 +13,7 @@ public enum V2DatabasePoolMetricClass: String, CaseIterable, Sendable {
     case directSendControl = "direct_send_control"
     case directAuthorizationResolution = "direct_authorization_resolution"
     /// 前台消息写入、控制写入和交互读取使用的连接池。
+    case messageWrite = "message_write"
     case foreground
     /// 同步工作使用的连接池。
     case sync
@@ -71,6 +72,105 @@ public struct V2DatabasePoolTopologySnapshot: Equatable, Sendable {
     }
 }
 
+/// A granted loan remains occupied until its actual database future settles, including driver borrow wait.
+/// These counters are loan admission observations, not actual connection utilization.
+public struct V2DatabaseLoanClassMetrics: Equatable, Sendable {
+    public let inFlight: Int
+    public let queued: Int
+    public let granted: UInt64
+    public let rejected: UInt64
+    public init(inFlight: Int = 0, queued: Int = 0, granted: UInt64 = 0, rejected: UInt64 = 0) {
+        self.inFlight = inFlight; self.queued = queued
+        self.granted = granted; self.rejected = rejected
+    }
+}
+
+/// Closed observation labels; no physical database or request identifiers.
+public enum V2DatabaseLoanObservationMetricSource: String, CaseIterable, Sendable {
+    case durableOwner = "durable_owner"
+    case roomSendInitialization = "room_send_initialization"
+    case preparationOwnerRead = "preparation_owner_read"
+    case controlReservation = "control_reservation"
+    case lifecycle, renewal, presence
+    case roomWake = "room_wake"
+    case routeLookup = "route_lookup"
+    case realtimePartitionControl = "realtime_partition_control"
+    case realtimeOwnerSnapshot = "realtime_owner_snapshot"
+    case realtimeRecoveryHead = "realtime_recovery_head"
+    case groupEventPull = "group_event_pull"
+    case groupEventSubscribe = "group_event_subscribe"
+    case roomRecovery = "room_recovery"
+    case sync
+    case userStateProjection = "user_state_projection"
+    case query, maintenance, other
+}
+
+public enum V2DatabaseLoanObservationMetricStage: String, CaseIterable, Sendable {
+    case gateQueued = "gate_queued"
+    case awaitingDriver = "awaiting_driver"
+    case betweenSQL = "between_sql"
+    case sql, settled
+}
+
+/// Completed stage intervals and currently observed loans are independent.
+/// `settled` is terminal, so it has no active or oldest-age export.
+public struct V2DatabaseLoanObservationStageMetric: Equatable, Sendable {
+    public var active = 0
+    public var oldestMilliseconds: Double = 0
+    public var count: UInt64 = 0
+    public var totalMilliseconds: Double = 0
+    public var maxMilliseconds: Double = 0
+    public init() {}
+}
+
+/// Fixed actual SQL-future classifications; concurrent lifetimes can overlap.
+public enum V2DatabaseLoanObservationMetricSQLPhase: String, CaseIterable, Sendable {
+    case fence
+    case readBody = "read_body"
+    case transactionControl = "transaction_control"
+    case other
+}
+
+/// Actual completed SQL-future lifetimes, not exclusive stage wall-clock time.
+public struct V2DatabaseLoanObservationSQLMetric: Equatable, Sendable {
+    public var count: UInt64 = 0
+    public var totalMilliseconds: Double = 0
+    public var maxMilliseconds: Double = 0
+    public init() {}
+}
+
+public struct V2DatabaseLoanObservationSourceMetric: Equatable, Sendable {
+    public var sqlPhases = Dictionary(uniqueKeysWithValues: V2DatabaseLoanObservationMetricSQLPhase.allCases.map {
+        ($0, V2DatabaseLoanObservationSQLMetric())
+    })
+    public var stages = Dictionary(uniqueKeysWithValues: V2DatabaseLoanObservationMetricStage.allCases.map {
+        ($0, V2DatabaseLoanObservationStageMetric())
+    })
+    /// Grant until actual future settlement, including driver wait and transaction finalization.
+    /// This is not socket utilization or a sum of SQL execution times.
+    public var actualHeldCount: UInt64 = 0
+    public var actualHeldTotalMilliseconds: Double = 0
+    public var actualHeldMaxMilliseconds: Double = 0
+    public init() {}
+}
+
+/// Process aggregate with four fixed classes and no database or owner identifiers.
+/// Activation and Sync share ordinary capacity, reported separately from general work.
+public struct V2DatabaseLoanMetricsSnapshot: Equatable, Sendable {
+    public let ordinary: V2DatabaseLoanClassMetrics
+    public let activation: V2DatabaseLoanClassMetrics
+    public let sync: V2DatabaseLoanClassMetrics
+    public let renewal: V2DatabaseLoanClassMetrics
+    /// Nil means no observation source; otherwise all fixed sources render zero baselines.
+    public let observations: [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric]?
+    public init(ordinary: V2DatabaseLoanClassMetrics = .init(), activation: V2DatabaseLoanClassMetrics = .init(),
+                renewal: V2DatabaseLoanClassMetrics = .init(), sync: V2DatabaseLoanClassMetrics = .init(),
+                observations: [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric]? = nil) {
+        self.ordinary = ordinary; self.activation = activation; self.renewal = renewal; self.sync = sync
+        self.observations = observations
+    }
+}
+
 /// 聚合网关进程内的数据库压力、通知合并、批处理和缓存指标。
 ///
 /// 必填部分描述基础工作压力，可选部分承载已接入组件的观测结果。
@@ -80,13 +180,10 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     /// 数据库工作准入的在途数、队列长度和累计结果。
     public let databaseWork: V2DatabaseWorkAdmissionSnapshot
     /// 采集器提供的连接池配置拓扑，不是实时连接使用率。
+    public let databaseLoans: V2DatabaseLoanMetricsSnapshot?
     public let databasePools: V2DatabasePoolTopologySnapshot
     /// 同步可用性提示的合并、投递和丢弃统计。
     public let syncWake: V2SyncWakeCoalescerSnapshot
-    /// 分片命令额度池的聚合统计；不携带分片、房间或租约标识作为指标标签。
-    public let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPoolSnapshot?
-    /// 按房间预留命令额度的聚合统计，用于观察批量预留效果，不暴露房间或租约标识。
-    public let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPoolSnapshot?
     /// 私聊日志追加的本地排队、执行及批处理结果，使用固定模式和原因分类。
     public let directRoomLogAppendBatching: V2SendMessageBatchMetricsSnapshot?
     /// 已读游标微批处理的排队与事务统计，不包含用户、房间或操作标识。
@@ -108,6 +205,11 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
 /// 本地 Actor 宿主与目录的负载指标；仅作调用方的节点不包含宿主字段。
     public let roomActors: V2RoomRuntimeMetricsSnapshot?
     public let sendOperationBatching: V2SendOperationBatchMetricsSnapshot?
+    public let sendOperationOwnerBatching: V2SendOperationOwnerMetricsSnapshot?
+    /// Independent durable preparation admission; never part of owner write occupancy.
+    public let gatewayMessageSend: V2GatewayMessageSendMetricsSnapshot?
+    public let roomRecoveryBatches: V2RoomRecoveryBatchPressureSnapshot?
+    public let registryRecovery: V2RegistryRecoveryMetricsSnapshot?
 
     /// 从各组件的观测构造聚合值，不执行采集、不清零计数，也不校验组件间的一致性。
     ///
@@ -115,8 +217,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     ///   - databaseWork: 数据库准入观测。
     ///   - databasePools: 连接池配置拓扑。
     ///   - syncWake: 同步提示合并器观测。
-    ///   - shardAdmissionCommandCredits: 分片命令额度池的聚合统计；不携带分片、房间或租约标识作为指标标签。 默认 `nil`，表示未提供。
-    ///   - roomAdmissionCommandCredits: 按房间预留命令额度的聚合统计，用于观察批量预留效果，不暴露房间或租约标识。 默认 `nil`，表示未提供。
     ///   - directRoomLogAppendBatching: 私聊日志追加的本地排队、执行及批处理结果，使用固定模式和原因分类。 默认 `nil`，表示未提供。
     ///   - readReceiptBatching: 已读游标微批处理的排队与事务统计，不包含用户、房间或操作标识。 默认 `nil`，表示未提供。
     ///   - directRoomLogAppendStages: 私聊权威追加事务的固定阶段耗时分布，阶段名来自枚举而非动态 SQL。 默认 `nil`，表示未提供。
@@ -130,8 +230,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         databaseWork: V2DatabaseWorkAdmissionSnapshot,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWake: V2SyncWakeCoalescerSnapshot,
-        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPoolSnapshot? = nil,
-        roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPoolSnapshot? = nil,
         directRoomLogAppendBatching: V2SendMessageBatchMetricsSnapshot? = nil,
         readReceiptBatching: V2ReadReceiptBatchMetricsSnapshot? = nil,
         directRoomLogAppendStages: V2DirectRoomLogAppendStageMetricsSnapshot? = nil,
@@ -142,13 +240,20 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         preparedGroupEventPageCache: V2PreparedGroupEventPageCacheSnapshot? = nil,
         livePresenceRenewals: V2LivePresenceRenewalBatcherSnapshot? = nil,
         roomActors: V2RoomRuntimeMetricsSnapshot? = nil,
-        sendOperationBatching: V2SendOperationBatchMetricsSnapshot? = nil
+        sendOperationBatching: V2SendOperationBatchMetricsSnapshot? = nil,
+        sendOperationOwnerBatching: V2SendOperationOwnerMetricsSnapshot? = nil,
+        databaseLoans: V2DatabaseLoanMetricsSnapshot? = nil,
+        gatewayMessageSend: V2GatewayMessageSendMetricsSnapshot? = nil,
+        registryRecovery: V2RegistryRecoveryMetricsSnapshot? = nil,
+        roomRecoveryBatches: V2RoomRecoveryBatchPressureSnapshot? = nil
     ) {
+        self.roomRecoveryBatches = roomRecoveryBatches
+        self.registryRecovery = registryRecovery
+        self.gatewayMessageSend = gatewayMessageSend
+        self.databaseLoans = databaseLoans
         self.databaseWork = databaseWork
         self.databasePools = databasePools
         self.syncWake = syncWake
-        self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
-        self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatching = directRoomLogAppendBatching
         self.readReceiptBatching = readReceiptBatching
         self.directRoomLogAppendStages = directRoomLogAppendStages
@@ -160,6 +265,7 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.livePresenceRenewals = livePresenceRenewals
         self.roomActors = roomActors
         self.sendOperationBatching = sendOperationBatching
+        self.sendOperationOwnerBatching = sendOperationOwnerBatching
     }
 }
 
@@ -171,4 +277,189 @@ public protocol V2RuntimePressureMetricsSource: Sendable {
     ///
     /// - Returns: 基础压力指标及当前可用的组件观测；未接入的可选组件以 `nil` 表示。
     func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot
+}
+
+/// Fixed TCP admission reasons; never contains connection or business identities.
+public enum V2GatewayMessageSendRejectionReason: String, CaseIterable, Sendable {
+    case connectionCount = "connection_count"
+    case connectionBytes = "connection_bytes"
+    case processBytes = "process_bytes"
+}
+
+/// Shared process reservation ownership, including tasks waiting for actual settlement.
+public struct V2GatewayMessageSendMetricsSnapshot: Equatable, Sendable {
+    public let inFlightRequests: Int
+    public let reservedBytes: Int
+    public let peakInFlightRequests: Int
+    public let peakReservedBytes: Int
+    public let rejections: [V2GatewayMessageSendRejectionReason: UInt64]
+
+    public init(inFlightRequests: Int = 0, reservedBytes: Int = 0,
+                peakInFlightRequests: Int = 0, peakReservedBytes: Int = 0,
+                rejections: [V2GatewayMessageSendRejectionReason: UInt64] = [:]) {
+        self.inFlightRequests = inFlightRequests
+        self.reservedBytes = reservedBytes
+        self.peakInFlightRequests = peakInFlightRequests
+        self.peakReservedBytes = peakReservedBytes
+        self.rejections = Dictionary(uniqueKeysWithValues:
+            V2GatewayMessageSendRejectionReason.allCases.map { ($0, rejections[$0, default: 0]) })
+    }
+}
+
+public enum V2RegistryRecoveryScopeKind: String, CaseIterable, Sendable {
+    case account, room, presence, typing
+}
+public enum V2RegistryRecoveryStage: String, CaseIterable, Sendable {
+    case desired, awaitingRetention = "awaiting_retention", queued, actual
+    case actualScopes = "actual_scopes"
+    case authorizationReturns = "authorization_returns"
+    case interestActivation = "interest_activation"
+    case inlineRetention = "inline_retention"
+    case outboundRetention = "outbound_retention"
+    case authorization, retention, coverageWrite = "coverage_write"
+}
+public enum V2RegistryRecoveryReason: String, CaseIterable, Sendable {
+    case initial, recheck, newHead = "new_head", coverageRecovery = "coverage_recovery"
+}
+public struct V2RegistryRecoveryStageSnapshot: Equatable, Sendable {
+    public var count: Int
+    public var oldestMilliseconds: Double
+    public init(count: Int = 0, oldestMilliseconds: Double = 0) {
+        self.count = count; self.oldestMilliseconds = oldestMilliseconds
+    }
+}
+/// Root ownership and actual provider query attempts are distinct from scope counts.
+public enum V2RecoveryAttemptStage: String, CaseIterable, Sendable {
+    case interestActivation = "interest_activation"
+    case authorizationQuery = "authorization_query"
+    case queryRoot = "query_root"
+    case control
+    public var unit: String {
+        switch self {
+        case .authorizationQuery: "query_attempts"
+        case .interestActivation, .queryRoot, .control: "root_tasks"
+        }
+    }
+}
+/// Retired streams remain owned until their actual recovery writer drains.
+public enum V2RetiredRecoveryWriterStage: String, CaseIterable, Sendable {
+    case retainedStreams = "retained_streams"
+    case actualDrains = "actual_drains"
+    public var unit: String {
+        switch self {
+        case .retainedStreams: "streams"
+        case .actualDrains: "worker_tasks"
+        }
+    }
+}
+/// Presence observation work has different units from recovery scope gauges.
+public enum V2PresenceObservationStage: String, CaseIterable, Sendable {
+    case queuedKeys = "queued_keys", actualQueries = "actual_queries"
+    case resultPositions = "result_positions"
+    case resultTickets = "result_tickets", settlingTickets = "settling_tickets"
+    case retiredTickets = "retired_tickets"
+    case ownedJobs = "owned_jobs", waiters
+    public var unit: String {
+        switch self {
+        case .queuedKeys: "request_keys"
+        case .actualQueries: "query_batches"
+        case .resultPositions: "result_keys"
+        case .resultTickets, .settlingTickets, .retiredTickets: "target_tickets"
+        case .ownedJobs: "batch_jobs"
+        case .waiters: "waiters"
+        }
+    }
+}
+/// Mutually exclusive positions in the recovery admission ledger. Prepared
+/// proofs still queued for dispatch occupy queued; they are not another component.
+public enum V2RecoveryPositionStage: String, CaseIterable, Sendable {
+    case queued
+    case authorizationReturns = "authorization_returns"
+    case selectedHandoff = "selected_handoff"
+    case outbound
+}
+public struct V2RecoveryPositionLedgerSnapshot: Equatable, Sendable {
+    public var capacity: Int
+    public var stages: [V2RecoveryPositionStage: V2RegistryRecoveryStageSnapshot]
+    public var occupied: Int { stages.values.reduce(0) { $0 + $1.count } }
+    public var oldestMilliseconds: Double { stages.values.map(\.oldestMilliseconds).max() ?? 0 }
+    public init(capacity: Int = 1024,
+                stages: [V2RecoveryPositionStage: V2RegistryRecoveryStageSnapshot] = [:]) {
+        self.capacity = capacity; self.stages = stages
+    }
+}
+
+/// Completed monotonic timing observations, independent of ownership gauges.
+public enum V2RecoverySchedulingPhase: String, CaseIterable, Sendable {
+    case pumpPass = "pump_pass"
+    case shortOffer = "short_offer"
+    case interestProvider = "interest_provider"
+    case queryProvider = "query_provider"
+    case controlCohort = "control_cohort"
+}
+public enum V2RecoverySchedulingScan: String, CaseIterable, Sendable {
+    case desired, queued
+}
+public struct V2RecoverySchedulingTimingSnapshot: Equatable, Sendable {
+    public var count: UInt64
+    public var totalMilliseconds: Double
+    public var maxMilliseconds: Double
+    public init(count: UInt64 = 0, totalMilliseconds: Double = 0, maxMilliseconds: Double = 0) {
+        self.count = count; self.totalMilliseconds = totalMilliseconds; self.maxMilliseconds = maxMilliseconds
+    }
+}
+/// Counts failed Ready checks, not distinct operations. A retried attempt may
+/// fail multiple checks; labels contain no connection, scope or room identity.
+public enum V2RecoveryReadyRejectionReason: String, CaseIterable, Sendable {
+    case permissionExpired = "permission_expired"
+    case permissionMissing = "permission_missing"
+    case generationInvalid = "generation_invalid"
+    case headUnsatisfied = "head_unsatisfied"
+    case coverageChanged = "coverage_changed"
+    case closed
+    case recovering
+    case enqueueRefused = "enqueue_refused"
+}
+public struct V2RecoverySchedulingSnapshot: Equatable, Sendable {
+    public var timings: [V2RecoverySchedulingPhase: V2RecoverySchedulingTimingSnapshot]
+    public var scans: [V2RecoverySchedulingScan: UInt64]
+    public var readyRejections: [V2RecoveryReadyRejectionReason: UInt64]
+    public init(timings: [V2RecoverySchedulingPhase: V2RecoverySchedulingTimingSnapshot] = [:],
+                scans: [V2RecoverySchedulingScan: UInt64] = [:],
+                readyRejections: [V2RecoveryReadyRejectionReason: UInt64] = [:]) {
+        self.timings = timings; self.scans = scans; self.readyRejections = readyRejections
+    }
+}
+
+/// Scope stage gauges overlap. Actual and actualScopes alias the same root-owned scopes.
+/// Outbound ownership after handoff is reported separately; root tasks and provider queries
+/// have separate attempt gauges. Aliases and overlapping phases must not be added together.
+/// These are Registry scopes, not Coordinator partition jobs or client-applied cursors.
+public struct V2RegistryRecoveryMetricsSnapshot: Equatable, Sendable {
+    public var stages: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryStage: V2RegistryRecoveryStageSnapshot]]
+    public var reasons: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryReason: Int]]
+    public var duplicateRetained: [V2RegistryRecoveryScopeKind: UInt64]
+    public var actualReasons: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryReason: Int]]
+    public var presenceObservationStages: [V2PresenceObservationStage: V2RegistryRecoveryStageSnapshot]
+    public var recoveryAttemptStages: [V2RecoveryAttemptStage: V2RegistryRecoveryStageSnapshot]
+    public var retiredRecoveryWriterStages: [V2RetiredRecoveryWriterStage: V2RegistryRecoveryStageSnapshot]
+    public var positionLedger: V2RecoveryPositionLedgerSnapshot
+    public var schedulingTelemetry: V2RecoverySchedulingSnapshot
+    public init(stages: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryStage: V2RegistryRecoveryStageSnapshot]] = [:],
+                reasons: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryReason: Int]] = [:],
+                duplicateRetained: [V2RegistryRecoveryScopeKind: UInt64] = [:],
+                actualReasons: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryReason: Int]] = [:],
+                presenceObservationStages: [V2PresenceObservationStage: V2RegistryRecoveryStageSnapshot] = [:],
+                recoveryAttemptStages: [V2RecoveryAttemptStage: V2RegistryRecoveryStageSnapshot] = [:],
+                retiredRecoveryWriterStages: [V2RetiredRecoveryWriterStage: V2RegistryRecoveryStageSnapshot] = [:],
+                positionLedger: V2RecoveryPositionLedgerSnapshot = .init(),
+                schedulingTelemetry: V2RecoverySchedulingSnapshot = .init()) {
+        self.stages = stages; self.reasons = reasons; self.duplicateRetained = duplicateRetained
+        self.actualReasons = actualReasons
+        self.presenceObservationStages = presenceObservationStages
+        self.recoveryAttemptStages = recoveryAttemptStages
+        self.retiredRecoveryWriterStages = retiredRecoveryWriterStages
+        self.positionLedger = positionLedger
+        self.schedulingTelemetry = schedulingTelemetry
+    }
 }

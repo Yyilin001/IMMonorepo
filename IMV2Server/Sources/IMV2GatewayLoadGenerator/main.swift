@@ -9,6 +9,7 @@ import Glibc
 import Musl
 #endif
 import Foundation
+import Synchronization
 import IMV2Compression
 import IMV2Core
 import IMV2Server
@@ -24,6 +25,10 @@ enum IMV2GatewayLoadGenerator {
     static func main() async {
         do {
             let arguments = Array(CommandLine.arguments.dropFirst())
+            if arguments == ["--describe-message-transport"] {
+                print(LoadConnectionHandler.messageTransportDescription)
+                return
+            }
             if arguments.count == 2, arguments[0] == "--validate-scenario" {
                 let scenario = try LoadScenario.load(path: arguments[1])
                 let totalSeconds = scenario.phases.reduce(0) { $0 + $1.durationSeconds }
@@ -101,6 +106,7 @@ private func loadResponseKind(_ body: IMV2Envelope.OneOf_Body?) -> String {
     case .authenticated: "authenticated"
     case .heartbeatAck: "heartbeat_ack"
     case .messageAccepted: "message_accepted"
+    case .messageSendOperationResult: "message_send_operation_result"
     case .groupEventPage: "group_event_page"
     case .groupEventSubscribed: "group_event_subscribed"
     case .groupEventAvailable: "group_event_available"
@@ -113,7 +119,25 @@ private func loadResponseKind(_ body: IMV2Envelope.OneOf_Body?) -> String {
     }
 }
 
+// Inspect only closed tool failures or the error's type. Error descriptions
+// may contain URLs or request material and must not enter load reports.
+private func loadHTTPFailureCode(_ error: any Error) -> String {
+    if let failure = error as? V2ToolOperationHTTP.Failure {
+        switch failure {
+        case .status(let status): return "HTTP_STATUS_\(status)"
+        case .incomplete: return "HTTP_INCOMPLETE"
+        case .invalidResponse: return "HTTP_INVALID_RESPONSE"
+        case .invalidConfiguration: return "HTTP_INVALID_CONFIGURATION"
+        }
+    }
+    if let code = V2ToolOperationHTTP.clientFailureCode(error) { return code }
+    if error is CancellationError { return "HTTP_CLIENT_CANCELLED" }
+    if let io = error as? IOError { return "HTTP_CLIENT_IO_\(io.errnoCode)" }
+    return "HTTP_CLIENT_" + String(reflecting: type(of: error))
+}
+
 private struct LoadConfiguration: Sendable {
+    let benchmarkWireVersion: UInt32
     let host: String
     let port: Int
     let revision: String
@@ -123,6 +147,7 @@ private struct LoadConfiguration: Sendable {
     let credentialsPath: String
     let reportPath: String
     let connections: Int
+    let localPortBase: Int?
     let rampPerSecond: Int
     let rampBatchSize: Int
     let workloadRampPerSecond: Int
@@ -137,6 +162,7 @@ private struct LoadConfiguration: Sendable {
     let roomLogReads: Bool
     let roomLogInitialCursor: RoomLogInitialCursor
     let roomLogReadTrigger: RoomLogReadTrigger
+    let roomNotificationLossCanary: Bool
     let roomLogRecoveryGraceMilliseconds: Int
     let peerTopology: PeerTopology
     let heartbeatSeconds: Int
@@ -145,7 +171,12 @@ private struct LoadConfiguration: Sendable {
     let maximumFailurePercent: Double
     let scenario: LoadScenario?
     let scenarioRateScale: Double
+    let scenarioReadyPath: String?
+    let scenarioStartBarrierPath: String?
+    let checkpointRequestPath: String?
+    let checkpointResponsePath: String?
     let recoveryBurst: Bool
+    let plannedReconnectInflightCanary: Bool
     let recoveryBurstWorkers: Int
     let recoveryBurstMaximumAttempts: Int
     let recoveryBurstObserveSeconds: Int
@@ -178,6 +209,10 @@ private struct LoadConfiguration: Sendable {
               let reportPath = values["--report"], !reportPath.isEmpty
         else { throw LoadError.invalidArguments }
 
+        // Measurement-only reference adapter; production endpoints remain version-strict.
+        let wire = try Self.integer(values["--benchmark-wire-version"] ?? String(IMV2ProtocolVersion.current), range: 1...255)
+        guard wire == 45 || wire == Int(IMV2ProtocolVersion.current) else { throw LoadError.invalidArguments }
+        benchmarkWireVersion = UInt32(wire)
         self.host = host
         revision = values["--revision"] ?? "unknown"
         serverName = values["--server-name"] ?? "localhost"
@@ -191,6 +226,11 @@ private struct LoadConfiguration: Sendable {
         // A mixed-source 10k run assigns 8k connections to one isolated load
         // worker, so allow one worker to own the full validated test scale.
         connections = try Self.integer(values["--connections"] ?? "100", range: 1...10_000)
+        if let value = values["--local-port-base"] {
+            localPortBase = try Self.integer(value, range: 1_024...(65_536 - LocalSourcePortAllocator.span))
+        } else {
+            localPortBase = nil
+        }
         rampPerSecond = try Self.integer(values["--ramp-per-second"] ?? "50", range: 1...1_000)
         rampBatchSize = try Self.integer(
             values["--ramp-batch-size"] ?? String(min(rampPerSecond, 100)),
@@ -255,6 +295,39 @@ private struct LoadConfiguration: Sendable {
         } else {
             scenario = nil
         }
+        scenarioReadyPath = values["--scenario-ready-path"]
+        scenarioStartBarrierPath = values["--scenario-start-barrier-path"]
+        guard (scenarioReadyPath == nil && scenarioStartBarrierPath == nil)
+            || (scenario != nil && scenarioReadyPath?.isEmpty == false && scenarioStartBarrierPath?.isEmpty == false
+                && scenarioReadyPath != scenarioStartBarrierPath) else { throw LoadError.invalidArguments }
+        checkpointRequestPath = values["--checkpoint-request-path"]
+        checkpointResponsePath = values["--checkpoint-response-path"]
+        guard (checkpointRequestPath == nil) == (checkpointResponsePath == nil) else { throw LoadError.invalidArguments }
+        if let request = checkpointRequestPath, let response = checkpointResponsePath {
+            // Resolve the existing parent for every file, then append its name.
+            // Foundation may canonicalize an existing /private/tmp parent to
+            // /tmp while preserving /private/tmp on a nonexistent child URL.
+            // Resolving those unequal shapes used to reject valid canary paths.
+            func ownedFileURL(_ path: String) -> URL {
+                let file = URL(fileURLWithPath: path).standardizedFileURL
+                return file.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+                    .appendingPathComponent(file.lastPathComponent, isDirectory: false)
+            }
+            let reportURL = ownedFileURL(reportPath)
+            let directory = reportURL.deletingLastPathComponent().path
+            let ownedPrefix = directory.hasSuffix("/") ? directory : directory + "/"
+            let requestURL = ownedFileURL(request), responseURL = ownedFileURL(response)
+            for path in [request, response] where FileManager.default.fileExists(atPath: path) {
+                // Existing symbolic links must not bypass owned-directory validation.
+                let attributes = try FileManager.default.attributesOfItem(atPath: path)
+                guard attributes[.type] as? FileAttributeType == .typeRegular else { throw LoadError.invalidArguments }
+            }
+            guard benchmarkWireVersion >= 46, scenario != nil,
+                  request.hasPrefix("/"), response.hasPrefix("/"), directory != "/",
+                  requestURL.path.hasPrefix(ownedPrefix), responseURL.path.hasPrefix(ownedPrefix),
+                  requestURL != responseURL, requestURL.path != reportURL.path,
+                  responseURL.path != reportURL.path else { throw LoadError.invalidArguments }
+        }
         // Scenario warm-up waits for both direct rooms and tail cursors, so a
         // phase never mixes recovery traffic with its steady workload.
         guard roomLogInitialCursor == .zero || roomLogReads
@@ -270,6 +343,17 @@ private struct LoadConfiguration: Sendable {
         else { throw LoadError.invalidArguments }
         self.scenarioRateScale = scenarioRateScale
         recoveryBurst = try Self.integer(values["--recovery-burst"] ?? "0", range: 0...1) == 1
+        roomNotificationLossCanary = try Self.integer(values["--room-notification-loss-canary"] ?? "0", range: 0...1) == 1
+        guard !roomNotificationLossCanary || (roomLogReads && roomLogReadTrigger == .availabilityHint
+            && connections <= 500 && !recoveryBurst
+            && (values["--message-transport"] == nil || values["--message-transport"] == "tcp")) else {
+            throw LoadError.invalidArguments
+        }
+        plannedReconnectInflightCanary = try Self.integer(values["--planned-reconnect-inflight-canary"] ?? "0", range: 0...1) == 1
+        guard !plannedReconnectInflightCanary || (scenario != nil && roomLogReads && connections <= 500 && !recoveryBurst
+            && maximumInFlightMessagesPerConnection == 1
+            && scenario?.sendDispatch == .boundedClientQueue
+            && (scenario?.maximumQueuedMessagesPerConnection ?? 0) >= 1) else { throw LoadError.invalidArguments }
         recoveryBurstWorkers = try Self.integer(values["--recovery-burst-workers"] ?? "128", range: 1...connections)
         recoveryBurstMaximumAttempts = try Self.integer(values["--recovery-burst-max-attempts"] ?? "1", range: 1...3)
         recoveryBurstOfflineSeconds = try Self.integer(values["--recovery-burst-offline-seconds"] ?? "0", range: 0...300)
@@ -496,12 +580,22 @@ private final class LoadStatistics: @unchecked Sendable {
         var heartbeatSent = 0
         var heartbeatAcknowledged = 0
         var heartbeatMissed = 0
+        var roomProgressReportsSent = 0
+        var roomProgressStatesAccepted = 0
+        var roomProgressStatesIgnored = 0
+        var roomProgressRecoverySignals = 0
+        var roomNotificationsDiscarded = 0
         var directRoomAttempted = 0
         var directRoomOpened = 0
         var roomLogTailReady = 0
         var workloadFailed = 0
         var workloadFailuresByKindAndCode: [String: Int] = [:]
         var messagesSent = 0
+        var messageTransportEvents: [String: Int] = [:]
+        var realtimeCoverageEvents: [String: Int] = [:]
+        var messageSendNegotiatedConnections = 0
+        var messageSendPayloadLimitMinimum: UInt32?
+        var messageSendPayloadLimitMaximum: UInt32?
         var messagesAcknowledged = 0
         var messagesSkipped = 0
         var scenarioMessagesScheduled = 0
@@ -510,7 +604,11 @@ private final class LoadStatistics: @unchecked Sendable {
         var scenarioMessageQueueAbandoned = 0
         var queuedScenarioMessages = 0
         var maximumQueuedScenarioMessages = 0
+        // Initial logical pulls only: retries must not dilute the failure guard.
         var syncPullsSent = 0
+        var syncWireAttempts = 0
+        var syncRetryAttempts = 0
+        var syncLogicalFailures = 0
         var syncBatchesReceived = 0
         var syncRecordsReceived = 0
         var syncAcknowledged = 0
@@ -543,6 +641,7 @@ private final class LoadStatistics: @unchecked Sendable {
         var roomSyncStateBatch = RecoveryBatchStats()
         var roomLatestVisibleBatch = RecoveryBatchStats()
         var maximumRSSBytes: UInt64 = 0
+        var protocolFailuresByKindAndCode: [String: Int] = [:]
     }
 
     private let lock = NIOLock()
@@ -555,6 +654,10 @@ private final class LoadStatistics: @unchecked Sendable {
             let key = Self.connectionFailureKey(error)
             state.connectionFailuresByError[key, default: 0] += 1
         }
+    }
+    func recordProtocolFailure(_ error: Error) {
+        guard case .unexpectedServerResponse(let code, let messageType, _)? = error as? LoadError else { return }
+        lock.withLock { state.protocolFailuresByKindAndCode["\(messageType):\(code ?? "NONE")", default: 0] += 1 }
     }
     func recordAuthenticated(milliseconds: Double) {
         lock.withLock {
@@ -579,6 +682,15 @@ private final class LoadStatistics: @unchecked Sendable {
         }
     }
     func recordHeartbeatMissed() { lock.withLock { state.heartbeatMissed += 1 } }
+    func recordRoomNotificationDiscarded() { lock.withLock { state.roomNotificationsDiscarded += 1 } }
+    func recordRoomProgressReport() { lock.withLock { state.roomProgressReportsSent += 1 } }
+    func recordRoomProgressState(accepted: Bool, recovery: Bool) {
+        lock.withLock {
+            if accepted { state.roomProgressStatesAccepted += 1 }
+            else { state.roomProgressStatesIgnored += 1 }
+            if recovery { state.roomProgressRecoverySignals += 1 }
+        }
+    }
     func recordDirectRoomAttempted() { lock.withLock { state.directRoomAttempted += 1 } }
     func recordDirectRoomOpened() { lock.withLock { state.directRoomOpened += 1 } }
     func recordRoomLogTailReady() { lock.withLock { state.roomLogTailReady += 1 } }
@@ -587,6 +699,37 @@ private final class LoadStatistics: @unchecked Sendable {
             state.workloadFailed += 1
             let key = "\(kind):\(code):\(retryable ? "retryable" : "terminal")"
             state.workloadFailuresByKindAndCode[key, default: 0] += 1
+        }
+    }
+    func recordRealtimeCoverage(_ coverage: IMV2RealtimeCoverage) {
+        let scope: String
+        switch coverage.scope {
+        case .account: scope = "account"
+        case .room: scope = "room"
+        case .directory: scope = "directory"
+        case .presence: scope = "presence"
+        case .typing: scope = "typing"
+        case .unspecified, .UNRECOGNIZED: scope = "unknown"
+        }
+        let phase: String
+        switch coverage.state {
+        case .recovering: phase = "recovering"
+        case .ready: phase = "ready"
+        case .ended: phase = "ended"
+        case .unspecified, .UNRECOGNIZED: phase = "unknown"
+        }
+        // Notification observations never advance a durable cursor or certify
+        // catch-up. Labels exclude connection IDs, topic IDs and wire values.
+        lock.withLock { state.realtimeCoverageEvents[scope + ":" + phase, default: 0] += 1 }
+    }
+    func recordMessageTransportEvent(_ code: String) {
+        lock.withLock { state.messageTransportEvents[code, default: 0] += 1 }
+    }
+    func recordMessageSendNegotiated(payloadLimit: UInt32) {
+        lock.withLock {
+            state.messageSendNegotiatedConnections += 1
+            state.messageSendPayloadLimitMinimum = min(state.messageSendPayloadLimitMinimum ?? payloadLimit, payloadLimit)
+            state.messageSendPayloadLimitMaximum = max(state.messageSendPayloadLimitMaximum ?? payloadLimit, payloadLimit)
         }
     }
     func recordMessageSent() { lock.withLock { state.messagesSent += 1 } }
@@ -625,6 +768,10 @@ private final class LoadStatistics: @unchecked Sendable {
         }
     }
     func recordSyncPullSent() { lock.withLock { state.syncPullsSent += 1 } }
+    func recordSyncWireAttempt(retry: Bool) {
+        lock.withLock { state.syncWireAttempts += 1; if retry { state.syncRetryAttempts += 1 } }
+    }
+    func recordSyncLogicalFailure() { lock.withLock { state.syncLogicalFailures += 1 } }
     func recordSyncBatch(milliseconds: Double, records: Int) {
         lock.withLock {
             state.syncBatchesReceived += 1
@@ -986,15 +1133,61 @@ private final class DirectRoomHTTPTaskOwner: @unchecked Sendable {
     }
 }
 
+// Explicit ranges let independent destinations reuse local ports without exhausting
+// the OS ephemeral range. Every connection attempt consumes a fresh port: a
+// reconnect must not reuse the same four-tuple while its prior socket is TIME_WAIT.
+private final class LocalSourcePortAllocator: @unchecked Sendable {
+    static let span = 10_000
+    private let lock = NIOLock()
+    private var nextPort: Int
+    private let endPort: Int
+
+    init(base: Int) {
+        nextPort = base
+        endPort = base + Self.span
+    }
+
+    func allocate() throws -> Int {
+        try lock.withLock {
+            guard nextPort < endPort else { throw LoadError.localSourcePortRangeExhausted }
+            defer { nextPort += 1 }
+            return nextPort
+        }
+    }
+}
+
 private struct LoadRun: Sendable {
-    let sendTasks = V2ToolHTTPSendTaskOwner()
+    static let accountHTTPConnectionsPerHostSoftLimit = 256
     let directRoomTasks = DirectRoomHTTPTaskOwner(
         maximumConcurrent: DirectRoomHTTPTaskOwner.configuredMaximumConcurrent,
         maximumQueued: DirectRoomHTTPTaskOwner.configuredMaximumQueued)
     let configuration: LoadConfiguration
     let credentials: [LoadCredential]
 
+    // One pool per run. Both comparison servers use this same loader lifecycle.
+    private let accountHTTP: V2ToolOperationHTTP
+    private let localSourcePorts: LocalSourcePortAllocator?
+
+    init(configuration: LoadConfiguration, credentials: [LoadCredential]) throws {
+        self.configuration = configuration
+        self.credentials = credentials
+        self.localSourcePorts = configuration.localPortBase.map { LocalSourcePortAllocator(base: $0) }
+        self.accountHTTP = try V2ToolOperationHTTP(baseURL: configuration.accountBaseURL, caPath: configuration.caPath,
+            http1ConnectionsPerHostSoftLimit: Self.accountHTTPConnectionsPerHostSoftLimit)
+    }
+
     func execute() async throws -> LoadReport {
+        let result: Result<LoadReport, any Error>
+        do { result = .success(try await executeWithOwnedHTTP()) }
+        catch { result = .failure(error) }
+        // executeWithOwnedHTTP closes TCP operations and drains direct HTTP tasks before returning.
+        // Early setup failures have no tasks; shutdown still occurs exactly once.
+        do { try await accountHTTP.shutdown() }
+        catch { if case .success = result { throw error } }
+        return try result.get()
+    }
+
+    private func executeWithOwnedHTTP() async throws -> LoadReport {
         var tls = TLSConfiguration.makeClientConfiguration()
         tls.minimumTLSVersion = .tlsv13
         tls.maximumTLSVersion = .tlsv13
@@ -1011,6 +1204,7 @@ private struct LoadRun: Sendable {
         var scenarioPhases: [ScenarioPhaseReport] = []
         var scenarioDrain: ScenarioDrainReport?
         var recoveryBurstReport: RecoveryBurstReport?
+        var checkpointWorker: RealtimeCheckpointWorker?
 
         do {
             var offset = 0
@@ -1062,6 +1256,12 @@ private struct LoadRun: Sendable {
                 }
             }
 
+            if let request = configuration.checkpointRequestPath, let response = configuration.checkpointResponsePath {
+                // Capture the completed slot array by value; replacements remain
+                // protected by each slot's existing lock. Never capture run's var.
+                checkpointWorker = RealtimeCheckpointWorker(slots: slots, requested: configuration.connections,
+                    requestPath: request, responsePath: response)
+            }
             if configuration.messagesPerSecond > 0 || configuration.scenario != nil {
                 try await startWorkloads(channels: slots.compactMap(\.channel))
             }
@@ -1084,6 +1284,29 @@ private struct LoadRun: Sendable {
                               }) else { throw LoadError.unexpectedResponse }
                     }
                 }
+                if configuration.plannedReconnectInflightCanary {
+                    guard let slot = slots.first, let channel = slot.channel else { throw LoadError.unexpectedResponse }
+                    let injectionStart = statistics.snapshot()
+                    channel.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent())
+                    let heldDeadline = NIODeadline.now() + .seconds(15)
+                    while statistics.snapshot().messageTransportEvents["CANARY_RECEIPT_HELD", default: 0] == 0 {
+                        try enforceGuards(statistics: statistics)
+                        guard NIODeadline.now() < heldDeadline else { throw LoadError.unexpectedResponse }
+                        try await Task.sleep(nanoseconds: 20_000_000)
+                    }
+                    // FIFO on the old event loop queues the second command before ownership transfer.
+                    channel.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent())
+                    try await reconnect(slot: slot, group: group, sslContext: sslContext, statistics: statistics, requireInFlight: true)
+                    let recoveryDeadline = NIODeadline.now() + .seconds(60)
+                    while statistics.snapshot().messageTransportEvents["RECOVERED_AFTER_RECONNECT", default: 0] == 0
+                        || statistics.snapshot().messagesAcknowledged < injectionStart.messagesAcknowledged + 2
+                        || statistics.snapshot().queuedScenarioMessages != injectionStart.queuedScenarioMessages {
+                        try enforceGuards(statistics: statistics)
+                        guard NIODeadline.now() < recoveryDeadline else { throw LoadError.unexpectedResponse }
+                        try await Task.sleep(nanoseconds: 20_000_000)
+                    }
+                }
+                try await awaitScenarioStartBarrier(scenario: scenario, statistics: statistics)
                 try await runScenario(
                     scenario,
                     slots: slots,
@@ -1138,15 +1361,21 @@ private struct LoadRun: Sendable {
             terminalError = error
         }
 
+        // A canary checkpoint owns its actual event-loop probes through completion.
+        // Signal shutdown instead of cancelling futures, before closing any channel.
+        await checkpointWorker?.stopAndDrain()
         scenarioPhases = scenarioPhaseReports.snapshot()
-        let roomCursorSnapshots = await snapshotRoomCursors(channels: slots.compactMap(\.channel))
+        let finalConnectionSnapshots = await snapshotConnectionCursors(channels: slots.compactMap(\.channel))
+        let roomCursorSnapshots = finalConnectionSnapshots.flatMap(\.rooms).sorted {
+            ($0.connectionIndex, $0.roomID) < ($1.connectionIndex, $1.roomID)
+        }
+        let connectionCoverageSnapshots = finalConnectionSnapshots.map(\.coverage).sorted { $0.connectionIndex < $1.connectionIndex }
         await close(channels: slots.compactMap(\.channel))
-        await sendTasks.closeAndDrain()
         await directRoomTasks.closeAndDrain()
         eventLoopLagMetrics.stop()
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, recoveryBurst: recoveryBurstReport)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -1164,13 +1393,25 @@ private struct LoadRun: Sendable {
         statistics: LoadStatistics,
         restoredCursors: [String: UInt64]? = nil,
         deadline: NIODeadline? = nil,
-        attempt: RecoveryBurstAttempt? = nil
+        attempt: RecoveryBurstAttempt? = nil,
+        reconnectSlot: LoadConnectionSlot? = nil,
+        reconnectSnapshot: LoadReconnectSnapshot? = nil
     ) -> EventLoopFuture<Channel> {
         statistics.recordAttempt()
         let eventLoop = group.next()
+        let localAddress: SocketAddress?
+        do {
+            if let localSourcePorts {
+                localAddress = try SocketAddress(ipAddress: "127.0.0.1", port: localSourcePorts.allocate())
+            } else {
+                localAddress = nil
+            }
+        } catch {
+            return eventLoop.makeFailedFuture(error)
+        }
         let authenticated = eventLoop.makePromise(of: Void.self)
         let started = NIODeadline.now()
-        let connection = ClientBootstrap(group: eventLoop)
+        let bootstrap = ClientBootstrap(group: eventLoop)
             .connectTimeout(deadline.map { .nanoseconds(max(1, min(10_000_000_000, ($0 - .now()).nanoseconds))) } ?? .seconds(10))
             .channelOption(ChannelOptions.tcpOption(.tcp_nodelay), value: 1)
             .channelInitializer { channel in
@@ -1182,10 +1423,9 @@ private struct LoadRun: Sendable {
                     try channel.pipeline.syncOperations.addHandler(
                         LoadConnectionHandler(
                             credential: credential,
-                            accountBaseURL:configuration.accountBaseURL,
-                            sendTasks: sendTasks,
+                            benchmarkWireVersion: configuration.benchmarkWireVersion,
+                            accountHTTP: accountHTTP,
                             directRoomTasks: directRoomTasks,
-                            caPath:configuration.caPath,
                             targetUserIDs: targetUserIDs,
                             connectionIndex: connectionIndex,
                             heartbeatSeconds: configuration.heartbeatSeconds,
@@ -1200,16 +1440,27 @@ private struct LoadRun: Sendable {
                             roomLogReads: configuration.roomLogReads,
                             roomLogInitialCursor: configuration.roomLogInitialCursor,
                             roomLogReadTrigger: configuration.roomLogReadTrigger,
+                            roomNotificationLossCanary: configuration.roomNotificationLossCanary,
                             roomLogRecoveryGraceMilliseconds:
                                 configuration.roomLogRecoveryGraceMilliseconds,
                             started: started,
                             authenticated: authenticated,
-                            statistics: statistics, restoredCursors: restoredCursors
+                            statistics: statistics, restoredCursors: reconnectSnapshot?.cursors ?? restoredCursors,
+                            reconnectSlot: reconnectSlot, reconnectForegroundRoom: reconnectSnapshot?.foregroundRoom,
+                            holdReceiptForCanary: configuration.plannedReconnectInflightCanary && connectionIndex == 0 && reconnectSlot == nil && restoredCursors == nil
                         )
                     )
                 }
             }
-            .connect(host: configuration.host, port: configuration.port)
+        if let localAddress {
+            // REUSEPORT permits different workers to bind concurrently before
+            // their sockets have distinct connected four-tuples. REUSEADDR alone
+            // still rejects that unconnected bind window on macOS.
+            _ = bootstrap.channelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
+                .channelOption(ChannelOptions.socketOption(NIOBSDSocket.Option(rawValue: SO_REUSEPORT)), value: 1)
+                .bind(to: localAddress)
+        }
+        let connection = bootstrap.connect(host: configuration.host, port: configuration.port)
 
         // A TCP/TLS setup failure happens before LoadConnectionHandler owns the
         // authentication promise. Resolve that otherwise-unowned branch so a
@@ -1261,6 +1512,9 @@ private struct LoadRun: Sendable {
         for second in 0...scenario.roomWarmupTimeoutSeconds {
             try enforceGuards(statistics: statistics)
             let snapshot = statistics.snapshot()
+            guard snapshot.active == configuration.connections else {
+                throw LoadError.scenarioStartBarrierFailure("connection lost during room warmup")
+            }
             let tailReady = configuration.roomLogInitialCursor == .tail
                 ? snapshot.roomLogTailReady >= configuration.connections
                 : true
@@ -1274,6 +1528,75 @@ private struct LoadRun: Sendable {
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
         throw LoadError.roomWarmupTimedOut(opened: statistics.snapshot().directRoomOpened, required: required)
+    }
+
+    private struct ScenarioReady: Encodable {
+        let activeConnections: Int
+        let requestedConnections: Int
+    }
+    private struct ScenarioStartBarrier: Decodable {
+        let releaseAtUnixMilliseconds: Int64
+    }
+
+    /// No workload phase starts until all external workers have warmed their
+    /// rooms and cursors. The driver's release timestamp is common wall time;
+    /// the wait itself has a monotonic deadline and keeps the normal guards.
+    private func awaitScenarioStartBarrier(scenario: LoadScenario, statistics: LoadStatistics) async throws {
+        guard let readyPath = configuration.scenarioReadyPath,
+              let barrierPath = configuration.scenarioStartBarrierPath else { return }
+        let readyURL = URL(fileURLWithPath: readyPath)
+        let barrierURL = URL(fileURLWithPath: barrierPath)
+        guard !FileManager.default.fileExists(atPath: readyPath),
+              !FileManager.default.fileExists(atPath: barrierPath) else {
+            throw LoadError.scenarioStartBarrierFailure("ready or barrier path already exists")
+        }
+        let deadline = ContinuousClock.now + .seconds(min(600, max(60, scenario.roomWarmupTimeoutSeconds)))
+        var publishedReady = false
+        do {
+            try Task.checkCancellation()
+            try enforceGuards(statistics: statistics)
+            let snapshot = statistics.snapshot()
+            guard snapshot.active == configuration.connections else {
+                throw LoadError.scenarioStartBarrierFailure("not all requested connections are active")
+            }
+            try FileManager.default.createDirectory(at: readyURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(ScenarioReady(activeConnections: snapshot.active,
+                requestedConnections: configuration.connections)).write(to: readyURL, options: .atomic)
+            publishedReady = true
+            while !FileManager.default.fileExists(atPath: barrierPath) {
+                try Task.checkCancellation()
+                try enforceGuards(statistics: statistics)
+                guard statistics.snapshot().active == configuration.connections else {
+                    throw LoadError.scenarioStartBarrierFailure("connection lost while waiting")
+                }
+                guard ContinuousClock.now < deadline else { throw LoadError.scenarioStartBarrierFailure("release wait timed out") }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let bytes = try Data(contentsOf: barrierURL)
+            guard bytes.count <= 1_024 else { throw LoadError.scenarioStartBarrierFailure("release descriptor oversized") }
+            let release = try JSONDecoder().decode(ScenarioStartBarrier.self, from: bytes).releaseAtUnixMilliseconds
+            let nowMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+            guard release > 0, release <= nowMilliseconds + 600_000 else {
+                throw LoadError.scenarioStartBarrierFailure("release timestamp outside bounded wait")
+            }
+            while true {
+                try Task.checkCancellation()
+                try enforceGuards(statistics: statistics)
+                guard statistics.snapshot().active == configuration.connections else {
+                    throw LoadError.scenarioStartBarrierFailure("connection lost before release")
+                }
+                let remaining = release - Int64(Date().timeIntervalSince1970 * 1_000)
+                if remaining <= 0 {
+                    guard remaining >= -1_000 else { throw LoadError.scenarioStartBarrierFailure("release timestamp already stale") }
+                    break
+                }
+                guard ContinuousClock.now < deadline else { throw LoadError.scenarioStartBarrierFailure("release wait timed out") }
+                try await Task.sleep(for: .milliseconds(min(50, remaining)))
+            }
+        } catch {
+            if publishedReady { try? FileManager.default.removeItem(at: readyURL) }
+            throw error
+        }
     }
 
     private func runScenario(
@@ -1293,6 +1616,8 @@ private struct LoadRun: Sendable {
         let ticksPerSecond = scenario.schedulerTicksPerSecond ?? 10
         let tickNanoseconds = Int64(1_000_000_000 / ticksPerSecond)
         for phase in scenario.phases {
+            let phaseClockStarted = ContinuousClock.now
+            let phaseStartedAtUnixMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
             let started = statistics.snapshot()
             let phaseStarted = NIODeadline.now()
             var completedTicks = 0
@@ -1369,23 +1694,33 @@ private struct LoadRun: Sendable {
                 }
                 try enforceGuards(statistics: statistics)
             } catch {
+                let ended = statistics.snapshot()
+                let elapsed = phaseClockStarted.duration(to: .now).components
+                let endedAtUnixMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
                 reports.append(.init(
                     phase: phase,
                     rateScale: configuration.scenarioRateScale,
-                    observedDurationSeconds: Double(completedTicks) / Double(ticksPerSecond),
+                    observedDurationSeconds: Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1_000_000_000_000_000_000,
+                    startedAtUnixMilliseconds: phaseStartedAtUnixMilliseconds,
+                    endedAtUnixMilliseconds: endedAtUnixMilliseconds,
                     completed: false,
                     started: started,
-                    ended: statistics.snapshot()
+                    ended: ended
                 ))
                 throw error
             }
+            let ended = statistics.snapshot()
+            let elapsed = phaseClockStarted.duration(to: .now).components
+            let endedAtUnixMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
             reports.append(.init(
                 phase: phase,
                 rateScale: configuration.scenarioRateScale,
-                observedDurationSeconds: Double(phase.durationSeconds),
+                observedDurationSeconds: Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1_000_000_000_000_000_000,
+                startedAtUnixMilliseconds: phaseStartedAtUnixMilliseconds,
+                endedAtUnixMilliseconds: endedAtUnixMilliseconds,
                 completed: true,
                 started: started,
-                ended: statistics.snapshot()
+                ended: ended
             ))
         }
     }
@@ -1437,19 +1772,22 @@ private struct LoadRun: Sendable {
     // Read each handler on its own event loop before closing the transport.
     // Missing channels produce no snapshots; consumers must check coverage.
     private func snapshotRoomCursors(channels: [Channel]) async -> [RoomCursorSnapshot] {
+        await snapshotConnectionCursors(channels: channels).flatMap(\.rooms).sorted {
+            ($0.connectionIndex, $0.roomID) < ($1.connectionIndex, $1.roomID)
+        }
+    }
+    private func snapshotConnectionCursors(channels: [Channel]) async -> [ConnectionCursorProbeSnapshot] {
         guard let first = channels.first else { return [] }
-        let futures = channels.map { channel -> EventLoopFuture<[RoomCursorSnapshot]> in
-            let promise = channel.eventLoop.makePromise(of: [RoomCursorSnapshot].self)
+        let futures = channels.map { channel -> EventLoopFuture<ConnectionCursorProbeSnapshot?> in
+            let promise = channel.eventLoop.makePromise(of: ConnectionCursorProbeSnapshot?.self)
             channel.eventLoop.execute {
-                guard channel.isActive else { promise.succeed([]); return }
+                guard channel.isActive else { promise.succeed(nil); return }
                 channel.pipeline.fireUserInboundEventTriggered(RoomCursorProbe(completion: promise))
             }
             return promise.futureResult
         }
         let values = (try? await EventLoopFuture.whenAllSucceed(futures, on: first.eventLoop).get()) ?? []
-        return values.flatMap { $0 }.sorted {
-            ($0.connectionIndex, $0.roomID) < ($1.connectionIndex, $1.roomID)
-        }
+        return values.compactMap { $0 }
     }
 
     private func targetUserIDs(for connectionIndex: Int) -> [String] {
@@ -1603,51 +1941,50 @@ private struct LoadRun: Sendable {
             return .init(credential: credential, commands: commands)
         }
         let beforeSequenceByRoom = beforeByRoom
-        let result = try await V2ToolOperationHTTP.scoped(baseURL: configuration.accountBaseURL, caPath: configuration.caPath) { client in
-            await withTaskGroup(of: OfflineWriteResult.self) { tasks in
-                var next = 0, receipts: [OfflineWriteReceipt] = [], failed = 0
-                let workers = min(configuration.recoveryBurstOfflineWriteWorkers, jobs.count)
-                func add(_ job: OfflineRoomWrite) {
-                    tasks.addTask {
-                        var accepted: [OfflineWriteReceipt] = []
-                        for command in job.commands {
-                            do {
-                                try Task.checkCancellation()
-                                guard ContinuousClock.now < deadline else { throw LoadError.unexpectedResponse }
-                                let value = try await withThrowingTaskGroup(of: V2MessageOperationAcceptance.self) { request in
-                                    request.addTask {
-                                        guard case .accepted(let proof) = try await client.sendMessage(command,
-                                            token: job.credential.accessToken, deviceID: job.credential.deviceID) else { throw LoadError.unexpectedResponse }
-                                        return proof
-                                    }
-                                    request.addTask {
-                                        try await Task.sleep(until: deadline, clock: .continuous)
-                                        throw LoadError.unexpectedResponse
-                                    }
-                                    defer { request.cancelAll() }
-                                    guard let proof = try await request.next() else { throw LoadError.unexpectedResponse }
+        let client = accountHTTP
+        let result = await withTaskGroup(of: OfflineWriteResult.self) { tasks in
+            var next = 0, receipts: [OfflineWriteReceipt] = [], failed = 0
+            let workers = min(configuration.recoveryBurstOfflineWriteWorkers, jobs.count)
+            func add(_ job: OfflineRoomWrite) {
+                tasks.addTask {
+                    var accepted: [OfflineWriteReceipt] = []
+                    for command in job.commands {
+                        do {
+                            try Task.checkCancellation()
+                            guard ContinuousClock.now < deadline else { throw LoadError.unexpectedResponse }
+                            let value = try await withThrowingTaskGroup(of: V2MessageOperationAcceptance.self) { request in
+                                request.addTask {
+                                    guard case .accepted(let proof) = try await client.sendMessage(command,
+                                        token: job.credential.accessToken, deviceID: job.credential.deviceID) else { throw LoadError.unexpectedResponse }
                                     return proof
                                 }
-                                guard value.roomSequence > (beforeSequenceByRoom[command.command.roomID.rawValue] ?? 0) else { throw LoadError.unexpectedResponse }
-                                accepted.append(.init(roomID: command.command.roomID.rawValue, roomSequence: value.roomSequence))
-                            } catch { return .init(receipts: accepted, failed: job.commands.count - accepted.count) }
-                        }
-                        return .init(receipts: accepted, failed: 0)
+                                request.addTask {
+                                    try await Task.sleep(until: deadline, clock: .continuous)
+                                    throw LoadError.unexpectedResponse
+                                }
+                                defer { request.cancelAll() }
+                                guard let proof = try await request.next() else { throw LoadError.unexpectedResponse }
+                                return proof
+                            }
+                            guard value.roomSequence > (beforeSequenceByRoom[command.command.roomID.rawValue] ?? 0) else { throw LoadError.unexpectedResponse }
+                            accepted.append(.init(roomID: command.command.roomID.rawValue, roomSequence: value.roomSequence))
+                        } catch { return .init(receipts: accepted, failed: job.commands.count - accepted.count) }
                     }
+                    return .init(receipts: accepted, failed: 0)
                 }
-                for _ in 0..<workers { add(jobs[next]); next += 1 }
-                while let value = await tasks.next() {
-                    receipts.append(contentsOf: value.receipts); failed += value.failed
-                    if next < jobs.count { add(jobs[next]); next += 1 }
-                }
-                let sortedReceipts: [OfflineWriteReceipt] = receipts.sorted { (lhs: OfflineWriteReceipt, rhs: OfflineWriteReceipt) -> Bool in
-                    if lhs.roomID == rhs.roomID {
-                        return lhs.roomSequence < rhs.roomSequence
-                    }
-                    return lhs.roomID < rhs.roomID
-                }
-                return OfflineWriteResult(receipts: sortedReceipts, failed: failed)
             }
+            for _ in 0..<workers { add(jobs[next]); next += 1 }
+            while let value = await tasks.next() {
+                receipts.append(contentsOf: value.receipts); failed += value.failed
+                if next < jobs.count { add(jobs[next]); next += 1 }
+            }
+            let sortedReceipts: [OfflineWriteReceipt] = receipts.sorted { (lhs: OfflineWriteReceipt, rhs: OfflineWriteReceipt) -> Bool in
+                if lhs.roomID == rhs.roomID {
+                    return lhs.roomSequence < rhs.roomSequence
+                }
+                return lhs.roomID < rhs.roomID
+            }
+            return OfflineWriteResult(receipts: sortedReceipts, failed: failed)
         }
         try Task.checkCancellation()
         return (jobs.count * count, result)
@@ -1657,22 +1994,32 @@ private struct LoadRun: Sendable {
         slot: LoadConnectionSlot,
         group: MultiThreadedEventLoopGroup,
         sslContext: NIOSSLContext,
-        statistics: LoadStatistics
+        statistics: LoadStatistics,
+        requireInFlight: Bool = false
     ) async throws {
-        if let current = slot.channel {
-            statistics.recordPlannedReconnect()
-            _ = try? await current.close().get()
+        guard let current = slot.channel else { throw LoadError.unexpectedResponse }
+        let promise = current.eventLoop.makePromise(of: LoadReconnectSnapshot.self)
+        current.pipeline.fireUserInboundEventTriggered(PrepareReconnectEvent(completion: promise, requireInFlight: requireInFlight))
+        let snapshot = try await promise.futureResult.get()
+        slot.installSnapshot(snapshot)
+        statistics.recordPlannedReconnect()
+        _ = try? await current.close().get()
+        do {
+            let channel = try await connect(credential: slot.credential, targetUserIDs: slot.targetUserIDs,
+                connectionIndex: slot.connectionIndex, group: group, sslContext: sslContext,
+                statistics: statistics, reconnectSlot: slot, reconnectSnapshot: snapshot).get()
+            slot.replace(channel)
+            channel.pipeline.fireUserInboundEventTriggered(StartWorkloadEvent())
+        } catch {
+            if let unclaimed = slot.takeSnapshot() {
+                for _ in unclaimed.operations {
+                    statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN")
+                    statistics.recordWorkloadFailure(kind: "message", code: "TCP_OUTCOME_UNKNOWN_RECONNECT_FAILED")
+                }
+                statistics.recordScenarioMessageQueueAbandoned(count: unclaimed.queued)
+            }
+            throw error
         }
-        let channel = try await connect(
-            credential: slot.credential,
-            targetUserIDs: slot.targetUserIDs,
-            connectionIndex: slot.connectionIndex,
-            group: group,
-            sslContext: sslContext,
-            statistics: statistics
-        ).get()
-        slot.replace(channel)
-        channel.pipeline.fireUserInboundEventTriggered(StartWorkloadEvent())
     }
 
     private func printHold(second: Int, statistics: LoadStatistics) {
@@ -1740,12 +2087,86 @@ private struct RoomCursorSnapshot: Encodable, Sendable {
     let roomID: String
     let appliedRoomSequence: UInt64
     let recoveryTarget: UInt64?
+    let activeForeground: Bool
+    let announcedHighWatermark: UInt64
+    let pullInFlight: Bool
+    let pullSlotReserved: Bool
+    let pendingPullRequestID: UInt64?
+    let pendingPullRequestedAfter: UInt64?
+    let retryPending: Bool
+    let gracePending: Bool
+    let lastAcceptedHintHighWatermark: UInt64?
+    let lastAcceptedHintRoomSequence: UInt64?
+    let lastAcceptedHintAtUnixMilliseconds: Int64?
+    let lastAcceptedHintAgeMilliseconds: Double?
+    let lastAcceptedProgressHighWatermark: UInt64?
+    let lastAcceptedProgressAtUnixMilliseconds: Int64?
+    let snapshotAtUnixMilliseconds: Int64
+    let snapshotMonotonicNanoseconds: UInt64
 }
 
+private struct AcceptedRoomHintWitness {
+    let highWatermark: UInt64
+    let roomSequence: UInt64
+    let atUnixMilliseconds: Int64
+    let monotonicAt: NIODeadline
+}
+
+private struct RequestedScopeCoverageSnapshot: Encodable, Sendable {
+    let scope: String
+    let scopeID: String
+    let scopeGeneration: UInt64?
+    let revision: UInt64?
+    let state: String
+    let highWatermark: UInt64?
+    let appliedCursor: UInt64
+    let passed: Bool
+}
+private struct ConnectionCoverageSnapshot: Encodable, Sendable {
+    let connectionIndex: Int
+    let physicalConnectionID: UUID
+    let wireVersion: UInt32
+    let requestedScopes: [RequestedScopeCoverageSnapshot]
+    let ignoredCoverageFrames: Int
+    let heartbeatSent: Int
+    let heartbeatAcknowledged: Int
+    let heartbeatMissed: Int
+    let snapshotAtUnixMilliseconds: Int64
+    let passed: Bool
+}
+private struct ConnectionCursorProbeSnapshot: Sendable {
+    let rooms: [RoomCursorSnapshot]
+    let coverage: ConnectionCoverageSnapshot
+}
 private struct RoomCursorProbe {
-    let completion: EventLoopPromise<[RoomCursorSnapshot]>
+    let completion: EventLoopPromise<ConnectionCursorProbeSnapshot?>
+}
+private struct ObservedScopeCoverage {
+    let generation: UInt64
+    let revision: UInt64
+    let state: String
+    let highWatermark: UInt64
 }
 
+/// Immutable worklog; ownership moves from old event loop to slot to authenticated handler.
+private struct LoadMessageSnapshot: Sendable {
+    let command: V2MessageSendOperationCommand
+    let identity: V2OperationIdentity
+    let fingerprint: V2OperationFingerprint
+    let sent: NIODeadline
+    let deadline: NIODeadline
+    let attempts: Int
+}
+private struct LoadReconnectSnapshot: Sendable {
+    let operations: [LoadMessageSnapshot]
+    let queued: Int
+    let cursors: [String: UInt64]
+    let foregroundRoom: String?
+}
+private struct PrepareReconnectEvent {
+    let completion: EventLoopPromise<LoadReconnectSnapshot>
+    let requireInFlight: Bool
+}
 private struct ScenarioDrainProbe {
     let completion: EventLoopPromise<ScenarioPendingMessages>
 }
@@ -1765,6 +2186,7 @@ private final class LoadConnectionSlot: @unchecked Sendable {
     let connectionIndex: Int
     private let lock = NIOLock()
     private var currentChannel: Channel?
+    private var reconnectSnapshot: LoadReconnectSnapshot?
 
     init(credential: LoadCredential, targetUserIDs: [String], connectionIndex: Int) {
         self.credential = credential
@@ -1774,8 +2196,140 @@ private final class LoadConnectionSlot: @unchecked Sendable {
 
     var channel: Channel? { lock.withLock { currentChannel } }
 
+    func installSnapshot(_ snapshot: LoadReconnectSnapshot) {
+        lock.withLock { precondition(reconnectSnapshot == nil); reconnectSnapshot = snapshot }
+    }
+    func takeSnapshot() -> LoadReconnectSnapshot? {
+        lock.withLock { let result = reconnectSnapshot; reconnectSnapshot = nil; return result }
+    }
     func replace(_ channel: Channel) {
         lock.withLock { currentChannel = channel }
+    }
+}
+
+private struct RealtimeCheckpointRequest: Decodable {
+    let nonce: UUID
+    let requestedAtUnixMilliseconds: Int64
+    let connectionIndices: [Int]?
+    func selectedIndices(requested: Int) -> [Int]? {
+        if let indices = connectionIndices {
+            guard !indices.isEmpty, indices.count <= 32, Set(indices).count == indices.count,
+                  indices.allSatisfy({ $0 >= 0 && $0 < requested }) else { return nil }
+            return indices
+        }
+        guard requested <= 500 else { return nil }
+        return Array(0..<requested)
+    }
+}
+private struct RealtimeCheckpointSlot: Encodable, Sendable {
+    let connectionIndex: Int
+    let state: String
+    let physicalConnectionID: UUID?
+    let coverage: ConnectionCoverageSnapshot?
+    let rooms: [RoomCursorSnapshot]
+}
+private struct RealtimeCheckpointReport: Encodable {
+    let nonce: UUID
+    let requestedAtUnixMilliseconds: Int64
+    let samplingStartedAtUnixMilliseconds: Int64
+    let samplingCompletedAtUnixMilliseconds: Int64
+    let requestedConnections: Int
+    let selectedConnectionIndices: [Int]
+    let diagnosticFailureCode: String?
+    let slots: [RealtimeCheckpointSlot]
+}
+private final class RealtimeCheckpointStop: Sendable { let closed = Mutex(false) }
+
+/// One optional, owned canary worker. Sampling reads existing handler state on
+/// each physical channel's EL, with no protocol traffic or workload mutations.
+private struct RealtimeCheckpointWorker: Sendable {
+    private let closedPath: String
+    private let stop: RealtimeCheckpointStop
+    private let task: Task<Void, Never>
+    init(slots: [LoadConnectionSlot], requested: Int, requestPath: String, responsePath: String) {
+        let stop = RealtimeCheckpointStop(); self.stop = stop
+        closedPath = responsePath + ".closed"
+        task = Task {
+            var lastNonce: UUID?
+            var diagnosticFailed = false
+            while !stop.closed.withLock({ $0 }) {
+                do {
+                    if FileManager.default.fileExists(atPath: requestPath) {
+                        let attributes = try FileManager.default.attributesOfItem(atPath: requestPath)
+                        guard let size = attributes[.size] as? NSNumber, size.intValue > 0,
+                              size.intValue <= 4096 else { throw LoadError.invalidArguments }
+                        let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: requestPath))
+                        let data: Data
+                        do { data = try file.read(upToCount: 4097) ?? Data(); try file.close() }
+                        catch { try? file.close(); throw error }
+                        guard data.count <= 4096 else { throw LoadError.invalidArguments }
+                        let request = try JSONDecoder().decode(RealtimeCheckpointRequest.self, from: data)
+                        guard request.requestedAtUnixMilliseconds > 0 else { throw LoadError.invalidArguments }
+                        if request.nonce != lastNonce {
+                            let started = Self.wallMilliseconds()
+                            let selected = request.selectedIndices(requested: requested)
+                            let snapshots = await Self.snapshot(slots: slots, indices: selected ?? [])
+                            let report = RealtimeCheckpointReport(nonce: request.nonce,
+                                requestedAtUnixMilliseconds: request.requestedAtUnixMilliseconds,
+                                samplingStartedAtUnixMilliseconds: started,
+                                samplingCompletedAtUnixMilliseconds: Self.wallMilliseconds(),
+                                requestedConnections: requested, selectedConnectionIndices: selected ?? [],
+                                diagnosticFailureCode: selected == nil ? "invalid_connection_indices" : nil, slots: snapshots)
+                            try JSONEncoder.loadReport.encode(report).write(to: URL(fileURLWithPath: responsePath), options: .atomic)
+                            lastNonce = request.nonce
+                        }
+                        diagnosticFailed = false
+                    }
+                } catch {
+                    // Diagnostic failure never replaces the workload's original
+                    // outcome; the requesting runner observes a missing response.
+                    if !diagnosticFailed { print("checkpoint diagnostic failed type=\(type(of: error))") }
+                    diagnosticFailed = true
+                }
+                do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
+            }
+        }
+    }
+    func stopAndDrain() async {
+        stop.closed.withLock { $0 = true }
+        await task.value
+        // Written before the caller begins its final channel snapshot/closure.
+        // It is diagnostic only: a file failure cannot change workload results.
+        do {
+            let data = try JSONEncoder().encode(["checkpointStoppedAtUnixMilliseconds": Self.wallMilliseconds()])
+            try data.write(to: URL(fileURLWithPath: closedPath), options: .atomic)
+        } catch {
+            print("checkpoint closure diagnostic failed")
+            fflush(nil) // Publish the diagnostic before the caller closes channels.
+        }
+    }
+    private static func wallMilliseconds() -> Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
+    private static func snapshot(slots: [LoadConnectionSlot], indices: [Int]) async -> [RealtimeCheckpointSlot] {
+        let selected = Set(indices)
+        let channels = slots.filter { selected.contains($0.connectionIndex) }.compactMap { slot in slot.channel.map { (slot.connectionIndex, $0) } }
+        guard let first = channels.first else {
+            return indices.map { .init(connectionIndex: $0, state: "missing", physicalConnectionID: nil, coverage: nil, rooms: []) }
+        }
+        let futures = channels.map { index, channel -> EventLoopFuture<RealtimeCheckpointSlot> in
+            let promise = channel.eventLoop.makePromise(of: ConnectionCursorProbeSnapshot?.self)
+            channel.eventLoop.execute {
+                guard channel.isActive else { promise.succeed(nil); return }
+                channel.pipeline.fireUserInboundEventTriggered(RoomCursorProbe(completion: promise))
+            }
+            return promise.futureResult.map { snapshot in
+                .init(connectionIndex: index, state: snapshot == nil ? "inactive" : "active",
+                    physicalConnectionID: snapshot?.coverage.physicalConnectionID, coverage: snapshot?.coverage,
+                    rooms: snapshot?.rooms ?? [])
+            }
+        }
+        let results = (try? await EventLoopFuture.whenAllComplete(futures, on: first.1.eventLoop).get()) ?? []
+        var observed: [Int: RealtimeCheckpointSlot] = [:]
+        for (entry, result) in zip(channels, results) {
+            if case .success(let snapshot) = result { observed[entry.0] = snapshot }
+        }
+        // Include every requested slot, even failed bootstrap and absent/inactive
+        // channels. The runner must reject missing evidence instead of filtering.
+        return indices.map { observed[$0] ?? .init(connectionIndex: $0, state: "missing", physicalConnectionID: nil, coverage: nil, rooms: []) }
     }
 }
 
@@ -1918,13 +2472,23 @@ private struct ScenarioRandom {
 }
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
+    // SHA256 of this exact common algorithm source with the hash literal normalized.
+    static let algorithmSourceSHA256 = "a2ad6fe2136668e717b3d712a0b80dfbd794a8ae970fcb906ca65c55d629183d"
+    static let messageAttemptTimeoutSeconds: Int64 = 20
+    static let messageOperationTimeoutSeconds: Int64 = 60
+    static let maximumMessageWireAttempts = 5
+    static var messageTransportDescription: String {
+        """
+        {"contractVersion":3,"supportedBenchmarkWireVersions":[45,\(IMV2ProtocolVersion.current)],"defaultWireVersion":\(IMV2ProtocolVersion.current),"algorithmSourceSHA256":"\(algorithmSourceSHA256)","plannedReconnectHandoff":true,"messageTransport":"tcp","messageRecoveryTransport":"tcp_query","messageAttemptTimeoutSeconds":\(messageAttemptTimeoutSeconds),"messageOperationTimeoutSeconds":\(messageOperationTimeoutSeconds),"messageMaximumAttempts":\(maximumMessageWireAttempts)}
+        """
+    }
     typealias InboundIn = ByteBuffer
     typealias OutboundOut = ByteBuffer
 
     private enum Stage { case awaitingHello, awaitingAuthentication, authenticated }
     private enum PendingRequest {
         case heartbeat(sent: NIODeadline)
-        case message(sent: NIODeadline, roomID: String)
+        case message(operationID: UInt64)
         case syncPull(sent: NIODeadline)
         case roomEventPull(sent: NIODeadline, roomID: String, afterRoomSequence: UInt64)
         case roomEventSubscribe(roomID: String)
@@ -1933,12 +2497,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case syncAck(hasMore: Bool)
     }
 
-    private let sendTasks: V2ToolHTTPSendTaskOwner
     private let directRoomTasks: DirectRoomHTTPTaskOwner
     private var directRoomTaskIDs: Set<UUID> = []
-    private var httpSendTaskIDs: [UInt64: UUID] = [:]
-    private let accountBaseURL:URL
-    private let caPath:String
+    private let accountHTTP: V2ToolOperationHTTP
     private let credential: LoadCredential
     private let targetUserIDs: [String]
     private let connectionIndex: Int
@@ -1954,13 +2515,45 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private let roomLogReads: Bool
     private let roomLogInitialCursor: RoomLogInitialCursor
     private let roomLogReadTrigger: RoomLogReadTrigger
+    private let roomNotificationLossCanary: Bool
     private let roomLogRecoveryGraceMilliseconds: Int
     private let started: NIODeadline
     private let authenticatedPromise: EventLoopPromise<Void>
     private let statistics: LoadStatistics
-    private let limits = try! V2FrameLimits(maximumPayloadBytes: 65_536, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
+    private let benchmarkWireVersion: UInt32
+    private let limits: V2FrameLimits
     private var decoder: V2FrameDecoder
     private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
+    private var negotiatedMessagePayloadBytes: UInt32?
+    private enum MessageWireAction: Equatable { case submit, query, close }
+
+    private final class MessageOperation {
+        let command: V2MessageSendOperationCommand
+        let identity: V2OperationIdentity
+        let fingerprint: V2OperationFingerprint
+        let sent: NIODeadline
+        let deadline: NIODeadline
+        var attempts = 0
+        var restoredAfterReconnect = false
+        var wireRequestID: UInt64?
+        var lastWireAction: MessageWireAction = .submit
+        var timer: Scheduled<Void>?
+        init(snapshot: LoadMessageSnapshot) {
+            command = snapshot.command; identity = snapshot.identity; fingerprint = snapshot.fingerprint
+            sent = snapshot.sent; deadline = snapshot.deadline; attempts = snapshot.attempts
+            restoredAfterReconnect = true
+        }
+        init(command: V2MessageSendOperationCommand, sent: NIODeadline) throws {
+            self.command = command; identity = try command.identity; fingerprint = try command.fingerprint
+            self.sent = sent; deadline = sent + .seconds(LoadConnectionHandler.messageOperationTimeoutSeconds)
+        }
+    }
+    private let reconnectSlot: LoadConnectionSlot?
+    private let reconnectForegroundRoom: String?
+    private var holdReceiptForCanary: Bool
+    private var handoffPrepared = false
+    private var restoredMessagesNeedResume = false
+    private var messageOperations: [UInt64: MessageOperation] = [:]
     private var stage: Stage = .awaitingHello
     private var nextRequestID: UInt64 = 3
     private var pendingRequests: [UInt64: PendingRequest] = [:]
@@ -1970,12 +2563,44 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var directRoomIDs: [String] = []
     private var nextRoomIndex = 0
     private var nextSyncToken = ""
+    // Bound to this actual handler/physical channel, never transferred on reconnect.
+    private let physicalConnectionID = UUID()
+    private var checkpointHeartbeatSent = 0
+    private var checkpointHeartbeatAcknowledged = 0
+    private var checkpointHeartbeatMissed = 0
+    private var requestedAccountCoverage = false
+    private var requestedRoomCoverageID: String?
+    private var accountAppliedCursor: UInt64 = 0
+    private var observedCoverage: [String: ObservedScopeCoverage] = [:]
+    private var coverageRevisions: [String: UInt64] = [:]
+    private var ignoredCoverageFrames = 0
+    private enum SyncActionKind { case pull, acknowledgement(hasMore: Bool) }
+    private final class SyncAttempt {
+        let id = UUID()
+        let request: IMV2Envelope
+        let kind: SyncActionKind
+        let started: NIODeadline
+        let deadline: NIODeadline
+        var attempts = 0
+        var wireRequestID: UInt64?
+        var timer: Scheduled<Void>?
+        init(request: IMV2Envelope, kind: SyncActionKind) {
+            self.request = request; self.kind = kind
+            started = .now(); deadline = started + .seconds(10)
+        }
+    }
+    private var syncAttempt: SyncAttempt?
+    private var pendingSyncAcknowledgement: (IMV2Envelope, Bool)?
     private var syncInFlight = false
     private var syncRequested = false
     private var roomEventCursors: [String: UInt64] = [:]
     private let isRestoredRecovery: Bool
     private var restoredRecoveryTargets: [String: UInt64] = [:]
     private var roomEventAnnouncedHighWatermarks: [String: UInt64] = [:]
+    // Diagnostic history is bounded by this handler's opened foreground rooms.
+    // It never creates a recovery target or changes an applied cursor.
+    private var acceptedRoomHintWitnesses: [String: AcceptedRoomHintWitness] = [:]
+    private var acceptedRoomProgressWitnesses: [String: (highWatermark: UInt64, at: Int64)] = [:]
     private var roomEventPullRooms: Set<String> = []
     private var roomEventPullRetryCounts: [String: Int] = [:]
     private var roomEventPullRetryTasks: [String: Scheduled<Void>] = [:]
@@ -1998,10 +2623,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
 
     init(
         credential: LoadCredential,
-        accountBaseURL:URL,
-        sendTasks: V2ToolHTTPSendTaskOwner,
+        benchmarkWireVersion: UInt32,
+        accountHTTP: V2ToolOperationHTTP,
         directRoomTasks: DirectRoomHTTPTaskOwner,
-        caPath:String,
         targetUserIDs: [String],
         connectionIndex: Int,
         heartbeatSeconds: Int,
@@ -2016,17 +2640,25 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         roomLogReads: Bool,
         roomLogInitialCursor: RoomLogInitialCursor,
         roomLogReadTrigger: RoomLogReadTrigger,
+        roomNotificationLossCanary: Bool = false,
         roomLogRecoveryGraceMilliseconds: Int,
         started: NIODeadline,
         authenticated: EventLoopPromise<Void>,
         statistics: LoadStatistics,
-        restoredCursors: [String: UInt64]? = nil
+        restoredCursors: [String: UInt64]? = nil,
+        reconnectSlot: LoadConnectionSlot? = nil,
+        reconnectForegroundRoom: String? = nil,
+        holdReceiptForCanary: Bool = false
     ) {
+        self.benchmarkWireVersion = benchmarkWireVersion
+        limits = try! V2FrameLimits(maximumPayloadBytes: 65_536, acceptedVersions: [0, UInt8(benchmarkWireVersion)])
+        self.reconnectSlot = reconnectSlot
+        self.reconnectForegroundRoom = reconnectForegroundRoom
+        self.holdReceiptForCanary = holdReceiptForCanary
         isRestoredRecovery = restoredCursors != nil
         roomEventCursors = restoredCursors ?? [:]
-        self.sendTasks = sendTasks
         self.directRoomTasks = directRoomTasks
-        self.accountBaseURL=accountBaseURL;self.caPath=caPath
+        self.accountHTTP = accountHTTP
         self.credential = credential
         self.targetUserIDs = targetUserIDs
         // PostgreSQL JSON exports UUIDs in lowercase while Swift UUID values
@@ -2057,6 +2689,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         self.roomLogReads = roomLogReads
         self.roomLogInitialCursor = roomLogInitialCursor
         self.roomLogReadTrigger = roomLogReadTrigger
+        self.roomNotificationLossCanary = roomNotificationLossCanary
         self.roomLogRecoveryGraceMilliseconds = roomLogRecoveryGraceMilliseconds
         self.started = started
         authenticatedPromise = authenticated
@@ -2069,10 +2702,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             var hello = IMV2Envelope()
             hello.requestID = 1
             hello.clientHello = .init()
-            hello.clientHello.supportedProtocolVersions = [IMV2ProtocolVersion.current]
+            hello.clientHello.supportedProtocolVersions = [benchmarkWireVersion]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
             hello.clientHello.deviceID = credential.deviceID
             hello.clientHello.supportedFrameCompressions = [.zlib]
+            hello.clientHello.supportsMessageSendOperations = true
             try write(hello, frameVersion: 0, context: context)
         } catch {
             failAuthentication(error, context: context)
@@ -2090,6 +2724,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             }
         } catch {
             if authenticationCompleted {
+                statistics.recordProtocolFailure(error)
                 FileHandle.standardError.write(
                     Data("post-auth protocol failure: \(error)\n".utf8)
                 )
@@ -2105,8 +2740,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     func channelInactive(context: ChannelHandlerContext) {
         for id in directRoomTaskIDs { directRoomTasks.cancel(id: id) }
         directRoomTaskIDs.removeAll()
-        for id in httpSendTaskIDs.values { sendTasks.cancel(id: id) }
-        for requestID in httpSendTaskIDs.keys { pendingRequests.removeValue(forKey: requestID); messageRequestIDs.remove(requestID) }
+        for (operationID, operation) in messageOperations {
+            operation.timer?.cancel()
+            if let requestID = operation.wireRequestID { pendingRequests.removeValue(forKey: requestID) }
+            messageRequestIDs.remove(operationID)
+            statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN_CONNECTION_CLOSED")
+            statistics.recordWorkloadFailure(kind: "message", code: "TCP_OUTCOME_UNKNOWN_CONNECTION_CLOSED")
+        }
+        messageOperations.removeAll(keepingCapacity: false)
         heartbeatTask?.cancel()
         messageTask?.cancel()
         for task in roomEventPullRetryTasks.values { task.cancel() }
@@ -2120,6 +2761,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         recoveryDeadlineTask?.cancel()
         recoveryDeadlineTask = nil
         recoveryInFlightRequestID = nil
+        if syncAttempt != nil { statistics.recordSyncLogicalFailure() }
+        syncAttempt?.timer?.cancel()
+        syncAttempt = nil
         if registered { statistics.recordDisconnected() }
         if !authenticationCompleted { failAuthentication(LoadError.connectionClosed, context: context, close: false) }
     }
@@ -2134,9 +2778,24 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             compression: negotiatedFrameCompression,
             maximumUncompressedPayloadBytes: limits.maximumPayloadBytes
         )
+        do { try receive(envelope: envelope, frame: frame, context: context) }
+        catch {
+            guard case .unexpectedResponse? = error as? LoadError else { throw error }
+            let code: String?
+            if case .error(let rejection)? = envelope.body { code = rejection.code } else { code = nil }
+            throw LoadError.unexpectedServerResponse(errorCode: code,
+                messageType: loadResponseKind(envelope.body), requestID: frame.requestID)
+        }
+    }
+
+    private func receive(envelope: IMV2Envelope, frame: V2Frame, context: ChannelHandlerContext) throws {
         if frame.requestID == 0 {
             guard case .authenticated = stage else { return }
             switch envelope.body {
+            case .realtimeCoverage(let coverage):
+                statistics.recordRealtimeCoverage(coverage)
+                observeCoverage(coverage)
+                return
             case .syncAvailable:
                 guard syncReads, !targetUserIDs.isEmpty else { return }
                 syncRequested = true
@@ -2145,6 +2804,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 guard roomLogReads, roomLogReadTrigger == .availabilityHint,
                       hint.roomID == activeRoomLogRoomID
                 else { return }
+                if roomNotificationLossCanary {
+                    // Fault injection drops the actual foreground notification
+                    // before either its H or optional body affects this device.
+                    statistics.recordRoomNotificationDiscarded()
+                    return
+                }
+                acceptedRoomHintWitnesses[hint.roomID] = .init(highWatermark: hint.highWatermark,
+                    roomSequence: hint.roomSequence,
+                    atUnixMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000), monotonicAt: .now())
                 let previous = roomEventAnnouncedHighWatermarks[hint.roomID, default: 0]
                 roomEventAnnouncedHighWatermarks[hint.roomID] = max(previous, hint.highWatermark)
                 statistics.recordRoomEventAvailabilityHint()
@@ -2204,16 +2872,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                         missingSequences: hint.roomSequence - expectedSequence
                     )
                 }
-                if hint.highWatermark > roomEventCursors[hint.roomID, default: 0] {
-                    let cursor = roomEventCursors[hint.roomID, default: 0]
-                    statistics.recordRoomEventMetadataGap(
-                        missingSequences: hint.highWatermark - cursor
-                    )
-                    try scheduleRoomEventRecoveryIfNeeded(
-                        roomID: hint.roomID,
-                        context: context
-                    )
-                }
+                try acceptRoomRecoveryTarget(roomID: hint.roomID, highWatermark: hint.highWatermark,
+                    context: context, recordMetadataGap: true)
             default:
                 break
             }
@@ -2223,13 +2883,18 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         case .awaitingHello:
             guard frame.requestID == 1,
                   case .serverHello(let response)? = envelope.body,
-                  response.selectedProtocolVersion == IMV2ProtocolVersion.current
+                  response.selectedProtocolVersion == benchmarkWireVersion
             else {
                 FileHandle.standardError.write(Data(
                     "protocol mismatch expected=server_hello request_match=\(frame.requestID == 1) actual=\(loadResponseKind(envelope.body))\n".utf8
                 ))
                 throw LoadError.unexpectedResponse
             }
+            guard response.supportsMessageSendOperations, response.maximumMessageSendPayloadBytes > 0,
+                  response.maximumMessageSendPayloadBytes >= UInt32(messageText.utf8.count) else {
+                throw LoadError.messageSendNegotiationFailed
+            }
+            negotiatedMessagePayloadBytes = response.maximumMessageSendPayloadBytes
             switch response.selectedFrameCompression {
             case .unspecified:
                 negotiatedFrameCompression = nil
@@ -2241,11 +2906,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             stage = .awaitingAuthentication
             var authenticate = IMV2Envelope()
             authenticate.requestID = 2
-            authenticate.protocolVersion = IMV2ProtocolVersion.current
+            authenticate.protocolVersion = benchmarkWireVersion
             authenticate.authenticate = .init()
             authenticate.authenticate.accessToken = credential.accessToken
             authenticate.authenticate.deviceID = credential.deviceID
-            try write(authenticate, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+            try write(authenticate, frameVersion: UInt8(benchmarkWireVersion), context: context)
 
         case .awaitingAuthentication:
             guard frame.requestID == 2 else {
@@ -2276,21 +2941,54 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             guard response.selectedFrameCompression == expectedCompression else {
                 throw LoadError.unexpectedResponse
             }
+            guard response.supportsMessageSendOperations,
+                  response.maximumMessageSendPayloadBytes == negotiatedMessagePayloadBytes else {
+                throw LoadError.messageSendNegotiationFailed
+            }
+            statistics.recordMessageSendNegotiated(payloadLimit: response.maximumMessageSendPayloadBytes)
             stage = .authenticated
             authenticationCompleted = true
+            requestedAccountCoverage = true
             registered = true
             statistics.recordAuthenticated(milliseconds: (NIODeadline.now() - started).millisecondsDouble)
+            if let snapshot = reconnectSlot?.takeSnapshot() {
+                queuedScenarioMessages = snapshot.queued
+                for _ in 0..<snapshot.queued { statistics.recordMessageTransportEvent("RESTORED_QUEUE") }
+                for entry in snapshot.operations {
+                    let id = takeRequestID()
+                    messageOperations[id] = MessageOperation(snapshot: entry)
+                    messageRequestIDs.insert(id)
+                    statistics.recordMessageTransportEvent("RESTORED")
+                }
+                restoredMessagesNeedResume = true
+            }
             authenticatedPromise.succeed(())
             scheduleHeartbeat(context: context)
 
         case .authenticated:
-            guard let pending = pendingRequests.removeValue(forKey: frame.requestID) else { return }
+            if holdReceiptForCanary,
+               case .message(let id)? = pendingRequests[frame.requestID],
+               let operation = messageOperations[id], operation.wireRequestID == frame.requestID,
+               case .messageSendOperationResult(let wire)? = envelope.body,
+               case .receipt(let receipt) = try V2MessageSendOperationWireCodec.decode(result: wire),
+               receipt.validates(identity: operation.identity, fingerprint: operation.fingerprint),
+               case .accepted = receipt.outcome {
+                // Explicit canary fault: lose one authentic ACK, retain its worklog for reconnection.
+                holdReceiptForCanary = false
+                statistics.recordMessageTransportEvent("CANARY_RECEIPT_HELD")
+                return
+            }
+            guard let pending = pendingRequests.removeValue(forKey: frame.requestID) else {
+                if case .messageSendOperationResult? = envelope.body { statistics.recordMessageTransportEvent("LATE_RESPONSE") }
+                return
+            }
             if case .error(let error)? = envelope.body {
                 try handleRejected(
                     pending,
                     requestID: frame.requestID,
                     code: error.code,
                     retryable: error.retryable,
+                    retryAfterSeconds: error.retryAfterSeconds,
                     context: context
                 )
                 return
@@ -2298,12 +2996,16 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             switch pending {
             case .heartbeat(let sent):
                 heartbeatRequestID = nil
-                guard case .heartbeatAck? = envelope.body else { throw LoadError.unexpectedResponse }
+                guard case .heartbeatAck(let acknowledgement)? = envelope.body else { throw LoadError.unexpectedResponse }
+                try receiveRoomProgressStates(acknowledgement.roomSubscriptionStates, context: context)
+                checkpointHeartbeatAcknowledged += 1
                 statistics.recordHeartbeatAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
 
-            case .message:
-                // Current message operations complete through Account HTTP.
-                throw LoadError.unexpectedResponse
+            case .message(let operationID):
+                guard let operation = messageOperations[operationID], operation.wireRequestID == frame.requestID,
+                      case .messageSendOperationResult(let wire)? = envelope.body else { throw LoadError.unexpectedResponse }
+                operation.timer?.cancel(); operation.timer = nil; operation.wireRequestID = nil
+                try receiveMessageResult(V2MessageSendOperationWireCodec.decode(result: wire), operationID: operationID, context: context)
 
             case .readReceipt(let sent, let roomID, let requestedSequence):
                 readReceiptInFlightRooms.remove(roomID)
@@ -2345,6 +3047,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     retry: counts.retry)
 
             case .syncPull(let sent):
+                settleSyncWireResponse(frame.requestID)
                 guard case .syncBatch(let batch)? = envelope.body else {
                     if case .resetRequired? = envelope.body {
                         throw LoadError.unexpectedSyncResponse("reset_required")
@@ -2370,6 +3073,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     if batch.hasMore_p || syncRequested { try startSyncIfNeeded(context: context) }
                     return
                 }
+                accountAppliedCursor = max(accountAppliedCursor, highestSequence)
                 try sendSyncAck(
                     generation: batch.generation,
                     highestSequence: highestSequence,
@@ -2405,6 +3109,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 }
 
             case .roomEventSubscribe(let roomID):
+                guard case .authenticated = stage, context.channel.isActive else { return }
                 guard case .groupEventSubscribed(let subscription)? = envelope.body else {
                     FileHandle.standardError.write(Data(
                         "protocol mismatch expected=group_event_subscribed actual=\(loadResponseKind(envelope.body))\n".utf8
@@ -2412,7 +3117,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     throw LoadError.unexpectedResponse
                 }
                 guard subscription.roomID == roomID,
-                      roomEventCursorSubscriptionInFlightRoom == roomID
+                      roomEventCursorSubscriptionInFlightRoom == roomID,
+                      requestedRoomCoverageID == roomID
                 else {
                     FileHandle.standardError.write(Data(
                         "protocol mismatch expected=group_event_subscribed room_match=\(subscription.roomID == roomID) pending_match=\(roomEventCursorSubscriptionInFlightRoom == roomID)\n".utf8
@@ -2424,18 +3130,30 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     if restoredRecoveryTargets[roomID] == nil { restoredRecoveryTargets[roomID] = subscription.highWatermark }
                 }
                 if roomLogInitialCursor == .tail && !isRestoredRecovery {
-                    roomEventCursors[roomID] = subscription.highWatermark
+                    roomEventCursors[roomID] = max(
+                        roomEventCursors[roomID, default: 0], subscription.highWatermark
+                    )
                 }
-                roomEventAnnouncedHighWatermarks[roomID] = subscription.highWatermark
+                // A subscription reply can trail a newer hint or accepted ACK.
+                // Its snapshot coalesces with this handler's current scope; it
+                // cannot revoke an announced target or rewind an applied cursor.
+                roomEventAnnouncedHighWatermarks[roomID] = max(
+                    roomEventAnnouncedHighWatermarks[roomID, default: 0],
+                    max(roomEventCursors[roomID, default: 0], subscription.highWatermark)
+                )
                 roomEventCursorSubscriptionInFlightRoom = nil
                 roomEventCursorSubscriptionRetryCounts.removeValue(forKey: roomID)
-                if roomLogInitialCursor == .zero || isRestoredRecovery {
+                if roomLogInitialCursor == .zero || isRestoredRecovery
+                    || roomEventAnnouncedHighWatermarks[roomID, default: 0]
+                        > roomEventCursors[roomID, default: 0] {
                     try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
                 }
                 try sendNextRoomEventCursorSubscriptionOrScheduleMessages(context: context)
 
             case .syncAck(let hasMore):
                 guard case .acknowledged? = envelope.body else { throw LoadError.unexpectedResponse }
+                settleSyncWireResponse(frame.requestID)
+                pendingSyncAcknowledgement = nil
                 statistics.recordSyncAcknowledged()
                 syncInFlight = false
                 if hasMore || syncRequested { try startSyncIfNeeded(context: context) }
@@ -2446,7 +3164,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
         case is StartWorkloadEvent:
-            guard case .authenticated = stage, !workloadStarted, context.channel.isActive else { return }
+            guard case .authenticated = stage, !workloadStarted, !handoffPrepared, context.channel.isActive else { return }
             workloadStarted = true
             do {
                 if !directRoomIDs.isEmpty {
@@ -2530,10 +3248,59 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 context.close(promise: nil)
             }
         case let probe as RoomCursorProbe:
-            probe.completion.succeed(directRoomIDs.map { roomID in
-                RoomCursorSnapshot(connectionIndex: connectionIndex, roomID: roomID,
-                                   appliedRoomSequence: roomEventCursors[roomID, default: 0], recoveryTarget: restoredRecoveryTargets[roomID])
-            })
+            // All state is read on this handler's event loop in one probe. A
+            // retry can reserve a slot without having a wire request in flight.
+            let snapshotMonotonic = NIODeadline.now()
+            let snapshotWall = Int64(Date().timeIntervalSince1970 * 1_000)
+            var pendingPulls: [String: (requestID: UInt64, after: UInt64)] = [:]
+            for (requestID, pending) in pendingRequests {
+                if case .roomEventPull(_, let roomID, let after) = pending,
+                   pendingPulls[roomID].map({ requestID < $0.requestID }) ?? true {
+                    pendingPulls[roomID] = (requestID, after)
+                }
+            }
+            let rooms = directRoomIDs.map { roomID in
+                let hint = acceptedRoomHintWitnesses[roomID]
+                let pull = pendingPulls[roomID]
+                return RoomCursorSnapshot(connectionIndex: connectionIndex, roomID: roomID,
+                    appliedRoomSequence: roomEventCursors[roomID, default: 0], recoveryTarget: restoredRecoveryTargets[roomID],
+                    activeForeground: activeRoomLogRoomID == roomID,
+                    announcedHighWatermark: roomEventAnnouncedHighWatermarks[roomID, default: 0],
+                    pullInFlight: pull != nil, pullSlotReserved: roomEventPullRooms.contains(roomID),
+                    pendingPullRequestID: pull?.requestID, pendingPullRequestedAfter: pull?.after,
+                    retryPending: roomEventPullRetryTasks[roomID] != nil,
+                    gracePending: roomEventRecoveryGraceTasks[roomID] != nil,
+                    lastAcceptedHintHighWatermark: hint?.highWatermark,
+                    lastAcceptedHintRoomSequence: hint?.roomSequence,
+                    lastAcceptedHintAtUnixMilliseconds: hint?.atUnixMilliseconds,
+                    lastAcceptedHintAgeMilliseconds: hint.map { (snapshotMonotonic - $0.monotonicAt).millisecondsDouble },
+                    lastAcceptedProgressHighWatermark: acceptedRoomProgressWitnesses[roomID]?.highWatermark,
+                    lastAcceptedProgressAtUnixMilliseconds: acceptedRoomProgressWitnesses[roomID]?.at,
+                    snapshotAtUnixMilliseconds: snapshotWall,
+                    snapshotMonotonicNanoseconds: snapshotMonotonic.uptimeNanoseconds)
+            }
+            probe.completion.succeed(ConnectionCursorProbeSnapshot(rooms: rooms, coverage: coverageSnapshot(at: snapshotWall)))
+        case let transfer as PrepareReconnectEvent:
+            guard authenticationCompleted, context.channel.isActive, !handoffPrepared,
+                  !transfer.requireInFlight || !messageOperations.isEmpty else {
+                transfer.completion.fail(LoadError.unexpectedResponse); return
+            }
+            handoffPrepared = true
+            workloadStarted = false
+            messageTask?.cancel(); messageTask = nil
+            let operations = messageOperations.values.map { operation in
+                operation.timer?.cancel()
+                if let wireID = operation.wireRequestID { pendingRequests.removeValue(forKey: wireID) }
+                statistics.recordMessageTransportEvent("TRANSFERRED")
+                return LoadMessageSnapshot(command: operation.command, identity: operation.identity,
+                    fingerprint: operation.fingerprint, sent: operation.sent, deadline: operation.deadline,
+                    attempts: operation.attempts)
+            }
+            for _ in 0..<queuedScenarioMessages { statistics.recordMessageTransportEvent("TRANSFERRED_QUEUE") }
+            let snapshot = LoadReconnectSnapshot(operations: operations, queued: queuedScenarioMessages,
+                cursors: roomEventCursors, foregroundRoom: activeRoomLogRoomID)
+            messageOperations.removeAll(); messageRequestIDs.removeAll(); queuedScenarioMessages = 0
+            transfer.completion.succeed(snapshot)
         case let probe as ScenarioDrainProbe:
             probe.completion.succeed(.init(
                 queued: queuedScenarioMessages,
@@ -2543,6 +3310,63 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         default:
             context.fireUserInboundEventTriggered(event)
         }
+    }
+
+    private func observeCoverage(_ value: IMV2RealtimeCoverage) {
+        guard benchmarkWireVersion >= 46, value.scopeGeneration > 0 else { ignoredCoverageFrames += 1; return }
+        let scope: String
+        let expectedID: String
+        switch value.scope {
+        case .account where requestedAccountCoverage:
+            scope = "account"; expectedID = credential.userID
+        case .room:
+            guard let requestedRoomCoverageID else { ignoredCoverageFrames += 1; return }
+            scope = "room"; expectedID = requestedRoomCoverageID
+        default: ignoredCoverageFrames += 1; return
+        }
+        guard UUID(uuidString: value.scopeID) != nil,
+              UUID(uuidString: value.scopeID) == UUID(uuidString: expectedID),
+              value.revision > (coverageRevisions[scope] ?? 0),
+              value.scopeGeneration >= (observedCoverage[scope]?.generation ?? 0) else {
+            ignoredCoverageFrames += 1; return
+        }
+        let state: String
+        switch value.state {
+        case .ready: state = "ready"
+        case .recovering: state = "recovering"
+        case .ended: state = "ended"
+        default: ignoredCoverageFrames += 1; return
+        }
+        if let prior = observedCoverage[scope], prior.state == "ended",
+           prior.generation == value.scopeGeneration, state != "ended" {
+            ignoredCoverageFrames += 1; return
+        }
+        // Independent scope writes may cross awaits and arrive out of global
+        // revision order. Only this scope's revision/generation orders its proof.
+        coverageRevisions[scope] = value.revision
+        observedCoverage[scope] = .init(generation: value.scopeGeneration, revision: value.revision,
+            state: state, highWatermark: value.highWatermark)
+    }
+    private func coverageSnapshot(at wall: Int64) -> ConnectionCoverageSnapshot {
+        var scopes: [RequestedScopeCoverageSnapshot] = []
+        func snapshot(_ scope: String, id: String, cursor: UInt64) -> RequestedScopeCoverageSnapshot {
+            let observed = observedCoverage[scope]
+            return .init(scope: scope, scopeID: id, scopeGeneration: observed?.generation,
+                revision: observed?.revision, state: observed?.state ?? "missing",
+                highWatermark: observed?.highWatermark, appliedCursor: cursor,
+                passed: observed.map { $0.state == "ready" && cursor >= $0.highWatermark } ?? false)
+        }
+        if requestedAccountCoverage { scopes.append(snapshot("account", id: credential.userID, cursor: accountAppliedCursor)) }
+        if let room = requestedRoomCoverageID {
+            scopes.append(snapshot("room", id: room, cursor: roomEventCursors[room, default: 0]))
+        }
+        // No coverage is inherited from old handlers, including planned reconnect.
+        return .init(connectionIndex: connectionIndex, physicalConnectionID: physicalConnectionID,
+            wireVersion: benchmarkWireVersion, requestedScopes: scopes, ignoredCoverageFrames: ignoredCoverageFrames,
+            heartbeatSent: checkpointHeartbeatSent, heartbeatAcknowledged: checkpointHeartbeatAcknowledged,
+            heartbeatMissed: checkpointHeartbeatMissed,
+            snapshotAtUnixMilliseconds: wall,
+            passed: authenticationCompleted && requestedAccountCoverage && scopes.allSatisfy(\.passed))
     }
 
     private func scheduleHeartbeat(context: ChannelHandlerContext) {
@@ -2562,36 +3386,75 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
     }
 
+    private func receiveRoomProgressStates(_ values: [IMV2GroupEventProgressState], context: ChannelHandlerContext) throws {
+        guard values.count <= 1 else {
+            statistics.recordRoomProgressState(accepted: false, recovery: false); return
+        }
+        for value in values {
+            guard roomLogReads, roomLogReadTrigger == .availabilityHint,
+                  let room = activeRoomLogRoomID, requestedRoomCoverageID == room,
+                  let coverage = observedCoverage["room"], coverage.state == "ready",
+                  value.ready, value.scopeGeneration == coverage.generation,
+                  UUID(uuidString: value.roomID) == UUID(uuidString: room),
+                  value.highWatermark <= UInt64(Int64.max), value.appliedRoomSequence <= value.highWatermark else {
+                statistics.recordRoomProgressState(accepted: false, recovery: false); continue
+            }
+            acceptedRoomProgressWitnesses[room] = (value.highWatermark, Int64(Date().timeIntervalSince1970 * 1_000))
+            let behind = value.highWatermark > roomEventCursors[room, default: 0]
+            statistics.recordRoomProgressState(accepted: true, recovery: behind)
+            // acceptedC acknowledges only our report. It never changes our cursor.
+            try acceptRoomRecoveryTarget(roomID: room, highWatermark: value.highWatermark,
+                context: context, recordMetadataGap: false)
+        }
+    }
+    private func acceptRoomRecoveryTarget(roomID: String, highWatermark: UInt64,
+        context: ChannelHandlerContext, recordMetadataGap: Bool) throws {
+        roomEventAnnouncedHighWatermarks[roomID] = max(roomEventAnnouncedHighWatermarks[roomID, default: 0], highWatermark)
+        let cursor = roomEventCursors[roomID, default: 0]
+        guard highWatermark > cursor else { return }
+        if recordMetadataGap { statistics.recordRoomEventMetadataGap(missingSequences: highWatermark - cursor) }
+        try scheduleRoomEventRecoveryIfNeeded(roomID: roomID, context: context)
+    }
+
     private func sendHeartbeat(context: ChannelHandlerContext) throws {
         if let heartbeatRequestID {
             pendingRequests.removeValue(forKey: heartbeatRequestID)
+            checkpointHeartbeatMissed += 1
             statistics.recordHeartbeatMissed()
         }
         let requestID = takeRequestID()
         var heartbeat = IMV2Envelope()
         heartbeat.requestID = requestID
-        heartbeat.protocolVersion = IMV2ProtocolVersion.current
+        heartbeat.protocolVersion = benchmarkWireVersion
         heartbeat.heartbeat = .init()
         heartbeat.heartbeat.clientTimeMs = UInt64(max(0, Date().timeIntervalSince1970 * 1_000))
+        if roomLogReads, let room = activeRoomLogRoomID, requestedRoomCoverageID == room,
+           let coverage = observedCoverage["room"], coverage.state == "ready" {
+            // This is the loader's simulated applied cursor, not GRDB evidence.
+            var report = IMV2GroupEventProgress(); report.roomID = room
+            report.scopeGeneration = coverage.generation
+            report.appliedRoomSequence = roomEventCursors[room, default: 0]
+            heartbeat.heartbeat.roomProgress = [report]
+            statistics.recordRoomProgressReport()
+        }
         heartbeatRequestID = requestID
         pendingRequests[requestID] = .heartbeat(sent: .now())
+        checkpointHeartbeatSent += 1
         statistics.recordHeartbeatSent()
-        try write(heartbeat, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+        try write(heartbeat, frameVersion: UInt8(benchmarkWireVersion), context: context)
     }
 
     private func sendOpenDirectRoom(targetUserID:String,context:ChannelHandlerContext) throws {
         let actor=try UserID(credential.userID),target=try UserID(targetUserID),operationID=try DirectRoomOperationID(UUID().uuidString)
         let command=try V2DirectRoomOperationCommand(actorUserID:actor,operationID:operationID,
             targetUserID:target,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600_000)
-        let credential=self.credential,baseURL=accountBaseURL,caPath=self.caPath
+        let credential = self.credential, client = accountHTTP
         let handler=NIOLoopBound(self,eventLoop:context.eventLoop),boundContext=context.loopBound
         let eventLoop=context.eventLoop,taskID=UUID()
         let installed=directRoomTasks.start(id:taskID) {
             do {
                 try Task.checkCancellation()
-                let opened=try await V2ToolOperationHTTP.scoped(baseURL:baseURL,caPath:caPath) { client in
-                    try await client.openDirectRoom(command:command,token:credential.accessToken,deviceID:credential.deviceID)
-                }
+                let opened = try await client.openDirectRoom(command: command, token: credential.accessToken, deviceID: credential.deviceID)
                 guard !Task.isCancelled else { return }
                 eventLoop.execute {
                     let handler=handler.value,context=boundContext.value
@@ -2615,7 +3478,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     let handler=handler.value,context=boundContext.value
                     handler.directRoomTaskIDs.remove(taskID)
                     guard case .authenticated=handler.stage,handler.workloadStarted,context.channel.isActive else { return }
-                    handler.statistics.recordWorkloadFailure(kind:"direct_room",code:"ACCOUNT_HTTP_FAILURE")
+                    handler.statistics.recordWorkloadFailure(kind:"direct_room",code:loadHTTPFailureCode(error))
                     context.close(promise:nil)
                 }
             }
@@ -2626,6 +3489,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     private func scheduleMessages(context: ChannelHandlerContext) {
+        guard !handoffPrepared else { return }
+        if restoredMessagesNeedResume {
+            restoredMessagesNeedResume = false
+            do {
+                for id in Array(messageOperations.keys) { try emitMessageAttempt(operationID: id, action: .query, context: context) }
+                try drainQueuedScenarioMessages(context: context)
+            } catch { context.close(promise: nil); return }
+        }
         guard messageTask == nil else { return }
         guard let interval = messageIntervalMilliseconds else { return }
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
@@ -2665,7 +3536,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             return
         }
         if isRestoredRecovery {
-            roomEventCursorSubscriptionPendingRooms = directRoomIDs.sorted()
+            if reconnectSlot != nil, roomLogReadTrigger == .availabilityHint {
+                roomEventCursorSubscriptionPendingRooms = reconnectForegroundRoom.map { [$0] } ?? Array(directRoomIDs.prefix(1))
+            } else {
+                roomEventCursorSubscriptionPendingRooms = directRoomIDs.sorted()
+            }
         } else { switch roomLogReadTrigger {
         case .messageAcknowledgement:
             // Preserve the original synthetic stress mode, which exercises
@@ -2717,11 +3592,13 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let requestID = takeRequestID()
         var request = IMV2Envelope()
         request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
+        request.protocolVersion = benchmarkWireVersion
         request.groupEventSubscribe = .init()
         request.groupEventSubscribe.roomID = roomID
         pendingRequests[requestID] = .roomEventSubscribe(roomID: roomID)
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+        try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context)
+        if requestedRoomCoverageID != roomID { observedCoverage.removeValue(forKey: "room") }
+        requestedRoomCoverageID = roomID
     }
 
     /// 订阅是一道只读游标围栏，而 `SERVER_BUSY` 是显式的可重试响应。
@@ -2761,67 +3638,158 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private func sendMessage(context: ChannelHandlerContext) throws {
         guard !directRoomIDs.isEmpty else { return }
         guard messageRequestIDs.count < maximumInFlightMessagesPerConnection else {
-            statistics.recordMessageSkipped()
-            return
+            statistics.recordMessageSkipped(); return
         }
-        let directRoomID: String
-        if roomLogReadTrigger == .availabilityHint, let activeRoomLogRoomID {
-            directRoomID = activeRoomLogRoomID
-        } else {
-            directRoomID = directRoomIDs[nextRoomIndex % directRoomIDs.count]
-            nextRoomIndex += 1
-        }
-        let requestID = takeRequestID()
-        let command = try V2MessageSendOperationCommand(command: .init(roomID: .init(directRoomID),
+        guard negotiatedMessagePayloadBytes != nil else { throw LoadError.messageSendNegotiationFailed }
+        let roomID: String
+        if roomLogReadTrigger == .availabilityHint, let activeRoomLogRoomID { roomID = activeRoomLogRoomID }
+        else { roomID = directRoomIDs[nextRoomIndex % directRoomIDs.count]; nextRoomIndex += 1 }
+        // An immutable identity and fingerprint survive every query/retry.
+        let command = try V2MessageSendOperationCommand(command: .init(roomID: .init(roomID),
             senderUserID: .init(credential.userID), clientMessageID: .init(UUID().uuidString),
             text: messageText, limits: .init(maxUTF8Bytes: 65_536)),
             firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 86_400_000)
-        let sent = NIODeadline.now()
-        messageRequestIDs.insert(requestID)
-        pendingRequests[requestID] = .message(sent: sent, roomID: directRoomID)
+        let operationID = takeRequestID()
+        let operation = try MessageOperation(command: command, sent: .now())
+        messageOperations[operationID] = operation; messageRequestIDs.insert(operationID)
         statistics.recordMessageSent()
-        let credential = self.credential, baseURL = accountBaseURL, caPath = self.caPath
-        let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
-        let taskID = UUID(); httpSendTaskIDs[requestID] = taskID
-        let completionLoop = context.eventLoop
-        let installed = sendTasks.start(id: taskID) {
-            let result: Result<V2MessageSendOperationTerminalOutcome, any Error>
-            do { result = .success(try await V2ToolOperationHTTP.scoped(baseURL: baseURL, caPath: caPath) { client in
-                try await client.sendMessage(command, token: credential.accessToken, deviceID: credential.deviceID)
-            }) }
-            catch { result = .failure(error) }
-            _ = try? await completionLoop.submit {
+        try emitMessageAttempt(operationID: operationID, action: .submit, context: context)
+    }
 
+    private func emitMessageAttempt(operationID: UInt64, action: MessageWireAction, context: ChannelHandlerContext) throws {
+        guard let operation = messageOperations[operationID] else { return }
+        guard context.channel.isActive, operation.attempts < Self.maximumMessageWireAttempts, NIODeadline.now() < operation.deadline else {
+            try finishMessage(operationID, failure: "TCP_OUTCOME_UNKNOWN_RETRY_EXHAUSTED", context: context); return
+        }
+        let requestID = takeRequestID()
+        var request = IMV2Envelope()
+        request.requestID = requestID; request.protocolVersion = benchmarkWireVersion
+        let expired = Date().timeIntervalSince1970 * 1_000 >= Double(operation.command.firstSubmissionDeadlineMilliseconds)
+        let actualAction: MessageWireAction = expired || action == .close ? .query : action
+        if actualAction != .submit {
+            let query = try V2MessageSendOperationRecoveryRequest(identity: operation.identity,
+                fingerprint: operation.fingerprint, domainFingerprint: operation.command.command.fingerprint,
+                action: .query)
+            request.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery: query)
+        } else { request.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation.command) }
+        operation.attempts += 1; operation.wireRequestID = requestID; operation.lastWireAction = actualAction
+        pendingRequests[requestID] = .message(operationID: operationID)
+        statistics.recordMessageTransportEvent(actualAction == .submit ? "WIRE_SUBMIT" : "WIRE_RECOVERY_QUERY")
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
+        let remaining = max(1, min(Self.messageAttemptTimeoutSeconds * 1_000_000_000, (operation.deadline - .now()).nanoseconds))
+        operation.timer = context.eventLoop.scheduleTask(in: .nanoseconds(remaining)) {
             let handler = handler.value, context = boundContext.value
-            handler.httpSendTaskIDs.removeValue(forKey: requestID)
-            let ownedSlot = handler.pendingRequests.removeValue(forKey: requestID) != nil
-            handler.messageRequestIDs.remove(requestID)
-            guard case .authenticated = handler.stage, context.channel.isActive, ownedSlot else { return }
-            do {
-                switch try result.get() {
-                case .accepted:
-                    handler.statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
-                    if handler.roomLogReads, handler.roomLogReadTrigger == .messageAcknowledgement {
-                        try handler.sendRoomEventPullIfNeeded(roomID: directRoomID, context: context)
-                    }
-                case .rejected(let reason):
-                    handler.statistics.recordWorkloadFailure(kind: "message", code: reason.rawValue)
-                case .closed:
-                    handler.statistics.recordWorkloadFailure(kind: "message", code: "CLOSED")
-                }
-                try handler.drainQueuedScenarioMessages(context: context)
-            } catch {
-                handler.statistics.recordWorkloadFailure(kind: "message", code: "ACCOUNT_HTTP_FAILURE")
-                do { try handler.drainQueuedScenarioMessages(context: context) }
-                catch { context.close(promise: nil) }
+            guard let current = handler.messageOperations[operationID], current.wireRequestID == requestID else { return }
+            handler.pendingRequests.removeValue(forKey: requestID); current.wireRequestID = nil; current.timer = nil
+            handler.statistics.recordMessageTransportEvent("ATTEMPT_TIMEOUT")
+            do { try handler.scheduleMessageAttempt(operationID: operationID, action: .query,
+                delayMilliseconds: 0, context: context) }
+            catch { context.close(promise: nil) }
+        }
+        do { try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context) }
+        catch {
+            try finishMessage(operationID, failure: "TCP_OUTCOME_UNKNOWN_WRITE_FAILURE", drain: false, context: context)
+            throw error
+        }
+    }
+
+    private func receiveMessageResult(_ result: V2MessageSendOperationRecoveryResult, operationID: UInt64,
+                                      context: ChannelHandlerContext) throws {
+        guard let operation = messageOperations[operationID] else { return }
+        switch result {
+        case .receipt(let receipt):
+            guard receipt.validates(identity: operation.identity, fingerprint: operation.fingerprint) else {
+                statistics.recordMessageTransportEvent("INVALID_RECEIPT"); throw LoadError.unexpectedResponse
             }
-            }.get()
+            switch receipt.outcome {
+            case .accepted(let accepted):
+                // Retire the operation before optional room follow-up can throw;
+                // an accepted receipt must never be re-counted as close/unknown.
+                try finishMessage(operationID, failure: nil, drain: false, context: context)
+                statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - operation.sent).millisecondsDouble)
+                statistics.recordMessageTransportEvent("ACCEPTED")
+                if operation.restoredAfterReconnect { statistics.recordMessageTransportEvent("RECOVERED_AFTER_RECONNECT") }
+                let roomID = operation.command.command.roomID.rawValue
+                if roomLogReads {
+                    let cursor = roomEventCursors[roomID, default: 0]
+                    if cursor < .max, accepted.roomSequence == cursor + 1 {
+                        roomEventCursors[roomID] = accepted.roomSequence
+                        statistics.recordRoomEventLocalEchoApplied()
+                        cancelRoomEventRecoveryGraceIfCaughtUp(roomID: roomID)
+                    } else if accepted.roomSequence > cursor {
+                        statistics.recordRoomEventLocalEchoGapDetected()
+                        roomEventAnnouncedHighWatermarks[roomID] = max(roomEventAnnouncedHighWatermarks[roomID, default: 0], accepted.roomSequence)
+                        try scheduleRoomEventRecoveryIfNeeded(roomID: roomID, context: context)
+                    }
+                }
+                if roomLogReads, roomLogReadTrigger == .messageAcknowledgement {
+                    try sendRoomEventPullIfNeeded(roomID: roomID, context: context)
+                }
+                try drainQueuedScenarioMessages(context: context)
+            case .rejected(let reason):
+                statistics.recordMessageTransportEvent("TERMINAL_REJECTED_" + reason.rawValue)
+                try finishMessage(operationID, failure: "TCP_REJECTED_" + reason.rawValue, context: context)
+            case .closed:
+                statistics.recordMessageTransportEvent("TERMINAL_CLOSED")
+                try finishMessage(operationID, failure: "TCP_CLOSED", context: context)
+            }
+        case .fingerprintConflict:
+            statistics.recordMessageTransportEvent("FINGERPRINT_CONFLICT")
+            try finishMessage(operationID, failure: "TCP_FINGERPRINT_CONFLICT", context: context)
+        case .unresolved:
+            statistics.recordMessageTransportEvent("UNRESOLVED")
+            let expired = Date().timeIntervalSince1970 * 1_000 >= Double(operation.command.firstSubmissionDeadlineMilliseconds)
+            try scheduleMessageAttempt(operationID: operationID, action: expired ? .close : .submit,
+                delayMilliseconds: 1_000, context: context)
+        case .deferred(let hint):
+            guard hint.validates(identity: operation.identity, fingerprint: operation.fingerprint) else {
+                statistics.recordMessageTransportEvent("INVALID_DEFERRED_HINT"); throw LoadError.unexpectedResponse
+            }
+            statistics.recordMessageTransportEvent("DEFERRED_" + hint.reason.rawValue)
+            try scheduleMessageAttempt(operationID: operationID, action: operation.lastWireAction,
+                delayMilliseconds: Int64(max(1, hint.retryAfterMilliseconds ?? 1_000)), context: context)
         }
-        guard installed else {
-            httpSendTaskIDs.removeValue(forKey: requestID)
-            pendingRequests.removeValue(forKey: requestID); messageRequestIDs.remove(requestID)
-            throw CancellationError()
+    }
+
+    private func scheduleMessageAttempt(operationID: UInt64, action: MessageWireAction, delayMilliseconds: Int64,
+                                        context: ChannelHandlerContext) throws {
+        guard let operation = messageOperations[operationID] else { return }
+        let now = NIODeadline.now()
+        let base = now + .milliseconds(max(0, delayMilliseconds))
+        let remaining = (operation.deadline - base).nanoseconds
+        guard operation.attempts < Self.maximumMessageWireAttempts, remaining > 0 else {
+            try finishMessage(operationID, failure: action == .submit ? "TCP_DEFERRED_RETRY_EXHAUSTED" : "TCP_OUTCOME_UNKNOWN_UNRESOLVED", context: context)
+            return
         }
+        // Match the production policy: the server floor is the base, then
+        // apply bounded exponential jitter without restarting the total budget.
+        let exponent = min(max(0, operation.attempts - 1), 16)
+        let ceilingNanoseconds = min(30, 0.5 * pow(2, Double(exponent))) * 1_000_000_000
+        let window = min(ceilingNanoseconds, Double(remaining))
+        let next = base + .nanoseconds(Int64(window * Double.random(in: 0...1)))
+        guard next < operation.deadline else {
+            try finishMessage(operationID, failure: action == .submit ? "TCP_DEFERRED_RETRY_EXHAUSTED" : "TCP_OUTCOME_UNKNOWN_UNRESOLVED", context: context)
+            return
+        }
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
+        operation.timer = context.eventLoop.scheduleTask(in: .nanoseconds((next - now).nanoseconds)) {
+            let handler = handler.value, context = boundContext.value
+            handler.messageOperations[operationID]?.timer = nil
+            do { try handler.emitMessageAttempt(operationID: operationID, action: action, context: context) }
+            catch { context.close(promise: nil) }
+        }
+    }
+
+    private func finishMessage(_ operationID: UInt64, failure: String?, drain: Bool = true, context: ChannelHandlerContext) throws {
+        guard let operation = messageOperations.removeValue(forKey: operationID) else { return }
+        operation.timer?.cancel()
+        if let requestID = operation.wireRequestID { pendingRequests.removeValue(forKey: requestID) }
+        messageRequestIDs.remove(operationID)
+        if let failure {
+            if failure.hasPrefix("TCP_OUTCOME_UNKNOWN") { statistics.recordMessageTransportEvent("OUTCOME_UNKNOWN") }
+            statistics.recordWorkloadFailure(kind: "message", code: failure)
+        }
+        if drain { try drainQueuedScenarioMessages(context: context) }
     }
 
     /// 仅当每设备队列存在硬性上限时才保留场景选中的动作。
@@ -2848,7 +3816,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     /// ACK 与拒绝都会释放一个设备的在途槽位。
     ///
     /// 最多排空所通告的窗口，绝不通过事件循环递归调用，
-    /// 并让 `messagesSent` 始终表示实际开始的 HTTP 发送操作数量。
+    /// 并让 `messagesSent` 始终表示实际开始的 TCP 逻辑发送操作数量。
     ///
     /// - Parameter context: 目标通道上下文。
     /// - Throws: 发送或写入失败时抛出。
@@ -2907,7 +3875,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let requestID = takeRequestID()
         var request = IMV2Envelope()
         request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
+        request.protocolVersion = benchmarkWireVersion
         request.recordReadReceipt = .init()
         request.recordReadReceipt.roomID = roomID
         request.recordReadReceipt.operationID = UUID().uuidString
@@ -2919,7 +3887,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         do {
             try write(
                 request,
-                frameVersion: UInt8(IMV2ProtocolVersion.current),
+                frameVersion: UInt8(benchmarkWireVersion),
                 context: context
             )
         } catch {
@@ -2933,16 +3901,90 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         guard syncReads, !syncInFlight else { return }
         syncInFlight = true
         syncRequested = false
+        if let pending = pendingSyncAcknowledgement {
+            syncAttempt = SyncAttempt(request: pending.0, kind: .acknowledgement(hasMore: pending.1))
+        } else {
+            var request = IMV2Envelope()
+            request.syncPull.syncToken = nextSyncToken
+            request.syncPull.maxRecords = 100
+            syncAttempt = SyncAttempt(request: request, kind: .pull)
+            statistics.recordSyncPullSent()
+        }
+        try emitSyncAttempt(context: context)
+    }
+
+    private func emitSyncAttempt(context: ChannelHandlerContext) throws {
+        guard let attempt = syncAttempt, context.channel.isActive else { return }
+        guard NIODeadline.now() < attempt.deadline, attempt.attempts < 2 else {
+            finishSyncLogicalFailure(); return
+        }
+        attempt.timer?.cancel()
+        attempt.attempts += 1
         let requestID = takeRequestID()
-        var request = IMV2Envelope()
-        request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
-        request.syncPull = .init()
-        request.syncPull.syncToken = nextSyncToken
-        request.syncPull.maxRecords = 100
-        pendingRequests[requestID] = .syncPull(sent: .now())
-        statistics.recordSyncPullSent()
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+        attempt.wireRequestID = requestID
+        var request = attempt.request
+        request.requestID = requestID; request.protocolVersion = benchmarkWireVersion
+        switch attempt.kind {
+        case .pull: pendingRequests[requestID] = .syncPull(sent: attempt.started)
+        case .acknowledgement(let hasMore): pendingRequests[requestID] = .syncAck(hasMore: hasMore)
+        }
+        statistics.recordSyncWireAttempt(retry: attempt.attempts > 1)
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+        let boundContext = context.loopBound
+        let id = attempt.id
+        attempt.timer = context.eventLoop.scheduleTask(deadline: attempt.deadline) {
+            let handler = handler.value, context = boundContext.value
+            guard let current = handler.syncAttempt, current.id == id, current.wireRequestID == requestID else { return }
+            handler.pendingRequests.removeValue(forKey: requestID)
+            handler.statistics.recordWorkloadFailure(kind: "sync", code: "CLIENT_DEADLINE")
+            handler.finishSyncLogicalFailure()
+            // A dispatched response may still arrive. Retire this physical
+            // channel rather than recycling its correlation slot prematurely.
+            context.close(promise: nil)
+        }
+        try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context)
+    }
+
+    private func settleSyncWireResponse(_ requestID: UInt64) {
+        guard let attempt = syncAttempt, attempt.wireRequestID == requestID else { return }
+        attempt.timer?.cancel()
+        syncAttempt = nil
+    }
+
+    private func finishSyncLogicalFailure() {
+        syncAttempt?.timer?.cancel()
+        syncAttempt = nil
+        syncInFlight = false
+        syncRequested = true
+        statistics.recordSyncLogicalFailure()
+    }
+
+    private func retryRejectedSync(requestID: UInt64, code: String, retryable: Bool,
+                                   retryAfterSeconds: UInt32, context: ChannelHandlerContext) {
+        guard let attempt = syncAttempt, attempt.wireRequestID == requestID else { return }
+        attempt.timer?.cancel(); attempt.wireRequestID = nil
+        guard code == "SERVER_BUSY", retryable, attempt.attempts < 2 else { finishSyncLogicalFailure(); return }
+        let base = NIODeadline.now() + .seconds(Int64(retryAfterSeconds))
+        guard base < attempt.deadline else { finishSyncLogicalFailure(); return }
+        let remaining = (attempt.deadline - base).nanoseconds
+        let ceiling = min(Int64(500_000_000) << min(attempt.attempts - 1, 16), Int64(30_000_000_000))
+        let window = min(ceiling, remaining)
+        // A deterministic per-connection jitter preserves reproducible fixture
+        // evidence without collapsing all attempts onto the server floor.
+        let unit = Double((connectionIndex &* 17 &+ attempt.attempts &* 31) % 997) / 997
+        let wake = base + .nanoseconds(Int64(Double(window) * unit))
+        guard wake < attempt.deadline else { finishSyncLogicalFailure(); return }
+        let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
+        let id = attempt.id
+        attempt.timer = context.eventLoop.scheduleTask(deadline: wake) {
+            let handler = handler.value, context = boundContext.value
+            guard handler.syncAttempt?.id == id, case .authenticated = handler.stage, context.channel.isActive else { return }
+            do { try handler.emitSyncAttempt(context: context) }
+            catch {
+                handler.statistics.recordWorkloadFailure(kind: "sync", code: "CLIENT_WRITE_FAILURE")
+                handler.finishSyncLogicalFailure(); context.close(promise: nil)
+            }
+        }
     }
 
     /// 在需要时安排房间事件恢复拉取。
@@ -3043,7 +4085,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let requestID = takeRequestID()
         var request = IMV2Envelope()
         request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
+        request.protocolVersion = benchmarkWireVersion
         request.groupEventPull = .init()
         request.groupEventPull.roomID = roomID
         request.groupEventPull.afterRoomSequence = afterRoomSequence
@@ -3054,11 +4096,12 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             afterRoomSequence: afterRoomSequence
         )
         statistics.recordRoomEventPullSent()
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+        try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context)
     }
 
     private func scheduleRoomEventPullRetry(
         roomID: String,
+        serverRetryAfterSeconds: UInt32,
         context: ChannelHandlerContext
     ) {
         guard roomEventPullRetryTasks[roomID] == nil else { return }
@@ -3067,7 +4110,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let exponent = min(retryCount - 1, 5)
         let baseDelay = 50 * (1 << exponent)
         let jitter = (connectionIndex &* 17 &+ retryCount &* 31) % 50
-        let delay = Int64(min(2_000, baseDelay + jitter))
+        // Match V2RoomRecoveryRunner: even a zero server floor means at
+        // least one second. Bound only our exponential delay, never the floor.
+        let serverFloor = max(Int64(1_000), Int64(serverRetryAfterSeconds) * 1_000)
+        let delay = max(serverFloor, Int64(min(2_000, baseDelay))) + Int64(jitter)
         let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
         roomEventPullRetryTasks[roomID] = context.eventLoop.scheduleTask(
@@ -3105,7 +4151,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let requestID = takeRequestID()
         var request = IMV2Envelope()
         request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
+        request.protocolVersion = benchmarkWireVersion
         switch kind {
         case .roomSyncState:
             request.roomSyncStateBatch = .init()
@@ -3132,7 +4178,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             context.close(promise: nil)
         }
         do {
-            try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+            try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context)
             statistics.recordRecoverySent(kind)
         } catch {
             pendingRequests.removeValue(forKey: requestID)
@@ -3194,22 +4240,16 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     private func sendSyncAck(
-        generation: UInt64,
-        highestSequence: UInt64,
-        receipt: String,
-        hasMore: Bool,
-        context: ChannelHandlerContext
+        generation: UInt64, highestSequence: UInt64, receipt: String,
+        hasMore: Bool, context: ChannelHandlerContext
     ) throws {
-        let requestID = takeRequestID()
         var request = IMV2Envelope()
-        request.requestID = requestID
-        request.protocolVersion = IMV2ProtocolVersion.current
-        request.syncAck = .init()
         request.syncAck.generation = generation
         request.syncAck.highestContiguousSequence = highestSequence
         request.syncAck.syncReceipt = receipt
-        pendingRequests[requestID] = .syncAck(hasMore: hasMore)
-        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
+        pendingSyncAcknowledgement = (request, hasMore)
+        syncAttempt = SyncAttempt(request: request, kind: .acknowledgement(hasMore: hasMore))
+        try emitSyncAttempt(context: context)
     }
 
     private func handleRejected(
@@ -3217,23 +4257,35 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         requestID: UInt64,
         code: String,
         retryable: Bool,
+        retryAfterSeconds: UInt32,
         context: ChannelHandlerContext
     ) throws {
         switch pending {
         case .heartbeat:
             heartbeatRequestID = nil
+            checkpointHeartbeatMissed += 1
             statistics.recordHeartbeatMissed()
-        case .message:
-            messageRequestIDs.remove(requestID)
-            statistics.recordWorkloadFailure(kind: "message", code: code, retryable: retryable)
-            try drainQueuedScenarioMessages(context: context)
+        case .message(let operationID):
+            guard let operation = messageOperations[operationID], operation.wireRequestID == requestID else { throw LoadError.unexpectedResponse }
+            operation.timer?.cancel(); operation.timer = nil; operation.wireRequestID = nil
+            statistics.recordMessageTransportEvent("SERVER_REJECTED_" + code)
+            if retryable {
+                // A rejected query does not establish whether the earlier send
+                // committed. Preserve this wire action for pre-dispatch busy;
+                // other retryable failures query the same immutable identity.
+                try scheduleMessageAttempt(operationID: operationID,
+                    action: code == "SERVER_BUSY" ? operation.lastWireAction : .query,
+                    delayMilliseconds: max(1_000, Int64(retryAfterSeconds) * 1_000), context: context)
+            } else { try finishMessage(operationID, failure: "TCP_SERVER_" + code, context: context) }
         case .syncPull, .syncAck:
-            syncInFlight = false
+            // Every rejected wire action retains the original failure count.
             statistics.recordWorkloadFailure(kind: "sync", code: code, retryable: retryable)
+            retryRejectedSync(requestID: requestID, code: code, retryable: retryable,
+                retryAfterSeconds: retryAfterSeconds, context: context)
         case .roomEventPull(_, let roomID, _):
             if retryable {
                 statistics.recordRoomEventPullRetryableRejection()
-                scheduleRoomEventPullRetry(roomID: roomID, context: context)
+                scheduleRoomEventPullRetry(roomID: roomID, serverRetryAfterSeconds: retryAfterSeconds, context: context)
             } else {
                 roomEventPullRooms.remove(roomID)
                 roomEventPullRetryCounts.removeValue(forKey: roomID)
@@ -3260,6 +4312,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             }
             roomEventCursorSubscriptionInFlightRoom = nil
             statistics.recordWorkloadFailure(kind: "room_event_subscribe", code: code, retryable: retryable)
+            FileHandle.standardError.write(Data("terminal request rejection kind=room_event_subscribe retries=\(retryCount) code=\(code)\n".utf8))
             // A tail cursor must come from the server. Do not start a
             // purported steady workload at cursor zero after its explicit
             // initialization barrier failed.
@@ -3289,6 +4342,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
 
     private func write(_ envelope: IMV2Envelope, frameVersion: UInt8, context: ChannelHandlerContext) throws {
         let frame = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: frameVersion)
+        if frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
+            guard let maximum = negotiatedMessagePayloadBytes, frame.payload.count <= Int(maximum) else {
+                throw LoadError.messageSendNegotiationFailed
+            }
+        }
         let bytes = try V2FrameCodec.encode(frame, limits: limits)
         var buffer = context.channel.allocator.buffer(capacity: bytes.count)
         buffer.writeBytes(bytes)
@@ -3345,6 +4403,25 @@ private struct LoadReport: Encodable {
     let workloadRampPerSecond: Int
     let directRoomHTTPMaximumConcurrent: Int
     let directRoomHTTPMaximumQueued: Int
+    let accountHTTPConnectionsPerHostSoftLimit: Int
+    let localPortBase: Int?
+    let localPortSpan: Int?
+    let localPortReuseAddress: Bool
+    let localPortReusePort: Bool
+    let protocolFailuresByKindAndCode: [String: Int]
+    let plannedReconnectInflightCanary: Bool
+    let benchmarkWireVersion: UInt32
+    let algorithmSourceSHA256: String
+    let messageTransport: String
+    let messageRecoveryTransport: String
+    let messageAttemptTimeoutSeconds: Int64
+    let messageOperationTimeoutSeconds: Int64
+    let messageMaximumAttempts: Int
+    let messageTransportEvents: [String: Int]
+    let realtimeCoverageEvents: [String: Int]
+    let messageSendNegotiatedConnections: Int
+    let messageSendPayloadLimitMinimum: UInt32?
+    let messageSendPayloadLimitMaximum: UInt32?
     let holdSeconds: Int
     let eventLoops: Int
     let messagesPerSecond: Int
@@ -3355,6 +4432,7 @@ private struct LoadReport: Encodable {
     let syncReads: Bool
     let roomLogReads: Bool
     let roomLogReadTrigger: String
+    let roomNotificationLossCanary: Bool
     let roomLogRecoveryGraceMilliseconds: Int
     let recoveryBatchTimeoutSeconds: Int
     let peerTopology: String
@@ -3370,6 +4448,11 @@ private struct LoadReport: Encodable {
     let heartbeatSent: Int
     let heartbeatAcknowledged: Int
     let heartbeatMissed: Int
+    let roomProgressReportsSent: Int
+    let roomProgressStatesAccepted: Int
+    let roomProgressStatesIgnored: Int
+    let roomProgressRecoverySignals: Int
+    let roomNotificationsDiscarded: Int
     let directRoomAttempted: Int
     let directRoomOpened: Int
     let roomLogTailReady: Int
@@ -3384,7 +4467,11 @@ private struct LoadReport: Encodable {
     let scenarioMessageQueueAbandoned: Int
     let queuedScenarioMessagesAtEnd: Int
     let maximumQueuedScenarioMessages: Int
+    /// Initial logical pull dispatches; BUSY wire retries are separate.
     let syncPullsSent: Int
+    let syncWireAttempts: Int
+    let syncRetryAttempts: Int
+    let syncLogicalFailures: Int
     let syncBatchesReceived: Int
     let syncRecordsReceived: Int
     let syncAcknowledged: Int
@@ -3426,12 +4513,23 @@ private struct LoadReport: Encodable {
     let scenarioPhases: [ScenarioPhaseReport]
     let scenarioDrain: ScenarioDrainReport?
     let roomCursorSnapshots: [RoomCursorSnapshot]
+    let connectionCoverageSnapshots: [ConnectionCoverageSnapshot]
+    let coverageProofRequired: Bool
+    let coverageProofPassed: Bool
     let scenarioPostDrainHoldSeconds: Int?
     let terminalError: String?
     let recoveryBurst: RecoveryBurstReport?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], recoveryBurst: RecoveryBurstReport?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], connectionCoverageSnapshots: [ConnectionCoverageSnapshot], recoveryBurst: RecoveryBurstReport?) {
         self.recoveryBurst = recoveryBurst
+        self.connectionCoverageSnapshots = connectionCoverageSnapshots
+        let requiresCoverageProof = configuration.benchmarkWireVersion >= 46
+        coverageProofRequired = requiresCoverageProof
+        coverageProofPassed = !requiresCoverageProof || (
+            connectionCoverageSnapshots.count == configuration.connections &&
+            Set(connectionCoverageSnapshots.map(\.connectionIndex)).count == configuration.connections &&
+            Set(connectionCoverageSnapshots.map(\.physicalConnectionID)).count == configuration.connections &&
+            connectionCoverageSnapshots.allSatisfy(\.passed))
         revision = configuration.revision
         host = configuration.host
         port = configuration.port
@@ -3441,6 +4539,25 @@ private struct LoadReport: Encodable {
         workloadRampPerSecond = configuration.workloadRampPerSecond
         directRoomHTTPMaximumConcurrent = DirectRoomHTTPTaskOwner.configuredMaximumConcurrent
         directRoomHTTPMaximumQueued = DirectRoomHTTPTaskOwner.configuredMaximumQueued
+        accountHTTPConnectionsPerHostSoftLimit = LoadRun.accountHTTPConnectionsPerHostSoftLimit
+        localPortBase = configuration.localPortBase
+        localPortSpan = configuration.localPortBase.map { _ in LocalSourcePortAllocator.span }
+        localPortReuseAddress = configuration.localPortBase != nil
+        localPortReusePort = configuration.localPortBase != nil
+        protocolFailuresByKindAndCode = state.protocolFailuresByKindAndCode
+        plannedReconnectInflightCanary = configuration.plannedReconnectInflightCanary
+        benchmarkWireVersion = configuration.benchmarkWireVersion
+        algorithmSourceSHA256 = LoadConnectionHandler.algorithmSourceSHA256
+        messageTransport = "tcp"
+        messageRecoveryTransport = "tcp_query"
+        messageAttemptTimeoutSeconds = LoadConnectionHandler.messageAttemptTimeoutSeconds
+        messageOperationTimeoutSeconds = LoadConnectionHandler.messageOperationTimeoutSeconds
+        messageMaximumAttempts = LoadConnectionHandler.maximumMessageWireAttempts
+        messageTransportEvents = state.messageTransportEvents
+        realtimeCoverageEvents = state.realtimeCoverageEvents
+        messageSendNegotiatedConnections = state.messageSendNegotiatedConnections
+        messageSendPayloadLimitMinimum = state.messageSendPayloadLimitMinimum
+        messageSendPayloadLimitMaximum = state.messageSendPayloadLimitMaximum
         holdSeconds = configuration.holdSeconds
         eventLoops = configuration.eventLoops
         messagesPerSecond = configuration.messagesPerSecond
@@ -3451,6 +4568,7 @@ private struct LoadReport: Encodable {
         syncReads = configuration.syncReads
         roomLogReads = configuration.roomLogReads
         roomLogReadTrigger = configuration.roomLogReadTrigger.rawValue
+        roomNotificationLossCanary = configuration.roomNotificationLossCanary
         roomLogRecoveryGraceMilliseconds =
             configuration.roomLogRecoveryGraceMilliseconds
         recoveryBatchTimeoutSeconds = configuration.recoveryBatchTimeoutSeconds
@@ -3467,6 +4585,11 @@ private struct LoadReport: Encodable {
         heartbeatSent = state.heartbeatSent
         heartbeatAcknowledged = state.heartbeatAcknowledged
         heartbeatMissed = state.heartbeatMissed
+        roomProgressReportsSent = state.roomProgressReportsSent
+        roomProgressStatesAccepted = state.roomProgressStatesAccepted
+        roomProgressStatesIgnored = state.roomProgressStatesIgnored
+        roomProgressRecoverySignals = state.roomProgressRecoverySignals
+        roomNotificationsDiscarded = state.roomNotificationsDiscarded
         directRoomAttempted = state.directRoomAttempted
         directRoomOpened = state.directRoomOpened
         roomLogTailReady = state.roomLogTailReady
@@ -3482,6 +4605,9 @@ private struct LoadReport: Encodable {
         queuedScenarioMessagesAtEnd = state.queuedScenarioMessages
         maximumQueuedScenarioMessages = state.maximumQueuedScenarioMessages
         syncPullsSent = state.syncPullsSent
+        syncWireAttempts = state.syncWireAttempts
+        syncRetryAttempts = state.syncRetryAttempts
+        syncLogicalFailures = state.syncLogicalFailures
         syncBatchesReceived = state.syncBatchesReceived
         syncRecordsReceived = state.syncRecordsReceived
         syncAcknowledged = state.syncAcknowledged
@@ -3558,6 +4684,8 @@ private struct ScenarioPhaseReport: Encodable {
     let name: String
     let durationSeconds: Int
     let observedDurationSeconds: Double
+    let startedAtUnixMilliseconds: Int64
+    let endedAtUnixMilliseconds: Int64
     let completed: Bool
     let requestedMessagesPerSecond: Double
     let requestedRoomLogReadsPerSecond: Double
@@ -3565,6 +4693,8 @@ private struct ScenarioPhaseReport: Encodable {
     let requestedReadReceiptsPerSecond: Double
     let requestedRoomSyncStateBatchesPerSecond: Double
     let requestedRoomLatestVisibleBatchesPerSecond: Double
+    let messageTransportEvents: [String: Int]
+    let realtimeCoverageEvents: [String: Int]
     let messagesSent: Int
     let messagesAcknowledged: Int
     let messagesSkipped: Int
@@ -3582,7 +4712,11 @@ private struct ScenarioPhaseReport: Encodable {
     let readReceiptsSent: Int
     let readReceiptsAcknowledged: Int
     let readReceiptsCoalesced: Int
+    /// Initial logical pull dispatches; BUSY wire retries are separate.
     let syncPullsSent: Int
+    let syncWireAttempts: Int
+    let syncRetryAttempts: Int
+    let syncLogicalFailures: Int
     let syncRecordsReceived: Int
     let workloadFailed: Int
     let heartbeatLatency: Percentiles
@@ -3601,6 +4735,8 @@ private struct ScenarioPhaseReport: Encodable {
         phase: LoadScenario.Phase,
         rateScale: Double,
         observedDurationSeconds: Double,
+        startedAtUnixMilliseconds: Int64,
+        endedAtUnixMilliseconds: Int64,
         completed: Bool,
         started: LoadStatistics.State,
         ended: LoadStatistics.State
@@ -3608,6 +4744,8 @@ private struct ScenarioPhaseReport: Encodable {
         name = phase.name
         durationSeconds = phase.durationSeconds
         self.observedDurationSeconds = observedDurationSeconds
+        self.startedAtUnixMilliseconds = startedAtUnixMilliseconds
+        self.endedAtUnixMilliseconds = endedAtUnixMilliseconds
         self.completed = completed
         requestedMessagesPerSecond = phase.messagesPerSecond * rateScale
         requestedRoomLogReadsPerSecond = phase.roomLogReadsPerSecond * rateScale
@@ -3615,6 +4753,14 @@ private struct ScenarioPhaseReport: Encodable {
         requestedReadReceiptsPerSecond = phase.effectiveReadReceiptsPerSecond * rateScale
         requestedRoomSyncStateBatchesPerSecond = phase.effectiveRoomSyncStateBatchesPerSecond * rateScale
         requestedRoomLatestVisibleBatchesPerSecond = phase.effectiveRoomLatestVisibleBatchesPerSecond * rateScale
+        messageTransportEvents = ended.messageTransportEvents.reduce(into: [:]) { result, entry in
+            let delta = entry.value - started.messageTransportEvents[entry.key, default: 0]
+            if delta != 0 { result[entry.key] = delta }
+        }
+        realtimeCoverageEvents = ended.realtimeCoverageEvents.reduce(into: [:]) { result, entry in
+            let delta = entry.value - started.realtimeCoverageEvents[entry.key, default: 0]
+            if delta != 0 { result[entry.key] = delta }
+        }
         messagesSent = ended.messagesSent - started.messagesSent
         messagesAcknowledged = ended.messagesAcknowledged - started.messagesAcknowledged
         messagesSkipped = ended.messagesSkipped - started.messagesSkipped
@@ -3635,6 +4781,9 @@ private struct ScenarioPhaseReport: Encodable {
             - started.readReceiptsAcknowledged
         readReceiptsCoalesced = ended.readReceiptsCoalesced - started.readReceiptsCoalesced
         syncPullsSent = ended.syncPullsSent - started.syncPullsSent
+        syncWireAttempts = ended.syncWireAttempts - started.syncWireAttempts
+        syncRetryAttempts = ended.syncRetryAttempts - started.syncRetryAttempts
+        syncLogicalFailures = ended.syncLogicalFailures - started.syncLogicalFailures
         syncRecordsReceived = ended.syncRecordsReceived - started.syncRecordsReceived
         workloadFailed = ended.workloadFailed - started.workloadFailed
         heartbeatLatency = ended.heartbeatLatency
@@ -3755,10 +4904,13 @@ private struct Percentiles: Encodable {
 
 private enum LoadError: Error, CustomStringConvertible {
     case invalidArguments
+    case messageSendNegotiationFailed
+    case localSourcePortRangeExhausted
     case invalidScenario(String)
     case invalidCredentialFile
     case insufficientCredentials(required: Int, available: Int)
     case unexpectedResponse
+    case unexpectedServerResponse(errorCode: String?, messageType: String, requestID: UInt64)
     case unexpectedSyncResponse(String)
     case connectionClosed
     case directRoomControlQueueFull
@@ -3767,6 +4919,7 @@ private enum LoadError: Error, CustomStringConvertible {
     case connectionLossGuardTriggered(disconnected: Int, authenticated: Int)
     case workloadFailureGuardTriggered(failed: Int, attempted: Int)
     case roomWarmupTimedOut(opened: Int, required: Int)
+    case scenarioStartBarrierFailure(String)
     case scenarioPhaseNotDrained(phase: String, queued: Int, maximumQueued: Int, sent: Int, acknowledged: Int)
     case scenarioCompletionDrainTimedOut(queued: Int, inFlight: Int)
 
@@ -3774,10 +4927,14 @@ private enum LoadError: Error, CustomStringConvertible {
         switch self {
         case .invalidArguments:
             return "invalid arguments; required: --host --ca-path --credentials --report"
+        case .messageSendNegotiationFailed: return "TCP message send operation capability or payload limit was not negotiated"
+        case .localSourcePortRangeExhausted: return "local source port range exhausted after 10000 connection attempts"
         case .invalidScenario(let reason): return "invalid scenario: \(reason)"
         case .invalidCredentialFile: return "credential file is empty, duplicated, or malformed"
         case .insufficientCredentials(let required, let available): return "insufficient credentials: required \(required), available \(available)"
         case .unexpectedResponse: return "gateway returned an unexpected protocol response"
+        case .unexpectedServerResponse(let errorCode, let messageType, let requestID):
+            return "gateway returned an unexpected protocol response errorCode=\(errorCode ?? "NONE") messageType=\(messageType) requestID=\(requestID)"
         case .unexpectedSyncResponse(let reason):
             return "gateway returned an unexpected sync response: \(reason)"
         case .connectionClosed: return "gateway connection closed before authentication"
@@ -3785,8 +4942,9 @@ private enum LoadError: Error, CustomStringConvertible {
         case .memoryGuardTriggered(let megabytes): return "local memory guard triggered at \(megabytes) MB"
         case .failureGuardTriggered(let failed, let attempted): return "connection failure guard triggered: \(failed)/\(attempted)"
         case .connectionLossGuardTriggered(let disconnected, let authenticated): return "active connection loss guard triggered: \(disconnected)/\(authenticated)"
-        case .workloadFailureGuardTriggered(let failed, let attempted): return "message workload failure guard triggered: \(failed)/\(attempted)"
+        case .workloadFailureGuardTriggered(let failed, let attempted): return "workload failure guard triggered: \(failed)/\(attempted)"
         case .roomWarmupTimedOut(let opened, let required): return "room warmup timed out: opened \(opened)/\(required)"
+        case .scenarioStartBarrierFailure(let reason): return "scenario start barrier failed: \(reason)"
         case .scenarioPhaseNotDrained(let phase, let queued, let maximumQueued, let sent, let acknowledged):
             return "scenario phase did not sustain its offered rate: phase=\(phase) queued=\(queued) maximum_queued=\(maximumQueued) sent=\(sent) acknowledged=\(acknowledged)"
         case .scenarioCompletionDrainTimedOut(let queued, let inFlight):

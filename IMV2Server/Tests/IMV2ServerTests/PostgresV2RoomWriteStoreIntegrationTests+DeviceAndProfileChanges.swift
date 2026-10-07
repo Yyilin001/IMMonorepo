@@ -9,6 +9,7 @@ import HTTPTypes
 import Darwin
 #endif
 import IMV2Core
+import IMV2ActorContracts
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
@@ -1432,37 +1433,57 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let changingRoom = changed == "source" ? sourceRoom : target.roomID
             try await sql.raw("INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at) VALUES (\(bind: sourceRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)), (\(bind: target.roomID.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
-            let local = V2ForwardMessagesService(database: owner, writeStore: write, capacityProfile: profile, limits: limits, now: { now })
-            func routed() throws -> V2RoutedForwardMessagesService {
-                try .init(router: V2CachedRoomShardRouter(source: V2PostgresRoomShardRouter(database: control)), owners: ["room-b": local, "alias": local], physicalStoreKeyByShard: ["room-b": "one", "alias": "one"])
+            func routed(database: any Database) throws -> V2ActorForwardingCoordinator {
+                let directory = V2CachedRoomShardRouter(source: V2PostgresRoomShardRouter(database: control))
+                let executor = V2ActorForwardPairDomainExecutor(database: database,
+                    write: PostgresV2RoomWriteStore(database: database), capacityProfile: profile,
+                    limits: limits, now: { now })
+                let cross = try V2ActorCrossOwnerForwardService(sources: [
+                    "room-b": .init(receipts: PostgresV2ForwardReceiptStore(database: database),
+                        jobs: PostgresV2ForwardDeliveryStore(database: database))
+                ], sourceCommand: forwardSourceCommandUnexpected, deadline: { .now + .seconds(30) })
+                return try .init(router: directory, physicalStoreKeyByShard: ["room-b": "owner"],
+                    pair: .init { pair, deadline in
+                        let rooms = [pair.source.roomID, pair.targetRoomID].sorted { $0.rawValue < $1.rawValue }
+                        let first = try await directory.route(for: rooms[0])
+                        let second = try await directory.route(for: rooms[1])
+                        return try await withRoomActivation(database: database, roomID: rooms[0],
+                            shardID: first.shardID, epoch: first.epoch) { firstToken in
+                            try await withRoomActivation(database: database, roomID: rooms[1],
+                                shardID: second.shardID, epoch: second.epoch) { secondToken in
+                                try await executor.execute(pair, activationTokens: [firstToken, secondToken], deadline: deadline)
+                            }
+                        }
+                    }, crossOwner: cross, deadline: { .now + .seconds(30) })
             }
             func command() throws -> V2ForwardMessagesCommand {
                 try .init(operationID: .init(uuid: UUID()), sources: [.init(roomID: sourceRoom, messageID: source.messageID, revision: .init(1))], targetRoomIDs: [target.roomID])
             }
             let original = try command()
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await routed().forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
+            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
             #expect(try await count("im_v2.messages", on: ownerSQL) == 1)
             #expect(try await count("im_v2.message_forward_operations", on: ownerSQL) == 0)
             guard try await count("im_v2.messages", on: ownerSQL) == 1 else { return }
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=0 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
-            let cached = try routed()
+            let cached = try routed(database: owner)
             let accepted = try await cached.forward(actorUserID: .init(uuid: memberTwoUUID), command: original)
             #expect(accepted.count == 1 && accepted[0].errorCode == nil)
             try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
             for input in [original, try command()] {
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await cached.forward(actorUserID: .init(uuid: memberTwoUUID), command: input) }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await cached.forward(actorUserID: .init(uuid: memberTwoUUID), command: input) }
             }
-            #expect(try await routed().forward(actorUserID: .init(uuid: memberTwoUUID), command: original) == accepted)
+            #expect(try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) == accepted)
             #expect(try await count("im_v2.messages", on: ownerSQL) == 2)
             #expect(try await count("im_v2.message_forward_operations", on: ownerSQL) == 1)
             #expect(try await count("im_v2.message_forward_operations", on: sql) == 0)
             try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='retired' WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await routed().forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
+            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
             try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='room-b' WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
-            let wrongLocal = V2ForwardMessagesService(database: control, writeStore: PostgresV2RoomWriteStore(database: control), capacityProfile: profile, limits: limits, now: { now })
-            let wrong = try V2RoutedForwardMessagesService(router: V2PostgresRoomShardRouter(database: control), owners: ["room-b": wrongLocal])
-            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await wrong.forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
+            let wrong = try routed(database: control)
+            await #expect(throws: V2RoomActivationLeaseError.roomNotFound) {
+                _ = try await wrong.forward(actorUserID: .init(uuid: memberTwoUUID), command: original)
+            }
             let barrier = InviteImportTestBarrier()
             let holder = Task {
                 try await owner.transaction { transaction in
@@ -1473,17 +1494,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             await barrier.waitUntilHeld()
-            let queued = Task { try await routed().forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
+            let queued = Task { try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
             do {
                 var waiting = false
                 for _ in 0..<1000 {
-                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%owner_epoch%' AND query LIKE '%FOR UPDATE%'").first(decoding: CountRow.self)?.value == 1
+                    waiting = try await ownerSQL.raw("SELECT COUNT(*) AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%owner_epoch%' AND query LIKE '%FOR NO KEY UPDATE%'").first(decoding: CountRow.self)?.value == 1
                     if waiting { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
                 #expect(waiting)
                 await barrier.release(); try await holder.value
-                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) { _ = try await queued.value }
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await queued.value }
             } catch {
                 await barrier.release(); _ = try? await holder.value; _ = try? await queued.value
                 throw error

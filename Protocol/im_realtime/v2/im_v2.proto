@@ -21,6 +21,9 @@ message Envelope {
   reserved 20, 24, 26, 28, 105, 106;
   reserved "send_message", "withdraw_message", "change_message_reaction", "edit_message", "forward_messages", "messages_forwarded";
   oneof body {
+    DeviceRoomProgressReport device_room_progress_report = 131;
+    DeviceRoomProgressRecorded device_room_progress_recorded = 132;
+    RealtimeCoverage realtime_coverage = 130;
     MessageSendOperation message_send_operation = 127;
     MessageSendOperationRecover message_send_operation_recover = 128;
     MessageSendOperationResult message_send_operation_result = 129;
@@ -99,7 +102,6 @@ message Envelope {
     RoomSyncStateBatchResult room_sync_state_batch_result = 114;
     AccountRoomChangesStart account_room_changes_start = 115;
     AccountRoomChangesReady account_room_changes_ready = 116;
-    AccountRoomChanged account_room_changed = 117;
     AccountRoomResyncRequired account_room_resync_required = 118;
     RoomLatestVisibleBatch room_latest_visible_batch = 119;
     RoomLatestVisibleBatchResult room_latest_visible_batch_result = 120;
@@ -321,14 +323,51 @@ message MessageSendOperationResult {
   }
 }
 
-// Heartbeats carry no delivery or cursor semantics. They only keep a live
-// foreground transport eligible for low-latency availability hints.
+// Heartbeats exchange connection-local room progress without granting authority
+// or renewing leases. Reports describe this device's committed local cursor.
 message Heartbeat {
   uint64 client_time_ms = 1;
+  // At most one: the connection's installed foreground detail-room scope.
+  repeated GroupEventProgress room_progress = 2;
 }
 
 message HeartbeatAck {
   int64 server_time_ms = 1;
+  // Returned even without a report, from the exact live local subscription.
+  repeated GroupEventProgressState room_subscription_states = 2;
+}
+
+// A report is advisory device progress, never a permission or delivery proof.
+message GroupEventProgress {
+  string room_id = 1;
+  uint64 scope_generation = 2;
+  uint64 applied_room_sequence = 3;
+}
+
+// Independent of detail-room subscriptions. The authenticated connection
+// supplies user/device identity; at most 64 distinct rooms per request.
+// Send only after local events and cursor commit atomically. The Gateway checks
+// each report against a current online room grant before persisting the batch.
+message DeviceRoomCursor {
+  string room_id = 1;
+  uint64 applied_through = 2;
+}
+message DeviceRoomProgressReport {
+  repeated DeviceRoomCursor rooms = 1;
+}
+// Success confirms storage of this device's report, not authorization, message
+// read status, or permission to retire room history. Never advances local data.
+message DeviceRoomProgressRecorded {
+  repeated DeviceRoomCursor rooms = 1;
+}
+message GroupEventProgressState {
+  string room_id = 1;
+  uint64 scope_generation = 2;
+  uint64 high_watermark = 3;
+  // Last accepted report; clients must never use it to advance local storage.
+  uint64 applied_room_sequence = 4;
+  // Actual socket Ready admission for this exact subscription authorization.
+  bool ready = 5;
 }
 
 // Live activity is intentionally ephemeral. It is never appended to a room
@@ -699,13 +738,6 @@ message AccountRoomChangesReady {
   string connection_epoch = 1;
 }
 
-message AccountRoomChanged {
-  string connection_epoch = 1;
-  uint64 notification_sequence = 2;
-  string room_id = 3;
-  uint64 high_watermark = 4;
-}
-
 message AccountRoomResyncRequired {
   string connection_epoch = 1;
 }
@@ -1074,3 +1106,20 @@ message PresencePublicationControl {
   Mode mode = 1;
 }
 message PresencePublicationControlled { PresencePublicationControl.Mode mode = 1; }
+
+// Connection-local revision orders coverage transitions, never authorization.
+// READY is sent only after the matching subscription and fresh-head barrier.
+message RealtimeCoverage {
+  enum Scope { SCOPE_UNSPECIFIED = 0; ACCOUNT = 1; ROOM = 2; DIRECTORY = 3; PRESENCE = 4; TYPING = 5; }
+  enum State { STATE_UNSPECIFIED = 0; RECOVERING = 1; READY = 2; ENDED = 3; }
+  enum Reason { REASON_UNSPECIFIED = 0; INSTALLING = 1; COVERAGE_LOST = 2; DEPENDENCY_UNAVAILABLE = 3; CANCELLED = 4; }
+  Scope scope = 1;
+  string scope_id = 2;
+  uint64 revision = 3;
+  State state = 4;
+  Reason reason = 5;
+  uint64 scope_generation = 6;
+  // Account/room barrier only. Directory channel uses connection_epoch instead.
+  uint64 high_watermark = 7;
+  string connection_epoch = 8;
+}

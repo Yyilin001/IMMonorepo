@@ -23,6 +23,9 @@ public func v2RenderPrometheusRuntimePressureMetrics(
     if let actors = snapshot.roomActors {
         lines.append(contentsOf: v2RoomActorMetricLines(actors))
     }
+    if let recovery = snapshot.roomRecoveryBatches {
+        lines += v2RoomRecoveryBatchMetricLines(recovery)
+    }
     for pool in snapshot.databasePools.pools {
         lines.append(
             "im_v2_database_pool_event_loop_handles{pool=\"\(pool.poolClass.rawValue)\"} \(pool.eventLoopHandles)"
@@ -111,6 +114,36 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "im_v2_database_work_queue_wait_milliseconds_count{class=\"\(workClass.rawValue)\"} \(wait.samples)"
         )
     }
+    // These fixed purposes partition interactiveRead; they never add capacity.
+    for (name, type, help) in [
+        ("in_flight", "gauge", "Interactive database permits by trusted purpose; shares the original class capacity."),
+        ("queued", "gauge", "Interactive queued work by trusted purpose; sum stays within the original class queue."),
+        ("admissions_total", "counter", "Actual interactive permit grants by trusted purpose."),
+        ("rejections_total", "counter", "Interactive work rejected before borrowing by purpose and fixed reason."),
+        ("cancellations_total", "counter", "Interactive queued cancellations by trusted purpose."),
+        ("queue_wait_milliseconds", "histogram", "Completed interactive queue waits including grants, cancellation and timeout; milliseconds.")
+    ] {
+        lines.append("# HELP im_v2_database_work_interactive_read_\(name) \(help)")
+        lines.append("# TYPE im_v2_database_work_interactive_read_\(name) \(type)")
+    }
+    for purpose in V2InteractiveReadAdmissionPurpose.allCases {
+        let value = snapshot.databaseWork.interactiveReadPurposes[purpose] ?? .empty
+        let labels = "purpose=\"\(purpose.rawValue)\""
+        let prefix = "im_v2_database_work_interactive_read_"
+        lines.append("\(prefix)in_flight{\(labels)} \(value.inFlight)")
+        lines.append("\(prefix)queued{\(labels)} \(value.queued)")
+        lines.append("\(prefix)admissions_total{\(labels)} \(value.admittedRequests)")
+        lines.append("\(prefix)cancellations_total{\(labels)} \(value.cancelledRequests)")
+        lines.append("\(prefix)rejections_total{\(labels),reason=\"queue_full\"} \(value.queueFullRejections)")
+        lines.append("\(prefix)rejections_total{\(labels),reason=\"timeout\"} \(value.timeoutRejections)")
+        let wait = value.queueWait
+        for bucket in V2DatabaseWorkAdmissionWaitBucket.allCases {
+            lines.append("\(prefix)queue_wait_milliseconds_bucket{\(labels),le=\"\(bucket.rawValue)\"} \(wait.count(atOrBelow: bucket))")
+        }
+        lines.append("\(prefix)queue_wait_milliseconds_bucket{\(labels),le=\"+Inf\"} \(wait.samples)")
+        lines.append("\(prefix)queue_wait_milliseconds_sum{\(labels)} \(wait.sumMilliseconds)")
+        lines.append("\(prefix)queue_wait_milliseconds_count{\(labels)} \(wait.samples)")
+    }
     lines.append(contentsOf: [
         "# HELP im_v2_sync_wake_pending_users Users waiting for the next coalescer flush.",
         "# TYPE im_v2_sync_wake_pending_users gauge",
@@ -128,49 +161,6 @@ public func v2RenderPrometheusRuntimePressureMetrics(
         "# TYPE im_v2_sync_wake_dropped_total counter",
         "im_v2_sync_wake_dropped_total \(snapshot.syncWake.droppedNotifications)",
     ])
-    if let credits = snapshot.shardAdmissionCommandCredits {
-        lines.append(contentsOf: [
-            "# HELP im_v2_shard_admission_command_credits Process-local, already durable-charged command-window credits for direct room-event-log sends.",
-            "# TYPE im_v2_shard_admission_command_credits gauge",
-            "im_v2_shard_admission_command_credits{state=\"available\"} \(credits.activeCredits)",
-            "im_v2_shard_admission_command_credits{state=\"in_flight\"} \(credits.inFlightCredits)",
-            "# HELP im_v2_shard_admission_command_credit_reservations_total Durable batch reservations of direct room-event-log command credits.",
-            "# TYPE im_v2_shard_admission_command_credit_reservations_total counter",
-            "im_v2_shard_admission_command_credit_reservations_total \(credits.batchReservations)",
-            "# HELP im_v2_shard_admission_command_credits_reserved_total Command-window credits durably charged in PostgreSQL batches.",
-            "# TYPE im_v2_shard_admission_command_credits_reserved_total counter",
-            "im_v2_shard_admission_command_credits_reserved_total \(credits.databaseCreditsReserved)",
-            "# HELP im_v2_shard_admission_command_credits_committed_total Credits consumed by committed message transactions.",
-            "# TYPE im_v2_shard_admission_command_credits_committed_total counter",
-            "im_v2_shard_admission_command_credits_committed_total \(credits.committedCredits)",
-            "# HELP im_v2_shard_admission_command_credit_rejections_total Requests rejected because the durable command window is full.",
-            "# TYPE im_v2_shard_admission_command_credit_rejections_total counter",
-            "im_v2_shard_admission_command_credit_rejections_total \(credits.capacityRejections)",
-        ])
-    }
-    if let credits = snapshot.roomAdmissionCommandCredits {
-        lines.append(contentsOf: [
-            "# HELP im_v2_room_admission_command_credits Process-local, already durable-charged per-room command-window credits for direct room-event-log sends.",
-            "# TYPE im_v2_room_admission_command_credits gauge",
-            "im_v2_room_admission_command_credits{state=\"available\"} \(credits.activeCredits)",
-            "im_v2_room_admission_command_credits{state=\"in_flight\"} \(credits.inFlightCredits)",
-            "# HELP im_v2_room_admission_command_credit_hot_rooms Locally promoted hot rooms eligible for precharged per-room command credits.",
-            "# TYPE im_v2_room_admission_command_credit_hot_rooms gauge",
-            "im_v2_room_admission_command_credit_hot_rooms \(credits.promotedHotRooms)",
-            "# HELP im_v2_room_admission_command_credit_reservations_total Durable per-room command-credit batch reservations.",
-            "# TYPE im_v2_room_admission_command_credit_reservations_total counter",
-            "im_v2_room_admission_command_credit_reservations_total \(credits.batchReservations)",
-            "# HELP im_v2_room_admission_command_credits_reserved_total Per-room command-window credits durably charged in PostgreSQL batches.",
-            "# TYPE im_v2_room_admission_command_credits_reserved_total counter",
-            "im_v2_room_admission_command_credits_reserved_total \(credits.databaseCreditsReserved)",
-            "# HELP im_v2_room_admission_command_credits_committed_total Per-room credits consumed by committed message transactions.",
-            "# TYPE im_v2_room_admission_command_credits_committed_total counter",
-            "im_v2_room_admission_command_credits_committed_total \(credits.committedCredits)",
-            "# HELP im_v2_room_admission_command_credit_rejections_total Requests rejected because a per-room durable command window is full.",
-            "# TYPE im_v2_room_admission_command_credit_rejections_total counter",
-            "im_v2_room_admission_command_credit_rejections_total \(credits.capacityRejections)",
-        ])
-    }
     if let batching = snapshot.directRoomLogAppendBatching {
         lines.append(contentsOf: [
             "# HELP im_v2_direct_room_log_append_batch_lanes Independent room-keyed append scheduling lanes.",
@@ -295,6 +285,22 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             )
         }
     }
+    if let send = snapshot.gatewayMessageSend {
+        let gauges: [(String, Int)] = [
+            ("in_flight_requests", send.inFlightRequests),
+            ("reserved_bytes", send.reservedBytes),
+            ("peak_in_flight_requests_lifetime", send.peakInFlightRequests),
+            ("peak_reserved_bytes_lifetime", send.peakReservedBytes),
+        ]
+        for (name, value) in gauges {
+            lines.append("# TYPE im_v2_gateway_message_send_\(name) gauge")
+            lines.append("im_v2_gateway_message_send_\(name) \(value)")
+        }
+        lines.append("# TYPE im_v2_gateway_message_send_rejected_total counter")
+        for reason in V2GatewayMessageSendRejectionReason.allCases {
+            lines.append("im_v2_gateway_message_send_rejected_total{reason=\"\(reason.rawValue)\"} \(send.rejections[reason, default: 0])")
+        }
+    }
     if let lag = snapshot.gatewayEventLoopLag {
         lines.append(contentsOf: [
             "# HELP im_v2_gateway_event_loop_lag_milliseconds Delay of a low-frequency task scheduled on TLS child-channel EventLoops.",
@@ -396,6 +402,91 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "im_v2_prepared_group_event_page_cache_evictions_total \(prepared.evictions)",
         ])
     }
+    if let recovery = snapshot.registryRecovery {
+        lines.append(contentsOf: v2RenderPrometheusRecoverySchedulingMetrics(recovery.schedulingTelemetry)
+            .split(separator: "\n").map(String.init))
+        let positions = recovery.positionLedger
+        lines += [
+            "# HELP im_v2_gateway_recovery_positions_occupied Authoritative recovery admission positions: queued plus authorization_returns plus selected_handoff plus outbound. Mutually exclusive positions; prepared queued proofs are included in queued. Independent from overlapping scope and root-task gauges.",
+            "# TYPE im_v2_gateway_recovery_positions_occupied gauge",
+            "im_v2_gateway_recovery_positions_occupied \(positions.occupied)",
+            "# HELP im_v2_gateway_recovery_positions_capacity Recovery admission position limit.",
+            "# TYPE im_v2_gateway_recovery_positions_capacity gauge",
+            "im_v2_gateway_recovery_positions_capacity \(positions.capacity)",
+            "# HELP im_v2_gateway_recovery_positions Recovery admission positions by fixed mutually exclusive stage.",
+            "# TYPE im_v2_gateway_recovery_positions gauge",
+            "# HELP im_v2_gateway_recovery_position_oldest_milliseconds Oldest currently retained position using original demand enqueue, attempt reservation, selected dispatch or outbound ticket start time.",
+            "# TYPE im_v2_gateway_recovery_position_oldest_milliseconds gauge",
+            "im_v2_gateway_recovery_position_oldest_milliseconds{stage=\"all\"} \(positions.oldestMilliseconds)"
+        ]
+        for stage in V2RecoveryPositionStage.allCases {
+            let value = positions.stages[stage] ?? .init()
+            let labels = "{stage=\"\(stage.rawValue)\"}"
+            lines.append("im_v2_gateway_recovery_positions\(labels) \(value.count)")
+            lines.append("im_v2_gateway_recovery_position_oldest_milliseconds\(labels) \(value.oldestMilliseconds)")
+        }
+        lines += [
+            "# HELP im_v2_gateway_retired_recovery_writer_work Retired recovery writer ownership by fixed stage and unit: retained_streams occupies the connection Directory operation budget until actual drain; actual_drains counts at most 16 owned drain worker tasks processing a subset of retained streams. Different units and overlapping ownership must not be added together.",
+            "# TYPE im_v2_gateway_retired_recovery_writer_work gauge",
+            "# HELP im_v2_gateway_retired_recovery_writer_oldest_milliseconds Oldest retained stream or actual drain worker using its own original monotonic retirement or drain start time.",
+            "# TYPE im_v2_gateway_retired_recovery_writer_oldest_milliseconds gauge"
+        ]
+        for stage in V2RetiredRecoveryWriterStage.allCases {
+            let value = recovery.retiredRecoveryWriterStages[stage] ?? .init()
+            let labels = "{stage=\"\(stage.rawValue)\",unit=\"\(stage.unit)\"}"
+            lines.append("im_v2_gateway_retired_recovery_writer_work\(labels) \(value.count)")
+            lines.append("im_v2_gateway_retired_recovery_writer_oldest_milliseconds\(labels) \(value.oldestMilliseconds)")
+        }
+        lines += [
+            "# HELP im_v2_gateway_recovery_attempts Recovery ownership by fixed stage and unit: interest_activation, query_root and control are independently bounded root tasks; authorization_query counts actual provider query attempts within query roots until provider return. Query roots include result settlement. The query subset overlaps roots; these are not scope counts or physical database sessions.",
+            "# TYPE im_v2_gateway_recovery_attempts gauge",
+            "# HELP im_v2_gateway_recovery_attempt_oldest_milliseconds Oldest currently owned recovery root or provider query attempt using its own original monotonic start time.",
+            "# TYPE im_v2_gateway_recovery_attempt_oldest_milliseconds gauge"
+        ]
+        for stage in V2RecoveryAttemptStage.allCases {
+            let value = recovery.recoveryAttemptStages[stage] ?? .init()
+            let labels = "{stage=\"\(stage.rawValue)\",unit=\"\(stage.unit)\"}"
+            lines.append("im_v2_gateway_recovery_attempts\(labels) \(value.count)")
+            lines.append("im_v2_gateway_recovery_attempt_oldest_milliseconds\(labels) \(value.oldestMilliseconds)")
+        }
+        lines += [
+            "# HELP im_v2_gateway_presence_observation_work Presence observation owner work by fixed stage and unit: actual_queries are locally submitted query batches until provider return; result_positions retain exact batch/request keys after query ownership transfers to output; queued keys, active query keys and retained result positions share the 1024 position budget; owned_jobs also include result preparation and mailbox offers; tickets include per-target output responsibility until actual settlement; retired_tickets is the generation-retired subset. Overlapping gauges, never connection counts or physical database sessions.",
+            "# TYPE im_v2_gateway_presence_observation_work gauge",
+            "# HELP im_v2_gateway_presence_observation_oldest_milliseconds Oldest currently owned presence stage work using original monotonic enqueue, query or result-retention time; settlement and retired stages preserve the result ticket time.",
+            "# TYPE im_v2_gateway_presence_observation_oldest_milliseconds gauge"
+        ]
+        for stage in V2PresenceObservationStage.allCases {
+            let value = recovery.presenceObservationStages[stage] ?? .init()
+            let labels = "{stage=\"\(stage.rawValue)\",unit=\"\(stage.unit)\"}"
+            lines.append("im_v2_gateway_presence_observation_work\(labels) \(value.count)")
+            lines.append("im_v2_gateway_presence_observation_oldest_milliseconds\(labels) \(value.oldestMilliseconds)")
+        }
+        lines += [
+            "# HELP im_v2_gateway_registry_recovery_scopes Current Registry scope stages; actual and actual_scopes alias the same root-owned scopes and must not be added together; outbound_retention holds scope tickets after mailbox handoff until actual output settlement; root tasks and provider queries have separate recovery_attempts gauges; authorization_returns counts exact actual-owned result return positions within the same queued-plus-reserved 1024 bound; inline_retention is the separate existing ingress-consumer handoff lane; overlapping gauges, not client cursor progress.",
+            "# TYPE im_v2_gateway_registry_recovery_scopes gauge",
+            "# HELP im_v2_gateway_registry_recovery_oldest_milliseconds Oldest current scope demand or actual job by fixed kind/stage.",
+            "# TYPE im_v2_gateway_registry_recovery_oldest_milliseconds gauge",
+            "# HELP im_v2_gateway_registry_recovery_demands Current pending demands by fixed reason; not successful permission checks.",
+            "# TYPE im_v2_gateway_registry_recovery_demands gauge",
+            "# HELP im_v2_gateway_registry_recovery_actual_reasons Root-owned Registry scopes by original demand reason until result requeue or mailbox handoff; outbound tickets, root tasks and provider queries are counted separately.",
+            "# TYPE im_v2_gateway_registry_recovery_actual_reasons gauge",
+            "# HELP im_v2_gateway_registry_recovery_duplicate_retained_total Same-generation confirmed retained requirements skipped without new work.",
+            "# TYPE im_v2_gateway_registry_recovery_duplicate_retained_total counter"
+        ]
+        for kind in V2RegistryRecoveryScopeKind.allCases {
+            for stage in V2RegistryRecoveryStage.allCases {
+                let value = recovery.stages[kind]?[stage] ?? .init()
+                let labels = "{kind=\"\(kind.rawValue)\",stage=\"\(stage.rawValue)\"}"
+                lines.append("im_v2_gateway_registry_recovery_scopes\(labels) \(value.count)")
+                lines.append("im_v2_gateway_registry_recovery_oldest_milliseconds\(labels) \(value.oldestMilliseconds)")
+            }
+            for reason in V2RegistryRecoveryReason.allCases {
+                lines.append("im_v2_gateway_registry_recovery_demands{kind=\"\(kind.rawValue)\",reason=\"\(reason.rawValue)\"} \(recovery.reasons[kind]?[reason] ?? 0)")
+                lines.append("im_v2_gateway_registry_recovery_actual_reasons{kind=\"\(kind.rawValue)\",reason=\"\(reason.rawValue)\"} \(recovery.actualReasons[kind]?[reason] ?? 0)")
+            }
+            lines.append("im_v2_gateway_registry_recovery_duplicate_retained_total{kind=\"\(kind.rawValue)\"} \(recovery.duplicateRetained[kind] ?? 0)")
+        }
+    }
     if let renewals = snapshot.livePresenceRenewals {
         lines.append(contentsOf: [
             "# HELP im_v2_live_presence_renewal_pending_connections Heartbeat lease renewals waiting in the bounded coalescing window.",
@@ -412,6 +503,172 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "# TYPE im_v2_live_presence_renewal_largest_batch gauge",
             "im_v2_live_presence_renewal_largest_batch \(renewals.largestBatch)",
         ])
+    }
+    if let loans = snapshot.databaseLoans {
+        lines.append(contentsOf: [
+            "# HELP im_v2_database_loan_in_flight Granted loans until actual database future settlement, including driver borrow wait; not actual connection utilization.",
+            "# TYPE im_v2_database_loan_in_flight gauge",
+            "# HELP im_v2_database_loan_queued Requests awaiting a physical loan grant.",
+            "# TYPE im_v2_database_loan_queued gauge",
+            "# HELP im_v2_database_loan_granted_total Physical loan grants.",
+            "# TYPE im_v2_database_loan_granted_total counter",
+            "# HELP im_v2_database_loan_rejected_total Physical loan requests rejected before grant.",
+            "# TYPE im_v2_database_loan_rejected_total counter",
+        ])
+        for (label, value) in [("ordinary", loans.ordinary), ("activation", loans.activation), ("sync", loans.sync), ("renewal", loans.renewal)] {
+            lines.append(contentsOf: [
+                "im_v2_database_loan_in_flight{class=\"\(label)\"} \(value.inFlight)",
+                "im_v2_database_loan_queued{class=\"\(label)\"} \(value.queued)",
+                "im_v2_database_loan_granted_total{class=\"\(label)\"} \(value.granted)",
+                "im_v2_database_loan_rejected_total{class=\"\(label)\"} \(value.rejected)",
+            ])
+        }
+    }
+    if let observations = snapshot.databaseLoans?.observations {
+        let prefix = "im_v2_database_loan_observation"
+        for (suffix, type, help) in [
+            ("active", "gauge", "Currently observed loans in a nonterminal stage; not all database work."),
+            ("oldest_ms", "gauge", "Oldest currently observed stage age in milliseconds; zero means no active observation for this stage."),
+            ("stage_duration_sum", "counter", "Milliseconds of completed observed stage intervals; not SQL statement counts or message latency."),
+            ("stage_duration_count", "counter", "Completed observed stage intervals."),
+            ("stage_duration_max", "gauge", "Lifetime maximum completed observed stage interval in milliseconds."),
+            ("held_duration_sum", "counter", "Milliseconds from loan grant until actual future settlement, including driver wait and transaction finalization."),
+            ("held_duration_count", "counter", "Granted observed loans whose actual database future settled."),
+            ("held_duration_max", "gauge", "Lifetime maximum grant-to-actual-settlement duration in milliseconds."),
+            ("sql_duration_sum", "counter", "Milliseconds of completed actual SQL futures by fixed phase; concurrent futures may overlap, so this cannot be added to held wall-clock duration."),
+            ("sql_duration_count", "counter", "Completed actual SQL futures by fixed phase, including failures."),
+            ("sql_duration_max", "gauge", "Lifetime maximum completed actual SQL-future duration in milliseconds.")
+        ] {
+            lines.append("# HELP \(prefix)_\(suffix) \(help)")
+            lines.append("# TYPE \(prefix)_\(suffix) \(type)")
+        }
+        for source in V2DatabaseLoanObservationMetricSource.allCases {
+            let value = observations[source, default: .init()]
+            let sourceLabel = "source=\"\(source.rawValue)\""
+            for stage in V2DatabaseLoanObservationMetricStage.allCases where stage != .settled {
+                let item = value.stages[stage, default: .init()]
+                let labels = "\(sourceLabel),stage=\"\(stage.rawValue)\""
+                lines.append(contentsOf: [
+                    "\(prefix)_active{\(labels)} \(item.active)",
+                    "\(prefix)_oldest_ms{\(labels)} \(item.oldestMilliseconds)",
+                    "\(prefix)_stage_duration_sum{\(labels)} \(item.totalMilliseconds)",
+                    "\(prefix)_stage_duration_count{\(labels)} \(item.count)",
+                    "\(prefix)_stage_duration_max{\(labels)} \(item.maxMilliseconds)"
+                ])
+            }
+            for phase in V2DatabaseLoanObservationMetricSQLPhase.allCases {
+                let item = value.sqlPhases[phase, default: .init()]
+                let labels = "\(sourceLabel),phase=\"\(phase.rawValue)\""
+                lines.append(contentsOf: [
+                    "\(prefix)_sql_duration_sum{\(labels)} \(item.totalMilliseconds)",
+                    "\(prefix)_sql_duration_count{\(labels)} \(item.count)",
+                    "\(prefix)_sql_duration_max{\(labels)} \(item.maxMilliseconds)"
+                ])
+            }
+            lines.append(contentsOf: [
+                "\(prefix)_held_duration_sum{\(sourceLabel)} \(value.actualHeldTotalMilliseconds)",
+                "\(prefix)_held_duration_count{\(sourceLabel)} \(value.actualHeldCount)",
+                "\(prefix)_held_duration_max{\(sourceLabel)} \(value.actualHeldMaxMilliseconds)"
+            ])
+        }
+    }
+    for (prefix, optionalOwner) in [
+        ("im_v2_send_operation_owner_", snapshot.sendOperationOwnerBatching)
+    ] {
+        guard let owner = optionalOwner else { continue }
+        let gauges: [(String, Int, String)] = [
+            ("retained_items", owner.retainedItems, "Commands retained across queued and executing physical-owner work."),
+            ("retained_bytes", owner.retainedBytes, "Encoded command payload bytes retained across queued and executing owner work."),
+            ("queued_turns", owner.queuedTurns, "Room requests waiting for this physical-owner stage's cohort selection."),
+            ("waiting_policy_turns", owner.waitingPolicyTurns, "Room turns retaining original inputs until cold policy preparation settles."),
+            ("in_flight_batches", owner.inFlightBatches, "Actual stage cohorts awaiting admission or executor settlement, not database transactions."),
+            ("largest_batch", owner.largestBatch, "Largest command count in one physical-owner coordinator cohort."),
+            ("largest_room_count", owner.largestRoomCount, "Largest distinct room count in one physical-owner coordinator cohort.")
+        ]
+        for (suffix, value, help) in gauges {
+            let name = "\(prefix)\(suffix)"
+            lines.append(contentsOf: ["# HELP \(name) \(help)", "# TYPE \(name) gauge", "\(name) \(value)"])
+        }
+        if let stages = owner.stages {
+            let name = "\(prefix)batch_roots"
+            lines.append(contentsOf: [
+                "# HELP \(name) Retained physical-owner roots partitioned by lifecycle stage. Quota turn includes actual execution and cleanup, not SQL transaction counts; standby borrowing remains within existing root and payload budgets.",
+                "# TYPE \(name) gauge"
+            ])
+            for stage in V2SendOperationOwnerBatchStage.allCases {
+                lines.append("\(name){stage=\"\(stage.rawValue)\"} \(stages[stage, default: 0])")
+            }
+        }
+        let counters: [(String, UInt64, String)] = [
+            ("batches_started_total", owner.batchesStarted, "Physical-owner stage cohorts started, including admission attempts; not room turns or commits."),
+            ("batches_completed_total", owner.batchesCompleted, "Stage cohorts whose actual executor or admission rejection has settled; not successful commits."),
+            ("commands_submitted_total", owner.commandsSubmitted, "Commands selected into actual stage cohorts; not durable acceptances or client acknowledgements.")
+        ]
+        for (suffix, value, help) in counters {
+            let name = "\(prefix)\(suffix)"
+            lines.append(contentsOf: ["# HELP \(name) \(help)", "# TYPE \(name) counter", "\(name) \(value)"])
+        }
+    }
+    if let operations = snapshot.sendOperationBatching {
+        lines.append("# HELP im_v2_policy_memory_events_total Bounded policy state lookup and object/fact retention events.")
+        lines.append("# TYPE im_v2_policy_memory_events_total counter")
+        for event in V2PolicyMemoryEvent.allCases {
+            lines.append("im_v2_policy_memory_events_total{event=\"\(event.rawValue)\"} \(operations.policyMemoryEvents[event, default: 0])")
+        }
+        lines.append(contentsOf: [
+            "# HELP im_v2_send_operation_sql_continuation_settled_not_resumed Observed settled SQL results whose continuation has not resumed; does not cover all SQL or actor tasks.",
+            "# TYPE im_v2_send_operation_sql_continuation_settled_not_resumed gauge",
+            "# HELP im_v2_send_operation_sql_continuation_resumed_not_dispatched Observed resumed continuations awaiting a recorded adjacent dispatch or sequence end; does not cover all SQL or actor tasks.",
+            "# TYPE im_v2_send_operation_sql_continuation_resumed_not_dispatched gauge",
+            "# HELP im_v2_send_operation_sql_continuation_no_next_dispatch_total Observations ended without a recorded successor dispatch due to sequence end, failure or closure; unobserved SQL, COMMIT or ROLLBACK may still run.",
+            "# TYPE im_v2_send_operation_sql_continuation_no_next_dispatch_total counter",
+            "# HELP im_v2_send_operation_sql_continuation_duration_milliseconds_sum Independent observed SQL continuation segments, with the second ending only at a recorded adjacent dispatch; overlap transaction stages and are not proof of COMMIT or socket delivery.",
+            "# TYPE im_v2_send_operation_sql_continuation_duration_milliseconds_sum counter",
+            "# TYPE im_v2_send_operation_sql_continuation_duration_milliseconds_count counter",
+            "# HELP im_v2_send_operation_sql_continuation_duration_milliseconds_max Lifetime maximum of each completed SQL continuation segment.",
+            "# TYPE im_v2_send_operation_sql_continuation_duration_milliseconds_max gauge",
+        ])
+        for source in V2RoomSQLContinuationSource.allCases {
+            let item = operations.sqlContinuations[source, default: .init()]
+            let label = "{source=\"\(source.rawValue)\"}"
+            lines.append("im_v2_send_operation_sql_continuation_settled_not_resumed\(label) \(item.settledNotResumed)")
+            lines.append("im_v2_send_operation_sql_continuation_resumed_not_dispatched\(label) \(item.resumedNotDispatched)")
+            lines.append("im_v2_send_operation_sql_continuation_no_next_dispatch_total\(label) \(item.noNextDispatch)")
+            let parts: [(String, UInt64, Double, Double)] = [
+                ("settled_to_resumed", item.settledToResumedCount,
+                 item.settledToResumedTotalMilliseconds, item.settledToResumedMaxMilliseconds),
+                ("resumed_to_dispatch", item.resumedToDispatchCount,
+                 item.resumedToDispatchTotalMilliseconds, item.resumedToDispatchMaxMilliseconds),
+            ]
+            for (part, count, sum, maximum) in parts {
+                let labels = "{source=\"\(source.rawValue)\",part=\"\(part)\"}"
+                lines.append("im_v2_send_operation_sql_continuation_duration_milliseconds_sum\(labels) \(sum)")
+                lines.append("im_v2_send_operation_sql_continuation_duration_milliseconds_count\(labels) \(count)")
+                lines.append("im_v2_send_operation_sql_continuation_duration_milliseconds_max\(labels) \(maximum)")
+            }
+        }
+        lines.append(contentsOf: [
+            "# HELP im_v2_send_operation_admission_handoff_duration_milliseconds_sum Admission handoff segments before COMMIT dispatch; overlap body/admission and transaction finalization, never add to stage latency.",
+            "# TYPE im_v2_send_operation_admission_handoff_duration_milliseconds_sum counter",
+            "# TYPE im_v2_send_operation_admission_handoff_duration_milliseconds_count counter",
+            "# HELP im_v2_send_operation_admission_handoff_duration_milliseconds_max Lifetime maximum admission handoff segment before COMMIT dispatch.",
+            "# TYPE im_v2_send_operation_admission_handoff_duration_milliseconds_max gauge",
+        ])
+        for path in V2SendOperationAdmissionPath.allCases {
+            let item = operations.ownerAdmissionHandoffs[path, default: .init()]
+            let parts: [(String, Double, Double)] = [
+                ("result_ready_to_validated", item.resultReadyToValidatedMillisecondsTotal,
+                 item.resultReadyToValidatedMillisecondsMax),
+                ("validated_to_commit_dispatch", item.validatedToCommitDispatchMillisecondsTotal,
+                 item.validatedToCommitDispatchMillisecondsMax),
+            ]
+            for (part, sum, maximum) in parts {
+                let labels = "{path=\"\(path.rawValue)\",part=\"\(part)\"}"
+                lines.append("im_v2_send_operation_admission_handoff_duration_milliseconds_sum\(labels) \(sum)")
+                lines.append("im_v2_send_operation_admission_handoff_duration_milliseconds_count\(labels) \(item.count)")
+                lines.append("im_v2_send_operation_admission_handoff_duration_milliseconds_max\(labels) \(maximum)")
+            }
+        }
     }
     if let operations = snapshot.sendOperationBatching {
         lines.append(contentsOf: [
@@ -441,6 +698,57 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "# TYPE im_v2_send_operation_execution_milliseconds_max gauge",
             "im_v2_send_operation_execution_milliseconds_max \(operations.executionMillisecondsMax)",
         ])
+    }
+    if let operations = snapshot.sendOperationBatching {
+        let counters: [(String, UInt64, String)] = [
+            ("cohort_attempts_total", operations.ownerCohortAttempts, "Actual Store setwise transaction attempts, including isolation subcohorts; not coordinator batches."),
+            ("cohort_handles_total", operations.ownerCohortHandles, "Handles included across actual setwise attempts; isolation may retry a handle."),
+            ("cohort_commands_total", operations.ownerCohortCommands, "Commands included across actual setwise attempts; not unique submissions or throughput."),
+            ("cohort_commits_total", operations.ownerCohortCommits, "Confirmed Store setwise transaction commits."),
+            ("cohort_accepted_commands_total", operations.ownerCohortAcceptedCommands, "Newly accepted commands in confirmed setwise commits."),
+            ("cohort_replayed_commands_total", operations.ownerCohortReplayedCommands, "Permanent receipt replays returned by confirmed setwise commits."),
+            ("cohort_isolations_total", operations.ownerCohortIsolations, "Proven rollback isolation decisions; not scalar fallback command counts.")
+        ]
+        for (suffix, value, help) in counters {
+            let name = "im_v2_send_operation_store_\(suffix)"
+            lines.append(contentsOf: ["# HELP \(name) \(help)", "# TYPE \(name) counter", "\(name) \(value)"])
+        }
+        lines.append(contentsOf: [
+            "# HELP im_v2_send_operation_store_scalar_fallback_handles_total Handles taking their scalar execution, counted once at that boundary by fixed reason.",
+            "# TYPE im_v2_send_operation_store_scalar_fallback_handles_total counter",
+            "# HELP im_v2_send_operation_store_scalar_fallback_commands_total Commands taking scalar execution; not repeated for binary isolation depth.",
+            "# TYPE im_v2_send_operation_store_scalar_fallback_commands_total counter"
+        ])
+        for reason in V2SendOperationOwnerScalarFallbackReason.allCases {
+            let value = operations.ownerScalarFallbacks[reason, default: .init()]
+            lines.append("im_v2_send_operation_store_scalar_fallback_handles_total{reason=\"\(reason.rawValue)\"} \(value.handles)")
+            lines.append("im_v2_send_operation_store_scalar_fallback_commands_total{reason=\"\(reason.rawValue)\"} \(value.commands)")
+        }
+    }
+    if let operations = snapshot.sendOperationBatching {
+        lines.append(contentsOf: [
+            "# HELP im_v2_send_operation_stage_in_flight Actual durable send operations still executing in each fixed stage.",
+            "# TYPE im_v2_send_operation_stage_in_flight gauge",
+            "# HELP im_v2_send_operation_stage_started_total Actual operations started in each fixed stage.",
+            "# TYPE im_v2_send_operation_stage_started_total counter",
+            "# HELP im_v2_send_operation_stage_completed_total Actual operations completed in each fixed stage.",
+            "# TYPE im_v2_send_operation_stage_completed_total counter",
+            "# HELP im_v2_send_operation_stage_duration_milliseconds_sum Monotonic elapsed milliseconds of completed stage operations.",
+            "# TYPE im_v2_send_operation_stage_duration_milliseconds_sum counter",
+            "# HELP im_v2_send_operation_stage_duration_milliseconds_max Longest completed stage operation in milliseconds.",
+            "# TYPE im_v2_send_operation_stage_duration_milliseconds_max gauge",
+        ])
+        for stage in V2SendOperationStage.allCases {
+            let item = operations.stages[stage, default: .init()]
+            let started = item.count.addingReportingOverflow(UInt64(max(0, item.inFlight)))
+            let startedCount = started.overflow ? UInt64.max : started.partialValue
+            let label = "{stage=\"\(stage.rawValue)\"}"
+            lines.append("im_v2_send_operation_stage_in_flight\(label) \(item.inFlight)")
+            lines.append("im_v2_send_operation_stage_started_total\(label) \(startedCount)")
+            lines.append("im_v2_send_operation_stage_completed_total\(label) \(item.count)")
+            lines.append("im_v2_send_operation_stage_duration_milliseconds_sum\(label) \(item.totalMilliseconds)")
+            lines.append("im_v2_send_operation_stage_duration_milliseconds_max\(label) \(item.maxMilliseconds)")
+        }
     }
     return lines.joined(separator: "\n") + "\n"
 }

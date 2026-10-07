@@ -24,16 +24,20 @@ public struct V2AuthenticatedConnection: Equatable, Sendable {
     public let deviceID: DeviceID
     /// 认证前协商的能力 profile，领域处理器据此选择设备可解释的同步表示。
     public let capabilityProfile: String
+    /// Device control cut read atomically with credential authentication.
+    /// Later control snapshots compare versions instead of rereading credentials.
+    public let credentialControlVersion: Int64
     /// 组合认证层已确认的连接身份。
     ///
     /// - Parameters:
     ///   - userID: 账号身份。
     ///   - deviceID: 该会话设备身份。
     ///   - capabilityProfile: 已协商并由调用者验证的能力 profile。
-    public init(userID: UserID, deviceID: DeviceID, capabilityProfile: String) {
+    public init(userID: UserID, deviceID: DeviceID, capabilityProfile: String, credentialControlVersion: Int64 = 0) {
         self.userID = userID
         self.deviceID = deviceID
         self.capabilityProfile = capabilityProfile
+        self.credentialControlVersion = credentialControlVersion
     }
 }
 

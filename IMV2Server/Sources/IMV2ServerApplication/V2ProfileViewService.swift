@@ -45,22 +45,3 @@ public protocol V2ProfileViewStore: Sendable {
 }
 
 /// 资料视图查询服务，把边缘请求原样转交存储。
-public struct V2ProfileViewService: Sendable {
-    private let store: any V2ProfileViewStore
-
-    /// 组合资料视图存储。
-    ///
-    /// - Parameter store: 实际执行查询的存储实现。
-    public init(store: any V2ProfileViewStore) {
-        self.store = store
-    }
-
-    /// 读取资料视图。
-    ///
-    /// - Parameter request: 已校验的查询请求。
-    /// - Returns: 与请求键一一对应的结果列表。
-    /// - Throws: 存储实现抛出的错误。
-    public func read(_ request: V2ProfileViewReadRequest) async throws -> [V2ProfileViewLookupResult] {
-        try await store.read(request)
-    }
-}

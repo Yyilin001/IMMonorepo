@@ -33,7 +33,19 @@ struct GatewayRoomServicesAssembly {
         let roomActorServices = V2GatewayRoomActorServices(directory: actorDirectory, callTimeout: callTimeout,
             readReceiptControlStore: PostgresV2ReadReceiptStore(database: topology.database,
                 projectionDelivery: projection.userShardProjectionDelivery), databaseWorkAdmission: frontdoor.databaseWorkAdmission,
-            directRoomLogEventCache: projection.directRoomLogEventCache)
+            directRoomLogEventCache: projection.directRoomLogEventCache,
+            sendRecoveryQuery: { request in
+                guard case .room(let room) = request.identity.scope else {
+                    throw V2RoomCallFailure.notAccepted(.invalidRequest)
+                }
+                let route = try await projection.roomShardRouter.route(for: room)
+                guard let database = topology.roomShardDatabases[route.shardID] else {
+                    throw V2RoomCallFailure.notAccepted(.unavailable)
+                }
+                return try await V2RoomSQLDeadline.withDeadline(.now + callTimeout.duration) {
+                    try await PostgresV2MessageSendOperationStore.queryRecovery(request, database: database)
+                }
+            })
         let groupEventLog = V2RoomRefGroupEventLogClient(rooms: roomQueries,
             directRoomLogEventCache: projection.directRoomLogEventCache)
         let forwardPort = V2RoomRefForwardPort(directory: actorDirectory)
@@ -41,10 +53,16 @@ struct GatewayRoomServicesAssembly {
             V2ActorForwardSourceEndpoint(receipts: PostgresV2ForwardReceiptStore(database: $0), jobs: PostgresV2ForwardDeliveryStore(database: $0))
         }
         let importRouting = V2ResourceForwardImportRouting(sources: topology.roomShardDatabases)
+        let pair: V2ActorForwardPairPort
+        if roomOwners.actorConfiguration.policyPlacement != nil {
+            pair = .init { try await actors.forwardPair($0, deadline: $1) }
+        } else {
+            pair = .init(coordinator: actors.reservations, executorsByShard: roomOwners.forwardPairs)
+        }
         // 资源跨房间复制与跨归属方转发都通过 Actor 命令和持久作业完成。
         let forwardMessages = try V2ActorForwardingCoordinator(router: projection.roomShardRouter,
             physicalStoreKeyByShard: roomOwners.physicalStoreKeyByShard,
-            pair: .init(coordinator: actors.reservations, executorsByShard: roomOwners.forwardPairs),
+            pair: pair,
             crossOwner: V2ActorCrossOwnerForwardService(sources: forwardSources,
                 sourceCommand: { try await forwardPort.execute($0, deadline: $1) },
                 deadline: { .now + callTimeout.duration }),

@@ -16,11 +16,10 @@ struct GatewayBackgroundWorkers {
     struct Delivery {
         let forwardRuntime: V2ForwardDeliveryRuntime
         let directAuthorizationCoordinator: V2DirectAuthorizationCoordinator
-        let foregroundGroupEventHints: V2ForegroundGroupEventHintDispatcher
         let directRoomLogEventCache: V2DirectRoomLogEventCache?
         let syncWakeCoalescer: V2SyncWakeCoalescer
         let userStateWorkers: [V2UserStateEventWorker]
-        let groupEventWakeRelay: V2GroupEventWakeRelay
+        let userSyncWakeRelays: [V2UserSyncWakeRelay]
         let contentReviewWorker: V2RoutedContentReviewWorker?
         let pushWakeWorker: V2PushWakeWorker?
         let mentionPushWakeRelays: [PostgresV2MentionPushWakeRelay]
@@ -63,7 +62,7 @@ struct GatewayBackgroundWorkers {
         logger: Logger,
         prepared: GatewayPreparedAssembly,
         roomServices: GatewayRoomServicesAssembly,
-        realtime: GatewayRealtimeAssembly,
+        realtime: GatewayActorRealtimeRuntime,
         commands: GatewayCommandAssembly,
         maintenance: GatewayMaintenanceAssembly,
         forwardDelivery: GatewayForwardDeliveryAssembly
@@ -72,26 +71,19 @@ struct GatewayBackgroundWorkers {
         let frontdoor = prepared.frontdoor
         let ownerMaintenance = prepared.ownerMaintenance
         let projection = prepared.projection
-        let roomOwners = prepared.roomOwners
         let directAuthorizationCoordinator = prepared.authorization
-        let foregroundGroupEventHints = realtime.foregroundGroupEventHints
-        // 唤醒转发不构成交付依赖：发布失败或重复只影响前台延迟，
-        // 因为客户端始终按游标拉取房间事件日志。
-        let groupEventWakeRelay = V2GroupEventWakeRelay(
-            store: roomOwners.groupEventWakeStore,
-            publisher: realtime.groupEventWakePublisher
-        )
         return .init(
             configuration: configuration,
             logger: logger,
             delivery: .init(
                 forwardRuntime: forwardDelivery.runtime,
                 directAuthorizationCoordinator: directAuthorizationCoordinator,
-                foregroundGroupEventHints: foregroundGroupEventHints,
                 directRoomLogEventCache: projection.directRoomLogEventCache,
                 syncWakeCoalescer: frontdoor.syncWakeCoalescer,
                 userStateWorkers: projection.userStateWorkers,
-                groupEventWakeRelay: groupEventWakeRelay,
+                userSyncWakeRelays: realtime.userSyncWakeStores.map {
+                    V2UserSyncWakeRelay(store: $0, publisher: realtime.publisher)
+                },
                 contentReviewWorker: commands.contentReviewWorker,
                 pushWakeWorker: maintenance.pushWakeWorker,
                 mentionPushWakeRelays: maintenance.mentionPushWakeRelays

@@ -164,11 +164,11 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
     }
     private func original(_ identity:V2OperationIdentity,_ fingerprint:V2OperationFingerprint,sql:any SQLDatabase) async throws -> V2GroupCapabilityRecoveryResult? {
         guard let row=try await sql.raw("SELECT receipt::text AS payload FROM im_v2.group_capability_receipts WHERE actor_user_id=\(bind:identity.accountID.uuidValue!) AND operation_id=\(bind:operation(identity))").first(decoding:PayloadRow.self) else { return nil }
-        let receipt=try JSONDecoder().decode(V2GroupCapabilityReceipt.self,from:Data(row.payload.utf8));return receipt.identity==identity && receipt.fingerprint==fingerprint ? .receipt(receipt):.fingerprintConflict
+        let receipt=try v2DecodePersistenceJSON(V2GroupCapabilityReceipt.self, from: row.payload);return receipt.identity==identity && receipt.fingerprint==fingerprint ? .receipt(receipt):.fingerprintConflict
     }
     private func admission(identity:V2OperationIdentity,sql:any SQLDatabase) async throws -> V2GroupCapabilityAdmission? {
         guard let row=try await sql.raw("SELECT admission::text AS payload FROM im_v2.group_capability_admissions WHERE actor_user_id=\(bind:identity.accountID.uuidValue!) AND operation_id=\(bind:operation(identity))").first(decoding:PayloadRow.self) else { return nil }
-        return try JSONDecoder().decode(V2GroupCapabilityAdmission.self,from:Data(row.payload.utf8))
+        return try v2DecodePersistenceJSON(V2GroupCapabilityAdmission.self, from: row.payload)
     }
     private func persist(_ identity:V2OperationIdentity,_ fingerprint:V2OperationFingerprint,_ outcome:V2GroupCapabilityTerminalOutcome,at:UInt64,sql:any SQLDatabase) async throws -> V2GroupCapabilityReceipt {
         let receipt=try V2GroupCapabilityReceipt(identity:identity,fingerprint:fingerprint,outcome:outcome,resolvedAtMilliseconds:at)
@@ -178,9 +178,11 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
         switch identity.scope { case .room(let value),.message(let value,_):return value;default:throw V2GroupCapabilityValidationError.invalidIntent }
     }
     private func operation(_ identity:V2OperationIdentity) throws -> UUID { guard let id=UUID(uuidString:identity.operation.rawOperationID) else { throw V2GroupCapabilityValidationError.invalidIntent };return id }
-    private func json<T:Encodable>(_ value:T) throws -> String { String(decoding:try JSONEncoder().encode(value),as:UTF8.self) }
-    private func milliseconds(_ value:Date) throws -> UInt64 { let number=value.timeIntervalSince1970*1000;guard v2PostgresTimestampCanEncode(value),number.isFinite,number>0,number<Double(Int64.max) else { throw V2GroupCapabilityExecutionError.corruptPersistence };return UInt64(number.rounded(.down)) }
-    private func unsigned(_ value:Int64) throws -> UInt64 { guard value>=0 else { throw V2GroupCapabilityExecutionError.corruptPersistence };return UInt64(value) }
+    private func json<T:Encodable>(_ value:T) throws -> String { try v2EncodePersistenceJSON(value) }
+    private func milliseconds(_ value: Date) throws -> UInt64 {
+        try v2PersistenceMilliseconds(value, invalid: V2GroupCapabilityExecutionError.corruptPersistence)
+    }
+    private func unsigned(_ value:Int64) throws -> UInt64 { try v2PersistenceUnsigned(value, invalid: V2GroupCapabilityExecutionError.corruptPersistence) }
     private func fetchRoom(_ room:RoomID,sql:any SQLDatabase) async throws -> RoomRow? { try await sql.raw("SELECT room_kind AS kind,room_sequence,membership_revision,group_permission_revision FROM im_v2.rooms WHERE room_id=\(bind:room.uuidValue!) FOR UPDATE").first(decoding:RoomRow.self) }
     private func roomState(_ room:RoomID,sql:any SQLDatabase) async throws -> RoomRow { guard let state=try await fetchRoom(room,sql:sql) else { throw V2GroupCapabilitiesStoreError.roomNotFound };return state }
     private func member(_ user:UserID,room:RoomID,revision:Int64,sql:any SQLDatabase) async throws -> MemberRow? { try await sql.raw("SELECT role,joined_revision FROM im_v2.room_memberships WHERE room_id=\(bind:room.uuidValue!) AND user_id=\(bind:user.uuidValue!) AND joined_revision<=\(bind:revision) AND (left_revision IS NULL OR left_revision>\(bind:revision)) ORDER BY joined_revision DESC LIMIT 1 FOR UPDATE").first(decoding:MemberRow.self) }

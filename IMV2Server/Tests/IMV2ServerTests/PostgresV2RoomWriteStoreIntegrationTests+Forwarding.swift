@@ -21,184 +21,7 @@ import VaporTesting
 
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("direct room-log room credits preserve the room command window across local token reuse")
-    func directRoomLogRoomCommandCreditsPreserveRoomCapacity() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
-        else { return }
 
-        let resources = makeV2DatabaseTestResources()
-        do {
-            resources.databases.use(
-                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
-                as: .psql, isDefault: true
-            )
-            guard let sql = resources.database(.psql) as? any SQLDatabase else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
-                .first(decoding: ExistsRow.self))?.exists == false
-            else { throw TestConfigurationError.schemaAlreadyExists }
-            try await installSchema(on: sql)
-
-            let now = Date(timeIntervalSince1970: 1_750_202_000)
-            let roomID = UUID(uuidString: "00000000-0000-0000-0000-00000000c201")!
-            let leaseID = UUID(uuidString: "00000000-0000-0000-0000-00000000c202")!
-            try await sql.raw("""
-                INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, capacity_class)
-                VALUES (\(bind: roomID), 'rooms-room-credit-test', 'room-credit-test', 'standard')
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.shard_admission_pools
-                    (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit)
-                VALUES ('rooms-room-credit-test', 'room-credit-test', \(bind: leaseID), 1, \(bind: now.addingTimeInterval(600)), 10)
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.room_admission
-                    (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
-                VALUES (\(bind: roomID), 2, 2, \(bind: leaseID), 1)
-                """).run()
-            let state = try ShardAdmissionState(
-                lease: .init(
-                    id: try .init(leaseID.uuidString), generation: 1,
-                    validUntil: now.addingTimeInterval(600),
-                    commandWindow: try .init(limit: 10)))
-            let heatClock = Mutex(ContinuousClock.now)
-            let credits = V2RoomAdmissionCommandCreditPool(
-                database: resources.database(.psql), batchSize: 32,
-                monotonicNow: { heatClock.withLock { $0 } }
-            )
-            let promotionNow = Date()
-            #expect(await credits.shouldUseCredits(roomID: roomID, now: promotionNow) == false)
-            for _ in 0 ..< 4 {
-                await credits.recordNormalAdmissionCommit(roomID: roomID, now: promotionNow)
-            }
-            #expect(await credits.shouldUseCredits(roomID: roomID, now: promotionNow) == true)
-            heatClock.withLock { $0 = $0.advanced(by: .seconds(6)) }
-            #expect(await credits.shouldUseCredits(
-                roomID: roomID,
-                now: promotionNow.addingTimeInterval(6)
-            ) == false)
-            for _ in 0 ..< 4 {
-                await credits.recordNormalAdmissionCommit(roomID: roomID, now: Date())
-            }
-
-            let first = try await credits.acquire(roomID: roomID, shardState: state, now: now)
-            guard case .granted(let firstToken) = first else {
-                Issue.record("expected the first durable room command credit")
-                return
-            }
-            // A failed canonical write returns the process-local token. It
-            // must not decrement the durable reservation, which is what keeps
-            // a crash/retry from ever exceeding the room's command window.
-            await credits.release(firstToken, now: now)
-
-            for _ in 0 ..< 2 {
-                let acquisition = try await credits.acquire(roomID: roomID, shardState: state, now: now)
-                guard case .granted(let token) = acquisition else {
-                    Issue.record("expected a previously charged room credit")
-                    return
-                }
-                await credits.commit(token)
-            }
-            let exhausted = try await credits.acquire(roomID: roomID, shardState: state, now: now)
-            guard case .rateLimited = exhausted else {
-                Issue.record("the room credit pool oversold the room command window")
-                return
-            }
-            let persisted = try #require(try await sql.raw("""
-                SELECT command_window_used
-                FROM im_v2.room_admission
-                WHERE room_id = \(bind: roomID)
-                """).first(decoding: CapacityRow.self))
-            #expect(persisted.commandWindowUsed == 2)
-            #expect(await credits.snapshot() == .init(
-                activeCredits: 0, inFlightCredits: 0,
-                batchReservations: 1, databaseCreditsReserved: 2,
-                committedCredits: 2, returnedCredits: 1,
-                expiredCreditsDiscarded: 0, capacityRejections: 1,
-                promotedHotRooms: 1
-            ))
-
-            // The accelerated append path resolves one whole micro-batch with
-            // one actor entry. A partial capacity result preserves order, and
-            // returning the granted prefix cannot restore durable capacity.
-            let batchRoomID = UUID(
-                uuidString: "00000000-0000-0000-0000-00000000c203"
-            )!
-            try await sql.raw("""
-                INSERT INTO im_v2.rooms
-                    (room_id, room_shard_id, capacity_profile_id, capacity_class)
-                VALUES (
-                    \(bind: batchRoomID),
-                    'rooms-room-credit-test',
-                    'room-credit-test',
-                    'standard'
-                )
-                """).run()
-            try await sql.raw("""
-                INSERT INTO im_v2.room_admission
-                    (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
-                VALUES (\(bind: batchRoomID), 2, 2, \(bind: leaseID), 1)
-                """).run()
-            let batchCredits = V2RoomAdmissionCommandCreditPool(
-                database: resources.database(.psql), batchSize: 32
-            )
-            let batchRequest = V2RoomAdmissionCommandCreditPool.BatchRequest(
-                roomID: batchRoomID,
-                shardState: state,
-                now: now
-            )
-            let firstBatch = try await batchCredits.acquire(
-                [batchRequest, batchRequest, batchRequest]
-            )
-            let grantedPrefix: [V2RoomAdmissionCommandCreditPool.Token] =
-                firstBatch.compactMap { acquisition in
-                    guard case .granted(let token) = acquisition else { return nil }
-                    return token
-                }
-            #expect(grantedPrefix.count == 2)
-            guard case .rateLimited = firstBatch[2] else {
-                Issue.record("the batched room credit pool oversold the room window")
-                return
-            }
-            await batchCredits.release(grantedPrefix.map { ($0, now) })
-
-            let reusedBatch = try await batchCredits.acquire([batchRequest, batchRequest])
-            let reusedTokens: [V2RoomAdmissionCommandCreditPool.Token] =
-                reusedBatch.compactMap { acquisition in
-                    guard case .granted(let token) = acquisition else { return nil }
-                    return token
-                }
-            #expect(reusedTokens.count == 2)
-            await batchCredits.commit(reusedTokens)
-            guard case .rateLimited = try await batchCredits.acquire(
-                roomID: batchRoomID,
-                shardState: state,
-                now: now
-            ) else {
-                Issue.record("returned room credits were durably oversold")
-                return
-            }
-            #expect(await batchCredits.snapshot() == .init(
-                activeCredits: 0, inFlightCredits: 0,
-                batchReservations: 1, databaseCreditsReserved: 2,
-                committedCredits: 2, returnedCredits: 2,
-                expiredCreditsDiscarded: 0, capacityRejections: 2,
-                promotedHotRooms: 0
-            ))
-
-            try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await resources.shutdown()
-        } catch {
-            if let sql = resources.database(.psql) as? any SQLDatabase {
-                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
-            }
-            try? await resources.shutdown()
-            throw error
-        }
-    }
 
     @Test("a 100k hybrid group persists ordinary messages as room-log events and fans out only explicit mentions")
     func acceptsOneHundredThousandMemberHybridRoomWithoutGlobalFanout() async throws {
@@ -775,10 +598,24 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                   case .accepted(let sourceB) = try await sendB.send(.init(roomID: roomBID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "source only in owner B"))
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let router = V2PostgresRoomShardRouter(database: resources.database(.psql))
-            let service = try V2RoutedForwardMessagesService(router: router, owners: [
-                "room-a": V2ForwardMessagesService(database: resources.database(.psql), writeStore: writeA, capacityProfile: profile, limits: limits, now: { now }),
-                "room-b": V2ForwardMessagesService(database: resources.database(secondary), writeStore: writeB, capacityProfile: profile, limits: limits, now: { now })
-            ])
+            let databaseA = resources.database(.psql), databaseB = resources.database(secondary)
+            let executorA = V2ActorForwardPairDomainExecutor(database: databaseA, write: writeA,
+                capacityProfile: profile, limits: limits, now: { now })
+            let executorB = V2ActorForwardPairDomainExecutor(database: databaseB, write: writeB,
+                capacityProfile: profile, limits: limits, now: { now })
+            let service = try V2ActorForwardingCoordinator(router: router,
+                physicalStoreKeyByShard: ["room-a": "database-a", "room-b": "database-b"],
+                pair: .init { pair, deadline in
+                    // This matrix has only same-room colocated pairs. The
+                    // current domain executor still requires its real lease.
+                    #expect(pair.source.roomID == pair.targetRoomID)
+                    let remote = pair.source.roomID == roomBID
+                    return try await withRoomActivation(database: remote ? databaseB : databaseA,
+                        roomID: pair.source.roomID, shardID: remote ? "room-b" : "room-a") { token in
+                        try await (remote ? executorB : executorA).execute(pair,
+                            activationTokens: [token], deadline: deadline)
+                    }
+                }, crossOwner: PhysicalDatabaseForwardUnavailable(), deadline: { .now + .seconds(30) })
             let chunkID = try V2ForwardChunkIdentity.operationID(planID: .init("00000000-0000-0000-0000-00000000f001"), chunkIndex: 0)
             #expect(chunkID.uuidValue == UUID(uuidString: "59993946-8967-8ccb-9846-764840d87627"))
             let command = try V2ForwardMessagesCommand(operationID: chunkID, sources: [
@@ -786,7 +623,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 .init(roomID: roomBID, messageID: sourceB.messageID, revision: .init(1))
             ], targetRoomIDs: [roomID, roomBID])
             let results = try await service.forward(actorUserID: senderID, command: command)
-            #expect(results.map(\.errorCode) == [nil, "CROSS_OWNER_FORWARD_UNAVAILABLE", "CROSS_OWNER_FORWARD_UNAVAILABLE", nil])
+            #expect(results.map(\.errorCode) == [nil, "UNAVAILABLE", "UNAVAILABLE", nil])
             for sql in [primarySQL, secondarySQL] {
                 #expect(try await count("im_v2.messages", on: sql) == 2)
                 #expect(try await count("im_v2.message_forward_operations", on: sql) == 1)
@@ -2020,6 +1857,18 @@ private struct UnexpectedContentReviewer: V2ContentReviewing {
         throw V2ContentReviewWorkerError.dispositionNotApplied
     }
 }
+/// This test isolates physical pair routing; durable cross-owner delivery has
+/// separate worker tests and is deliberately unavailable at this boundary.
+private struct PhysicalDatabaseForwardUnavailable: V2CrossOwnerForwarding {
+    func forward(actor: UserID, operation: MessageForwardOperationID,
+        source: V2ForwardMessageReference, sourceRoute: V2RoomShardRoute,
+        target: RoomID, targetRoute: V2RoomShardRoute) async throws -> V2CrossOwnerForwardOutcome {
+        #expect(sourceRoute.shardID != targetRoute.shardID)
+        return .completed(try .init(sourceMessageID: source.messageID, targetRoomID: target,
+            messageID: nil, roomSequence: nil, errorCode: "UNAVAILABLE"))
+    }
+}
+
 private actor ForwardMediaBlockingScanner: V2MediaScanProvider {
     private(set) var started = false
     func scan(mediaID: MediaID) async throws -> V2MediaScanResult {

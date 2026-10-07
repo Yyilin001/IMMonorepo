@@ -290,7 +290,7 @@ public func v2RenderPrometheusGatewayTransportMetrics(_ snapshot: V2GatewayTrans
         "# HELP im_v2_gateway_foreground_group_event_degradations_total Full group event batches degraded to metadata-only wakes.",
         "# TYPE im_v2_gateway_foreground_group_event_degradations_total counter",
         "im_v2_gateway_foreground_group_event_degradations_total \(snapshot.foregroundGroupEventBatchDegradations)",
-        "# HELP im_v2_gateway_foreground_group_inbound_notifications_dropped_total Decoded NATS group notifications evicted from the bounded socket-fanout mailbox after recovery-cache ingestion.",
+        "# HELP im_v2_gateway_foreground_group_inbound_notifications_dropped_total Decoded Actor group notifications evicted from the bounded socket-fanout mailbox after recovery-cache ingestion.",
         "# TYPE im_v2_gateway_foreground_group_inbound_notifications_dropped_total counter",
         "im_v2_gateway_foreground_group_inbound_notifications_dropped_total \(snapshot.foregroundGroupInboundNotificationsDropped)",
         "# HELP im_v2_gateway_foreground_group_covered_wakes_suppressed_total Durable group wakes suppressed because completed local live fan-out already covered their high watermark.",
@@ -410,6 +410,12 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
         let rejection: V2GatewayTelemetryRejection?
     }
 
+    private struct MessageFailureKey: Hashable, Sendable {
+        let command: V2MessageSendFailureCommand
+        let disposition: V2MessageSendFailureDisposition
+        let reason: V2MessageSendFailureReason
+    }
+
     private struct CounterAndDuration: Sendable {
         var count: UInt64 = 0
         var elapsedMilliseconds: UInt64 = 0
@@ -422,6 +428,7 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
 
     private struct Storage: Sendable {
         var gateway: [GatewayKey: CounterAndDuration] = [:]
+        var messageFailures: [MessageFailureKey: UInt64] = [:]
 
     }
 
@@ -432,6 +439,9 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
     public func record(_ event: V2TelemetryEvent) async {
         storage.withLock { storage in
             switch event {
+            case let .messageSendInternalFailure(command, disposition, reason):
+                let key = MessageFailureKey(command: command, disposition: disposition, reason: reason)
+                storage.messageFailures[key] = v2SaturatingAdd(storage.messageFailures[key, default: 0], 1)
             case let .gatewayCommand(_, command, outcome, rejection, elapsedMilliseconds):
                 let key = GatewayKey(command: command, outcome: outcome, rejection: rejection)
                 var aggregate = storage.gateway[key, default: .init()]
@@ -454,6 +464,18 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
             "# HELP im_v2_gateway_commands_total Gateway commands by closed result vocabulary.",
             "# TYPE im_v2_gateway_commands_total counter",
         ]
+        lines.append("# HELP im_v2_gateway_message_operation_internal_failures_total Internal room-call failures before wire error mapping; bounded enum labels only.")
+        lines.append("# TYPE im_v2_gateway_message_operation_internal_failures_total counter")
+        // Export zeros too: a pre-phase scrape supplies a real baseline for
+        // failures first observed during the phase, rather than a sparse guess.
+        for command in V2MessageSendFailureCommand.allCases {
+            for disposition in V2MessageSendFailureDisposition.allCases {
+                for reason in V2MessageSendFailureReason.allCases {
+                    let key = MessageFailureKey(command: command, disposition: disposition, reason: reason)
+                    lines.append("im_v2_gateway_message_operation_internal_failures_total{command=\"\(command.rawValue)\",disposition=\"\(disposition.rawValue)\",reason=\"\(reason.rawValue)\"} \(storage.messageFailures[key, default: 0])")
+                }
+            }
+        }
         for key in storage.gateway.keys.sorted(by: v2GatewayMetricOrder) {
             let aggregate = storage.gateway[key]!
             let rejection = key.rejection?.rawValue ?? "none"
@@ -470,10 +492,6 @@ public final class V2PrometheusTelemetrySink: V2TelemetrySink, Sendable {
         (lhs.command.rawValue, lhs.outcome.rawValue, lhs.rejection?.rawValue ?? "none")
             < (rhs.command.rawValue, rhs.outcome.rawValue, rhs.rejection?.rawValue ?? "none")
     }
-}
-
-private func v2NonNegative(_ value: Int) -> UInt64 {
-    value > 0 ? UInt64(value) : 0
 }
 
 private func v2SaturatingAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {

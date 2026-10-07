@@ -18,6 +18,7 @@ struct GatewayFrontdoorAssembly {
     let prometheusTelemetry: V2PrometheusTelemetrySink
     let transportMetrics: V2GatewayTransportMetrics
     let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics
+    let messageSendBudget: V2GatewayMessageSendBudget
     let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics
     let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache
     let directSendPolicyCache: V2DirectSendPolicyCache
@@ -40,6 +41,7 @@ struct GatewayFrontdoorAssembly {
                     configuration.livePresenceRenewalMaximumDelayMilliseconds
                 )
             ),
+            maximumConnections: configuration.maximumConnections,
             foregroundFrameLimits: configuration.frameLimits,
             foregroundFrameCompression: configuration.frameCompression,
             foregroundMaximumUncompressedPayloadBytes:
@@ -61,25 +63,10 @@ struct GatewayFrontdoorAssembly {
                 ? syncWakeCoalescer
                 : connectionRegistry
         let databaseWorkAdmission = V2DatabaseWorkAdmissionController(
-            policy: .init(
-                maximumForegroundWriteInFlight:
-                    configuration.foregroundWriteDatabaseWorkLimit,
-                maximumForegroundControlWriteInFlight:
-                    configuration.foregroundControlWriteDatabaseWorkLimit,
-                maximumInteractiveReadInFlight:
-                    configuration.interactiveReadDatabaseWorkLimit,
-                maximumSyncInFlight: configuration.syncDatabaseWorkLimit,
-                maximumForegroundWriteQueued:
-                    configuration.foregroundWriteDatabaseWorkMaximumQueued,
-                maximumForegroundControlWriteQueued:
-                    configuration.foregroundControlWriteDatabaseWorkMaximumQueued,
-                maximumInteractiveReadQueued:
-                    configuration.interactiveReadDatabaseWorkMaximumQueued,
-                maximumSyncQueued: configuration.syncDatabaseWorkMaximumQueued,
-                timeout: .milliseconds(
-                    configuration.databaseWorkAdmissionTimeoutMilliseconds
-                )
-            )
+            policy: Self.databaseWorkAdmissionPolicy(configuration),
+            interactiveReadCoverageReservedQueued: coverageReservedQueued(
+                roomShardStorage: configuration.roomShardStorage.filter { $0.databaseURL == configuration.databaseURL },
+                maximumReadQueued: configuration.interactiveReadDatabaseWorkMaximumQueued)
         )
         let databasePoolTopology = GatewayPoolMetricsTopology.make(
             configuration: configuration,
@@ -88,6 +75,8 @@ struct GatewayFrontdoorAssembly {
         let prometheusTelemetry = V2PrometheusTelemetrySink()
         let transportMetrics = V2GatewayTransportMetrics()
         let directRoomLogAppendStageMetrics = V2DirectRoomLogAppendStageMetrics()
+        let messageSendBudget = V2GatewayMessageSendBudget(
+            maximumBytes: configuration.messageSendMaximumInFlightBytesProcess)
         let gatewayEventLoopLagMetrics = V2EventLoopLagMetrics()
         // 所有同址房间写入者共享此有界提示缓存。
         // 每次条件追加的策略与游标仍以 PostgreSQL 为权威。
@@ -111,9 +100,51 @@ struct GatewayFrontdoorAssembly {
             prometheusTelemetry: prometheusTelemetry,
             transportMetrics: transportMetrics,
             directRoomLogAppendStageMetrics: directRoomLogAppendStageMetrics,
+            messageSendBudget: messageSendBudget,
             gatewayEventLoopLagMetrics: gatewayEventLoopLagMetrics,
             directRoomLogFastAppendCache: directRoomLogFastAppendCache,
             directSendPolicyCache: directSendPolicyCache
         )
     }
+    static func databaseWorkAdmissionPolicy(_ configuration: V2GatewayRuntimeConfiguration) -> V2DatabaseWorkAdmissionPolicy {
+        .init(
+                maximumForegroundWriteInFlight:
+                    configuration.foregroundWriteDatabaseWorkLimit,
+                maximumForegroundControlWriteInFlight:
+                    configuration.foregroundControlWriteDatabaseWorkLimit,
+                maximumInteractiveReadInFlight:
+                    configuration.interactiveReadDatabaseWorkLimit,
+                maximumSyncInFlight: configuration.syncDatabaseWorkLimit,
+                maximumForegroundWriteQueued:
+                    configuration.foregroundWriteDatabaseWorkMaximumQueued,
+                maximumForegroundControlWriteQueued:
+                    configuration.foregroundControlWriteDatabaseWorkMaximumQueued,
+                maximumInteractiveReadQueued:
+                    configuration.interactiveReadDatabaseWorkMaximumQueued,
+                maximumSyncQueued: configuration.syncDatabaseWorkMaximumQueued,
+                timeout: .milliseconds(
+                    configuration.databaseWorkAdmissionTimeoutMilliseconds
+                )
+            )
+    }
+
+    /// Logical shard aliases share one physical recovery batcher. Reserve only
+    /// its existing actual capacity, inside the unchanged total read queue.
+    static func coverageReservedQueued(
+        roomShardStorage: [V2RoomShardStorageConfiguration], maximumReadQueued: Int
+    ) -> Int {
+        let physicalCount = Set(roomShardStorage.map {
+            CoveragePhysicalStorage(databaseURL: $0.databaseURL, schema: $0.schema)
+        }).count
+        let actualLimit = V2HostRoomRecoveryQueryBatcher.Configuration.defaultMaximumInFlightBatches
+        let product = physicalCount.multipliedReportingOverflow(by: actualLimit)
+        let available = maximumReadQueued > 1 ? maximumReadQueued - 1 : 0
+        return min(product.overflow ? available : product.partialValue, available)
+    }
+
+    private struct CoveragePhysicalStorage: Hashable {
+        let databaseURL: String
+        let schema: String
+    }
+
 }

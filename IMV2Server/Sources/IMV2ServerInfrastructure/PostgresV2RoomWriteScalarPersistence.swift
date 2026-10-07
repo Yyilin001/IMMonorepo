@@ -4,7 +4,7 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-// 逐条接受路径的事务、所有者与激活围栏及最终分片预留均由 Store 持有。
+// 逐条接受路径的事务、所有者与激活边界由 Store 持有。
 // 这些方法只在 Store 借用的 SQLDatabase 上写入。
 enum V2RoomWriteScalarPersistencePath {
     static func persist(
@@ -18,19 +18,12 @@ enum V2RoomWriteScalarPersistencePath {
     ) async throws {
         let message = writeSet.acceptedMessage
         let roomID = try scalarRoomWriteUUID(message.roomID)
-        if room.kind == "direct" { try await V2RoomWriteDirectBatchPath.assertDirectMemberships(roomIDs: [roomID], sql: sql) }
         let messageID = try scalarRoomWriteUUID(message.messageID)
         let eventID = try scalarRoomWriteUUID(writeSet.eventID)
         let senderID = try scalarRoomWriteUUID(message.senderUserID)
         let clientMessageID = try scalarRoomWriteUUID(message.clientMessageID)
         let roomSequence = try scalarRoomWriteSigned(message.roomSequence)
         let timelineSequence = try scalarRoomWriteSigned(message.timelineSequence)
-        let roomAdmission = writeSet.nextRoomState.admission
-        guard let shardLease = writeSet.nextShardState.lease else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        let shardLeaseID = try scalarRoomWriteUUID(shardLease.id)
-        let shardLeaseGeneration = try scalarRoomWriteSigned(shardLease.generation)
 
         guard let mediaJSON = String(data: try JSONEncoder().encode(message.media.map { $0.mediaID.rawValue }), encoding: .utf8) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -94,8 +87,6 @@ enum V2RoomWriteScalarPersistencePath {
                 clientMessageID: clientMessageID,
                 roomSequence: roomSequence,
                 timelineSequence: timelineSequence,
-                shardLeaseID: shardLeaseID,
-                shardLeaseGeneration: shardLeaseGeneration,
                 entitiesJSON: entitiesJSON,
                 mediaJSON: mediaJSON,
                 mediaPresentationsJSON: mediaPresentationsJSON,
@@ -117,13 +108,6 @@ enum V2RoomWriteScalarPersistencePath {
             WHERE room_id = \(bind: roomID)
             """).run()
         let mentionTargets = hybridMentionTargetIDs(message.mentions, excluding: senderID)
-        try await sql.raw("""
-            UPDATE im_v2.room_admission
-            SET command_window_used = \(bind: roomAdmission.commandWindow.used),
-                shard_lease_id = \(bind: shardLeaseID),
-                shard_lease_generation = \(bind: shardLeaseGeneration)
-            WHERE room_id = \(bind: roomID)
-            """).run()
         try await sql.raw("""
             WITH message_insert AS (
             INSERT INTO im_v2.messages
@@ -226,8 +210,6 @@ enum V2RoomWriteScalarPersistencePath {
         clientMessageID: UUID,
         roomSequence: Int64,
         timelineSequence: Int64,
-        shardLeaseID: UUID,
-        shardLeaseGeneration: Int64,
         entitiesJSON: String,
         mediaJSON: String,
         mediaPresentationsJSON: String,
@@ -270,6 +252,9 @@ enum V2RoomWriteScalarPersistencePath {
             )
             return
         }
+        // Plain appends validate in persistMessages. Complex direct writes
+        // retain the same membership fence here before their first mutation.
+        try await V2RoomWriteDirectBatchPath.assertDirectMemberships(roomIDs: [roomID], sql: sql)
         guard let mutation = try await sql.raw("""
             WITH room_update AS (
                 UPDATE im_v2.rooms
@@ -277,22 +262,8 @@ enum V2RoomWriteScalarPersistencePath {
                     timeline_sequence = \(bind: timelineSequence)
                 WHERE room_id = \(bind: roomID)
                 RETURNING room_id
-            ), admission_update AS (
-                UPDATE im_v2.room_admission AS admission
-                SET command_window_used = \(bind: admission.commandWindow.used),
-                    shard_lease_id = \(bind: shardLeaseID),
-                    shard_lease_generation = \(bind: shardLeaseGeneration)
-                FROM room_update
-                WHERE admission.room_id = room_update.room_id
-                  AND \(bind: persistsRoomAdmission)
-                RETURNING admission.room_id
-            ), admission_passthrough AS (
-                SELECT room_id FROM room_update
-                WHERE NOT \(bind: persistsRoomAdmission)
             ), admission_gate AS (
-                SELECT room_id FROM admission_update
-                UNION ALL
-                SELECT room_id FROM admission_passthrough
+                SELECT room_id FROM room_update
             ), message_insert AS (
                 INSERT INTO im_v2.messages
                     (message_id, room_id, room_sequence, timeline_sequence, sender_user_id,

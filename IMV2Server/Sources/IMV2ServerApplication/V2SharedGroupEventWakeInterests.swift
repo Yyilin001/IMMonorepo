@@ -6,15 +6,24 @@ import IMV2Core
 /// 各作用域分别维护房间级需求，不按设备创建租约。
 public actor V2SharedGroupEventWakeInterests {
     public enum Scope: Hashable, Sendable {
-        case foreground, accountCoverage
+        case foreground
         /// 共享的在线账号生命周期，与连接数量无关。
         case account(UUID)
     }
+    public struct Activation: Hashable, Sendable {
+        public let roomID: RoomID
+        public let scope: Scope
+        public init(roomID: RoomID, scope: Scope) { self.roomID = roomID; self.scope = scope }
+    }
+
     public enum Failure: Error, Equatable, Sendable { case closed }
 
     private final class Entry {
         var owners: [Scope: UUID] = [:]
         var revision = UUID()
+        // Actual underlying demand settled by this owner. This is not a
+        // coverage proof; the native coordinator restores coverage itself.
+        var confirmedActive: Bool?
         var operation: (id: UUID, task: Task<UUID, Error>)?
     }
 
@@ -35,26 +44,67 @@ public actor V2SharedGroupEventWakeInterests {
     }
 
     private func activate(roomID: RoomID, scope: Scope) async throws {
+        try await activate([.init(roomID: roomID, scope: scope)])
+    }
+
+    public func activate(_ requests: [Activation]) async throws {
         try Task.checkCancellation()
         guard !closed else { throw Failure.closed }
-        let entry = entries[roomID] ?? Entry()
-        entries[roomID] = entry
-        let token = UUID()
-        entry.owners[scope] = token
-        entry.revision = UUID()
+        guard requests.count <= 128, Set(requests).count == requests.count else { throw V2RoomRecoveryReadError.invalidRequest }
+        if requests.isEmpty { return }
+        var tokens: [Activation: UUID] = [:]
+        var selected: [RoomID: Entry] = [:]
+        for request in requests {
+            let entry = entries[request.roomID] ?? Entry()
+            entries[request.roomID] = entry
+            let token = UUID(); tokens[request] = token
+            entry.owners[request.scope] = token; entry.revision = UUID()
+            selected[request.roomID] = entry
+        }
+        // Join existing operations. Only idle entries join this one underlying
+        // batch, so concurrent foreground demand cannot start competing SQL.
+        let fresh = selected.filter { $0.value.operation == nil && $0.value.confirmedActive != true }
+        if !fresh.isEmpty {
+            let rooms = fresh.keys.sorted { $0.rawValue < $1.rawValue }
+            let batch = Task { try await self.activateUnderlying(rooms) }
+            for (room, entry) in fresh {
+                let revision = entry.revision, operationID = UUID()
+                entry.operation = (operationID, Task {
+                    try await batch.value
+                    return await self.confirmBatchActivation(roomID: room, operationID: operationID, revision: revision)
+                })
+            }
+        }
         do {
-            try await reconcile(roomID: roomID, entry: entry)
+            for room in selected.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
+                try await reconcile(roomID: room, entry: selected[room]!)
+            }
             try Task.checkCancellation()
             guard !closed else { throw Failure.closed }
         } catch {
-            // 迟到的故障不能释放此作用域中较新的激活。
-            if entry.owners[scope] == token {
-                entry.owners.removeValue(forKey: scope)
-                entry.revision = UUID()
+            // A waiter owns only these tokens. Cancelling it never cancels the
+            // shared registration task or removes a replacement generation.
+            for (request, token) in tokens {
+                guard let entry = selected[request.roomID], entry.owners[request.scope] == token else { continue }
+                entry.owners.removeValue(forKey: request.scope); entry.revision = UUID()
             }
-            if !closed { try? await reconcile(roomID: roomID, entry: entry) }
+            if !closed {
+                for (room, entry) in selected { try? await reconcile(roomID: room, entry: entry) }
+            }
             throw error
         }
+    }
+
+    private func confirmBatchActivation(roomID: RoomID, operationID: UUID, revision: UUID) -> UUID {
+        if let entry = entries[roomID], entry.operation?.id == operationID {
+            entry.confirmedActive = true
+        }
+        return revision
+    }
+
+    private func activateUnderlying(_ rooms: [RoomID]) async throws {
+        guard !closed else { throw Failure.closed }
+        for room in rooms { try await underlying.activate(roomID: room) }
     }
 
     private func deactivate(roomID: RoomID, scope: Scope) async {
@@ -75,6 +125,11 @@ public actor V2SharedGroupEventWakeInterests {
             let operation: (id: UUID, task: Task<UUID, Error>)
             if let existing = entry.operation { operation = existing }
             else {
+                let desired = !entry.owners.isEmpty
+                if entry.confirmedActive == desired {
+                    if !desired { entries.removeValue(forKey: roomID) }
+                    return
+                }
                 operation = (UUID(), Task { try await self.drive(roomID: roomID, entry: entry) })
                 entry.operation = operation
             }
@@ -90,7 +145,10 @@ public actor V2SharedGroupEventWakeInterests {
                     return
                 }
             } catch {
-                if entry.operation?.id == operation.id { entry.operation = nil }
+                if entry.operation?.id == operation.id {
+                    entry.operation = nil
+                    entry.confirmedActive = nil // Failed I/O may have applied partial state.
+                }
                 throw error
             }
         }
@@ -102,8 +160,17 @@ public actor V2SharedGroupEventWakeInterests {
             guard !closed else { throw Failure.closed }
             guard entries[roomID] === entry else { return entry.revision }
             let revision = entry.revision
-            if entry.owners.isEmpty { await underlying.deactivate(roomID: roomID) }
-            else { try await underlying.activate(roomID: roomID) }
+            let desired = !entry.owners.isEmpty
+            if entry.confirmedActive != desired {
+                do {
+                    if desired { try await underlying.activate(roomID: roomID) }
+                    else { await underlying.deactivate(roomID: roomID) }
+                    entry.confirmedActive = desired
+                } catch {
+                    entry.confirmedActive = nil
+                    throw error
+                }
+            }
             // 任何等待者认定激活或停用完成前，
             // 都须核对消息代理 I/O 期间发生的作用域修改。
             if entry.revision == revision { return revision }

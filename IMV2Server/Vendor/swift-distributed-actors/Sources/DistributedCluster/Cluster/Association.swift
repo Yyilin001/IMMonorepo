@@ -65,6 +65,18 @@ final class Association: CustomStringConvertible, @unchecked Sendable {
         self.completionTasks = []
     }
 
+    /// Reconnect a physically closed channel without declaring its node dead.
+    /// Retain this Association object because cached remote controls own it.
+    /// An active channel or permanent tombstone must never be reopened here.
+    @discardableResult
+    func prepareReconnectIfChannelClosed() -> Bool {
+        self.lock.withLock {
+            guard case .associated(let channel) = self.state, !channel.isActive else { return false }
+            self.state = .associating(queue: .init())
+            return true
+        }
+    }
+
     /// Complete the association and drain any pending message sends onto the channel.
     // TODO: This style can only ever work since we lock around the entirety of enqueueing messages and this setting; make it such that we don't need the lock eventually
     func completeAssociation(handshake: HandshakeStateMachine.CompletedState, over channel: Channel) throws {

@@ -17,6 +17,10 @@ struct GatewayApplicationTelemetrySink: V2TelemetrySink {
 
     func record(_ event: V2TelemetryEvent) async {
         switch event {
+        case .messageSendInternalFailure:
+            // Exact counters are exported by the paired Prometheus sink.
+            // Do not introduce an additional synchronous log on every rejection.
+            return
         case .gatewayCommand(let traceID, let command, let outcome, let rejection, let elapsedMilliseconds):
             guard shouldLogGatewayCommand(
                 traceID: traceID,

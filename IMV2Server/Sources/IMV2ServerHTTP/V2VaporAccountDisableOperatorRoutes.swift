@@ -61,7 +61,7 @@ public struct V2VaporAccountDisableOperatorRoutes: Sendable {
             catch V2AccountDisableError.operationConflict { throw Abort(.conflict) }
             catch V2AccountDisableError.invalidUserID { throw Abort(.badRequest) }
             catch V2AccountDisableError.unavailable { return unavailableResponse() }
-            catch { throw Abort(.serviceUnavailable) }
+            catch { return unavailableResponse() }
             guard let disabledAtMilliseconds = milliseconds(disabledAt: result) else {
                 return unavailableResponse()
             }

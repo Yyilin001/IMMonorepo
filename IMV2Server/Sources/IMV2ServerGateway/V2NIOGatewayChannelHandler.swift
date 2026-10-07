@@ -117,6 +117,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let eventLoop = context.eventLoop
         let stream = stream
+        let socketGate = V2RoomSubscriptionSocketGate(eventLoop: eventLoop)
         let foregroundWriter = V2NIOGatewayForegroundWriter(
             channel: context.channel,
             scheduler: foregroundWriteScheduler,
@@ -152,7 +153,8 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     eventLoop.execute {
                         defer { continuation.resume() }
                         let context = boundContext.value
-                        guard context.channel.isActive, context.channel.isWritable else { return }
+                        guard boundHandler.value.stream.connectionAllowsDispatch(),
+                              context.channel.isActive, context.channel.isWritable else { return }
                         var buffer = context.channel.allocator.buffer(capacity: bytes.count)
                         buffer.writeBytes(bytes)
                         context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
@@ -163,6 +165,10 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     eventLoop.execute {
                         let handler = boundHandler.value
                         let context = boundContext.value
+                        guard handler.stream.connectionAllowsDispatch() else {
+                            continuation.resume(returning: false)
+                            return
+                        }
                         guard !handler.closed, context.channel.isActive, context.channel.isWritable else {
                             let reason: V2GatewayConnectionClosure = context.channel.isActive && !context.channel.isWritable
                                 ? .requiredNotificationBackpressure : .requestFailure
@@ -194,6 +200,40 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         context.writeAndFlush(handler.wrapOutboundOut(buffer), promise: promise)
                     }
                 }
+            }, scopedNotificationWriter: { write in
+                await withCheckedContinuation { continuation in
+                    eventLoop.execute {
+                        let handler = boundHandler.value, context = boundContext.value
+                        // Recovery hints share no retry queue with responses.
+                        // A congested channel leaves its scope recovering.
+                        let headMetrics = V2RoomSubscriptionHeadDeliveryMetrics.shared
+                        guard !handler.closed, context.channel.isActive else {
+                            headMetrics.record(.socketClosed)
+                            continuation.resume(returning: false); return
+                        }
+                        guard context.channel.isWritable else {
+                            headMetrics.record(.socketNotWritable)
+                            continuation.resume(returning: false); return
+                        }
+                        guard !handler.processing, !handler.needsFrameDrain,
+                              handler.pendingResponseWrite == nil, !foregroundWriter.hasPendingFrames else {
+                            headMetrics.record(.socketResponseBusy)
+                            continuation.resume(returning: false); return
+                        }
+                        var buffer = context.channel.allocator.buffer(capacity: write.bytes.count)
+                        buffer.writeBytes(write.bytes)
+                        let outbound = buffer
+                        let promise = eventLoop.makePromise(of: Void.self)
+                        promise.futureResult.whenFailure { _ in headMetrics.record(.socketWriteFailed) }
+                        let accepted = write.enqueueIfCurrent {
+                            boundContext.value.write(boundHandler.value.wrapOutboundOut(outbound), promise: promise)
+                        }
+                        if accepted { context.flush() }
+                        else { promise.succeed(()) } // No write owns this completion when the permit rejects.
+                        headMetrics.record(accepted ? .socketEnqueued : .socketPermitRejected)
+                        continuation.resume(returning: accepted)
+                    }
+                }
             }, requiredNotificationClose: {
                 await withCheckedContinuation { continuation in
                     eventLoop.execute {
@@ -214,16 +254,17 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                               context.channel.isWritable, !foregroundWriter.hasPendingFrames else {
                             continuation.resume(returning: false); return
                         }
+                        var buffer = context.channel.allocator.buffer(capacity: write.bytes.count)
+                        buffer.writeBytes(write.bytes)
+                        let outbound = buffer
                         let accepted = write.enqueueIfCurrent {
-                            let context = boundContext.value
-                            var buffer = context.channel.allocator.buffer(capacity: write.bytes.count)
-                            buffer.writeBytes(write.bytes)
-                            context.writeAndFlush(boundHandler.value.wrapOutboundOut(buffer), promise: nil)
+                            boundContext.value.write(boundHandler.value.wrapOutboundOut(outbound), promise: nil)
                         }
+                        if accepted { context.flush() }
                         continuation.resume(returning: accepted)
                     }
                 }
-            })
+            }, roomSubscriptionSocketGate: socketGate)
             eventLoop.execute {
                 let handler = boundHandler.value
                 guard attached, !handler.closed else { return }
@@ -243,6 +284,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         }
         transportMetrics.observeQueuedInboundBytes(pending.queuedBytes)
         processNext(context: context)
+    }
+
+    public func errorCaught(context: ChannelHandlerContext, error: Error) {
+        // Preserve ChannelInboundHandler's default propagation. A channel error
+        // is not itself an additional close decision or a retry instruction.
+        logger.warning("gateway channel error", metadata: v2GatewayTransportFailureMetadata(error))
+        context.fireErrorCaught(error)
     }
 
     public func channelInactive(context: ChannelHandlerContext) {
@@ -268,6 +316,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             let drained = drained
             let onDrained = onDrained
             Task {
+                await stream.retireTransportConnection()
                 await processingTask?.value
                 await attachmentTask?.value
                 await revocationTask?.value
@@ -345,7 +394,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                 // 对客户端保持不透明；服务端只记录固定分类和错误类型，
                 // 不输出可能包含协议载荷、连接地址或凭据的异常描述。
                 let closeReason = v2GatewayClosureReason(for: error)
-                var metadata = V2SafeLogMetadata.failure(error, stage: "gateway_transport")
+                var metadata = v2GatewayTransportFailureMetadata(error)
                 metadata["closure_reason"] = "\(closeReason.rawValue)"
                 logger.warning(
                     "gateway request processing failed",
@@ -599,12 +648,15 @@ struct V2NIOGatewayForegroundWriteSubmission: Sendable {
     let writer: V2NIOGatewayForegroundWriter
     let bytes: ByteBuffer
     let isAuthorizedToWrite: @Sendable () -> Bool
+    let enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)?
 
     init(writer: V2NIOGatewayForegroundWriter, bytes: ByteBuffer,
-         isAuthorizedToWrite: @escaping @Sendable () -> Bool = { true }) {
+         isAuthorizedToWrite: @escaping @Sendable () -> Bool = { true },
+         enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) {
         self.writer = writer
         self.bytes = bytes
         self.isAuthorizedToWrite = isAuthorizedToWrite
+        self.enqueueIfCurrent = enqueueIfCurrent
     }
 }
 
@@ -617,6 +669,11 @@ struct V2GatewayForegroundWriteQueue: Sendable {
     struct Entry: Sendable {
         let bytes: ByteBuffer
         let isAuthorizedToWrite: @Sendable () -> Bool
+        let enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)?
+        init(bytes: ByteBuffer, isAuthorizedToWrite: @escaping @Sendable () -> Bool,
+             enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) {
+            self.bytes = bytes; self.isAuthorizedToWrite = isAuthorizedToWrite; self.enqueueIfCurrent = enqueueIfCurrent
+        }
     }
     enum AppendOutcome: Equatable, Sendable {
         case queued
@@ -648,8 +705,9 @@ struct V2GatewayForegroundWriteQueue: Sendable {
     var queuedBytes: Int { frameBytes + (recoveryFrame?.bytes.readableBytes ?? 0) }
 
     mutating func append(_ bytes: ByteBuffer,
-                         isAuthorizedToWrite: @escaping @Sendable () -> Bool = { true }) -> AppendOutcome {
-        let entry = Entry(bytes: bytes, isAuthorizedToWrite: isAuthorizedToWrite)
+                         isAuthorizedToWrite: @escaping @Sendable () -> Bool = { true },
+                         enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) -> AppendOutcome {
+        let entry = Entry(bytes: bytes, isAuthorizedToWrite: isAuthorizedToWrite, enqueueIfCurrent: enqueueIfCurrent)
         if recoveryFrame != nil {
             recoveryFrame = entry
             return .recoveryReplaced
@@ -770,8 +828,9 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     }
 
     func submit(_ bytes: ByteBuffer,
-                isAuthorizedToWrite: @escaping @Sendable () -> Bool) {
-        if append(bytes, isAuthorizedToWrite: isAuthorizedToWrite) { schedulerLane.enqueue(self) }
+                isAuthorizedToWrite: @escaping @Sendable () -> Bool,
+                enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) {
+        if append(bytes, isAuthorizedToWrite: isAuthorizedToWrite, enqueueIfCurrent: enqueueIfCurrent) { schedulerLane.enqueue(self) }
     }
 
     /// 接纳一个已准备好的帧，但不立即进入共享通道。
@@ -782,7 +841,8 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     /// - Parameter bytes: 待接纳的已准备帧。
     /// - Returns: 是否需要将本写者加入调度通道。
     private func append(_ bytes: ByteBuffer,
-                        isAuthorizedToWrite: @escaping @Sendable () -> Bool) -> Bool {
+                        isAuthorizedToWrite: @escaping @Sendable () -> Bool,
+                        enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) -> Bool {
         guard isAuthorizedToWrite() else { return false }
         let submission = state.withLock { state -> (
             shouldEnqueue: Bool,
@@ -790,7 +850,7 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
             queuedBytes: Int
         )? in
             guard !state.finished else { return nil }
-            let outcome = state.queue.append(bytes, isAuthorizedToWrite: isAuthorizedToWrite)
+            let outcome = state.queue.append(bytes, isAuthorizedToWrite: isAuthorizedToWrite, enqueueIfCurrent: enqueueIfCurrent)
             guard !state.scheduled, !state.waitingForWritability else {
                 return (false, outcome, state.queue.queuedBytes)
             }
@@ -822,7 +882,8 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         for submission in submissions {
             let writer = submission.writer
             guard writer.append(submission.bytes,
-                                isAuthorizedToWrite: submission.isAuthorizedToWrite) else { continue }
+                                isAuthorizedToWrite: submission.isAuthorizedToWrite,
+                                enqueueIfCurrent: submission.enqueueIfCurrent) else { continue }
             let identity = ObjectIdentifier(writer.schedulerLane)
             if batches[identity] == nil {
                 batches[identity] = .init(lane: writer.schedulerLane, writers: [])
@@ -888,6 +949,25 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
             return (batch, reschedule)
         }
         guard let batch = result.0 else { return }
+        if batch.entries.contains(where: { $0.enqueueIfCurrent != nil }) {
+            var writtenFrames = 0
+            var writtenBytes = 0
+            for entry in batch.entries where entry.isAuthorizedToWrite() {
+                let accepted: Bool
+                if let permit = entry.enqueueIfCurrent {
+                    accepted = permit { self.channel.write(entry.bytes, promise: nil) }
+                } else {
+                    channel.write(entry.bytes, promise: nil); accepted = true
+                }
+                if accepted { writtenFrames += 1; writtenBytes += entry.bytes.readableBytes }
+            }
+            if writtenFrames > 0 {
+                channel.flush()
+                metrics?.foregroundWriteBatch(frames: writtenFrames, bytes: writtenBytes)
+            }
+            if result.1 { schedulerLane.enqueue(self) }
+            return
+        }
         let frames = batch.entries.filter { $0.isAuthorizedToWrite() }.map(\.bytes)
         guard !frames.isEmpty else {
             if result.1 { schedulerLane.enqueue(self) }
@@ -1009,4 +1089,43 @@ func v2GatewayClosureReason(for error: Error) -> V2GatewayConnectionClosure {
         }
     }
     return .requestFailure
+}
+
+/// Only fixed enum cases, the error's compile-time type and a numeric POSIX
+/// errno are exported. Never interpolate Error.description or network addresses.
+func v2GatewayTransportFailureMetadata(_ error: any Error) -> Logger.Metadata {
+    var metadata = V2SafeLogMetadata.failure(error, stage: "gateway_transport")
+    if let coordination = error as? V2GatewayRoomSubscriptionCoordinationError {
+        let code: String
+        switch coordination {
+        case .closed: code = "closed"
+        case .overloaded: code = "overloaded"
+        case .superseded: code = "superseded"
+        case .invalidGrant: code = "invalid_grant"
+        case .deadlineExpired: code = "deadline_expired"
+        case .refused(let reason):
+            code = "owner_refused"
+            metadata["room_subscription_refusal"] = "\(reason.rawValue)"
+        }
+        metadata["room_coordination_error_code"] = "\(code)"
+    }
+    if let session = error as? V2GatewaySessionError {
+        let code: String
+        switch session {
+        case .invalidClientHello: code = "invalid_client_hello"
+        case .invalidAuthenticatePayload: code = "invalid_authenticate_payload"
+        case .unsupportedCapabilityProfile: code = "unsupported_capability_profile"
+        case .unsupportedCommand: code = "unsupported_command"
+        case .sessionExpired: code = "session_expired"
+        case .authenticatedConnectionLimit: code = "authenticated_connection_limit"
+        case .invalidServerClock: code = "invalid_server_clock"
+        }
+        metadata["session_error_code"] = "\(code)"
+    }
+    // IOError.errnoCode traps for Windows-native domains. Do not inspect an
+    // unverified domain there merely to improve diagnostics.
+    #if !os(Windows)
+    if let io = error as? IOError { metadata["errno"] = "\(io.errnoCode)" }
+    #endif
+    return metadata
 }

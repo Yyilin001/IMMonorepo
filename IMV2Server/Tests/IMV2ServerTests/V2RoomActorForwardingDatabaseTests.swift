@@ -12,13 +12,15 @@ import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("D5 same-owner pair commits once and an expired token cannot replay",
-          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_D5_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
-    func v2RoomActorForwardPairFenceAndReplay() async throws {
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_D5_TEST_DATABASE_IS_DISPOSABLE"] == "1"), arguments: [false, true])
+    func v2RoomActorForwardPairFenceAndReplay(policyMode: Bool) async throws {
         let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_D5_OWNER_DATABASE_URL"])
         let resources = makeV2DatabaseTestResources()
         resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
         let database = resources.database(.psql)
         let sql = try #require(database as? any SQLDatabase)
+        var policyOwners: PostgresV2PolicyOwnerDirectory?
+        var policyService: V2RoomPolicyAuthorizationService?
         do {
             guard try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS value")
                 .first(decoding: D5ForwardBool.self)?.value == false else {
@@ -67,6 +69,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SET valid_until = CURRENT_TIMESTAMP + INTERVAL '1 hour'
                 WHERE room_shard_id = 'room-a'
                 """).run()
+            // Prepare source data before selecting either writer mode. Once
+            // policy mode precharges shared credits, legacy writes cannot
+            // participate in that runtime's budget.
+            let targetSend = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+                capacityProfile: profile, limits: limits, now: Date.init)
+            guard case .accepted(let oppositeSource) = try await targetSend.send(.init(
+                roomID: targetRoom, actorUserID: senderID,
+                clientMessageID: .init(uuid: UUID()), text: "opposite source")) else {
+                throw V2ForwardInboxError.corruptPersistenceState
+            }
             let leases = PostgresV2RoomActivationStore(database: database)
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let host = V2ActorHostIdentity(hostID: try .init("d5-pair-host"), incarnationID: UUID())
@@ -79,9 +91,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let pair = V2ActorForwardPairWire(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), source: try .init(roomID: sourceRoom,
                     messageID: source.messageID, revision: .init(1)), targetRoomID: targetRoom)
-            let executor = V2ActorForwardPairDomainExecutor(database: database,
+            var configuredExecutor = V2ActorForwardPairDomainExecutor(database: database,
                 write: PostgresV2RoomWriteStore(database: database), capacityProfile: profile,
                 limits: limits, now: { Date() })
+            if policyMode {
+                let journal = PostgresV2PolicyAuthorizationJournal(database: database)
+                let legacy = V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: [:])
+                let owners = PostgresV2PolicyOwnerDirectory(journal: journal,
+                    dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy),
+                    revoke: { try await PostgresV2RoomPolicyLeaseFence(database: database).revoke($0) })
+                let service = V2RoomPolicyAuthorizationService(roomDatabase: database, controlDatabase: database,
+                    policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
+                policyOwners = owners; policyService = service
+                configuredExecutor = configuredExecutor.usingPolicyAuthorizations(service)
+            }
+            let executor = configuredExecutor
             let tokens = [sourceGrant.token, targetGrant.token]
             let first = try await executor.execute(pair, activationTokens: tokens)
             #expect(first.errorCode == nil && first.messageID != nil)
@@ -93,13 +117,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let selfResult = try await executor.execute(selfPair,
                 activationTokens: [sourceGrant.token])
             #expect(selfResult.errorCode == nil && selfResult.messageID != nil)
-            let targetSend = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
-                capacityProfile: profile, limits: limits, now: Date.init)
-            guard case .accepted(let oppositeSource) = try await targetSend.send(.init(
-                roomID: targetRoom, actorUserID: senderID,
-                clientMessageID: .init(uuid: UUID()), text: "opposite source")) else {
-                throw V2ForwardInboxError.corruptPersistenceState
-            }
             let forwardA = V2ActorForwardPairWire(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), source: pair.source,
                 targetRoomID: targetRoom)
@@ -126,25 +143,37 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 text: "forward source", media: [], entities: [],
                 forwardedFrom: .init(messageID: source.messageID,
                     senderUserID: senderID, sourceRevision: .init(1)), limits: limits)
-            let recoveredOutcome = try await PostgresV2RoomWriteStore(database: database)
-                .accept(command: recoveredCommand, capacityProfile: profile,
-                    identifiers: try V2AcceptanceIDFactory().make(at: recoveredAt),
-                    now: recoveredAt)
-            guard let recovered = recoveredOutcome.acceptanceReceipt else {
-                throw V2ForwardInboxError.corruptPersistenceState
+            let recoveredPair = V2ActorForwardPairWire(actorUserID: senderID,
+                operationID: .init(uuid: recoveredOperation), source: pair.source, targetRoomID: targetRoom)
+            let recoveredMessageID: MessageID
+            if policyMode {
+                let service = try #require(policyService)
+                let write = PostgresV2RoomWriteStore(database: database).usingPolicyAuthorizations(service)
+                let request = V2RoomWriteRequest(command: recoveredCommand, capacityProfile: profile,
+                    identifiers: try V2AcceptanceIDFactory().make(at: recoveredAt), now: recoveredAt)
+                // The seeded ledger has no result. Fault injection omits only
+                // its result publication; the actual fenced acceptance and
+                // immutable completion still commit through the policy path.
+                let outcome = try await write.acceptActorForwardPair(request: request,
+                    sourceRoomID: sourceRoom, activationTokens: tokens,
+                    prepareLedger: { _ in }, recordLedger: { _, _ in })
+                recoveredMessageID = try #require(outcome.acceptanceReceipt).messageID
+            } else {
+                let outcome = try await PostgresV2RoomWriteStore(database: database)
+                    .accept(command: recoveredCommand, capacityProfile: profile,
+                        identifiers: try V2AcceptanceIDFactory().make(at: recoveredAt), now: recoveredAt)
+                guard let receipt = outcome.acceptanceReceipt else { throw V2ForwardInboxError.corruptPersistenceState }
+                recoveredMessageID = receipt.messageID
             }
             try await sql.raw("""
                 UPDATE im_v2.messages
                 SET withdrawn_at = CURRENT_TIMESTAMP, withdrawn_by_user_id = \(bind: senderUUID)
                 WHERE message_id = \(bind: source.messageID.uuidValue!)
                 """).run()
-            let recoveredPair = V2ActorForwardPairWire(actorUserID: senderID,
-                operationID: .init(uuid: recoveredOperation), source: pair.source,
-                targetRoomID: targetRoom)
             let repaired = try await executor.execute(recoveredPair, activationTokens: tokens)
-            #expect(repaired.messageID == recovered.messageID && repaired.errorCode == nil)
+            #expect(repaired.messageID == recoveredMessageID && repaired.errorCode == nil)
             #expect(try await sql.raw("""
-                SELECT result_message_id = \(bind: recovered.messageID.uuidValue!) AS value
+                SELECT result_message_id = \(bind: recoveredMessageID.uuidValue!) AS value
                 FROM im_v2.message_forward_operations
                 WHERE operation_id = \(bind: recoveredOperation)
                 """).first(decoding: D5ForwardBool.self)?.value == true)
@@ -161,9 +190,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
                 _ = try await executor.execute(pair, activationTokens: tokens)
             }
+            if let policyService { try await policyService.shutdown() }
+            if let policyOwners { await policyOwners.shutdown() }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {
+            if let policyService { try? await policyService.shutdown() }
+            if let policyOwners { await policyOwners.shutdown() }
             try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
             try? await resources.shutdown()
             throw error

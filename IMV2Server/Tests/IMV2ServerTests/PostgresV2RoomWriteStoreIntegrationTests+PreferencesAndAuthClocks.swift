@@ -680,6 +680,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let gateway = V2PostgresGatewayAuthenticator(database: database, tokenKey: key, now: { clock.now() })
             try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at, session_expires_at) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), \(bind: base.addingTimeInterval(-120)), \(bind: base.addingTimeInterval(-120)), \(bind: base.addingTimeInterval(60)))").run()
             try await sql.raw("INSERT INTO im_v2.device_access_tokens (token_hmac, user_id, device_id, issued_at, expires_at) VALUES (\(bind: key.digest(localInput)), \(bind: senderUUID), \(bind: device.uuidValue!), \(bind: base.addingTimeInterval(-120)), \(bind: base.addingTimeInterval(60)))").run()
+            try await sql.raw("INSERT INTO im_v2.realtime_device_control_versions (user_id, device_id, latest_change_version) VALUES (\(bind: senderUUID), \(bind: device.uuidValue!), 37)").run()
             func snapshot() async throws -> String {
                 let row = try await sql.raw("SELECT jsonb_build_object('last_active_at', d.last_active_at, 'device_revoked_at', d.revoked_at, 'token_revoked_at', t.revoked_at)::text AS value FROM im_v2.auth_devices d JOIN im_v2.device_access_tokens t USING (user_id, device_id) WHERE d.device_id = \(bind: device.uuidValue!)").first(decoding: StringValueRow.self)
                 guard let row else { throw V2GatewayAuthenticationError.corruptPersistenceState }
@@ -720,6 +721,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let recovered = try await gateway.authenticateSession(accessToken: localInput, deviceID: device)
             #expect(recovered.userID == senderID)
             #expect(recovered.expiresAt == base.addingTimeInterval(60))
+            let control = try #require(try await sql.raw("SELECT latest_change_version::text AS value FROM im_v2.realtime_device_control_versions WHERE user_id=\(bind: senderUUID) AND device_id=\(bind: device.uuidValue!)").first(decoding: StringValueRow.self))
+            #expect(recovered.credentialControlVersion == Int64(control.value))
             let activity = try await sql.raw("SELECT last_active_at AS value FROM im_v2.auth_devices WHERE device_id = \(bind: device.uuidValue!)").first(decoding: RevocationClockDateRow.self)
             #expect(activity?.value == base)
             #expect(try await count("im_v2.device_revocation_events", on: sql) == 0)

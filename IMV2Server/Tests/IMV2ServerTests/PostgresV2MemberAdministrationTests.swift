@@ -125,7 +125,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sql.raw("CREATE TRIGGER fail_member_receipt BEFORE INSERT ON im_v2.member_administration_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.fail_member_receipt()").run()
                 await #expect(throws:(any Error).self) { _=try await store.submit(command,token:token,capacityProfile:forwardImportTestProfile(),eventID:.init(uuid:UUID())) }
                 #expect(try await sql.raw("SELECT to_jsonb(r)::text AS value FROM im_v2.rooms r WHERE room_id=\(bind:roomUUID)").first(decoding:StringValueRow.self)?.value == before)
-                for table in ["room_events","moderation_audit_entries","room_member_mutes","member_administration_receipts","group_event_wake_outbox"] { #expect(try await count("im_v2."+table,on:sql) == 0) }
+                for table in ["room_events","moderation_audit_entries","room_member_mutes","member_administration_receipts"] { #expect(try await count("im_v2."+table,on:sql) == 0) }
                 #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.room_memberships WHERE room_id=\(bind:roomUUID) AND left_revision IS NOT NULL").first(decoding:CountRow.self)?.value == 0)
                 try await sql.raw("DROP TRIGGER fail_member_receipt ON im_v2.member_administration_receipts").run()
                 guard case .receipt(let receipt)=try await store.submit(command,token:token,capacityProfile:forwardImportTestProfile(),eventID:.init(uuid:UUID())) else { throw CancellationError() }

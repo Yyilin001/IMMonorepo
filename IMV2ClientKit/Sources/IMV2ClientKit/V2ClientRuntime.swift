@@ -110,6 +110,15 @@ public actor V2ClientRuntime {
     }
 
     /// 读取逻辑阶段快照；返回 stopped 不保证之前启动的所有任务已完成退出。
+    public enum BackgroundLoop: Sendable { case initialSync, policy, roomSubscription, roomRecovery, availability, heartbeat }
+    private var backgroundFailure: (any Error)?
+    private var backgroundFailureLoop: BackgroundLoop?
+    public func lastBackgroundFailureLoop() -> BackgroundLoop? { backgroundFailureLoop }
+
+    /// The most recent current-generation loop failure, retained across retries.
+    /// Cancellation and failures from retired generations do not replace it.
+    public func lastBackgroundFailure() -> (any Error)? { backgroundFailure }
+
     public func currentState() -> V2ClientRuntimeState { state }
 
     /// 等待运行时停止通知，或等待者自身被取消。
@@ -241,19 +250,19 @@ public actor V2ClientRuntime {
                 try await activity.synchronizeAfterConnection()
                 try Task.checkCancellation()
             } catch is CancellationError { return }
-            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration, error: error, loop: .initialSync) }
         }
         policyRecoveryTask?.cancel()
         policyRecoveryTask = Task { [weak self, activity] in
             do { try await activity.runPolicyRecoveryLoop() }
             catch is CancellationError { return }
-            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration, error: error, loop: .policy) }
         }
         roomSubscriptionTask?.cancel()
         roomSubscriptionTask = Task { [weak self, activity] in
             do { try await activity.runRoomSubscriptionLoop(connectionID: connectionID) }
             catch is CancellationError { return }
-            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration, error: error, loop: .roomSubscription) }
         }
         availabilityTask?.cancel()
         heartbeatTask?.cancel()
@@ -261,7 +270,7 @@ public actor V2ClientRuntime {
         roomCatchUpTask = Task { [weak self, activity] in
             do { try await activity.runRoomCatchUpLoop() }
             catch is CancellationError { return }
-            catch { await self?.handleBackgroundFailure(generation: taskGeneration) }
+            catch { await self?.handleBackgroundFailure(generation: taskGeneration, error: error, loop: .roomRecovery) }
         }
         availabilityTask = Task { [weak self, activity] in
             do {
@@ -269,7 +278,7 @@ public actor V2ClientRuntime {
             } catch is CancellationError {
                 return
             } catch {
-                await self?.handleBackgroundFailure(generation: taskGeneration)
+                await self?.handleBackgroundFailure(generation: taskGeneration, error: error, loop: .availability)
             }
         }
         heartbeatTask = Task { [weak self, activity] in
@@ -278,7 +287,7 @@ public actor V2ClientRuntime {
             } catch is CancellationError {
                 return
             } catch {
-                await self?.handleBackgroundFailure(generation: taskGeneration)
+                await self?.handleBackgroundFailure(generation: taskGeneration, error: error, loop: .heartbeat)
             }
         }
     }
@@ -286,8 +295,10 @@ public actor V2ClientRuntime {
     /// 只处理当前 running 代的循环失败，撤下任务、通知停止并断开连接。
     ///
     /// 此路径取消其他循环但不逐一等待它们返回，不能视为与显式 stop 的完整 drain 相同。
-    private func handleBackgroundFailure(generation failedGeneration: UInt64) async {
+    private func handleBackgroundFailure(generation failedGeneration: UInt64, error: any Error, loop: BackgroundLoop) async {
         guard generation == failedGeneration, case .running = state else { return }
+        backgroundFailure = error
+        backgroundFailureLoop = loop
         retiredTasks.append(contentsOf: [availabilityTask, heartbeatTask, roomCatchUpTask,
             roomSubscriptionTask, policyRecoveryTask, initialRecoveryTask].compactMap { $0 })
         generation &+= 1

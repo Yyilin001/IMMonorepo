@@ -154,8 +154,8 @@ struct PostgresV2RoomActivationTests {
         }
     }
 
-    @Test("transaction begun before expiry rechecks clock after lock wait")
-    func lockWaitCrossesExpiry() async throws {
+    @Test("lease LockRows is fully consumed before the authoritative expiry clock", arguments: [false, true])
+    func lockWaitCrossesExpiry(durableBatch: Bool) async throws {
         try await withUserEventDatabase { database, sql, schema in
             let room = try await createRoom(sql: sql, schema: schema)
             let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
@@ -168,22 +168,48 @@ struct PostgresV2RoomActivationTests {
             let blocker = Task {
                 try await database.transaction { transaction in
                     let txSQL = try #require(transaction as? any SQLDatabase)
-                    try await txSQL.raw("SELECT room_id FROM \(unsafeRaw: schema).rooms WHERE room_id = \(bind: room.uuidValue!) FOR UPDATE").run()
+                    let pid = try #require(try await txSQL.raw("SELECT pg_backend_pid() AS pid").first(decoding: ActivationPIDRow.self)).pid
+                    try await txSQL.raw("SELECT room_id FROM \(unsafeRaw: schema).room_activation_leases WHERE room_id = \(bind: room.uuidValue!) FOR UPDATE").run()
+                    await blockerLocked.setPID(pid)
                     await blockerLocked.signal()
                     await releaseBlocker.wait()
                 }
             }
             await blockerLocked.wait()
+            let holderPID = try #require(await blockerLocked.pid())
             let waiter = Task {
                 try await database.transaction { transaction in
                     let txSQL = try #require(transaction as? any SQLDatabase)
                     try await txSQL.raw("SELECT clock_timestamp()").run()
                     await waiterBegun.signal()
-                    try await v2RequireRoomActivation(token: lease.token, sql: txSQL, schema: schema)
+                    if durableBatch {
+                        try await v2RequireDurableOwnerBatchActivations(tokens: [lease.token], sql: txSQL, schema: schema)
+                    } else {
+                        try await v2RequireRoomActivation(token: lease.token, sql: txSQL, schema: schema)
+                    }
                 }
             }
             await waiterBegun.wait()
-            try await Task.sleep(for: .milliseconds(425))
+            do {
+                let budget = ContinuousClock.now + .seconds(5)
+                var witnessed = false
+                while ContinuousClock.now < budget {
+                    let state = try #require(try await sql.raw("""
+                        SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                               WHERE \(bind: holderPID) = ANY(pg_blocking_pids(pid))) AS blocked,
+                               clock_timestamp() >= expires_at AS expired
+                        FROM \(unsafeRaw: schema).room_activation_leases WHERE room_id = \(bind: room.uuidValue!)
+                        """).first(decoding: ActivationExpiryWaitRow.self))
+                    if state.blocked && state.expired { witnessed = true; break }
+                    await Task.yield()
+                }
+                #expect(witnessed, "actual lease-lock wait must cross the database expiry")
+            } catch {
+                await releaseBlocker.signal()
+                _ = try? await blocker.value
+                _ = try? await waiter.value
+                throw error
+            }
             await releaseBlocker.signal()
             try await blocker.value
             await #expect(throws: V2RoomActivationLeaseError.leaseExpired) { try await waiter.value }
@@ -319,6 +345,9 @@ struct PostgresV2RoomActivationTests {
 
 private actor ActivationGate {
     private var signalled = false
+    private var backendPID: Int64?
+    func setPID(_ value: Int64) { backendPID = value }
+    func pid() -> Int64? { backendPID }
     private var waiters: [CheckedContinuation<Void, Never>] = []
     func wait() async {
         if signalled { return }
@@ -337,3 +366,6 @@ private struct ActivationSequenceRow: Decodable {
 }
 
 private struct ActivationRollback: Error {}
+
+private struct ActivationPIDRow: Decodable { let pid: Int64 }
+private struct ActivationExpiryWaitRow: Decodable { let blocked: Bool; let expired: Bool }

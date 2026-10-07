@@ -46,98 +46,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION im_v2.enqueue_hybrid_group_event_wake() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    INSERT INTO im_v2.group_event_wake_outbox (
-        room_id, target_room_sequence, revision, state, next_attempt_at, updated_at
-    )
-    SELECT inserted.room_id,
-           max(inserted.room_sequence),
-           1,
-           'pending',
-           min(inserted.created_at),
-           max(inserted.created_at)
-    FROM inserted_room_events AS inserted
-    JOIN im_v2.rooms AS room ON room.room_id = inserted.room_id
-    WHERE room.room_kind = 'group'
-      AND room.capacity_class = 'large'
-    GROUP BY inserted.room_id
-    ON CONFLICT (room_id) DO UPDATE
-    SET target_room_sequence = GREATEST(
-            im_v2.group_event_wake_outbox.target_room_sequence,
-            EXCLUDED.target_room_sequence
-        ),
-        revision = im_v2.group_event_wake_outbox.revision + 1,
-        state = 'pending',
-        lease_token = NULL,
-        lease_expires_at = NULL,
-        next_attempt_at = LEAST(
-            im_v2.group_event_wake_outbox.next_attempt_at,
-            EXCLUDED.next_attempt_at
-        ),
-        updated_at = GREATEST(
-            im_v2.group_event_wake_outbox.updated_at,
-            EXCLUDED.updated_at
-        )
-    -- A pending row already guarantees that the relay will revisit this room.
-    -- Its authoritative high-watermark is read from `rooms` after the relay
-    -- owns the lease, so rewriting this hot row for every append is redundant.
-    -- A leased row must still be replaced: that revision/token transition is
-    -- the durable fence that prevents an in-flight publisher from deleting a
-    -- wake created by a later commit.
-    WHERE im_v2.group_event_wake_outbox.state = 'leased';
-    RETURN NULL;
-END;
-$$;
-
--- Plain message-row events are the canonical accepted event for the compact
--- hybrid-group path.  Keep wake publication in the same transaction and
--- coalesce it once per affected room, exactly like the legacy room-event
--- source.  Direct rooms also use message-row events but deliberately do not
--- enter the group wake pipeline.
-CREATE FUNCTION im_v2.enqueue_hybrid_group_message_wake() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    INSERT INTO im_v2.group_event_wake_outbox (
-        room_id, target_room_sequence, revision, state, next_attempt_at, updated_at
-    )
-    SELECT inserted.room_id,
-           max(inserted.room_sequence),
-           1,
-           'pending',
-           min(inserted.created_at),
-           max(inserted.created_at)
-    FROM inserted_messages AS inserted
-    JOIN im_v2.rooms AS room ON room.room_id = inserted.room_id
-    WHERE inserted.accepted_event_storage = 'message_row'
-      AND room.room_kind = 'group'
-      AND room.capacity_class = 'large'
-    GROUP BY inserted.room_id
-    ON CONFLICT (room_id) DO UPDATE
-    SET target_room_sequence = GREATEST(
-            im_v2.group_event_wake_outbox.target_room_sequence,
-            EXCLUDED.target_room_sequence
-        ),
-        revision = im_v2.group_event_wake_outbox.revision + 1,
-        state = 'pending',
-        lease_token = NULL,
-        lease_expires_at = NULL,
-        next_attempt_at = LEAST(
-            im_v2.group_event_wake_outbox.next_attempt_at,
-            EXCLUDED.next_attempt_at
-        ),
-        updated_at = GREATEST(
-            im_v2.group_event_wake_outbox.updated_at,
-            EXCLUDED.updated_at
-        )
-    WHERE im_v2.group_event_wake_outbox.state = 'leased';
-    RETURN NULL;
-END;
-$$;
-
 CREATE FUNCTION im_v2.enqueue_user_projection_v7() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
@@ -311,6 +219,14 @@ CREATE TABLE im_v2.auth_devices (
     last_active_at timestamp with time zone NOT NULL,
     CONSTRAINT auth_devices_display_name_length CHECK (((octet_length(display_name) >= 1) AND (octet_length(display_name) <= 128))),
     CONSTRAINT auth_devices_platform_length CHECK (((octet_length(platform) >= 1) AND (octet_length(platform) <= 64)))
+);
+
+-- Authentication captures the committed device-control cut at session creation.
+CREATE TABLE im_v2.realtime_device_control_versions (
+    user_id uuid NOT NULL,
+    device_id uuid NOT NULL,
+    latest_change_version bigint NOT NULL CHECK (latest_change_version > 0),
+    PRIMARY KEY (user_id, device_id)
 );
 
 CREATE TABLE im_v2.content_review_cases (
@@ -623,22 +539,6 @@ CREATE TABLE im_v2.group_announcements (
     CONSTRAINT group_announcements_revision_check CHECK ((revision > 0))
 );
 
-CREATE TABLE im_v2.group_event_wake_outbox (
-    room_id uuid NOT NULL,
-    target_room_sequence bigint NOT NULL,
-    revision bigint NOT NULL,
-    state text NOT NULL,
-    lease_token uuid,
-    lease_expires_at timestamp with time zone,
-    attempt_count integer DEFAULT 0 NOT NULL,
-    next_attempt_at timestamp with time zone NOT NULL,
-    updated_at timestamp with time zone NOT NULL,
-    CONSTRAINT group_event_wake_outbox_attempt_count_check CHECK ((attempt_count >= 0)),
-    CONSTRAINT group_event_wake_outbox_check CHECK ((((state = 'pending'::text) AND (lease_token IS NULL) AND (lease_expires_at IS NULL)) OR ((state = 'leased'::text) AND (lease_token IS NOT NULL) AND (lease_expires_at IS NOT NULL)))),
-    CONSTRAINT group_event_wake_outbox_revision_check CHECK ((revision > 0)),
-    CONSTRAINT group_event_wake_outbox_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'leased'::text]))),
-    CONSTRAINT group_event_wake_outbox_target_room_sequence_check CHECK ((target_room_sequence > 0))
-);
 
 CREATE TABLE im_v2.group_role_policies (
     room_id uuid NOT NULL,
@@ -1348,6 +1248,9 @@ CREATE TABLE im_v2.message_send_completions (
     group_capacity_class text CHECK (group_capacity_class IN ('standard', 'large')),
     direct_recipient_user_id uuid,
     created_at timestamp with time zone NOT NULL,
+    operation_fingerprint bytea CHECK (octet_length(operation_fingerprint) = 32),
+    operation_resolved_at_ms bigint CHECK (operation_resolved_at_ms > 0),
+    CHECK ((operation_fingerprint IS NULL) = (operation_resolved_at_ms IS NULL)),
     PRIMARY KEY (room_id, sender_user_id, client_message_id)
 );
 
@@ -2100,14 +2003,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-66'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-66'::text))
+    schema_id text DEFAULT 'im-v2-current-69'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-69'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-66');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-69');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2598,8 +2501,6 @@ ALTER TABLE ONLY im_v2.gateway_worker_cursors
 ALTER TABLE ONLY im_v2.group_announcements
     ADD CONSTRAINT group_announcements_pkey PRIMARY KEY (room_id);
 
-ALTER TABLE ONLY im_v2.group_event_wake_outbox
-    ADD CONSTRAINT group_event_wake_outbox_pkey PRIMARY KEY (room_id);
 
 
 
@@ -2975,7 +2876,6 @@ CREATE INDEX group_join_requests_room_pending_idx ON im_v2.group_join_requests U
 CREATE INDEX group_join_requests_applicant_pending_idx ON im_v2.group_join_requests USING btree (applicant_user_id, created_at) WHERE (state = ANY (ARRAY['pending'::text]));
 
 
-CREATE INDEX group_event_wake_outbox_claim_idx ON im_v2.group_event_wake_outbox USING btree (next_attempt_at, updated_at) WHERE (state = 'pending'::text);
 
 
 
@@ -3135,9 +3035,7 @@ CREATE UNIQUE INDEX user_sync_log_nonfanout_identity_idx ON im_v2.user_sync_log 
 
 CREATE INDEX user_sync_retention_claim_idx ON im_v2.user_sync_retention USING btree (updated_at, user_id);
 
-CREATE TRIGGER room_events_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.room_events REFERENCING NEW TABLE AS inserted_room_events FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_hybrid_group_event_wake();
 
-CREATE TRIGGER messages_enqueue_hybrid_group_wake AFTER INSERT ON im_v2.messages REFERENCING NEW TABLE AS inserted_messages FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_hybrid_group_message_wake();
 
 CREATE TRIGGER room_events_immutable BEFORE DELETE OR UPDATE ON im_v2.room_events FOR EACH ROW EXECUTE FUNCTION im_v2.reject_room_event_mutation();
 
@@ -3196,8 +3094,6 @@ ALTER TABLE ONLY im_v2.direct_room_pairs
 ALTER TABLE ONLY im_v2.group_announcements
     ADD CONSTRAINT group_announcements_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.group_event_wake_outbox
-    ADD CONSTRAINT group_event_wake_outbox_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
 
 ALTER TABLE ONLY im_v2.group_role_policies
     ADD CONSTRAINT group_role_policies_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
@@ -3522,17 +3418,7 @@ CREATE TRIGGER message_mutation_receipts_immutable BEFORE UPDATE OR DELETE ON im
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
 
 
-CREATE TABLE im_v2.message_send_operation_receipts (
-    room_id uuid NOT NULL,actor_user_id uuid NOT NULL,operation_id uuid NOT NULL,
-    fingerprint_version smallint NOT NULL CHECK(fingerprint_version=1),
-    request_fingerprint bytea NOT NULL CHECK(octet_length(request_fingerprint)=32),
-    domain_fingerprint bytea NOT NULL CHECK(octet_length(domain_fingerprint)=32),
-    receipt jsonb NOT NULL CHECK(jsonb_typeof(receipt)='object'),
-    resolved_at timestamptz NOT NULL CHECK(isfinite(resolved_at)),
-    PRIMARY KEY(room_id,actor_user_id,operation_id)
-);
-CREATE TRIGGER message_send_operation_receipts_immutable BEFORE UPDATE OR DELETE ON im_v2.message_send_operation_receipts
-    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_mutation_receipt_mutation();
+
 
 
 CREATE TABLE im_v2.device_registration_cancellations (
@@ -3766,26 +3652,8 @@ CREATE TABLE im_v2.message_operation_closures (
     PRIMARY KEY (room_id, sender_user_id, client_message_id)
 );
 
-CREATE FUNCTION im_v2.reject_closed_message_acceptance() RETURNS trigger
-LANGUAGE plpgsql VOLATILE AS $$
-BEGIN
-    -- VOLATILE executes the second query using a fresh READ COMMITTED snapshot after
-    -- a waiting operation lock. A conditional append's older outer snapshot is insufficient.
-    IF current_setting('transaction_isolation') <> 'read committed' THEN
-        RAISE EXCEPTION 'message acceptance requires read committed isolation' USING ERRCODE = '25000';
-    END IF;
-    PERFORM pg_advisory_xact_lock(hashtextextended(
-        'v2-message-operation:' || NEW.room_id::text || ':' || NEW.sender_user_id::text || ':' || NEW.client_message_id::text, 0));
-    IF EXISTS (SELECT 1 FROM im_v2.message_operation_closures
-        WHERE room_id = NEW.room_id AND sender_user_id = NEW.sender_user_id AND client_message_id = NEW.client_message_id) THEN
-        RAISE EXCEPTION 'message operation is permanently closed'
-            USING ERRCODE = '23514', CONSTRAINT = 'message_operation_permanently_closed';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER message_send_completion_close_fence BEFORE INSERT ON im_v2.message_send_completions
-    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_closed_message_acceptance();
+-- Historical closure rows remain readable for compatibility. New sends use
+-- unique message identity; recovery queries never close absent operations.
 
 CREATE FUNCTION im_v2.reject_message_operation_closure_mutation() RETURNS trigger
 LANGUAGE plpgsql AS $$
@@ -4153,5 +4021,165 @@ END;
 $$;
 CREATE TRIGGER remote_device_revocation_baseline_immutable BEFORE UPDATE OR DELETE ON im_v2.remote_device_revocation_baselines FOR EACH ROW EXECUTE FUNCTION im_v2.guard_remote_device_revocation_metadata();
 CREATE TRIGGER remote_device_revocation_receipt_immutable BEFORE UPDATE OR DELETE ON im_v2.remote_device_revocation_receipts FOR EACH ROW EXECUTE FUNCTION im_v2.guard_remote_device_revocation_metadata();
+
+
+-- Fixed-size control-plane fencing. Topic subscriptions and Actor references
+-- are process-local; publication never queries this table.
+CREATE TABLE im_v2.realtime_partition_leases (
+    partition_id integer PRIMARY KEY CHECK (partition_id BETWEEN 0 AND 255),
+    host_id text CHECK (octet_length(host_id) BETWEEN 1 AND 128),
+    service_id text CHECK (octet_length(service_id) BETWEEN 1 AND 128),
+    process_incarnation uuid,
+    lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
+    lease_token uuid,
+    expires_at timestamptz NOT NULL DEFAULT '1970-01-01T00:00:00Z' CHECK (isfinite(expires_at)),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp() CHECK (isfinite(updated_at)),
+    CHECK ((lease_epoch = 0 AND host_id IS NULL AND service_id IS NULL
+            AND process_incarnation IS NULL AND lease_token IS NULL)
+        OR (lease_epoch > 0 AND host_id IS NOT NULL AND service_id IS NOT NULL
+            AND process_incarnation IS NOT NULL AND lease_token IS NOT NULL))
+);
+INSERT INTO im_v2.realtime_partition_leases (partition_id)
+    SELECT generate_series(0, 255);
+CREATE TABLE im_v2.user_sync_wake_outbox (
+    user_id uuid PRIMARY KEY,
+    target_user_sequence bigint NOT NULL CHECK (target_user_sequence > 0),
+    revision bigint NOT NULL CHECK (revision > 0),
+    state text NOT NULL CHECK (state IN ('pending','leased')),
+    lease_token uuid,
+    lease_expires_at timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    CHECK ((state='pending' AND lease_token IS NULL AND lease_expires_at IS NULL)
+        OR (state='leased' AND lease_token IS NOT NULL AND lease_expires_at IS NOT NULL))
+);
+CREATE INDEX user_sync_wake_claim_idx ON im_v2.user_sync_wake_outbox(next_attempt_at, updated_at) WHERE state='pending';
+CREATE INDEX user_sync_wake_expired_idx ON im_v2.user_sync_wake_outbox(lease_expires_at) WHERE state='leased';
+CREATE FUNCTION im_v2.enqueue_user_sync_wake() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO im_v2.user_sync_wake_outbox
+        (user_id,target_user_sequence,revision,state,next_attempt_at,updated_at)
+    SELECT user_id,max(user_sync_sequence),1,'pending',min(created_at),max(created_at)
+    FROM inserted_user_sync_rows GROUP BY user_id
+    ON CONFLICT(user_id) DO UPDATE
+    SET target_user_sequence=GREATEST(im_v2.user_sync_wake_outbox.target_user_sequence,EXCLUDED.target_user_sequence),
+        revision=im_v2.user_sync_wake_outbox.revision+1,state='pending',lease_token=NULL,lease_expires_at=NULL,
+        next_attempt_at=LEAST(im_v2.user_sync_wake_outbox.next_attempt_at,EXCLUDED.next_attempt_at),
+        updated_at=GREATEST(im_v2.user_sync_wake_outbox.updated_at,EXCLUDED.updated_at)
+    WHERE im_v2.user_sync_wake_outbox.state='leased';
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER user_sync_log_enqueue_wake AFTER INSERT ON im_v2.user_sync_log
+    REFERENCING NEW TABLE AS inserted_user_sync_rows FOR EACH STATEMENT EXECUTE FUNCTION im_v2.enqueue_user_sync_wake();
+
+-- Device-reported durable room cursors are independent of foreground scopes.
+-- No room FK: rooms may live on another physical shard. These reports are
+-- recovery hints and never authorize access or retire retained room history.
+CREATE TABLE im_v2.device_room_progress (
+    user_id uuid NOT NULL,
+    device_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    applied_through bigint NOT NULL CHECK (applied_through >= 0),
+    PRIMARY KEY (user_id, device_id, room_id)
+);
+
+-- Policy authorization ownership and revocation journal. Policy facts remain
+-- in their domain tables; this journal serializes registration against changes.
+-- There are no room FKs: control and room owners may use different databases.
+CREATE TABLE im_v2.policy_owner_deployment (
+    deployment_id text PRIMARY KEY CHECK (deployment_id = 'active'),
+    revision bigint NOT NULL CHECK (revision > 0),
+    snapshot_digest bytea NOT NULL CHECK (octet_length(snapshot_digest) = 32),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE im_v2.policy_authorization_scopes (
+    scope_key text PRIMARY KEY CHECK (char_length(scope_key) BETWEEN 1 AND 80),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    owner_id uuid,
+    owner_epoch bigint NOT NULL DEFAULT 0 CHECK (owner_epoch >= 0),
+    owner_valid_until timestamptz,
+    pending_change_key text,
+    CHECK ((owner_id IS NULL AND owner_valid_until IS NULL AND owner_epoch = 0)
+        OR (owner_id IS NOT NULL AND owner_valid_until IS NOT NULL AND owner_epoch > 0))
+);
+
+CREATE SEQUENCE im_v2.policy_authorization_holder_generation AS bigint MINVALUE 1 NO CYCLE;
+CREATE TABLE im_v2.policy_authorization_holders (
+    scope_key text NOT NULL REFERENCES im_v2.policy_authorization_scopes(scope_key),
+    registration_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    activation_id uuid NOT NULL,
+    room_owner_epoch bigint NOT NULL CHECK (room_owner_epoch >= 0),
+    generation bigint NOT NULL CHECK (generation > 0),
+    endpoint text NOT NULL CHECK (char_length(endpoint) BETWEEN 1 AND 512),
+    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
+    policy_owner_epoch bigint NOT NULL CHECK (policy_owner_epoch > 0),
+    valid_until timestamptz NOT NULL,
+    revoked boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (scope_key, registration_id)
+);
+CREATE INDEX policy_authorization_holders_active_idx
+    ON im_v2.policy_authorization_holders(scope_key) WHERE NOT revoked;
+CREATE INDEX policy_authorization_holders_registration_idx
+    ON im_v2.policy_authorization_holders(registration_id);
+
+CREATE TABLE im_v2.policy_authorization_changes (
+    operation_key text PRIMARY KEY CHECK (char_length(operation_key) BETWEEN 1 AND 512),
+    scope_key text NOT NULL REFERENCES im_v2.policy_authorization_scopes(scope_key),
+    fingerprint bytea NOT NULL CHECK (octet_length(fingerprint) = 32),
+    command jsonb NOT NULL,
+    expected_revision bigint NOT NULL CHECK (expected_revision > 0),
+    next_revision bigint NOT NULL CHECK (next_revision > expected_revision),
+    committed boolean NOT NULL DEFAULT false,
+    receipt bytea,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    committed_at timestamptz,
+    CHECK ((NOT committed AND receipt IS NULL AND committed_at IS NULL)
+        OR (committed AND receipt IS NOT NULL AND committed_at IS NOT NULL))
+);
+CREATE INDEX policy_authorization_changes_pending_idx
+    ON im_v2.policy_authorization_changes(created_at, operation_key) WHERE NOT committed;
+CREATE INDEX policy_authorization_changes_scope_pending_idx
+    ON im_v2.policy_authorization_changes(scope_key, created_at, operation_key) WHERE NOT committed;
+
+CREATE TABLE im_v2.policy_authorization_revocations (
+    operation_key text NOT NULL REFERENCES im_v2.policy_authorization_changes(operation_key),
+    registration_id uuid NOT NULL,
+    room_id uuid NOT NULL,
+    activation_id uuid NOT NULL,
+    room_owner_epoch bigint NOT NULL CHECK (room_owner_epoch >= 0),
+    generation bigint NOT NULL CHECK (generation > 0),
+    endpoint text NOT NULL CHECK (char_length(endpoint) BETWEEN 1 AND 512),
+    valid_until timestamptz NOT NULL,
+    resolved_at timestamptz,
+    PRIMARY KEY (operation_key, registration_id)
+);
+
+CREATE TABLE im_v2.policy_authorization_outbox (
+    operation_key text PRIMARY KEY REFERENCES im_v2.policy_authorization_changes(operation_key),
+    scope_key text NOT NULL REFERENCES im_v2.policy_authorization_scopes(scope_key),
+    revision bigint NOT NULL CHECK (revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    published_at timestamptz
+);
+CREATE INDEX policy_authorization_outbox_pending_idx
+    ON im_v2.policy_authorization_outbox(created_at, operation_key) WHERE published_at IS NULL;
+CREATE INDEX policy_authorization_outbox_scope_pending_idx
+    ON im_v2.policy_authorization_outbox(scope_key, revision) WHERE published_at IS NULL;
+
+-- Room-side tombstones prevent a delayed install from resurrecting a revoked
+-- registration, even when revocation arrives before the initial installation.
+CREATE TABLE im_v2.room_policy_authorization_leases (
+    registration_id uuid PRIMARY KEY,
+    room_id uuid NOT NULL,
+    activation_id uuid NOT NULL,
+    room_owner_epoch bigint NOT NULL CHECK (room_owner_epoch >= 0),
+    generation bigint NOT NULL CHECK (generation > 0),
+    valid_until timestamptz NOT NULL,
+    revoked boolean NOT NULL DEFAULT false
+);
 
 COMMIT;

@@ -161,14 +161,14 @@ public struct PostgresV2GroupCreationOperationStore: Sendable {
     private func read(_ intent: V2GroupCreationIntent, sql: any SQLDatabase) async throws -> Row? {
         try await sql.raw("SELECT intent::text AS intent,room_id,event_id,room_shard_id AS shard,phase,accepted_member_count AS count,copied_member_count AS copied,receipt::text AS receipt FROM im_v2.group_creation_operations WHERE actor_user_id = \(bind: intent.identity.accountID.uuidValue!) AND operation_id = \(bind: operationUUID(intent)) FOR UPDATE").first(decoding: Row.self)
     }
-    private func matches(_ row: Row, intent: V2GroupCreationIntent) throws -> Bool { try JSONDecoder().decode(V2GroupCreationIntent.self, from: Data(row.intent.utf8)) == intent }
+    private func matches(_ row: Row, intent: V2GroupCreationIntent) throws -> Bool { try v2DecodePersistenceJSON(V2GroupCreationIntent.self, from: row.intent) == intent }
     private func pages(_ intent: V2GroupCreationIntent, sql: any SQLDatabase) async throws -> [Page] {
         let rows = try await sql.raw("SELECT page_offset AS offset,page_fingerprint::text AS fingerprint,members::text AS members FROM im_v2.group_creation_pages WHERE actor_user_id = \(bind: intent.identity.accountID.uuidValue!) AND operation_id = \(bind: operationUUID(intent)) ORDER BY page_offset LIMIT 196").all(decoding: PageRow.self)
         var expected = 0
         return try rows.map { row in
             let members = try JSONDecoder().decode([UserID].self, from: Data(row.members.utf8))
             guard row.offset == expected, !members.isEmpty, members.count <= 512, expected + members.count <= intent.initialMemberCount else { throw V2GroupMessagingStoreError.corruptPersistenceState }
-            let fingerprint = try JSONDecoder().decode(V2OperationFingerprint.self, from: Data(row.fingerprint.utf8))
+            let fingerprint = try v2DecodePersistenceJSON(V2OperationFingerprint.self, from: row.fingerprint)
             let page = try V2GroupCreationAppendRequest(intent: intent, offset: expected, memberUserIDs: members)
             guard page.pageFingerprint == fingerprint else { throw V2GroupMessagingStoreError.corruptPersistenceState }
             expected += members.count
@@ -211,7 +211,7 @@ public struct PostgresV2GroupCreationOperationStore: Sendable {
         let rows = try await sql.raw("SELECT intent::text AS intent,room_id,event_id,room_shard_id AS shard,phase,accepted_member_count AS count,copied_member_count AS copied,receipt::text AS receipt FROM im_v2.group_creation_operations WHERE actor_user_id = \(bind: actor) AND phase = 'staging' ORDER BY created_at LIMIT 3 FOR UPDATE").all(decoding: Row.self)
         let ms = try milliseconds(now)
         for row in rows {
-            let intent = try JSONDecoder().decode(V2GroupCreationIntent.self, from: Data(row.intent.utf8))
+            let intent = try v2DecodePersistenceJSON(V2GroupCreationIntent.self, from: row.intent)
             if ms >= intent.firstSubmissionDeadlineMilliseconds {
                 _ = try await finish(row, intent: intent, outcome: .rejected(.submissionExpired), now: now, sql: sql)
             }

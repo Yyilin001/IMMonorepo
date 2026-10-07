@@ -209,6 +209,16 @@ public enum V2ServerProtobufFrameCodec {
         } else if envelope.protocolVersion != UInt32(frameVersion) {
             throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
         }
+        if frameVersion < 47, let body = envelope.body {
+            switch body {
+            case .deviceRoomProgressReport, .deviceRoomProgressRecorded:
+                throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
+            default: break
+            }
+        }
+        if frameVersion < 46, case .realtimeCoverage? = envelope.body {
+            throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
+        }
         if frameVersion < 45, let body = envelope.body {
             switch body {
             case .messageSendOperation, .messageSendOperationRecover, .messageSendOperationResult:
@@ -223,6 +233,8 @@ public enum V2ServerProtobufFrameCodec {
     /// 此映射同时包含请求、响应和通知，不构成客户端可发送命令的白名单。
     private static func command(for envelope: IMV2Envelope) throws -> V2FrameCommand {
         switch envelope.body {
+        case .deviceRoomProgressReport?: return .deviceRoomProgressReport
+        case .deviceRoomProgressRecorded?: return .deviceRoomProgressRecorded
         case .messageSendOperation?: return .messageSendOperation
         case .messageSendOperationRecover?: return .messageSendOperationRecover
         case .messageSendOperationResult?: return .messageSendOperationResult
@@ -253,6 +265,7 @@ public enum V2ServerProtobufFrameCodec {
         case .snapshotManifest?: return .snapshotManifest
         case .snapshotPagePull?: return .snapshotPagePull
         case .snapshotPage?: return .snapshotPage
+        case .realtimeCoverage?: return .realtimeCoverage
         case .syncAvailable?: return .syncAvailable
         case .recordReadReceipt?: return .recordReadReceipt
         case .readReceiptRecorded?: return .readReceiptRecorded
@@ -299,7 +312,6 @@ public enum V2ServerProtobufFrameCodec {
         case .roomSyncStateBatchResult?: return .roomSyncStateBatchResult
         case .accountRoomChangesStart?: return .accountRoomChangesStart
         case .accountRoomChangesReady?: return .accountRoomChangesReady
-        case .accountRoomChanged?: return .accountRoomChanged
         case .accountRoomResyncRequired?: return .accountRoomResyncRequired
         case .roomLatestVisibleBatch?: return .roomLatestVisibleBatch
         case .roomLatestVisibleBatchResult?: return .roomLatestVisibleBatchResult

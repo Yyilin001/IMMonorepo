@@ -12,6 +12,11 @@ public enum V2ActorServicePermission: String, Codable, Hashable, Sendable {
     case trustedSafety
     case specialAccountAudit
     case roomCoordination
+    case realtimePublish
+    case realtimeReceive
+    case policyRevocation
+    case policyMutation
+    case policyRegistration
 }
 
 public enum V2ActorCallPrincipal: Codable, Equatable, Sendable {
@@ -65,7 +70,16 @@ public struct V2ActorSessionGrant: Codable, Equatable, Sendable {
 public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
     case activate(roomID: RoomID, owner: V2RoomDataOwner)
     case lookup(V2RoomActivationToken)
+    case revokePolicyAuthorization(V2RoomPolicyRevocationWire)
+    case mutatePolicy(V2PolicyMutationWire)
+    case claimPolicyOwnership(V2PolicyOwnershipClaimWire)
+    case invalidatePolicyCache(V2PolicyCacheInvalidationWire)
+    case policySnapshots(V2PolicySnapshotRequestWire)
+    case updatePolicySnapshot(V2PolicySnapshotUpdateWire)
+    case forwardPair(token: V2RoomActivationToken, pair: V2ActorForwardPairWire)
     case invoke(token: V2RoomActivationToken, request: V2RoomRequest)
+    case subscriptionRenewBatch([V2RoomSubscriptionRenewBatchItem])
+    case recoveryBatch([V2RoomRecoveryBatchWireItem])
     case reserve(token: V2RoomActivationToken, requestID: UUID)
     case markDispatched(V2RoomReservation)
     case abortReservation(V2RoomReservation)
@@ -77,9 +91,17 @@ public enum V2ActorRPCResponse: Codable, Equatable, Sendable {
     case ready(token: V2RoomActivationToken, physicalReference: Data)
     case occupied(V2RoomActivationLease)
     case result(V2RoomResponse)
+    case subscriptionRenewBatch([V2RoomSubscriptionRenewBatchOutcome])
+    case recoveryBatch([V2RoomRecoveryBatchWireOutcome])
     case reserved(V2RoomReservation)
     case completed(Bool)
     case acknowledged
+    case policyAuthorizationRevoked(V2RoomPolicyRevocationWire)
+    case policyMutationIdentityConflict(V2PolicyMutationWire)
+    case policyMutationCommitted(V2PolicyMutationReceiptWire)
+    case policyOwnership([V2PolicyOwnerStateWire])
+    case policySnapshots([V2PolicySnapshotWire])
+    case forwardPair(V2ActorForwardMessageResultWire)
     case failure(V2RoomCallFailure)
 }
 
@@ -145,4 +167,21 @@ public enum V2ActorAuthenticationError: Error, Equatable, Codable, Sendable {
     case sessionExpired
     case replay
     case overloaded
+}
+
+public struct V2RoomSubscriptionRenewBatchItem: Codable, Equatable, Sendable {
+    public let token: V2RoomActivationToken
+    public let command: V2RoomSubscriptionRenewCommand
+    public init(token: V2RoomActivationToken, command: V2RoomSubscriptionRenewCommand) {
+        self.token = token; self.command = command
+    }
+}
+public struct V2RoomSubscriptionRenewBatchOutcome: Codable, Equatable, Sendable {
+    public enum Outcome: Codable, Equatable, Sendable {
+        case result(V2RoomSubscriptionResult)
+        case failure(V2RoomCallFailure)
+    }
+    public let token: V2RoomActivationToken
+    public let outcome: Outcome
+    public init(token: V2RoomActivationToken, outcome: Outcome) { self.token = token; self.outcome = outcome }
 }

@@ -760,10 +760,6 @@ struct V2DirectRoomLogEventCacheTests {
             shardCount: 1,
             maximumPendingWrites: 8
         ))
-        let service = V2GroupEventLogService(
-            store: RejectingGroupEventLogStore(),
-            directRoomLogEventCache: cache
-        )
         let events = try (1 ... 2).map { sequence in
             try #require(V2GroupRoomLiveEventDraft(message(
                 roomID: roomID,
@@ -773,10 +769,10 @@ struct V2DirectRoomLogEventCacheTests {
             ))?.materialized())
         }
 
-        service.recordRelayedForegroundEvents(events)
-        // The publishing Gateway receives its own Core NATS message too.
+        cache.enqueueCommittedPlainDirectEvents(events)
+        // The publishing Gateway can receive its own relayed Actor event too.
         // Replaying the exact batch must remain an idempotent cache operation.
-        service.recordRelayedForegroundEvents(events)
+        cache.enqueueCommittedPlainDirectEvents(events)
 
         #expect(await cache.page(
             roomID: roomID,
@@ -811,10 +807,6 @@ struct V2DirectRoomLogEventCacheTests {
             shardCount: 1,
             maximumPendingWrites: 2
         ))
-        let service = V2GroupEventLogService(
-            store: RejectingGroupEventLogStore(),
-            directRoomLogEventCache: cache
-        )
         let events = try (1 ... 3).map { sequence in
             try #require(V2GroupRoomLiveEventDraft(message(
                 roomID: roomID,
@@ -824,7 +816,7 @@ struct V2DirectRoomLogEventCacheTests {
             ))?.materialized())
         }
 
-        service.recordRelayedForegroundEvents(events)
+        cache.enqueueCommittedPlainDirectEvents(events)
         var snapshot = await cache.snapshot()
         #expect(snapshot.pendingWrites == 2)
         #expect(snapshot.droppedWrites == 1)

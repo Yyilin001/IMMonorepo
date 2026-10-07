@@ -146,45 +146,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("room credits are bound to activation and unknown credits are never refunded",
-          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
-    func activationRoomCreditIsolation() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("credits-host"), incarnationID: UUID())
-            guard case .acquired(let first) = try await leases.acquire(roomID: roomID,
-                owner: owner, host: host, duration: .init(30_000)) else { Issue.record("lease"); return }
-            let state = try ShardAdmissionState(lease: .init(id: .init(uuid: leaseUUID), generation: 1,
-                validUntil: now.addingTimeInterval(100), commandWindow: .init(limit: 10, used: 0)))
-            let pool = V2RoomAdmissionCommandCreditPool(database: database, batchSize: 4)
-            guard case .granted(let firstCredit) = try await pool.acquire(roomID: roomUUID,
-                shardState: state, now: now, activation: first.token) else { Issue.record("first credit"); return }
-            #expect(try await leases.release(token: first.token))
-            guard case .acquired(let next) = try await leases.acquire(roomID: roomID,
-                owner: owner, host: host, duration: .init(30_000)) else { Issue.record("successor"); return }
-            guard case .granted(let nextCredit) = try await pool.acquire(roomID: roomUUID,
-                shardState: state, now: now, activation: next.token) else { Issue.record("next credit"); return }
-            #expect(await pool.snapshot().databaseCreditsReserved == 8)
-            await pool.discard(firstCredit)
-            await pool.release(firstCredit, now: now)
-            await pool.retire(activation: first.token)
-            await pool.release(nextCredit, now: now)
-            await pool.release(nextCredit, now: now)
-            let snapshot = await pool.snapshot()
-            #expect(snapshot.activeCredits == 4)
-            #expect(snapshot.inFlightCredits == 0)
-            #expect(snapshot.returnedCredits == 1)
-            #expect(snapshot.expiredCreditsDiscarded == 4)
-            struct Used: Decodable { let used: Int }
-            #expect(try await sql.raw("SELECT command_window_used AS used FROM im_v2.room_admission WHERE room_id = \(bind: roomUUID)")
-                .first(decoding: Used.self)?.used == 8)
-            await pool.retire(activation: next.token)
-            #expect(try await leases.release(token: next.token))
-        }
-    }
-
     private func activationWriteRequest(text: String, now: Date) throws -> V2RoomWriteRequest {
         .init(command: try .init(roomID: roomID, senderUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: text, limits: .init(maxUTF8Bytes: 64)),

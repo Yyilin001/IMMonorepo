@@ -81,37 +81,6 @@ public struct V2MessageReactionIDFactory: Sendable {
     }
 }
 
-/// 消息表态服务。
-///
-/// 它把已认证请求转换为存储命令，并为每次调用分配稳定的来源事件标识。
-public struct V2MessageReactionService: Sendable {
-    private let store: any V2MessageReactionStore
-    private let capacityProfile: V2CapacityProfile
-    private let identifiers: V2MessageReactionIDFactory
-    private let now: @Sendable () -> Date
-
-    /// 创建表态服务。
-    ///
-    /// - Parameters:
-    ///   - store: 表态持久化边界。
-    ///   - capacityProfile: 本次部署使用的容量档位。
-    ///   - identifiers: 标识工厂，默认使用随机 UUID。
-    ///   - now: 服务端时钟，默认取当前时间。
-    public init(store: any V2MessageReactionStore, capacityProfile: V2CapacityProfile, identifiers: V2MessageReactionIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
-        self.store = store; self.capacityProfile = capacityProfile; self.identifiers = identifiers; self.now = now
-    }
-
-    /// 执行一次消息表态变更。
-    ///
-    /// - Parameter request: 已认证的表态请求。
-    /// - Returns: 表态处理结果。
-    /// - Throws: 存储拒绝或持久化失败时抛出。
-    public func change(_ request: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome {
-        let eventID = try identifiers.make()
-        return try await store.change(command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, messageID: request.messageID, reaction: request.reaction, action: request.action), capacityProfile: capacityProfile, eventID: eventID, now: now())
-    }
-}
-
 /// 消息表态存储的错误分类。
 public enum V2MessageReactionStoreError: Error, Equatable, Sendable {
     /// 目标房间不存在。

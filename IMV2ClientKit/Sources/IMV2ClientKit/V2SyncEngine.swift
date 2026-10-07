@@ -116,7 +116,8 @@ public actor V2SyncEngine: V2SyncDriving {
     /// 按当前 generation 丢弃本地同步能力并仅重试一次无令牌拉取。
     ///
     /// 增量必须匹配能力配置，且不能替代已要求的快照重建。先原子应用批次，再发送游标保存的精确回执，
-    /// 最后记录服务端确认。确认或记账失败不撤销已落盘投影，重试依靠持久化游标与回执。
+    /// 最后记录服务端确认。生产 protobuf 适配器在同连接内有界重试明确未准入的 BUSY，
+    /// 始终保留本次精确 pull／ACK；其他确认或记账失败仍依靠持久化游标与回执恢复。
     private func performSyncCycle() async throws -> V2SyncCycleResult {
         try Task.checkCancellation()
         let cursorBeforePull = try await store.cursor()

@@ -29,8 +29,54 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
             ("command_rooms", commands.roomCount, "Rooms currently owning command permits."),
         ]
     }
-    return values.flatMap { suffix, value, help in
+    var lines = values.flatMap { suffix, value, help in
         let name = "im_v2_room_actor_" + suffix
         return ["# HELP \(name) \(help)", "# TYPE \(name) gauge", "\(name) \(value)"]
     }
+    let directory = snapshot.directoryCalls
+    let transport = snapshot.transportCalls
+    lines.append("# TYPE im_v2_room_actor_renewal_actual_calls gauge")
+    lines.append("im_v2_room_actor_renewal_actual_calls \(transport.renewalActualCalls)")
+    for stage in V2RoomRenewalFailureStage.allCases {
+        let name = "im_v2_room_actor_renewal_failure_" + stage.rawValue + "_total"
+        lines.append("# TYPE \(name) counter")
+        lines.append("\(name) \(transport.renewalFailures[stage, default: 0])")
+    }
+    let counters: [(String, UInt64)] = [
+        ("cached_call_attempts", directory.cachedCalls),
+        ("cached_call_responses", directory.cachedResponses),
+        ("cached_call_misses", directory.cacheMisses),
+        ("location_invalidations", directory.locationInvalidations),
+        ("recovery_attempts", directory.recoveryAttempts),
+        ("recovery_waits", directory.recoveryWaits),
+        ("recovery_warm_items", directory.recoveryWarmItems),
+        ("recovery_cold_items", directory.recoveryColdItems),
+        ("recovery_host_cohorts", directory.recoveryHostCohorts),
+        ("recovery_host_items", directory.recoveryHostItems),
+        ("recovery_batch_caller_timeouts", transport.batchCallerTimeouts),
+        ("recovery_batch_caller_cancellations", transport.batchCallerCancellations),
+        ("recovery_batch_rejected_global", transport.batchRejectedGlobal),
+        ("recovery_batch_rejected_peer", transport.batchRejectedPeer),
+        ("cached_local_calls", transport.cachedLocalCalls),
+        ("cached_remote_calls", transport.cachedRemoteCalls),
+        ("physical_lookups", transport.roomLookups),
+        ("business_invocations", transport.roomInvocations),
+        ("reference_misses", transport.referenceMisses),
+        ("host_recovery_probes", transport.hostRecoveryProbes),
+        ("host_recovery_waits", transport.hostRecoveryWaits),
+    ]
+    for (suffix, value) in counters {
+        let name = "im_v2_room_actor_" + suffix + "_total"
+        lines += ["# HELP \(name) Process-local \(suffix) since startup.",
+                  "# TYPE \(name) counter", "\(name) \(value)"]
+    }
+    for (suffix, value) in [("recovering_rooms", directory.recoveringRooms),
+                            ("waiting_for_lease_rooms", directory.waitingForLeaseRooms),
+                            ("active_host_recoveries", transport.activeHostRecoveries)] {
+        let name = "im_v2_room_actor_" + suffix
+        lines += ["# HELP \(name) Current bounded recovery work.",
+                  "# TYPE \(name) gauge", "\(name) \(value)"]
+    }
+    lines += v2RoomRecoveryStageMetricLines(snapshot)
+    return lines
 }

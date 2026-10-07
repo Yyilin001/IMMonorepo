@@ -498,18 +498,11 @@ public enum V2SendMessageReducer {
             throw V2SendMessageReducerError.invalidRoomSequence
         }
 
-        let admission = try V2CommandAdmissionEvaluator.reserve(
-            profile: profile,
-            roomState: roomState.admission,
-            shardState: shardState,
-            now: now
-        )
-        switch admission {
-        case .rateLimited(let retryAfterSeconds):
-            return .rateLimited(retryAfterSeconds: retryAfterSeconds)
-        case .unavailable(let reason):
-            return .unavailable(reason)
-        case .accepted(_, let reservedRoomAdmission, let reservedShardState):
+        // Sending advances message identity/sequence only. Capacity windows belong
+        // to other command workflows and are not charged by message acceptance.
+        do {
+            let reservedRoomAdmission = roomState.admission
+            let reservedShardState = shardState
             let accepted = V2AcceptedMessageDraft(
                 messageID: identifiers.messageID,
                 roomID: command.roomID,

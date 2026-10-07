@@ -1,5 +1,6 @@
 import IMV2ServerApplication
 import IMV2ServerContracts
+import IMV2ServerGateway
 import Logging
 import IMV2ActorApplication
 import IMV2ServerHTTP
@@ -72,8 +73,7 @@ struct GatewayPreparedAssembly {
             databaseWorkAdmission: frontdoor.databaseWorkAdmission,
             directSendPolicyCache: frontdoor.directSendPolicyCache,
             directRoomLogFastAppendCache: frontdoor.directRoomLogFastAppendCache,
-            directRoomLogAppendStageMetrics: frontdoor.directRoomLogAppendStageMetrics,
-            directRoomLogEventCache: projection.directRoomLogEventCache
+            directRoomLogAppendStageMetrics: frontdoor.directRoomLogAppendStageMetrics
         )
         return .init(
             topology: topology,
@@ -89,24 +89,23 @@ struct GatewayPreparedAssembly {
 
     /// Actor 已建立后，把 Actor、连接池及缓存的压力指标接入运维 HTTP 应用。
     /// 此操作仅登记路由；实际监听由 `GatewayRuntime.runServices` 启动。
-    func registerMetrics(on app: Application, actors: V2RoomActorApplication) {
+    func registerMetrics(on app: Application, actors: V2RoomActorApplication, actorRealtimeMetrics: (any V2ActorRealtimeMetricsSource)? = nil) {
         let frontdoor = self.frontdoor
         let ownerMaintenance = self.ownerMaintenance
         let projection = self.projection
         let roomOwners = self.roomOwners
-        let directRoomLogAppendBatcher = V2AggregatedSendMessageBatchMetrics(
-            owners: roomOwners.ownerBatchers.values.map { $0 as any V2SendMessageBatchMetricsReading })
+        let topology = self.topology
+        let physicalRecoveryOwners = Array(roomOwners.physicalResources.values)
         let readReceiptBatcher = V2AggregatedReadReceiptBatchMetrics(
             owners: roomOwners.physicalResources.values.map(\.receiptBatchMetrics))
+        let schedulingRegistry = frontdoor.connectionRegistry
+        V2SendPathTraceLogging.install()
         V2VaporMetricsRoutes.register(on: app, telemetry: frontdoor.prometheusTelemetry,
             connectionMetrics: frontdoor.connectionRegistry, transportMetrics: frontdoor.transportMetrics,
             durableWorkMetrics: ownerMaintenance.durableWorkMetrics,
             runtimePressureMetrics: V2GatewayRuntimePressureMetricsSource(
                 databaseWorkAdmission: frontdoor.databaseWorkAdmission, databasePools: frontdoor.databasePoolTopology,
                 syncWakeCoalescer: frontdoor.syncWakeCoalescer,
-                shardAdmissionCommandCredits: roomOwners.shardAdmissionCredits,
-                roomAdmissionCommandCredits: roomOwners.roomAdmissionCredits,
-                directRoomLogAppendBatcher: directRoomLogAppendBatcher,
                 readReceiptBatcher: readReceiptBatcher,
                 directRoomLogAppendStageMetrics: frontdoor.directRoomLogAppendStageMetrics,
                 gatewayEventLoopLagMetrics: frontdoor.gatewayEventLoopLagMetrics,
@@ -116,6 +115,143 @@ struct GatewayPreparedAssembly {
                 preparedGroupEventPageCache: projection.preparedGroupEventPageCache,
                 connectionRegistry: frontdoor.connectionRegistry, roomActors: actors,
                 sendOperationMetrics: V2AggregatedSendOperationBatchMetrics(
-                    owners: roomOwners.physicalResources.values.map(\.sendOperationMetrics))))
+                    owners: roomOwners.physicalResources.values.map(\.sendOperationMetrics)),
+                sendOperationOwnerMetrics: V2AggregatedSendOperationOwnerMetrics(
+                    owners: roomOwners.physicalResources.values.map { $0 as any V2SendOperationOwnerMetricsReading }),
+                databaseLoans: {
+                    let snapshot = topology.loanMetricsSnapshot()
+                    let ordinary = snapshot.classes[.ordinary, default: .init()]
+                    let activation = snapshot.classes[.activation, default: .init()]
+                    let renewal = snapshot.classes[.renewal, default: .init()]
+                    let sync = snapshot.classes[.sync, default: .init()]
+                    return .init(
+                        ordinary: .init(inFlight: ordinary.inFlight, queued: ordinary.queued,
+                                        granted: ordinary.granted, rejected: ordinary.rejected),
+                        activation: .init(inFlight: activation.inFlight, queued: activation.queued,
+                                          granted: activation.granted, rejected: activation.rejected),
+                        renewal: .init(inFlight: renewal.inFlight, queued: renewal.queued,
+                                       granted: renewal.granted, rejected: renewal.rejected),
+                        sync: .init(inFlight: sync.inFlight, queued: sync.queued,
+                                    granted: sync.granted, rejected: sync.rejected),
+                        observations: v2LoanObservationMetrics(snapshot.observations))
+                }, gatewayMessageSendBudget: frontdoor.messageSendBudget,
+                roomRecoveryBatches: {
+                    v2AggregateRecoveryBatchPressure(physicalRecoveryOwners.map { $0.recoveryBatchPressureSnapshot() })
+                }, additionalDatabaseWorkAdmissions: roomOwners.databaseWorkAdmissions.controllers),
+            actorRealtimeMetrics: actorRealtimeMetrics,
+            recoverySchedulingMetrics: { schedulingRegistry.recoverySchedulingMetricsSnapshot() },
+            roomHeadDeliveryMetrics: {
+                v2RenderPrometheusRoomSubscriptionHeadDeliveryMetrics(
+                    V2RoomSubscriptionHeadDeliveryMetrics.shared.snapshot())
+            })
     }
+}
+
+/// Exhaustive switches keep Infrastructure's closed labels out of Contracts.
+private func v2LoanObservationMetrics(
+    _ observations: [V2DatabaseLoanSource: V2DatabaseLoanSourceSnapshot]
+) -> [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric] {
+    var result: [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric] = [:]
+    for source in V2DatabaseLoanSource.allCases {
+        let sourceLabel: V2DatabaseLoanObservationMetricSource
+        switch source {
+        case .durableOwner: sourceLabel = .durableOwner
+        case .roomSendInitialization: sourceLabel = .roomSendInitialization
+        case .preparationOwnerRead: sourceLabel = .preparationOwnerRead
+        case .controlReservation: sourceLabel = .controlReservation
+        case .lifecycle: sourceLabel = .lifecycle
+        case .renewal: sourceLabel = .renewal
+        case .presence: sourceLabel = .presence
+        case .roomWake: sourceLabel = .roomWake
+        case .routeLookup: sourceLabel = .routeLookup
+        case .realtimePartitionControl: sourceLabel = .realtimePartitionControl
+        case .realtimeOwnerSnapshot: sourceLabel = .realtimeOwnerSnapshot
+        case .realtimeRecoveryHead: sourceLabel = .realtimeRecoveryHead
+        case .groupEventPull: sourceLabel = .groupEventPull
+        case .groupEventSubscribe: sourceLabel = .groupEventSubscribe
+        case .roomRecovery: sourceLabel = .roomRecovery
+        case .sync: sourceLabel = .sync
+        case .userStateProjection: sourceLabel = .userStateProjection
+        case .query: sourceLabel = .query
+        case .maintenance: sourceLabel = .maintenance
+        case .other: sourceLabel = .other
+        }
+        let observed = observations[source, default: .init()]
+        var metric = V2DatabaseLoanObservationSourceMetric()
+        metric.actualHeldCount = observed.actualHeldCount
+        metric.actualHeldTotalMilliseconds = observed.actualHeldTotalMilliseconds
+        metric.actualHeldMaxMilliseconds = observed.actualHeldMaxMilliseconds
+        for (phase, item) in observed.sqlPhases {
+            let phaseLabel: V2DatabaseLoanObservationMetricSQLPhase
+            switch phase {
+            case .fence: phaseLabel = .fence
+            case .readBody: phaseLabel = .readBody
+            case .transactionControl: phaseLabel = .transactionControl
+            case .other: phaseLabel = .other
+            }
+            var value = V2DatabaseLoanObservationSQLMetric()
+            value.count = item.count
+            value.totalMilliseconds = item.totalMilliseconds
+            value.maxMilliseconds = item.maxMilliseconds
+            metric.sqlPhases[phaseLabel] = value
+        }
+        for stage in V2DatabaseLoanStage.allCases {
+            let stageLabel: V2DatabaseLoanObservationMetricStage
+            switch stage {
+            case .gateQueued: stageLabel = .gateQueued
+            case .awaitingDriver: stageLabel = .awaitingDriver
+            case .betweenSQL: stageLabel = .betweenSQL
+            case .sql: stageLabel = .sql
+            case .settled: stageLabel = .settled
+            }
+            let item = observed.stages[stage, default: .init()]
+            var value = V2DatabaseLoanObservationStageMetric()
+            value.active = item.active
+            value.oldestMilliseconds = item.oldestMilliseconds
+            value.count = item.count
+            value.totalMilliseconds = item.totalMilliseconds
+            value.maxMilliseconds = item.maxMilliseconds
+            metric.stages[stageLabel] = value
+        }
+        result[sourceLabel] = metric
+    }
+    return result
+}
+
+/// Physical URL/schema owners are deduplicated at assembly; logical aliases must
+/// not multiply actual occupancy. These component snapshots are not atomic.
+private func v2AggregateRecoveryBatchPressure(
+    _ snapshots: [V2RoomRecoveryBatchPressureSnapshot]
+) -> V2RoomRecoveryBatchPressureSnapshot {
+    var result = V2RoomRecoveryBatchPressureSnapshot()
+    func sum(_ a: UInt64, _ b: UInt64) -> UInt64 {
+        let value = a.addingReportingOverflow(b)
+        return value.overflow ? .max : value.partialValue
+    }
+    for snapshot in snapshots {
+        result.pendingItems += snapshot.pendingItems
+        result.retainedItems += snapshot.retainedItems
+        result.retainedBytes += snapshot.retainedBytes
+        result.ordinaryRetainedItems += snapshot.ordinaryRetainedItems
+        result.actualBatches += snapshot.actualBatches
+        result.oldestQueuedMilliseconds = max(result.oldestQueuedMilliseconds, snapshot.oldestQueuedMilliseconds)
+        result.oldestActualMilliseconds = max(result.oldestActualMilliseconds, snapshot.oldestActualMilliseconds)
+        result.batchesStarted = sum(result.batchesStarted, snapshot.batchesStarted)
+        result.itemsSelected = sum(result.itemsSelected, snapshot.itemsSelected)
+        result.itemsSettled = sum(result.itemsSettled, snapshot.itemsSettled)
+        for purpose in V2RoomRecoveryBatchPurpose.allCases {
+            let value = snapshot.purposes[purpose, default: .init()]
+            var aggregate = result.purposes[purpose, default: .init()]
+            aggregate.inFlight += value.inFlight
+            aggregate.items += value.items
+            aggregate.oldestMilliseconds = max(aggregate.oldestMilliseconds, value.oldestMilliseconds)
+            aggregate.started = sum(aggregate.started, value.started)
+            aggregate.completed = sum(aggregate.completed, value.completed)
+            aggregate.busyBeforeAcquire = sum(aggregate.busyBeforeAcquire, value.busyBeforeAcquire)
+            aggregate.durationMillisecondsSum += value.durationMillisecondsSum
+            aggregate.durationMillisecondsMax = max(aggregate.durationMillisecondsMax, value.durationMillisecondsMax)
+            result.purposes[purpose] = aggregate
+        }
+    }
+    return result
 }

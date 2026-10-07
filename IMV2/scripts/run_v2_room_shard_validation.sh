@@ -38,7 +38,13 @@ done
 # Build the three local Swift binaries and bootstrap the control-plane schema.
 # The base helper neither removes a volume nor alters a remote environment.
 V2_LOCAL_COMPOSE_PROJECT="${project}" "${script_dir}/run_v2_local_account_stack.sh"
-compose up -d --wait --force-recreate postgres-room-00 postgres-room-01 postgres-user-projection account caddy gateway
+compose up -d --wait --force-recreate postgres-room-00 postgres-room-01 postgres-user-projection account caddy
+# Retained source volumes receive the repeatable extension before gateway boot.
+for journal_source_service in postgres-room-00 postgres-room-01 postgres-user-projection; do
+  "${script_dir}/install_v2_realtime_journal.sh" --print-sql |
+    compose exec -T "${journal_source_service}" psql -X --set=ON_ERROR_STOP=1 --username im_v2 --dbname im_v2 > /dev/null
+done
+compose up -d --wait --force-recreate gateway
 
 # Direct room creation requires a live, fenced admission lease on its physical
 # owner. These deliberately overprovisioned values apply only to the disposable

@@ -23,7 +23,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
             try await overloadSeedRoom(excess, sql: sql)
             let leases = PostgresV2RoomActivationStore(database: database)
             let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
-                configuration: overloadConfiguration(), batchDelay: .milliseconds(2))
+                configuration: overloadConfiguration())
             let host = hosted.host
             let hotLockerGate = OverloadGate(), healthyLockerGate = OverloadGate()
             let advisoryKey: Int64 = 9_240_211
@@ -151,7 +151,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
             try await overloadSeedRoom(secondRoom, capacityClass: .large, sql: sql)
             let leases = PostgresV2RoomActivationStore(database: database)
             let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
-                configuration: overloadConfiguration(), batchDelay: .milliseconds(2))
+                configuration: overloadConfiguration())
             let host = hosted.host
             let gate = OverloadGate()
             let advisoryKey: Int64 = 9_240_212
@@ -202,9 +202,8 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 try overloadRequireAccepted(try await second.value)
                 #expect(try await overloadCompletionCount(sql, room: roomID, operation: firstID) == 1)
                 #expect(try await overloadCompletionCount(sql, room: secondRoom, operation: secondID) == 1)
-                let batch = await hosted.batcher.snapshot()
-                #expect(batch.atomicBatchCommittedRequests == 0)
-                #expect(batch.pendingRequests == 0 && batch.inFlightBatches == 0)
+                let batch = await hosted.resources.sendOperationOwnerMetricsSnapshot()
+                #expect(batch.retainedItems == 0 && batch.inFlightBatches == 0)
                 #expect((await host.drain(deadline: .now + .seconds(5))).completed)
                 try await overloadAssertReleased(hosted, leases: leases, rooms: [roomID, secondRoom])
             } catch {
@@ -221,7 +220,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
 private struct OverloadHosted: Sendable {
     let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
     let budget: V2RoomCommandBudget
-    let batcher: V2SendMessageAdmissionBatcher
+    let resources: V2RoomServerOwnerResources
 }
 
 private func overloadConfiguration(batchWaitMilliseconds: Int64 = 2) throws -> V2RoomRuntimeConfiguration {
@@ -234,17 +233,11 @@ private func overloadConfiguration(batchWaitMilliseconds: Int64 = 2) throws -> V
 private func overloadHost(database: any Database,
     fixture: PostgresV2RoomWriteStoreIntegrationTests,
     leases: PostgresV2RoomActivationStore,
-    configuration: V2RoomRuntimeConfiguration,
-    batchDelay: Duration) throws -> OverloadHosted {
+    configuration: V2RoomRuntimeConfiguration) throws -> OverloadHosted {
     let writes = PostgresV2RoomWriteStore(database: database,
         strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-        contentReviewMode: .disabled,
-        shardAdmissionCommandCreditPool: .init(database: database, batchSize: 4))
-    let batcher = V2SendMessageAdmissionBatcher(store: writes,
-        configuration: .init(maximumBatchSize: 8, maximumDelay: batchDelay),
-        actorGrantedStore: writes)
+        contentReviewMode: .disabled)
     let resources = try V2RoomServerOwnerResources(database: database, writes: writes,
-        sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -260,7 +253,7 @@ private func overloadHost(database: any Database,
     return .init(host: .init(identity: identity, leaseStore: leases,
         configuration: configuration, budget: budget,
         classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
-        budget: budget, batcher: batcher)
+        budget: budget, resources: resources)
 }
 
 private func overloadActivate(_ host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,
@@ -314,9 +307,9 @@ private func overloadAdvisoryWait(sql: any SQLDatabase) async throws -> Bool {
 private func overloadCompletionCount(_ sql: any SQLDatabase, room: RoomID,
     operation: UUID) async throws -> Int64 {
     try #require(try await sql.raw("""
-        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_operation_receipts
-        WHERE room_id = \(bind: room.uuidValue!) AND actor_user_id = \(bind: senderUUID)
-          AND operation_id = \(bind: operation)
+        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_completions
+        WHERE room_id = \(bind: room.uuidValue!) AND sender_user_id = \(bind: senderUUID)
+          AND client_message_id = \(bind: operation)
         """).first(decoding: OverloadCountRow.self)).value
 }
 
@@ -336,9 +329,8 @@ private func overloadAssertReleased(_ hosted: OverloadHosted,
     let snapshot = await hosted.budget.snapshot()
     #expect(snapshot.commandCount == 0 && snapshot.byteCount == 0 && snapshot.roomCount == 0)
     #expect(snapshot.peakCommandCount <= 3)
-    let batch = await hosted.batcher.snapshot()
-    #expect(batch.pendingRequests == 0 && batch.inFlightBatches == 0)
-    #expect(batch.activeRooms == 0)
+    let batch = await hosted.resources.sendOperationOwnerMetricsSnapshot()
+    #expect(batch.retainedItems == 0 && batch.inFlightBatches == 0)
     let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
     for room in rooms { #expect(try await leases.locate(roomID: room, owner: owner) == nil) }
 }

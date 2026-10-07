@@ -10,7 +10,6 @@ extension GatewayBackgroundWorkers {
         let logger = self.logger
         let forwardRuntime = delivery.forwardRuntime
         let directAuthorizationCoordinator = delivery.directAuthorizationCoordinator
-        let foregroundGroupEventHints = delivery.foregroundGroupEventHints
         let directRoomLogEventCache = delivery.directRoomLogEventCache
         let syncWakeCoalescer = delivery.syncWakeCoalescer
 
@@ -29,11 +28,6 @@ extension GatewayBackgroundWorkers {
             }
         }
 
-        // 前台元数据发布由命令处理器之外的组件负责。
-        // 可选 Broker 或套接字卡顿不会延长已提交消息的响应路径。
-        _ = workers.start {
-            await foregroundGroupEventHints.run()
-        }
         _ = workers.start {
             if let directRoomLogEventCache {
                 await directRoomLogEventCache.run()

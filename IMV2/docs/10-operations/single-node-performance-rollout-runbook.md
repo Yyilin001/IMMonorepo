@@ -100,9 +100,9 @@ SELECT state, count(*)
 FROM im_v2.user_state_event_outbox
 WHERE state <> 'delivered'
 GROUP BY state;
-SELECT state, count(*)
-FROM im_v2.group_event_wake_outbox
-GROUP BY state;
+SELECT pending, count(*)
+FROM im_v2.realtime_dirty_room_heads
+GROUP BY pending;
 SELECT count(*) FROM im_v2.user_projection_checkpoints WHERE state = 'paused';
 SELECT max(sequence.next_sequence - checkpoint.projected_sequence)
 FROM im_v2.user_projection_checkpoints checkpoint

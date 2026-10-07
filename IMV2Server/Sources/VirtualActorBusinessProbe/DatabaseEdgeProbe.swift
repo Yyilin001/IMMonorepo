@@ -89,11 +89,7 @@ enum DatabaseEdgeProbe {
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 1000, window: 86_400),
                     contentReviewMode: .disabled)
                     .usingControlDatabase(control, authorizationResolutionDatabase: control)
-                let batcher = V2SendMessageAdmissionBatcher(store: writes,
-                    configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)),
-                    actorGrantedStore: writes)
                 owners["room-\(slot)"] = try .init(database: database, writes: writes,
-                    sendBatcher: batcher,
                     membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                     invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
                     invitationSecretIssuer: try invitationSecretIssuer(),
@@ -108,7 +104,8 @@ enum DatabaseEdgeProbe {
             hostsRooms: host, configuredShardIDs: ["room-a", "room-b"])
         let factory = host ? try V2RoomServerActivationFactory(owners: owners, safetyActorUserID: user) : nil
         let application = try await V2RoomActorApplication.start(configuration: configuration,
-            ownerRouter: V2PostgresRoomShardRouter(database: control), roomDatabases: databases, factory: factory)
+            ownerRouter: V2PostgresRoomShardRouter(database: control), roomDatabases: databases, factory: factory,
+            qualification: host ? .standalone() : nil)
         do {
             if host {
                 guard await application.readiness() else { throw Failure.invalid("host readiness") }

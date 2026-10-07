@@ -30,6 +30,11 @@ public actor V2RoomRecoveryRunner {
     /// Personal projection changes can make durable recovery work eligible again.
     public func requestCatchUp() { wake?.yield(()) }
 
+    public func retainOnlineRoomHead(roomID: RoomID, highWatermark: UInt64, userID: UserID) async throws {
+        try await engine.retainOnlineRoomHead(roomID: roomID, highWatermark: highWatermark, userID: userID)
+        wake?.yield(())
+    }
+
     public func requestLatestVisible(roomIDs: [RoomID]) async throws {
         try await engine.requestLatestVisible(roomIDs: roomIDs)
         wake?.yield(())
@@ -88,24 +93,36 @@ public actor V2RoomRecoveryRunner {
         guard !running else { throw V2RoomRecoveryEngineError.concurrentRun }
         running = true
         defer { running = false; wake = nil; consumerFailure = nil }
-        let (events, continuation) = AsyncThrowingStream<Void, Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
-        wake = continuation
-        defer { continuation.finish() }
-        do {
-            while true {
-                do { try await engine.prepare(userID: userID); break }
-                catch V2RealtimeTransportError.server(code: _, retryable: true, retryAfterSeconds: let seconds, currentRevision: _) {
-                    try await retrySleep(TimeInterval(max(1, seconds)))
-                    try Task.checkCancellation()
-                }
-            }
+        while true {
             try Task.checkCancellation()
-            try await runPrepared(userID: userID, events: events, continuation: continuation)
-        } catch {
-            await engine.stop()
-            throw error
+            consumerFailure = nil
+            let (events, continuation) = AsyncThrowingStream<Void, Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
+            wake = continuation
+            do {
+                while true {
+                    do { try await engine.prepare(userID: userID); break }
+                    catch V2RealtimeTransportError.server(code: _, retryable: true, retryAfterSeconds: let seconds, currentRevision: _) {
+                        try await retrySleep(TimeInterval(max(1, seconds)))
+                        try Task.checkCancellation()
+                    }
+                }
+                try Task.checkCancellation()
+                try await runPrepared(userID: userID, events: events, continuation: continuation)
+                continuation.finish()
+                await engine.stop()
+                return
+            } catch V2RoomRecoveryEngineError.coverageLost {
+                // The task group has drained the old consumer and driver. Only
+                // rebuild account coverage; transport failures still escape.
+                continuation.finish()
+                wake = nil
+                await engine.stop()
+            } catch {
+                continuation.finish()
+                await engine.stop()
+                throw error
+            }
         }
-        await engine.stop()
     }
 
     private func runPrepared(userID: UserID, events: AsyncThrowingStream<Void, Error>,

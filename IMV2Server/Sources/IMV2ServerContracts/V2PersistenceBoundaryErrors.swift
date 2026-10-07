@@ -50,8 +50,6 @@ public enum V2SyncStoreError: Error, Equatable, Sendable {
 public enum V2RoomShardStorageRegistryError: Error, Equatable, Sendable {
     /// 逻辑标识或 schema 格式无效。
     case invalidLocation
-    /// 初始化注册表时遇到完全相同的逻辑标识。
-    case duplicateShardID
     /// 当前注册表中未配置请求的逻辑标识。
     case unknownShardID
 }

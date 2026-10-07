@@ -57,8 +57,8 @@ struct SendMessageAcceptanceTests {
         #expect(transaction.acceptedMessage.roomSequence == 1)
         #expect(transaction.nextRoomState.nextRoomSequence == 2)
         #expect(transaction.nextRoomState.acceptedCommands.count == 1)
-        #expect(transaction.nextRoomState.admission.commandWindow.used == 1)
-        #expect(transaction.nextShardState.lease?.commandWindow.used == 1)
+        #expect(transaction.nextRoomState.admission.commandWindow.used == 0)
+        #expect(transaction.nextShardState.lease?.commandWindow.used == 0)
     }
 
     @Test
@@ -128,7 +128,7 @@ struct SendMessageAcceptanceTests {
     }
 
     @Test
-    func capacityRejectionDoesNotAllocateSequenceOrDedupeRecord() throws {
+    func sendingDoesNotConsumeCommandQuota() throws {
         let profile = try profile()
         let state = try V2RoomCommandState(
             roomID: RoomID("room-1"), nextRoomSequence: 1,
@@ -146,7 +146,9 @@ struct SendMessageAcceptanceTests {
             now: Date()
         )
 
-        #expect(result == .rateLimited(retryAfterSeconds: profile.retryAfterSeconds))
+        guard case .accepted(let accepted) = result else { Issue.record("Command quota must not reject messages"); return }
+        #expect(accepted.nextRoomState.nextRoomSequence == 2)
+        #expect(accepted.nextRoomState.admission.commandWindow.used == 10)
         #expect(state.nextRoomSequence == 1)
         #expect(state.acceptedCommands.isEmpty)
     }

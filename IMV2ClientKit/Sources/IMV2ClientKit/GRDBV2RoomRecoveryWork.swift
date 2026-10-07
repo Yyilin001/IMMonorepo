@@ -213,8 +213,7 @@ extension GRDBV2LocalSyncStore {
         for column in ["directory_membership_revision", "directory_owner_epoch"] {
             let value: DatabaseValue = row[column]
             if value.isNull { continue }
-            let integer = try recoveryInteger(row, column)
-            if column == "directory_membership_revision", integer == 0 { throw V2RoomRecoveryPersistenceError.invalidWork }
+            _ = try recoveryInteger(row, column)
         }
     }
 

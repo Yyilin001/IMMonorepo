@@ -29,7 +29,7 @@ public struct V2RoomLatestVisible: Equatable, Sendable {
     public let latest: Message?
 
     public init(roomID: RoomID, ownerEpoch: UInt64, membershipRevision: UInt64, head: UInt64, latest: Message?) throws {
-        guard ownerEpoch <= UInt64(Int64.max), membershipRevision > 0, membershipRevision <= UInt64(Int64.max),
+        guard ownerEpoch <= UInt64(Int64.max), membershipRevision <= UInt64(Int64.max),
               head <= UInt64(Int64.max), (latest?.sequence ?? 0) <= head
         else { throw V2RoomSynchronizationError.invalidState }
         self.roomID = roomID; self.ownerEpoch = ownerEpoch; self.membershipRevision = membershipRevision

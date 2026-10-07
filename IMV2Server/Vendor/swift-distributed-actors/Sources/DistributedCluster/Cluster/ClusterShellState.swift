@@ -403,7 +403,12 @@ extension ClusterShellState {
         }
 
         let change: Cluster.MembershipChange?
-        if let replacedMember = self.membership.anyMember(forEndpoint: handshake.remoteNode.endpoint) {
+        if let replacedMember = self.membership.anyMember(forEndpoint: handshake.remoteNode.endpoint),
+           replacedMember.node == handshake.remoteNode {
+            // A new physical channel for the exact same live UID is not a
+            // membership replacement. Preserve its monotonic member status.
+            change = nil
+        } else if let replacedMember = self.membership.anyMember(forEndpoint: handshake.remoteNode.endpoint) {
             change = self.membership.applyMembershipChange(Cluster.MembershipChange(replaced: replacedMember, by: Cluster.Member(node: handshake.remoteNode, status: .joining)))
         } else {
             change = self.membership.applyMembershipChange(Cluster.MembershipChange(member: Cluster.Member(node: handshake.remoteNode, status: .joining)))

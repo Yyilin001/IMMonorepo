@@ -4,12 +4,16 @@
 
 ## 已实现的边界
 
-PostgreSQL durable-work 指标是 worker 健康和积压的权威观测面。Hybrid 群的
-`group_event_wake_outbox` 也只在 room event 提交后发送最佳努力 wake hint；提示
-发布失败不会改变 cursor、房间事件或个人事件 outbox 状态，因此不会产生“broker 成功
-即投递成功”的指标语义。adapter 以 `PING`/`PONG` 确认命令并在断线后重放当前本机兴趣，
-但尚未暴露 NATS connection、publish-confirmation latency、consumer lag、reconnect 或
-broker availability 指标；启用 NATS 前不能把这些缺失指标误解为健康。
+房间恢复的持久责任由提交事务更新的 `realtime_dirty_room_heads` 记录。
+Room Owner 的实时通知降低延迟，Host 的独立检查补齐丢失的通知；确认按精确修订、水位、
+控制版本和激活令牌执行。确认响应丢失时，既有检查周期会唤醒 worker 重试保留的确认。
+个人 `user_sync_wake_outbox` 仍由独立 relay 处理。
+Gateway 按服务端成员覆盖向在线设备投递；Actor 成功返回表示对应协议的接收进度，
+不代表客户端已经持久应用。设备游标与日志补拉继续决定客户端恢复。
+旧房间 wake 表、触发器与 relay 已删除，当前 Schema 检查拒绝残留旧表的数据库。
+
+候选版本已经移除 NATS 运行依赖。Actor 路由的登记/续租、覆盖失效、队列项数和字节、
+远端接受/超时/拒绝、唤醒最老年龄与重试仍应接入部署级监控；未导出的指标不能当作健康。
 
 `V2TelemetrySink` 是 Server 的可注入边界。网关命令结果写入 `V2TelemetryEvent`；
 生产应用使用 `V2ApplicationTelemetrySink`
@@ -194,11 +198,78 @@ paused 阈值刻意为零；个人事件暂停表示确定性错误，瞬时故�
 同一份 PostgreSQL 聚合快照。ready/scheduled backlog 的容量阈值仍必须由经批准的
 拓扑和负载报告决定，不能由此模板伪造生产 SLO。
 
+## 物理连接占用与实时路由查询
+
+`im_v2_database_loan_observation_*` 按封闭业务来源区分发送、准备读取、
+房间日志拉取、订阅、恢复、同步、在线租约、生命周期与续租等工作。
+`other` 保留尚未标明来源的实际工作，不能按猜测重新归类。标签不含用户、
+房间、ActorID、SQL 或数据库地址；物理池别名只计一次。
+
+- `active{source,stage}` / `oldest_ms{source,stage}`：当前排队、等待驱动、
+  SQL 在途或 SQL 之间的占用及最老年龄。
+- `stage_duration_{sum,count,max}{source,stage}`：已完成阶段间隔；单位为毫秒。
+- `held_duration_{sum,count,max}{source}`：准入授予到实际数据库 Future 结束，
+  包含驱动等待与事务收尾。取消调用方不提前结束这一观测。
+- `sql_duration_{sum,count,max}{source,phase}`：实际 SQL Future 的完成耗时。
+  日志读取区分 `fence`、`read_body`、`transaction_control` 与 `other`。
+  包含驱动、网络和调度等待；并发 SQL 可以重叠，不能相加当作事务墙时。
+
+嵌套事务与连接操作复用原借用句柄，观测不增加 SQL、连接或任务。
+`awaiting_driver` 到实际借用回调的时间可能包括 Fluent 的 BEGIN，
+`between_sql` 也可能包括未通过包装器执行的外层 Fluent COMMIT；不能直接
+把它们命名为纯连接获取时间或纯应用空闲时间。
+
+`im_v2_database_work_interactive_read_*{purpose}` 按普通读取 `ordinary` 和
+必要覆盖授权 `coverage_authorization` 记录 `in_flight`、`queued`、
+`admissions_total`、按固定 reason 分类的 `rejections_total`、
+`cancellations_total` 和 `queue_wait_milliseconds` 直方图。这是原
+interactiveRead 聚合指标的分区，两目的计数之和应与聚合一致，并不表示
+额外连接或许可。真实授予、排队取消及原截止时间超时分别计数；等待时间
+包含这些已离队请求，不能只按业务成功数作分母。客户端不能指定purpose。
+
+保留的 `im_v2_actor_realtime_route_query_*` 指标描述旧 route-store 查询门，
+当前分片Actor寻址链不调用该查询门；它的零值不能证明实际SQL未发生。
+热路径验证须观察 `route_lookup`/`realtime_owner_snapshot` 实际SQL Future
+以及ShardTransport缓存miss、前台/后台Receptionist lookup；后台发现仍计数。
+`max` 均为进程生命周期高水位，不能冒充测量窗口内百分位。
+
+压测分析必须披露计数基线与尾部采样缺口。缺报告、缺节点、缺基线不能补零，
+未完成的压测不能作容量验收。实际复现与受控竞争证据见
+[`actor-realtime-benchmark.md`](actor-realtime-benchmark.md)。
+
+## 恢复链路的分段与实际占用
+
+`im_v2_room_directory_recovery_*{stage}` 导出 active、oldest_milliseconds、
+started_total、completed_total、items_started_total、duration_milliseconds_sum/max。
+固定阶段为 cold_caller_wait、actual_resolution、host_caller_wait、settled_callback。
+actual_resolution 跟踪共享解析任务，普通发送/读取也会触发，调用者取消不结束它；
+cold_caller_wait 与实际解析可能重叠。host_caller_wait 包括 Transport 准入前拒绝，
+Directory 的 recovery_host_cohorts/items_total 不能当成实际物理 RPC 次数。
+
+`im_v2_room_transport_recovery_*{stage}` 使用相同阶段量，区分
+session_caller_wait 与 actual_dispatch。前者记录恢复批调用者等待共享会话，
+不表示共享握手任务终止；后者从实际 dispatch 登记到其操作真实返回。
+recovery_batch_caller_timeouts/cancellations_total 不提前清除 actual_dispatch；
+recovery_batch_rejected_global/peer_total 只统计恢复批自己的实际槽位拒绝。
+本地 dispatch 结束不证明远端独立任务已经结束。
+
+`im_v2_room_recovery_batch_*{purpose}` 区分 states_cohort 与 scalar：
+in_flight、items、oldest_milliseconds 记录实际批仍占用的槽位；
+started_total/completed_total、duration_milliseconds_sum/max 覆盖从占位、
+等待数据库准入、实际查询到结果处理。busy_before_acquire_total 表示未进入
+数据库准入就被拒绝，不含内部延后 flush。物理 URL/schema 归属只聚合一次，
+逻辑别名不会重复计算同一个批处理器。
+
+这些指标不新增 SQL、后台轮询或执行任务。调用者等待与实际生命周期可能重叠，
+不能相加；sum/completed 的差分是已完成工作均值，oldest 反映尚未完成工作，
+max 是进程生命周期最大值，不能充当窗口 p99。未接入 Host 来源时不补零，
+已接入的固定枚举阶段始终输出零值基线。
+
 ## 仍需交付
 
 - 将结构化日志接入受控的集中采集和告警系统，并建立保留/访问策略；
-- 补齐 Push、NATS hint（连接、publish-confirmation、consumer lag、reconnect、broker
-  availability）、shard lease 和容量利用率指标，并基于批准的负载报告为 durable-work
+- 补齐 Push、Actor 路由（登记/续租、队列预算、接受/拒绝/超时、覆盖失效）、
+  shard lease 和容量利用率指标，并基于批准的负载报告为 durable-work
   ready/scheduled backlog 设定容量阈值；Redis 不属于当前 V2 correctness path；
 - 将角色 owner `im-v2-platform-oncall` 映射到实际 Alertmanager receiver 并保留
   一次演练证据；受认证的单目标 replay 入口、事务审计与 runbook 已见
@@ -208,3 +279,117 @@ paused 阈值刻意为零；个人事件暂停表示确定性错误，瞬时故�
 
 在这些项目完成前，本文件只能证明代码提供了可测试的安全遥测入口，不能证明
 生产监控或灾备能力已经建立。
+# Physical Sync loan fairness
+
+`im_v2_database_loan_{in_flight,queued,granted_total,rejected_total}` uses the fixed classes `ordinary`, `sync`, `activation`, and `renewal`. `ordinary` measures general work alone. Sum `ordinary + sync + activation` to measure the shared non-renewal budget; the benchmark retains9 such slots, activation capped2, plus2 renewal slots and11 total. The additional label creates no connections or queue capacity. When both Sync and general requests are eligible, actual grants alternate their FIFO heads; idle capacity remains available and submitted work holds its loan until actual completion.
+
+These physical-loan gauges differ from `im_v2_database_work_*{class="sync"}`, which measures logical work admission and includes time awaiting physical borrowing. A logical Sync slot can be occupied without owning a driver connection. Diagnostic `source="sync"` observations and the trusted loan scheduling purpose are distinct; only the actual routed Sync operation establishes that purpose before its first route borrow. Missing source or component samples must not be filled with zero.
+
+### Actor 实时分片倾斜与推送回调
+
+`im_v2_actor_realtime_partition_retained_{bindings,topics}_max` 是本机分片中保留的已安装订阅负载最大值，不包括 staging；过期内容沿现有回收路径删除，因此不是实时 Ready 权限计数。`partition_publications_active_max` 统计实际尚未结算的发布占用。带 `peak_lifetime` 的值是进程生命周期峰值，不是当前阶段速率。跨节点比较这些最大值应取 MAX，不求和。
+
+`publication_recipient_*{kind}` 记录验证后选中的 Gateway session 集合，包含空集合；成员不是客户端设备数，也不是成功收到消息的数量。`delivery_target_*{kind}` 的 active/oldest 及完成时延来自实际本地回调调用和返回，包括失败；调用方取消不提前释放。远端调用超时导致本地返回不能证明远端业务或客户端写入已结束。完成 count 是物理回调次数，可能与合并前的发布次数不同。
+
+内部观测归属沿实际 Delivery worker 生命周期维护，使用其已有容量，不新增任务、SQL 或准入。`delivery_observation_owners` 和 `delivery_observation_capacity` 描述当前配置范围；`skew_observation_ownership_violations_total` 非零时不能宣称 active/oldest 归属完整。公开标签仅四种固定 topic kind，不输出 room/user/peer/session/partition IDs。采样是本机诊断快照，不是全局原子状态。
+
+### Shared Host room-read collector
+
+`im_v2_room_read_collector_*` exposes pending items, retained items and bytes,
+ordinary retained items, actual batches, oldest queued/actual milliseconds,
+and lifetime batches started/items selected/items settled. Physical URL/schema
+owners are deduplicated before aggregation: occupancies and counters sum,
+oldest ages take the maximum. A scrape is a set of component snapshots rather
+than one atomic fleet snapshot. No room, user or request identifier is a label.
+
+Retained items include queued callers and selected items whose actual work has
+not settled. Streaming pure-pull settlement releases that item's retention
+after its subgroup transaction completes; the actual batch remains occupied
+until all remaining SQL and callbacks return. Queued cancellation/expiry does
+not increment selected or settled counters. Thus selected minus settled counts
+outstanding selected items, while actual batches can remain nonzero after the
+last item settles briefly until the executor returns and releases its slot.
+
+`im_v2_room_recovery_batch_*{purpose="pure_pull"}` records whole collector
+batch lifetime, including logical admission and sequential SQL subgroups.
+One collector batch is not one PostgreSQL transaction. Actual subgroup SQL
+counts and holding time must be read from the existing `group_event_pull`
+physical-loan observations. These overlapping timings must not be added.
+
+### Gateway 房间恢复批次推进
+
+`im_v2_gateway_registry_recovery_work_total` 使用固定 `kind=authorization|prepared` 和 `event=tasks_started|tasks_settled|scopes_started|scopes_settled`。这是进程生命周期累计值；取同一进程、同一观测窗口的差值，才能比较授权输入量与后续提示保留的推进量。一个任务可以依次处理多个作用域，任务数与作用域数不能互换。作用域 settled 包括成功、失败和过期后回授权队列；prepared settled 不等于客户端已应用消息。
+
+`im_v2_gateway_registry_recovery_queued_prepared_expired_total` 仅累计排队期间因原权限观察期限到期而实际移除的准备证明。反复分类不会重复计数，token/session 变化也不计为权限期限到期。当前正在执行的证明过期不属于这个 queued 指标。
+
+兴趣取得、房间/Presence 授权准备与 prepared/其他 scope 的短交接调度各有最多四个根任务名额。合计最多12个根任务，不等于12个查询；实际授权尝试另外计量，仍最多四个，下游物理 recovery RPC 四槽全局共享。已取得精确兴趣回执的 scope 可以直接查询，其他 scope 的冷激活等待不占查询槽；Presence 查询等待属于 query root，不能占 control。query root 是准备请求任务，不等于 SQL 次数，Presence 实际查询由其独立所有者指标计量。prepared 每个最多连续交接128个作用域，每次只领取当前一项；其余项仍可由其他任务推进。短交接任务在有界出站 offer 返回后释放名额，socket 实际等待属于 outbound_retention。原30秒权限期限不因排队、换批或等待 writer 延长。现有 desired/queued/actual_scopes/awaiting_retention 是当前 Gauge，不能以端点差值代替完成次数；最老需求年龄包含压测发送相位开始前的积压。
+
+Presence 查询所有者使用独立的 `im_v2_gateway_presence_observation_work` 与 `im_v2_gateway_presence_observation_oldest_milliseconds`。`actual_queries` 单位为 query_batches，`queued_keys` 为 request_keys，`result_tickets`/`settling_tickets`/`retired_tickets` 为 target_tickets，`owned_jobs` 为 batch_jobs，`waiters` 为 waiters，`result_positions` 为 result_keys（按 batch/request 精确计量的交付责任）。退休票据是结果责任的失效代际子集，不能与其他阶段相加当作连接数量；查询批次数也不等于物理数据库会话数。所有年龄来自原始单调时间，不因重试重新开始。
+
+`im_v2_gateway_registry_recovery_scopes{stage="authorization_returns"}` 统计实际授权任务持有的结果返回位。授权项出队时同步预留位置；结果返回时按任务、生命周期和作用域代次精确消费，再原子转移到有界轮转队列。权威总账本包括 queued、authorization_returns、selected_handoff 和 outbound，总数不超过原1024预算；这不是新增队列容量。部分回调只释放对应返回位，外层任务实际结束时才回收尚未消费的位置。关闭或取消不提前释放实际任务持有的返回位。对应 oldest 指标从选入授权任务时起算，与 actual_scopes 等阶段可能重叠，不能相加作为延迟。
+
+### Gateway recovery phase ownership
+
+Recovery pressure distinguishes `actual` permission/control tasks from
+`outbound_retention` connection-owned handoffs. `inline_retention` remains the
+actual ingress-consumer path. A blocked connection writer can keep an outbound
+handoff retained while query `actual` is zero; this does not mean shutdown has
+finished. Inspect stage age together with desired H, proof expiry, scope
+lifecycle and write-admission outcome. Connection close revokes admission first;
+actual SQL and outbound cleanup are drained separately. Counts must not be
+added across stages as if they were distinct connections.
+
+连接恢复尝试使用 `im_v2_gateway_recovery_attempts` 与 `im_v2_gateway_recovery_attempt_oldest_milliseconds`：interest_activation、query_root、control 单位 root_tasks，authorization_query 单位 query_attempts。query_root 包括 Presence 准备等待，实际 Presence SQL 使用其独立 query_batches 指标。旧 scope actual / actual_scopes 是同一组根任务持有的 scope 别名，不能相加；出站接管后的工作属于 outbound_retention。
+
+`im_v2_gateway_retired_recovery_writer_work` 与 `im_v2_gateway_retired_recovery_writer_oldest_milliseconds` 分别报告 retained_streams（streams）和 actual_drains（worker_tasks）。已注销流仍占连接 Directory 操作预算，实际 drain worker 最多16个；计数重叠且单位不同，不可相加。原退休/实际开始时间不因等待重置；归零须基于实际 worker 退出，不能凭取消或从活跃连接索引删除。
+
+Presence 总位置上限1024覆盖排队键、实际查询键与已返回的结果位置。实际查询结束后，旧结果按 batch/request 保留位置直至目标票据真实结算；同键新设备可在剩余容量内查询。旧回调不能释放后继的 active 查询键，旧 socket 不再通过键占用堵住查询入口。
+
+### Recovery position ledger
+
+`im_v2_gateway_recovery_positions_occupied` is the authoritative admission total;
+`im_v2_gateway_recovery_positions_capacity` is its fixed1024 limit.
+`im_v2_gateway_recovery_positions{stage}` partitions it into queued,
+authorization_returns, selected_handoff and outbound. Prepared queued proofs
+remain queued. Scope/root metrics overlap and must not be added to this total.
+`im_v2_gateway_recovery_position_oldest_milliseconds{stage}` retains original
+position age; all is the maximum stage age. Empty fixed stages report zero.
+A control root can process128 scopes: its age is cohort age, not one offer delay.
+Load-side drained is not sufficient when server shutdown reports drain_timeout.
+
+### Recovery scheduling diagnostics
+
+`/metrics/recovery-scheduling` renders a fixed synchronous snapshot without
+awaiting unrelated Registry or provider metrics. The optional benchmark flag
+`--recovery-scheduling-metrics` samples it separately; load and quality gates
+remain unchanged.
+
+`im_v2_gateway_recovery_scheduling_observations_total{phase}` counts completed
+spans. Duration total/max families report cumulative elapsed milliseconds and
+the process-lifetime maximum, respectively. Fixed phases are pump pass, short
+offer, interest provider, query provider and control cohort. Pump measures
+synchronous scheduling work; short offer includes actor round trips; interest
+provider is a logical shared-interest call that may cache or join; room query
+provider includes callee queuing and callbacks, not pure SQL/RPC. Presence SQL
+has separate execution metrics. Control cohort covers the entire root. These
+spans overlap and must not be summed as independent latency or CPU time.
+
+`im_v2_gateway_recovery_scheduling_scan_entries_total{source}` counts actual
+visits to desired and queued entries, including repeated visits. Compare
+interval deltas with completed spans and stage ages. Completed-duration metrics
+do not expose an operation that is still stuck; retain the ownership/oldest
+age metrics and report sampling failures explicitly.
+
+### Physical send-owner root stages
+
+Supporting providers expose im_v2_send_operation_owner_batch_roots{stage}
+with fixed stages acquiring_connection, awaiting_quota, and quota_turn.
+This partitions retained roots through actual settlement and cleanup, and
+must sum to the provider's in_flight_batches. Quota turn is an exclusive
+owner lifecycle, not an SQL transaction count: isolation/fallback can execute
+several original transactions under one turn.
+
+Unsupported providers omit this family rather than claiming zero stages.
+Aggregates emit it only if every provider supplies stage ownership.
+Preparation-owner snapshots do not acquire send-owner pipeline semantics.
+Standby roots remain inside existing root/item/byte/deadline budgets.

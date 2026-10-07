@@ -26,10 +26,63 @@ public struct V2RoomServerOwnerResolver: V2RoomDataOwnerResolving {
 public struct V2RoomServerLeaseStore: V2RoomActivationLeaseStore {
     private let stores: [String: PostgresV2RoomActivationStore]
 
-    public init(databases: [String: any Database], timeouts: V2RoomActivationSQLTimeouts = .default) throws {
+    /// Physical identity comes from composition, never from database existential identity.
+    /// Keys may contain private connection information and are never included in errors.
+    public init(databases: [String: any Database], timeouts: V2RoomActivationSQLTimeouts = .default,
+                physicalRegistrationKeys: [String: String]? = nil,
+                sqlContinuationMetricsByOwner: [String: V2SendOperationBatchMetrics] = [:]) throws {
         guard !databases.isEmpty else { throw V2ActorContractError.invalidConfiguration("room lease databases") }
         for key in databases.keys { _ = try V2RoomDataOwner(shardID: key, epoch: 0) }
-        self.stores = databases.mapValues { .init(database: $0, timeouts: timeouts) }
+        guard let physicalRegistrationKeys else {
+            self.stores = Dictionary(uniqueKeysWithValues: databases.map { owner, database in
+                (owner, Self.makeStore(database: database, timeouts: timeouts,
+                    sqlContinuationMetrics: sqlContinuationMetricsByOwner[owner]))
+            })
+            return
+        }
+        guard Set(physicalRegistrationKeys.keys) == Set(databases.keys),
+              physicalRegistrationKeys.values.allSatisfy({ key in
+                  !key.isEmpty && key.contains(where: { !$0.isWhitespace })
+              }) else {
+            throw V2ActorContractError.invalidConfiguration("room lease physical registration keys")
+        }
+        var physicalStores: [String: PostgresV2RoomActivationStore] = [:]
+        var aliases: [String: PostgresV2RoomActivationStore] = [:]
+        for ownerID in databases.keys.sorted() {
+            let physicalKey = physicalRegistrationKeys[ownerID]!
+            if let store = physicalStores[physicalKey] {
+                aliases[ownerID] = store
+            } else {
+                let store = Self.makeStore(database: databases[ownerID]!, timeouts: timeouts,
+                    sqlContinuationMetrics: sqlContinuationMetricsByOwner[ownerID])
+                physicalStores[physicalKey] = store
+                aliases[ownerID] = store
+            }
+        }
+        self.stores = aliases
+    }
+
+    private static func makeStore(database: any Database, timeouts: V2RoomActivationSQLTimeouts, sqlContinuationMetrics: V2SendOperationBatchMetrics?) -> PostgresV2RoomActivationStore {
+        // The Store derives its activation facade once from this physical
+        // database; renewal uses the reserved facade of the same gate. Physical
+        // aliases copy the exact Store, including both lifecycle facades.
+        let renewalDatabase = (database as? V2EventLoopBalancedDatabase)?.usingLoanClass(.renewal)
+        return .init(database: database, timeouts: timeouts, renewalDatabase: renewalDatabase, sqlContinuationMetrics: sqlContinuationMetrics)
+    }
+
+    /// Internal identity evidence for composition tests; no physical keys or credentials escape.
+    var renewalBatcherIdentities: [String: ObjectIdentifier] {
+        stores.mapValues(\.renewalBatcherIdentity)
+    }
+
+    var lifecycleBatcherIdentities: [String: ObjectIdentifier] {
+        stores.mapValues(\.lifecycleBatcherIdentity)
+    }
+
+    /// The factory's restore validator must share the exact physical Store,
+    /// including per-room exclusion, deadlines and actual transaction drain.
+    public func validate(token: V2RoomActivationToken) async throws {
+        try await store(token.owner).validate(token: token)
     }
 
     public func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
@@ -47,6 +100,22 @@ public struct V2RoomServerLeaseStore: V2RoomActivationLeaseStore {
 
     public func release(token: V2RoomActivationToken) async throws -> Bool {
         try await store(token.owner).release(token: token)
+    }
+
+    public func shutdownRenewals() async {
+        var drained: Set<ObjectIdentifier> = []
+        for store in stores.values where drained.insert(store.renewalBatcherIdentity).inserted {
+            await store.shutdownRenewals()
+        }
+    }
+
+    /// Only the application owning these physical stores may close lifecycle
+    /// admission, after its Hosts have finished their release operations.
+    public func shutdownLifecycle() async {
+        var drained: Set<ObjectIdentifier> = []
+        for store in stores.values where drained.insert(store.lifecycleBatcherIdentity).inserted {
+            await store.shutdownLifecycle()
+        }
     }
 
     private func store(_ owner: V2RoomDataOwner) throws -> PostgresV2RoomActivationStore {

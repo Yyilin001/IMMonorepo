@@ -4,6 +4,18 @@ Base: `apple/swift-distributed-actors` revision
 `50e789fbb6db9a9869a60b1915e659bd752e1d42` (see `UPSTREAM.json`).
 The copied production source differs from upstream only in:
 
+- `Cluster/Association.swift`, `Cluster/ClusterShell.swift`, and
+  `Cluster/ClusterShellState.swift`: a physically inactive associated channel
+  may atomically return to associating on the same Association object for
+  outbound/inbound handshake. Active channels and permanent tombstones cannot
+  reopen. Re-handshake with the same UID preserves membership; a different UID
+  retains the original exact replacement/down behavior. Health timeout alone
+  is not node death. The focused actual-channel-close/restart regression passed
+  in r39. Production Actor-only blackhole/heal canary r54 also passed
+  with the same live process/UID and physical clients: 120 clients, 348 TCP
+  acknowledgements, zero missed heartbeats, complete final cursor/coverage
+  proof. It used the original TTL/pool budget and production controller;
+  this is functional evidence, not capacity or all network-fault acceptance.
 - `ClusterSystemSettings.swift`: adds a validated, finite `ClusterInboundFrameLimit`
   and `maximumInboundFrameBytes` setting (16 MiB default).
 - `Cluster/Transport/TransportPipelines.swift`: installs the same bounded reader
@@ -32,6 +44,12 @@ platform list), and remote dependency version ranges. It omits upstream
 non-shipping tests, tools, plugins, docs, and their `swift-argument-parser`
 dependency. This vendor includes license, notice, and contributor attribution.
 `Tests/DistributedClusterBoundedFramingTests` are local regression tests.
+
+The Server package's `discoversRestartedHost` regression closes the actual NIO
+association channel, verifies a new active channel for the same live UID without
+membership down, and then restarts the peer twice on the same port with new UIDs.
+The focused r39 run passed; production silent network isolation remains a separate
+integration gate (see `docs/reviews/actor-realtime-routing-evidence.md`).
 
 The frame setting bounds an individual length-prefixed transport frame. The
 handshake watchdog bounds one connected but silent peer; NIO's existing

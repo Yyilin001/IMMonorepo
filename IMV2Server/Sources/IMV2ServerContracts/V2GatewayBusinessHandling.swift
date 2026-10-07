@@ -9,6 +9,11 @@ package protocol V2GatewayReadReceiptHandling: Sendable {
 
 package protocol V2GatewayMessageSendOperationHandling: V2MessageSendOperationHandling {
     var managesForegroundWriteAdmission: Bool { get }
+    var usesReadOnlySendRecovery: Bool { get }
+}
+
+extension V2GatewayMessageSendOperationHandling {
+    package var usesReadOnlySendRecovery: Bool { false }
 }
 
 extension V2GatewayReadReceiptHandling {

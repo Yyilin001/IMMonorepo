@@ -47,13 +47,13 @@ public struct PostgresV2MessageMutationOperationStore:Sendable {
             }
         }
     }
-    public func recover(_ request:V2MessageMutationRecoveryRequest,token:V2RoomActivationToken,now:Date) async throws -> V2MessageMutationRecoveryResult {
-        try await v2WithRoomScopedTransaction(database:database) { transaction in
-            let context=try await lockedContext(identity:request.identity,token:token,database:transaction)
-            if let result=try await existing(identity:request.identity,fingerprint:request.fingerprint,sql:context.sql) { return result }
-            guard request.action == .closeIfAbsent else { return .unresolved }
-            return .receipt(try await persist(identity:request.identity,fingerprint:request.fingerprint,outcome:.closed,now:now,sql:context.sql))
-        }
+    public func recover(_ request: V2MessageMutationRecoveryRequest, token: V2RoomActivationToken,
+                        now: Date) async throws -> V2MessageMutationRecoveryResult {
+        try await v2RecoverMessageOperation(database: database, action: request.action, unresolved: .unresolved,
+            lock: { try await lockedContext(identity: request.identity, token: token, database: $0).sql },
+            existing: { try await self.existing(identity: request.identity, fingerprint: request.fingerprint, sql: $0) },
+            close: { .receipt(try await self.persist(identity: request.identity, fingerprint: request.fingerprint,
+                outcome: .closed, now: now, sql: $0)) })
     }
     private func execute(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,deadline:UInt64,token:V2RoomActivationToken,now:Date,body:@escaping @Sendable(any Database) async throws -> MutationBodyResult) async throws -> V2MessageMutationRecoveryResult {
         let committed: (V2MessageMutationRecoveryResult, Bool) = try await v2WithRoomScopedTransaction(database:database) { transaction in
@@ -83,7 +83,7 @@ public struct PostgresV2MessageMutationOperationStore:Sendable {
             }
         }
         if committed.1, case .receipt(let receipt) = committed.0, case .committed(let event) = receipt.outcome {
-            committedMessageObserver?.observeCommittedRoomSequence(roomID: token.roomID, roomSequence: event.roomSequence)
+            committedMessageObserver?.observeCommittedRoomSequence(roomID: token.roomID, roomSequence: event.roomSequence, activation: token)
         }
         return committed.0
     }
@@ -93,32 +93,28 @@ public struct PostgresV2MessageMutationOperationStore:Sendable {
               let room=roomID.uuidValue,let actor=identity.accountID.uuidValue,
               let operation=UUID(uuidString:identity.operation.rawOperationID),let sql=database as? any SQLDatabase else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         // Preserve the inner mutation lock ordering while replacing its retained ledger.
-        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind:actor.uuidString+":"+operation.uuidString),0))").run()
-        try await v2RequireRoomActivation(token:token,sql:sql)
+        try await v2LockMessageOperation(actor: actor, operation: operation, token: token, sql: sql)
         return (sql,room)
     }
-    private func existing(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,sql:any SQLDatabase) async throws -> V2MessageMutationRecoveryResult? {
-        guard let row=try await sql.raw("SELECT receipt::text AS receipt FROM im_v2.message_mutation_receipts WHERE actor_user_id=\(bind:identity.accountID.uuidValue!) AND operation_id=\(bind:UUID(uuidString:identity.operation.rawOperationID)!)").first(decoding:ReceiptRow.self) else { return nil }
-        let receipt=try JSONDecoder().decode(V2MessageMutationReceipt.self,from:Data(row.receipt.utf8))
-        guard receipt.validates(identity:identity,fingerprint:fingerprint) else { return .fingerprintConflict }
-        return .receipt(receipt)
+    private func existing(identity: V2OperationIdentity, fingerprint: V2OperationFingerprint, sql: any SQLDatabase) async throws -> V2MessageMutationRecoveryResult? {
+        try await v2ReadMessageOperationReceipt(V2MessageMutationReceipt.self,
+            query: "SELECT receipt::text AS receipt FROM im_v2.message_mutation_receipts WHERE actor_user_id=\(bind: identity.accountID.uuidValue!) AND operation_id=\(bind: UUID(uuidString: identity.operation.rawOperationID)!)",
+            sql: sql, validates: { $0.validates(identity: identity, fingerprint: fingerprint) },
+            receipt: { .receipt($0) }, conflict: .fingerprintConflict)
     }
     private func persist(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,outcome:V2MessageMutationTerminalOutcome,now:Date,sql:any SQLDatabase) async throws -> V2MessageMutationReceipt {
         let receipt=try V2MessageMutationReceipt(identity:identity,fingerprint:fingerprint,outcome:outcome,resolvedAtMilliseconds:timestamp(now))
         guard case .message(let room,let message)=identity.scope else { throw V2MessageOperationValidationError.invalidKind }
-        let payload=String(decoding:try JSONEncoder().encode(receipt),as:UTF8.self)
+        let payload=try v2EncodePersistenceJSON(receipt)
         try await sql.raw("""
             INSERT INTO im_v2.message_mutation_receipts(actor_user_id,operation_id,room_id,message_id,kind,fingerprint_version,request_fingerprint,receipt,resolved_at)
             VALUES(\(bind:identity.accountID.uuidValue!),\(bind:UUID(uuidString:identity.operation.rawOperationID)!),\(bind:room.uuidValue!),\(bind:message.uuidValue!),\(bind:identity.kind.rawValue),\(bind:Int16(fingerprint.version)),\(bind:fingerprint.digest),\(bind:payload)::jsonb,\(bind:now))
             """).run()
         return receipt
     }
-    private func timestamp(_ date:Date) throws -> UInt64 {
-        let value=date.timeIntervalSince1970*1000
-        guard v2PostgresTimestampCanEncode(date),value.isFinite,value>0,value<Double(Int64.max) else { throw V2MessageOperationValidationError.invalidReceipt }
-        return UInt64(value)
+    private func timestamp(_ date: Date) throws -> UInt64 {
+        try v2PersistenceMilliseconds(date, invalid: V2MessageOperationValidationError.invalidReceipt)
     }
 }
-private struct ReceiptRow:Decodable { let receipt:String }
 
 private enum MutationBodyResult:Sendable { case terminal(V2MessageMutationTerminalOutcome, isNewEvent: Bool = false),deferred(V2MessageOperationRetryHint) }

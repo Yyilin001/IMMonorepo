@@ -460,27 +460,11 @@ func v2AppendGroupNicknameInvalidation(room: UUID, actor: UUID, revision: Int64,
     do {
         let context = try await prepare(room: room, actor: actor, required: .member,
             capacityProfile: capacityProfile, now: now, sql: sql)
-        let committed = try await commit(room: room, context: context, actor: actor, eventID: eventID,
+        _ = try await commit(room: room, context: context, actor: actor, eventID: eventID,
             eventType: "group.nickname_changed", payload: groupPayload([
                 "event_type": "group.nickname_changed", "room_id": room.uuidString,
                 "target_user_id": actor.uuidString, "revision": revision
             ]), now: now, sql: sql)
-        if context.room.capacityClass == .standard {
-            // Large rooms already enqueue through the room-event trigger. Account
-            // HTTP writes also need a durable wake for a quiet standard room.
-            try await sql.raw("""
-                INSERT INTO im_v2.group_event_wake_outbox
-                    (room_id,target_room_sequence,revision,state,next_attempt_at,updated_at)
-                VALUES(\(bind: room),\(bind: committed.sequence),1,'pending',\(bind: now),\(bind: now))
-                ON CONFLICT(room_id) DO UPDATE SET
-                    target_room_sequence=GREATEST(im_v2.group_event_wake_outbox.target_room_sequence,EXCLUDED.target_room_sequence),
-                    revision=im_v2.group_event_wake_outbox.revision+1,state='pending',
-                    lease_token=NULL,lease_expires_at=NULL,
-                    next_attempt_at=LEAST(im_v2.group_event_wake_outbox.next_attempt_at,EXCLUDED.next_attempt_at),
-                    updated_at=GREATEST(im_v2.group_event_wake_outbox.updated_at,EXCLUDED.updated_at)
-                WHERE im_v2.group_event_wake_outbox.state='leased'
-                """).run()
-        }
     } catch let failure as GroupAdmissionSignal {
         switch failure {
         case .rateLimited: throw V2RoomCallFailure.rolledBack(.overloaded)

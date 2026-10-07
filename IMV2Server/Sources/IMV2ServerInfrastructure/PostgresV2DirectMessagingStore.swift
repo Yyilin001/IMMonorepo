@@ -121,7 +121,7 @@ public struct PostgresV2DirectMessagingStore: Sendable {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 变更结果。
     /// - Throws: 持久化失败时抛出。
-    func applyStrangerMessagePermission(command:V2SetStrangerMessagePermissionCommand,transaction:any Database,now:Date) async throws -> V2SetStrangerMessagePermissionOutcome {
+    func applyStrangerMessagePermission(command:V2SetStrangerMessagePermissionCommand,transaction:any Database,now:Date,policyMutation:V2PolicyMutationContext? = nil) async throws -> V2SetStrangerMessagePermissionOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
             let actorID = try directUUID(command.actorUserID)
             let operationID = try directUUID(command.operationID)
@@ -131,7 +131,14 @@ public struct PostgresV2DirectMessagingStore: Sendable {
             let lockKey = "v2-stranger-message-preference:" + actorID.uuidString.lowercased()
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             guard v2PostgresTimestampCanEncode(now) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-            try await v2DrainDirectAuthorizations(.user(actorID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
+            if policyMutation != nil {
+                guard try await PostgresV2DirectAuthorizationIntentStore(database: transaction)
+                    .held(in: .user(actorID), limit: 1, transaction: transaction).isEmpty else {
+                    throw V2DirectAuthorizationCoordinationError.revocationIncomplete
+                }
+            } else {
+                try await v2DrainDirectAuthorizations(.user(actorID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
+            }
             try await sql.raw("INSERT INTO im_v2.user_stranger_message_preferences (user_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: requested), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_stranger_messages = EXCLUDED.allows_stranger_messages, updated_at = EXCLUDED.updated_at").run()
             try await bumpDirectSendPolicyVersion(userID: actorID, now: now, sql: sql)
             guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
@@ -198,16 +205,6 @@ private struct DirectCountRow: Decodable { let value: Int }
 private struct DirectShardLeaseRow: Decodable {
     let leaseID: UUID; let generation: Int64; let validUntil: Date
     enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until" }
-}
-private struct DirectPreferenceOperationRow: Decodable {
-    let allowsStrangerMessages: Bool; let updatedAt: Date
-    enum CodingKeys: String, CodingKey { case allowsStrangerMessages = "allows_stranger_messages", updatedAt = "updated_at" }
-    var permission: V2StrangerMessagePermission { allowsStrangerMessages ? .allow : .deny }
-}
-private struct DirectUserAddPreferenceOperationRow: Decodable {
-    let allowsBeingAdded: Bool; let updatedAt: Date
-    enum CodingKeys: String, CodingKey { case allowsBeingAdded = "allows_being_added", updatedAt = "updated_at" }
-    var permission: V2UserAddPermission { allowsBeingAdded ? .allow : .deny }
 }
 private func userAddPreferenceLockKey(_ userID: UUID) -> String { "v2-user-add-preference:\(userID.uuidString.lowercased())" }
 private struct DirectPublicProfileRow: Decodable {

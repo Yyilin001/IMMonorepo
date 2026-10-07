@@ -23,7 +23,10 @@ public struct V2EventLoopDatabasePool: Sendable {
         databases: Databases,
         logger: Logger,
         identifier: DatabaseID,
-        eventLoops: [any EventLoop]
+        eventLoops: [any EventLoop],
+        loanPolicy: V2PhysicalDatabaseLoanPolicy? = nil,
+        // Must match the startup parameters of every physical connection in this pool.
+        sessionTimeouts: V2RoomActivationSQLTimeouts? = nil
     ) throws {
         guard !eventLoops.isEmpty else {
             throw V2EventLoopDatabasePoolError.emptyEventLoopSet
@@ -44,6 +47,6 @@ public struct V2EventLoopDatabasePool: Sendable {
             return database
         }
         eventLoopDatabases = handles
-        database = try V2EventLoopBalancedDatabase(databases: handles)
+        database = try V2EventLoopBalancedDatabase(databases: handles, loanPolicy: loanPolicy, sessionTimeouts: sessionTimeouts)
     }
 }

@@ -7,6 +7,9 @@ No Docker, existing database or production secret is used. Optional App UI tests
 trust the temporary CA only in a newly created simulator that is deleted at exit.
 The HTTPS proxy supplies the same trusted edge headers as the local Caddy edge;
 all registration, credential, device and rate-limit behavior is the real server.
+Cross-Gateway mode uses authenticated Actor callbacks. The former broker-outage
+scenario is retired; callback transport faults are checked by
+IMV2/scripts/test_v2_realtime_actor_callback.py and realtime routing fence tests.
 """
 import argparse
 import base64
@@ -455,14 +458,13 @@ def main():
     parser.add_argument('--gateway', action='store_true', help='with --app-ui, also start the real TLS Gateway on loopback:7443 and verify connected-session revocation')
     parser.add_argument('--private-hint', action='store_true', help='with --app-ui --gateway, verify sender-only restriction hints through two real TLS clients, SQLite reopen and reconnect')
     parser.add_argument('--room-recovery-scale', type=int, choices=[0, 50, 129, 1000, 10000], help='with --app-ui --gateway, seed nonempty rooms and verify production TLS recovery and reconnect')
-    parser.add_argument('--room-recovery-broker-outage', action='store_true', help='with nonempty scale and multi-gateway NATS, stop the owned broker after coverage and verify explicit invalidation and recovery')
     parser.add_argument('--room-recovery-drop-tail', action='store_true', help='with nonempty scale, discard the last real TLS wake at the test consumer and verify periodic reconciliation')
     parser.add_argument('--room-recovery-scan-race', choices=['before-listener', 'directory', 'state'], help='commit through another Gateway at a selected recovery boundary')
     parser.add_argument('--headless-app', action='store_true', help='with --app-ui --gateway, also run real credential Push entry in an App host without constructing its root view')
     parser.add_argument('--current-logout', action='store_true', help='also verify current-device logout through real HTTPS and PostgreSQL')
     parser.add_argument('--interrupted-issuance', action='store_true', help='with --app-ui --current-logout, terminate the owned App after issuance and cancellation commit but before either response is forwarded')
     parser.add_argument('--load-credentials', action='store_true', help='exercise the actual load credential preparation script and cancel its issued session through the saved proof')
-    parser.add_argument('--multi-gateway-nats-binary', type=Path, help='with --private-hint or nonempty --room-recovery-scale, start owned NATS and a second TLS Gateway for cross-gateway recovery')
+    parser.add_argument('--multi-gateway', action='store_true', help='with --private-hint or nonempty --room-recovery-scale, start a second authenticated Actor/TLS Gateway for cross-gateway recovery')
     parser.add_argument('--room-recovery-slow-tls', action='store_true', help='pause the owned opaque TLS relay and require real App backpressure closure and recovery')
     parser.add_argument('--room-recovery-membership-race', action='store_true', help='remove and rejoin a member while a real old room state response is delayed')
     parser.add_argument('--room-recovery-app-reconnect', action='store_true', help='verify foreground App reconnect after three owned relay disconnects')
@@ -474,36 +476,32 @@ def main():
             parser.error('--gateway-recovery-connections must be 2...10000')
         if any((args.app_ui, args.gateway, args.private_hint, args.room_recovery_scale is not None,
                 args.current_logout, args.interrupted_issuance, args.load_credentials, args.headless_app,
-                args.multi_gateway_nats_binary, args.room_recovery_membership_race, args.room_recovery_slow_tls,
-                args.room_recovery_app_reconnect, args.room_recovery_scan_race, args.room_recovery_drop_tail,
-                args.room_recovery_broker_outage)):
+                args.multi_gateway, args.room_recovery_membership_race, args.room_recovery_slow_tls,
+                args.room_recovery_app_reconnect, args.room_recovery_scan_race, args.room_recovery_drop_tail)):
             parser.error('gateway recovery mode is exclusive of App and authorization fault modes')
         required_descriptors = 2 * args.gateway_recovery_connections + 1024
         soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft_limit != resource.RLIM_INFINITY and soft_limit < required_descriptors:
             parser.error('gateway recovery requires an inherited file descriptor soft limit of at least ' + str(required_descriptors))
         args.gateway = True
-    if args.room_recovery_membership_race and (not args.room_recovery_scale or not args.multi_gateway_nats_binary):
-        parser.error('--room-recovery-membership-race requires nonempty scale and multi-gateway NATS')
-    if sum(bool(flag) for flag in (args.room_recovery_membership_race, args.room_recovery_slow_tls, args.room_recovery_app_reconnect,
-                                  args.room_recovery_scan_race, args.room_recovery_drop_tail,
-                                  args.room_recovery_broker_outage)) > 1:
+    if args.room_recovery_membership_race and (not args.room_recovery_scale or not args.multi_gateway):
+        parser.error('--room-recovery-membership-race requires nonempty scale and --multi-gateway')
+    if sum(bool(flag) for flag in (args.room_recovery_membership_race, args.room_recovery_slow_tls,
+                                  args.room_recovery_app_reconnect, args.room_recovery_scan_race,
+                                  args.room_recovery_drop_tail)) > 1:
         parser.error('select exactly one room recovery fault scenario per run')
-    if args.room_recovery_app_reconnect and (not args.room_recovery_scale or not args.multi_gateway_nats_binary):
-        parser.error('--room-recovery-app-reconnect requires nonempty scale and multi-gateway NATS')
-    if args.room_recovery_slow_tls and (not args.room_recovery_scale or not args.multi_gateway_nats_binary
-                                      or args.room_recovery_scan_race or args.room_recovery_drop_tail
-                                      or args.room_recovery_broker_outage):
-        parser.error('--room-recovery-slow-tls requires nonempty scale, multi-gateway NATS and no other fault flag')
-    if args.room_recovery_scan_race and (not args.room_recovery_scale or not args.multi_gateway_nats_binary
-                                       or args.room_recovery_drop_tail or args.room_recovery_broker_outage):
-        parser.error('--room-recovery-scan-race requires nonempty scale, multi-gateway NATS and no other fault flag')
-    if args.room_recovery_drop_tail and (not args.room_recovery_scale or args.room_recovery_broker_outage):
-        parser.error('--room-recovery-drop-tail requires nonempty scale and cannot be combined with broker outage')
-    if args.room_recovery_broker_outage and not (args.room_recovery_scale and args.multi_gateway_nats_binary):
-        parser.error('--room-recovery-broker-outage requires nonempty scale and --multi-gateway-nats-binary')
-    if args.multi_gateway_nats_binary and not (args.private_hint or args.room_recovery_scale):
-        parser.error('--multi-gateway-nats-binary requires --private-hint or a nonempty --room-recovery-scale')
+    if args.room_recovery_app_reconnect and (not args.room_recovery_scale or not args.multi_gateway):
+        parser.error('--room-recovery-app-reconnect requires nonempty scale and --multi-gateway')
+    if args.room_recovery_slow_tls and (not args.room_recovery_scale or not args.multi_gateway
+                                      or args.room_recovery_scan_race or args.room_recovery_drop_tail):
+        parser.error('--room-recovery-slow-tls requires nonempty scale, --multi-gateway and no other fault flag')
+    if args.room_recovery_scan_race and (not args.room_recovery_scale or not args.multi_gateway
+                                       or args.room_recovery_drop_tail):
+        parser.error('--room-recovery-scan-race requires nonempty scale, --multi-gateway and no other fault flag')
+    if args.room_recovery_drop_tail and not args.room_recovery_scale:
+        parser.error('--room-recovery-drop-tail requires nonempty scale')
+    if args.multi_gateway and not (args.private_hint or args.room_recovery_scale):
+        parser.error('--multi-gateway requires --private-hint or a nonempty --room-recovery-scale')
     if args.gateway and not (args.app_ui or args.gateway_recovery_connections):
         parser.error('--gateway requires --app-ui')
     if args.private_hint and not (args.app_ui and args.gateway):
@@ -564,8 +562,6 @@ def main():
         tls_relay = None
         tls_relay_events = []
         additional_processes = []
-        recovery_broker = []
-        recovery_broker_events = []
         additional_logs = []
         gateway_samples = []
         remote_baselines = {}
@@ -590,7 +586,7 @@ def main():
                 run(['initdb', '-D', str(data), '-U', 'postgres', '--auth=trust', '--no-locale', '--encoding=UTF8'])
                 run(['pg_ctl', '-D', str(data), '-l', str(private / 'postgres.log'), '-o',
                      '-p {} -h 127.0.0.1 -k {} -c max_connections={}'.format(
-                         db_port, private, 320 if args.multi_gateway_nats_binary else 160), 'start', '-w'])
+                         db_port, private, 320 if args.multi_gateway else 160), 'start', '-w'])
                 postgres_started = True
                 run(['createdb', *database_arguments, 'im_live_account'])
                 run(['psql', '-X', *database_arguments, '-d', 'im_live_account', '-v', 'ON_ERROR_STOP=1',
@@ -603,8 +599,8 @@ def main():
                     '--output-dir', str(private / 'actors'),
                     '--host', 'gateway=localhost:{}'.format(free_port()),
                     '--caller', 'account=localhost:{}'.format(free_port()),
-                    '--shards', 'rooms-primary']
-                if args.multi_gateway_nats_binary:
+                    '--shards', 'rooms-primary', '--user-buckets', 'users-primary']
+                if args.multi_gateway:
                     actor_configuration += ['--host', 'gateway-secondary=localhost:{}'.format(free_port())]
                 run(actor_configuration)
 
@@ -712,29 +708,9 @@ def main():
                         IM_V2_TLS_PRIVATE_KEY_PATH=str(private / 'leaf.key'),
                         IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(metrics_port),
                         IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS='4000')
-                    if args.multi_gateway_nats_binary:
-                        nats_port = free_port()
-                        nats_log = (output / 'nats.log').open('w')
-                        additional_logs.append(nats_log)
-                        nats = subprocess.Popen([str(args.multi_gateway_nats_binary.resolve()), '-a', '127.0.0.1', '-p', str(nats_port)],
-                            stdout=nats_log, stderr=subprocess.STDOUT)
-                        additional_processes.append(nats)
-                        recovery_broker.append(nats)
-                        deadline = time.monotonic() + 10
-                        while True:
-                            if nats.poll() is not None:
-                                raise RuntimeError('owned NATS failed to start')
-                            try:
-                                with socket.create_connection(('127.0.0.1', nats_port), timeout=.2):
-                                    break
-                            except OSError:
-                                if time.monotonic() >= deadline:
-                                    raise RuntimeError('owned NATS startup deadline exceeded')
-                                time.sleep(.05)
-                        gateway_config.update(IM_V2_GATEWAY_REPLICA_COUNT='2',
-                            IM_V2_GROUP_WAKE_NATS_URL='nats://127.0.0.1:{}'.format(nats_port),
-                            IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX='imv2.recovery.acceptance',
-                            IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64=base64.b64encode(os.urandom(32)).decode())
+                    gateway_config.update(IM_V2_GATEWAY_NODE_ID='gateway',
+                        IM_V2_REALTIME_ROOM_TRANSPORT='actor',
+                        IM_V2_GATEWAY_REPLICA_COUNT='2' if args.multi_gateway else '1')
                     gateway_log = (output / 'gateway.log').open('w')
                     gateway = subprocess.Popen([str(binary_directory / 'IMV2ServerApp')],
                         env=dict(environment, **gateway_config), stdout=gateway_log, stderr=subprocess.STDOUT)
@@ -753,13 +729,13 @@ def main():
                     if args.room_recovery_slow_tls or args.room_recovery_app_reconnect:
                         tls_relay = TLSBackpressureProxy(primary_tls_port)
                     print('Native TLS Gateway and authenticated-connection metrics ready.', flush=True)
-                    if args.multi_gateway_nats_binary:
+                    if args.multi_gateway:
                         secondary_port = free_port()
                         secondary_log = (output / 'gateway-secondary.log').open('w')
                         additional_logs.append(secondary_log)
                         secondary_config = dict(gateway_config,
                             IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(private / 'actors/gateway-secondary/configuration.json'),
-                            IM_V2_GATEWAY_NODE_ID='recovery-gateway-secondary',
+                            IM_V2_GATEWAY_NODE_ID='gateway-secondary',
                             IM_V2_TLS_PORT=str(secondary_port), IM_V2_METRICS_PORT=str(free_port()))
                         secondary = subprocess.Popen([str(binary_directory / 'IMV2ServerApp')],
                             env=dict(environment, **secondary_config), stdout=secondary_log, stderr=subprocess.STDOUT)
@@ -776,9 +752,7 @@ def main():
                                     raise RuntimeError('secondary Gateway startup deadline exceeded')
                                 time.sleep(.05)
                         environment['SIMCTL_CHILD_IMV2_ROOM_RECOVERY_SECONDARY_PORT'] = str(secondary_port)
-                        if args.room_recovery_broker_outage:
-                            environment['SIMCTL_CHILD_IMV2_ROOM_RECOVERY_BROKER_OUTAGE'] = '1'
-                        print('Second TLS Gateway and real NATS ready.', flush=True)
+                        print('Second TLS Gateway and authenticated Actor callbacks ready.', flush=True)
 
 
                 def seed_recovery_rooms(handle):
@@ -880,49 +854,6 @@ def main():
                             self.send_header('Connection', 'close')
                             self.end_headers()
                             self.wfile.write(payload)
-                            self.close_connection = True
-                            return
-                        if (args.room_recovery_broker_outage and self.command == 'POST'
-                                and self.path in ('/__fixture__/broker-stop', '/__fixture__/broker-start')):
-                            # Operates exclusively on the harness-owned process.
-                            # No production route or arbitrary process selector.
-                            with count_lock:
-                                broker = recovery_broker[0]
-                                if self.path.endswith('broker-stop'):
-                                    if broker.poll() is not None:
-                                        self.send_error(409)
-                                        return
-                                    broker.terminate()
-                                    broker.wait(timeout=5)
-                                    recovery_broker_events.append({'action': 'stop', 'pid': broker.pid,
-                                        'exitCode': broker.returncode, 'monotonicTime': time.monotonic()})
-                                else:
-                                    if broker.poll() is None:
-                                        self.send_error(409)
-                                        return
-                                    broker = subprocess.Popen([str(args.multi_gateway_nats_binary.resolve()),
-                                        '-a', '127.0.0.1', '-p', str(nats_port)], stdout=nats_log, stderr=subprocess.STDOUT)
-                                    recovery_broker[0] = broker
-                                    additional_processes.append(broker)
-                                    deadline = time.monotonic() + 10
-                                    while True:
-                                        if broker.poll() is not None:
-                                            raise RuntimeError('owned broker restart failed')
-                                        try:
-                                            with socket.create_connection(('127.0.0.1', nats_port), timeout=.2):
-                                                break
-                                        except OSError:
-                                            if time.monotonic() >= deadline:
-                                                raise RuntimeError('owned broker restart timed out')
-                                            time.sleep(.05)
-                                    recovery_broker_events.append({'action': 'start', 'pid': broker.pid,
-                                        'monotonicTime': time.monotonic()})
-                                (output / 'broker-fault-events.json').write_text(
-                                    json.dumps(recovery_broker_events, indent=2) + '\n')
-                            self.send_response(204)
-                            self.send_header('Content-Length', '0')
-                            self.send_header('Connection', 'close')
-                            self.end_headers()
                             self.close_connection = True
                             return
                         length = int(self.headers.get('Content-Length', '0'))
@@ -1292,19 +1223,15 @@ def main():
                                 assert 'IMV2_TLS_ROOM_SCAN_RACE_PASSED boundary=' + args.room_recovery_scan_race in (output / 'app.log').read_text()
                             if args.room_recovery_drop_tail:
                                 assert 'IMV2_TLS_ROOM_SILENT_TAIL_RECOVERY_PASSED' in (output / 'app.log').read_text()
-                            if args.room_recovery_broker_outage:
-                                assert 'IMV2_TLS_ROOM_BROKER_RECOVERY_PASSED' in (output / 'app.log').read_text()
-                                assert [event['action'] for event in recovery_broker_events] == ['stop', 'start'], 'broker fault cycle did not complete'
-                                assert recovery_broker_events[0]['pid'] != recovery_broker_events[1]['pid'], 'broker process was not replaced'
-                                assert recovery_broker[0].poll() is None, 'restarted broker exited before acceptance'
                             if args.room_recovery_scale > 0:
                                 assert 'IMV2_TLS_ROOM_ONLINE_PASSED rooms=' + str(args.room_recovery_scale) in (output / 'app.log').read_text()
                         if args.private_hint:
                             assert 'IMV2_THREE_FOREGROUND_RECOVERY_CYCLES_PASSED' in (output / 'app.log').read_text()
                             assert 'IMV2_FOREGROUND_RECOVERY_COMPLETION_PASSED' in (output / 'app.log').read_text()
-                        if args.multi_gateway_nats_binary:
+                        if args.multi_gateway:
                             if args.private_hint:
                                 assert 'IMV2_CROSS_GATEWAY_RECOVERY_AND_ONLINE_WAKE_PASSED' in (output / 'app.log').read_text()
+                                assert 'IMV2_CROSS_GATEWAY_TWO_DEVICES_AND_SINGLE_EXIT_PASSED' in (output / 'app.log').read_text()
                             if args.room_recovery_scale:
                                 assert 'IMV2_TLS_ROOM_CROSS_GATEWAY_PASSED rooms=' + str(args.room_recovery_scale) in (output / 'app.log').read_text()
                         if args.gateway:
@@ -1370,7 +1297,7 @@ def main():
                     # Automatic reconnect signs the scoped App into the scale
                     # account in addition to the test-owned sender session. The
                     # three transport reconnects must reuse that one App device.
-                    expected_devices = 5 + (6 if args.gateway else 3 if args.app_ui else 0) + (2 if args.headless_app else 0) + (3 if args.current_logout else 0) + 2 * int(args.interrupted_issuance) + int(args.load_credentials) + 3 * int(args.private_hint) + int(args.room_recovery_scale is not None) + int(args.room_recovery_membership_race) + int(args.room_recovery_app_reconnect)
+                    expected_devices = 5 + (6 if args.gateway else 3 if args.app_ui else 0) + (2 if args.headless_app else 0) + (3 if args.current_logout else 0) + 2 * int(args.interrupted_issuance) + int(args.load_credentials) + 3 * int(args.private_hint) + int(args.private_hint and args.multi_gateway) + int(args.room_recovery_scale is not None) + int(args.room_recovery_membership_race) + int(args.room_recovery_app_reconnect)
                     expected_revoked = 1 + (2 if args.gateway else 1 if args.app_ui else 0) + int(args.headless_app) + (3 if args.current_logout else 0) + int(args.interrupted_issuance) + int(args.load_credentials)
                     assert persisted == '{}|{}|0|0|{}'.format(expected_devices, expected_revoked, expected_revoked), persisted
                     if args.room_recovery_app_reconnect:

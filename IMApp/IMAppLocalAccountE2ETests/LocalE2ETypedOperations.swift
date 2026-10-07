@@ -14,8 +14,40 @@ extension LocalE2EAccountCredentials {
     private func recoveryTransport(_ scheduler: V2AccountWorkScheduler) -> V2URLSessionMediaEdgeHTTPTransport {
         .init(executor: .init(scheduler: scheduler))
     }
+    /// Reuses the caller's authenticated TCP connection when supplied. A
+    /// standalone test call owns its socket through actual submit/recovery drain.
+    func withMessageSendClient<Value: Sendable>(auth: V2AuthSession? = nil, connection existing: V2TLSFrameConnection? = nil, transport existingTransport: V2ProtobufSyncTransport? = nil,
+        operation: (V2ProtobufMessageSendOperationClient) async throws -> Value) async throws -> Value {
+        guard existing == nil || existingTransport != nil else { throw V2MessageSendTransportError.invalidResponse }
+        let connection = try existing ?? V2TLSFrameConnection(endpoint: V2RealtimeEndpoint(host: "localhost", port: 7_443),
+            frameLimits: V2FrameLimits(maximumPayloadBytes: 65_536, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]))
+        do {
+            if await connection.messageSendSession() == nil {
+                if let auth {
+                    let credentials = try await auth.realtimeCredentials()
+                    guard credentials.userID == userID, credentials.deviceID == deviceID else { throw V2MessageSendTransportError.authenticationRequired }
+                    _ = try await connection.connectAndAuthenticate(accessToken: credentials.accessToken, deviceID: credentials.deviceID,
+                        supportedCapabilityProfiles: ["base"])
+                    try await auth.requireAuthenticatedEpoch(XCTUnwrap(credentials.sessionEpoch))
+                } else {
+                    _ = try await connection.connectAndAuthenticate(accessToken: accessToken, deviceID: deviceID,
+                        supportedCapabilityProfiles: ["base"])
+                }
+            }
+            let readiness = await connection.messageSendSession()
+            let session = try XCTUnwrap(readiness)
+            guard session.accountID == userID, session.deviceID == deviceID else { throw V2MessageSendTransportError.authenticationRequired }
+            let transport = existingTransport ?? V2ProtobufSyncTransport(wire: connection, protocolVersion: session.protocolVersion)
+            let value = try await operation(.init(transport: transport, connection: connection))
+            if existing == nil { await connection.disconnect() }
+            return value
+        } catch {
+            if existing == nil { await connection.disconnect() }
+            throw error
+        }
+    }
     func sendMessage(roomID: RoomID, clientMessageID: ClientMessageID, text: String,
-                     media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], auth: V2AuthSession? = nil) async throws -> V2MessageOperationAcceptance {
+                     media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], auth: V2AuthSession? = nil, connection: V2TLSFrameConnection? = nil, transport: V2ProtobufSyncTransport? = nil) async throws -> V2MessageOperationAcceptance {
         guard media.isEmpty else { throw V2OperationWorkError.dependencyUnavailable }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -23,16 +55,7 @@ extension LocalE2EAccountCredentials {
             installationBinding: .init(value: UUID()), userID: userID)
         let scheduler = V2AccountWorkScheduler()
         do {
-            let client: V2HTTPMessageSendOperationClient
-            if let auth {
-                let authorization = V2SessionHTTPAuthorization(session: auth, epoch: await auth.currentEpoch(),
-                    transport: V2URLSessionAuthHTTPTransport(executor: .init(scheduler: scheduler)), scheduler: scheduler)
-                client = try V2HTTPMessageSendOperationClient(baseURL: XCTUnwrap(URL(string: "https://localhost:8443")),
-                    credentials: authorization, transport: authorization)
-            } else {
-                client = try V2HTTPMessageSendOperationClient(baseURL: XCTUnwrap(URL(string: "https://localhost:8443")),
-                    credentials: RecoveryE2ECredentials(account: self), transport: recoveryTransport(scheduler))
-            }
+            return try await withMessageSendClient(auth: auth, connection: connection, transport: transport) { client in
             let service = V2MessageSendOperationService(accountID: userID, store: store, client: client)
             let intent = try V2SendIntent(id: UUID(), roomID: roomID, clientMessageID: clientMessageID,
                 text: text, mentions: mentions, attachmentJobIDs: [])
@@ -49,7 +72,10 @@ extension LocalE2EAccountCredentials {
                 let storedWork = try await store.operationWork(id: workID)
                 let work = try XCTUnwrap(storedWork)
                 if work.scheduling == .finished {
-                    guard work.execution == .committed else { throw V2OperationWorkError.invalidTransition }
+                    guard work.execution == .committed else {
+                        print("IMV2_MESSAGE_SEND_TERMINAL execution=\(work.execution.rawValue) code=\(work.lastErrorCode ?? "none")")
+                        throw V2OperationWorkError.invalidTransition
+                    }
                     let original = try await client.recover(.init(identity: command.identity, fingerprint: command.fingerprint,
                         domainFingerprint: command.command.fingerprint, action: .query))
                     let persisted = try await store.databasePool.read { db in
@@ -69,6 +95,7 @@ extension LocalE2EAccountCredentials {
                         try await service.execute(claim)
                     } else { try await Task.sleep(for: .milliseconds(50)) }
                 } else { try await Task.sleep(for: .milliseconds(50)) }
+            }
             }
         } catch {
             await scheduler.closeAndDrain(); try? await store.close(); throw error

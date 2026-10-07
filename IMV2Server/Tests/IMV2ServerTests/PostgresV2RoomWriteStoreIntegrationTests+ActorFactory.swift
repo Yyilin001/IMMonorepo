@@ -10,6 +10,58 @@ import SQLKit
 import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("explicit physical lease aliases share lifecycle and renewal actors and reject incomplete private mappings",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func leasePhysicalAliasesShareRenewalCoordinator() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, _, _, _ in
+            // The physical identity is explicitly supplied, even when all three
+            // logical handles happen to use this fixture's same database value.
+            let databases = ["lease-a": database, "lease-b": database, "lease-c": database]
+            let privateKey = "postgresql://fixture-user:credential-secret@fixture/owner"
+            let keys = ["lease-a": privateKey, "lease-b": privateKey, "lease-c": "independent-owner"]
+            let shared = try V2RoomServerLeaseStore(databases: databases, physicalRegistrationKeys: keys)
+            let legacy = try V2RoomServerLeaseStore(databases: databases)
+            let sharedIDs = shared.renewalBatcherIdentities
+            let legacyIDs = legacy.renewalBatcherIdentities
+            #expect(Set(sharedIDs.keys) == Set(databases.keys))
+            #expect(sharedIDs["lease-a"] != nil)
+            #expect(sharedIDs["lease-a"] == sharedIDs["lease-b"])
+            #expect(sharedIDs["lease-a"] != sharedIDs["lease-c"])
+            #expect(legacyIDs["lease-a"] != nil)
+            #expect(legacyIDs["lease-a"] != legacyIDs["lease-b"])
+            let lifecycleIDs = shared.lifecycleBatcherIdentities
+            let legacyLifecycleIDs = legacy.lifecycleBatcherIdentities
+            #expect(Set(lifecycleIDs.keys) == Set(databases.keys))
+            #expect(lifecycleIDs["lease-a"] != nil)
+            #expect(lifecycleIDs["lease-a"] == lifecycleIDs["lease-b"])
+            #expect(lifecycleIDs["lease-a"] != lifecycleIDs["lease-c"])
+            #expect(legacyLifecycleIDs["lease-a"] != nil)
+            #expect(legacyLifecycleIDs["lease-a"] != legacyLifecycleIDs["lease-b"])
+            var missing = keys; missing.removeValue(forKey: "lease-c")
+            var extra = keys; extra["lease-extra"] = privateKey
+            var empty = keys; empty["lease-c"] = ""
+            var whitespace = keys; whitespace["lease-c"] = " \t\n"
+            for invalidKeys in [missing, extra, empty, whitespace] {
+                do {
+                    let unexpected = try V2RoomServerLeaseStore(databases: databases,
+                        physicalRegistrationKeys: invalidKeys)
+                    await unexpected.shutdownRenewals()
+                    await unexpected.shutdownLifecycle()
+                    Issue.record("invalid physical registration mapping was accepted")
+                } catch {
+                    #expect((error as? V2ActorContractError) == .invalidConfiguration("room lease physical registration keys"))
+                    let diagnostic = String(reflecting: error)
+                    #expect(!diagnostic.contains(privateKey))
+                    #expect(!diagnostic.contains("credential-secret"))
+                }
+            }
+            await shared.shutdownRenewals()
+            await legacy.shutdownRenewals()
+            await shared.shutdownLifecycle()
+            await legacy.shutdownLifecycle()
+        }
+    }
+
     @Test("concrete room factory sends, reads and recovers the same operation after retirement",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func actorFactoryRestoresSendAndQueries() async throws {
@@ -19,17 +71,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // generation contract. Seed the current creation invariant here.
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1").run()
             try await sql.raw("UPDATE im_v2.room_memberships SET joined_revision = 1").run()
-            let writes = PostgresV2RoomWriteStore(database: database)
-            let batcher = V2SendMessageAdmissionBatcher(store: writes,
-                configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)),
-                actorGrantedStore: writes)
+            // Exercise production lifecycle facades against actual PostgreSQL,
+            // while observing a single shared physical admission gate.
+            let database = try V2EventLoopBalancedDatabase(databases: [database], loanPolicy: .init(
+                maximumConnections: 11, reservedRenewalConnections: 2,
+                maximumQueued: 16, maximumWait: .seconds(5)))
+            // Match the factory's declared review policy. The generic test
+            // convenience initializer enables review and forces scalar fallback.
+            let writes = PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled)
             let admission = V2DatabaseWorkAdmissionController(policy: .init(
                 maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
                 maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
                 timeout: .seconds(1)))
             let ownerResources = try V2RoomServerOwnerResources(database: database, writes: writes,
-                sendBatcher: batcher,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -37,10 +92,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(),
                 databaseWorkAdmission: admission)
+            let leases = try V2RoomServerLeaseStore(databases: ["room-a": database],
+                sqlContinuationMetricsByOwner: ["room-a": ownerResources.sendOperationMetrics])
             let factory = try V2RoomServerActivationFactory(owners: ["room-a": ownerResources],
-                safetyActorUserID: senderID, now: { now }).runtimeFactory()
+                safetyActorUserID: senderID, now: { now }).runtimeFactory(validation: {
+                    try await leases.validate(token: $0)
+                })
             let configuration = try V2RoomRuntimeConfiguration()
-            let leases = try V2RoomServerLeaseStore(databases: ["room-a": database])
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let makeHost = { () throws -> V2RoomActivationHost<V2RoomRequest, V2RoomResponse> in
                 .init(identity: .init(hostID: try .init("factory-host"), incarnationID: UUID()),
@@ -53,6 +111,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 guard case .ready(let token) = try await first.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }
+                #expect(database.loanMetricsSnapshot().classes[.activation]?.granted == 2)
+                #expect(database.loanMetricsSnapshot().classes[.ordinary]?.granted == 0)
+                let initialSQL = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations
+                for source in [V2RoomSQLContinuationSource.lifecycleRooms, .lifecycleLeases] {
+                    #expect(initialSQL[source]?.settledToResumedCount == 2)
+                    #expect(initialSQL[source]?.resumedToDispatchCount == 2)
+                    #expect(initialSQL[source]?.settledNotResumed == 0)
+                    #expect(initialSQL[source]?.resumedNotDispatched == 0)
+                }
                 let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID, senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "factory send", limits: .init(maxUTF8Bytes: 64)),
                     firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 600_000)
@@ -70,6 +137,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let durableMetrics = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot()
                 #expect(durableMetrics.attemptedBatches == 1 && durableMetrics.committedCommands == 1)
                 #expect(durableMetrics.inFlightBatches == 0)
+                for source in [V2RoomSQLContinuationSource.durableFenceCombined] {
+                    #expect(durableMetrics.sqlContinuations[source]?.settledToResumedCount == 1)
+                    #expect(durableMetrics.sqlContinuations[source]?.resumedToDispatchCount == 1)
+                }
+                // The combined fence is one actual SQL statement. Separate
+                // room/lease labels must not invent two execution boundaries.
+                for source in [V2RoomSQLContinuationSource.durableFenceRooms, .durableFenceLeases] {
+                    #expect(durableMetrics.sqlContinuations[source]?.settledToResumedCount == 0)
+                }
                 let read = try V2ActorRecordReadReceiptWire(roomID: roomID, actorUserID: senderID,
                     operationID: .init(uuid: UUID()), readThroughRoomSequence: receipt.roomSequence)
                 let recorded = try await first.invoke(token: token,
@@ -111,9 +187,28 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(recovered.messageID == receipt.messageID)
                 #expect(try await count("im_v2.messages", on: sql) == 1)
                 #expect(await next.stop(deadline: .now + .seconds(10)).completed)
+                let loans = database.loanMetricsSnapshot()
+                #expect((loans.classes[.activation]?.granted ?? 0) >= 6)
+                #expect((loans.classes[.ordinary]?.granted ?? 0) > 0)
+                #expect(loans.classes.values.allSatisfy { $0.inFlight == 0 && $0.queued == 0 })
+                for source in [V2DatabaseLoanSource.durableOwner, .groupEventSubscribe, .roomRecovery, .lifecycle] {
+                    let observed = try #require(loans.observations[source])
+                    #expect(observed.actualHeldCount > 0)
+                    #expect((observed.stages[.sql]?.count ?? 0) > 0)
+                    #expect(observed.stages.values.allSatisfy { $0.active == 0 })
+                }
+                #expect((loans.observations[.groupEventSubscribe]?.sqlPhases[.fence]?.count ?? 0) > 0)
+                #expect((loans.observations[.groupEventSubscribe]?.sqlPhases[.readBody]?.count ?? 0) > 0)
+                let sqlContinuations = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations
+                #expect((sqlContinuations[.scalarFenceRooms]?.settledToResumedCount ?? 0) > 0)
+                #expect(sqlContinuations.values.allSatisfy { $0.settledNotResumed == 0 && $0.resumedNotDispatched == 0 })
+                await leases.shutdownLifecycle()
+                await database.shutdownLoans()
             } catch {
                 _ = await first.stop(deadline: .now + .seconds(10))
                 _ = await next.stop(deadline: .now + .seconds(10))
+                await leases.shutdownLifecycle()
+                await database.shutdownLoans()
                 throw error
             }
         }
@@ -155,19 +250,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
             let writes = PostgresV2RoomWriteStore(database: ownerDatabase)
                 .usingControlDatabase(control)
-            let batcher = V2SendMessageAdmissionBatcher(
-                store: writes,
-                configuration: .init(maximumBatchSize: 8, maximumDelay: .milliseconds(2)),
-                actorGrantedStore: writes
-            )
             let admission = V2DatabaseWorkAdmissionController(policy: .init(
                 maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
                 maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
                 timeout: .seconds(1)))
             let resources = try V2RoomServerOwnerResources(
-                database: ownerDatabase, writes: writes, sendBatcher: batcher,
-                membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
+                database: ownerDatabase, writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: ActorFactoryProjectionDelivery(), capacityProfile: forwardImportTestProfile(),

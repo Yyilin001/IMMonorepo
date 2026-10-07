@@ -114,7 +114,7 @@ ClientKit 已删除旧上传解析/完成/状态协议、旧 HTTP 上传客户�
 
 ## 同 home 迁移的复制与切读内核
 
-[迁移服务](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceMigrationService.swift)与[持久存储](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)已实现以下路径，仍使用纯 storage 协议和身份分配闭包：
+[测试中的迁移包装](../../IMV2Server/Tests/IMV2ServerTests/V2PersistentStoreServiceFixtures.swift)与[持久存储](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)已实现以下路径，仍使用纯 storage 协议和身份分配闭包：
 
 1. 在资源所属数据库内校验维护权限、当前 generation、available 状态与精确源事实。按 operation ID 幂等，持久保存源引用、预分配目标、大小和 SHA-256；同一资源最多一个待复制任务，目标 binding 由维护请求明确指定。
 2. 取得有期限的 claim 后离开事务执行 I/O。恢复先 inspect 已登记的目标；不存在才读取原输入并复制。回执必须完整匹配目标身份、大小和摘要，响应丢失也不重新分配对象。

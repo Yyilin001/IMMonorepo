@@ -19,7 +19,6 @@ import Testing
 import Vapor
 import VaporTesting
 
-
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("Push admission preserves the exact persisted budget window across timestamp conversion", arguments: 0..<6)
     func pushBudgetWindowTimestampPrecision(index: Int) async throws {
@@ -157,75 +156,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await sql.raw("SELECT state AS value FROM im_v2.content_review_jobs WHERE message_id = \(bind: primary.uuidValue!)").first(decoding: StringValueRow.self)?.value == expectedState)
             #expect(try await count("im_v2.content_review_jobs WHERE state = 'completed' AND decision = 'clear' AND claim_token IS NULL AND lease_expires_at IS NULL", on: sql) == (pause ? 1 : 2))
             #expect(try await store.claimPending(now: now.addingTimeInterval(31), leaseDuration: 30, limit: 2).isEmpty)
-        }
-    }
-
-
-
-    @Test("Hybrid group wakes retain newer revisions and recover at the integer retry limit",
-          arguments: 0..<6, [false, true])
-    func groupWakeRetryCounterBoundary(index: Int, routed: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .large) { database, target, sql, targetSQL, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000.1234567)
-            let now = base.addingTimeInterval(30)
-            let maximum = Int64(Int32.max)
-            let starting = [Int64(0), maximum - 1, maximum, 1, maximum - 1, maximum][index]
-            let expired = index >= 3
-            let firstAttempt = min(starting + 1, maximum)
-            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base })
-            func send() async throws {
-                guard case .accepted = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "wake counter boundary")) else { throw CancellationError() }
-            }
-            try await send()
-            try await sql.raw("UPDATE im_v2.group_event_wake_outbox SET attempt_count = \(bind: starting)").run()
-            if expired {
-                try await sql.raw("UPDATE im_v2.group_event_wake_outbox SET state = 'leased', lease_token = \(bind: UUID()), lease_expires_at = \(bind: now)").run()
-            }
-            let durable = PostgresV2GroupEventWakeStore(database: database)
-            let store: any V2GroupEventWakeStore
-            if routed { store = try V2RoutedGroupEventWakeStore(ownerStores: ["a": durable, "b": PostgresV2GroupEventWakeStore(database: target)]) }
-            else { store = durable }
-            let limit = routed ? 2 : 1
-            let first = try #require(try await store.claimPending(now: now, leaseDuration: 15, limit: limit).first)
-            #expect(first.attempt == Int(firstAttempt) && first.wake.highWatermark == 1 && first.revision == 1)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_event_wake_outbox WHERE state = 'leased' AND attempt_count = \(bind: firstAttempt) AND updated_at = \(bind: now) AND lease_expires_at = \(bind: now.addingTimeInterval(15))").first(decoding: CountRow.self)?.value == 1)
-            try await send()
-            let newer = try #require(try await sql.raw("SELECT to_jsonb(w)::text AS value FROM im_v2.group_event_wake_outbox w").first(decoding: StringValueRow.self)).value
-            try await store.markPublished(first)
-            try await durable.scheduleRetry(first, nextAttemptAt: now.addingTimeInterval(300))
-            #expect(try await sql.raw("SELECT to_jsonb(w)::text AS value FROM im_v2.group_event_wake_outbox w").first(decoding: StringValueRow.self)?.value == newer)
-            let second = try #require(try await store.claimPending(now: now, leaseDuration: 15, limit: limit).first)
-            #expect(second.wake.highWatermark == 2 && second.revision == 2 && second.claimToken != first.claimToken)
-            #expect(second.attempt == Int(min(firstAttempt + 1, maximum)))
-            try await store.scheduleRetry(second, nextAttemptAt: now)
-            actor Publisher: V2GroupEventWakePublishing {
-                var fails = true
-                var wakes: [V2GroupEventWake] = []
-                func publish(_ wake: V2GroupEventWake) async throws {
-                    wakes.append(wake)
-                    if fails { throw V2GroupEventWakeStoreError.corruptPersistenceState }
-                }
-                func recover() { fails = false }
-            }
-            let publisher = Publisher()
-            let clock = TestSequenceClock([now])
-            let relay = V2GroupEventWakeRelay(store: store, publisher: publisher, now: { clock.now() })
-            #expect(try await relay.runOnce(limit: limit) == .init(claimed: 1, published: 0, retryScheduled: 1))
-            let delay: TimeInterval = starting == 0 ? 4 : starting == 1 ? 8 : 30
-            let retryAt = now.addingTimeInterval(delay)
-            let relayAttempt = min(firstAttempt + 2, maximum)
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_event_wake_outbox WHERE state = 'pending' AND target_room_sequence = 2 AND revision = 2 AND attempt_count = \(bind: relayAttempt) AND next_attempt_at = \(bind: retryAt) AND updated_at = \(bind: retryAt) AND lease_token IS NULL AND lease_expires_at IS NULL").first(decoding: CountRow.self)?.value == 1)
-            let scheduled = try #require(try await sql.raw("SELECT to_jsonb(w)::text AS value FROM im_v2.group_event_wake_outbox w").first(decoding: StringValueRow.self)).value
-            #expect(try await relay.runOnce(limit: limit) == .init(claimed: 0, published: 0, retryScheduled: 0))
-            #expect(try await sql.raw("SELECT to_jsonb(w)::text AS value FROM im_v2.group_event_wake_outbox w").first(decoding: StringValueRow.self)?.value == scheduled)
-            clock.set([retryAt])
-            await publisher.recover()
-            #expect(try await relay.runOnce(limit: limit) == .init(claimed: 1, published: 1, retryScheduled: 0))
-            #expect(await publisher.wakes == [second.wake, second.wake])
-            #expect(try await count("im_v2.group_event_wake_outbox", on: sql) == 0)
-            #expect(try await count("im_v2.group_event_wake_outbox", on: targetSQL) == 0)
-            #expect(try await sql.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id = \(bind: roomUUID)").first(decoding: CountRow.self)?.value == 2)
-            #expect(try await count("im_v2.room_events", on: sql) == 2)
         }
     }
 
@@ -792,7 +722,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-
     @Test("Concurrent direct room opens serialize operation identity and reuse the original room timestamp",
           arguments: ["same-operation", "different-operation", "different-target"], [false, true])
     func directRoomOpenConcurrentReplay(path: String, existingPair: Bool) async throws {
@@ -1017,13 +946,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if path == "block" {
                 try await sql.raw("INSERT INTO im_v2.user_relationships (lower_user_id, higher_user_id, state, requested_by_user_id, updated_at) VALUES (LEAST(\(bind: senderUUID), \(bind: memberTwoUUID)), GREATEST(\(bind: senderUUID), \(bind: memberTwoUUID)), 'accepted', \(bind: senderUUID), \(bind: now))").run()
             }
-            func store(credits: Bool) throws -> PostgresV2RoomWriteStore {
+            func store() throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                    shardAdmissionCommandCreditPool: credits ? .init(database: database, batchSize: 1) : nil)
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             }
-            let writer = try store(credits: false)
-            let replayWriter = try store(credits: false)
+            let writer = try store()
+            let replayWriter = try store()
             func request(_ room: RoomID) throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: room, senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
                     text: "direct revision boundary", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile,
@@ -1139,15 +1067,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             } else { rooms = batch ? [roomID, roomID] : [roomID] }
             let cache = V2DirectRoomLogFastAppendCache()
-            let credits = V2ShardAdmissionCommandCreditPool(database: database, batchSize: 1)
-            func store(warm: Bool, withCredits: Bool) throws -> PostgresV2RoomWriteStore {
+            func store(warm: Bool) throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: warm ? cache : .init(),
-                    shardAdmissionCommandCreditPool: withCredits ? credits : nil)
+                    directRoomLogFastAppendCache: warm ? cache : .init())
             }
-            let warm = try store(warm: true, withCredits: batch)
-            let replay = try store(warm: false, withCredits: false)
+            let warm = try store(warm: true)
+            let replay = try store(warm: false)
             func request(_ room: RoomID) throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: room, senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
                     text: "room cursor boundary", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile,
@@ -1169,7 +1095,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     .executePreferenceFixture(owner: .init(uuid: memberTwoUUID), operation: .strangerMessagePreference(.init(uuid: UUID())),
                         value: .strangerMessage(.deny), now: now)
             }
-            let writer = try store(warm: false, withCredits: batch)
+            let writer = try store(warm: false)
             let inputs = try rooms.map { try request($0) }
             func perform() async throws -> [V2SendMessageOutcome] {
                 if batch { return try await writer.acceptAtomically(requests: inputs) }
@@ -1180,13 +1106,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 for table in ["rooms", "room_memberships", "direct_room_pairs", "room_admission", "messages",
                     "message_send_completions", "message_projection_states", "message_content_versions", "message_media_references",
                     "message_mentions", "room_events", "room_timeline_activities", "direct_message_denials",
-                    "stranger_message_windows",
-                    "group_event_wake_outbox"] {
+                    "stranger_message_windows"] {
                     guard let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self) else { throw CancellationError() }
                     result.append(row.value)
                 }
-                // Precharged process credits can remain durably reserved after
-                // rollback; their in-flight and committed counts are checked below.
                 return result
             }
             let column = timeline ? "timeline_sequence" : "room_sequence"
@@ -1206,7 +1129,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await sql.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id = \(bind: room)").first(decoding: CountRow.self)?.value == Int64.max)
                 return
             }
-            let initialCredits = await credits.snapshot()
             for _ in 0..<2 {
                 do { _ = try await perform(); Issue.record("Expected cursor exhaustion to reject the whole write") }
                 catch {
@@ -1214,8 +1136,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     else { #expect(error as? V2RoomWriteStoreError == .corruptPersistenceState) }
                 }
                 #expect(try await snapshot() == before)
-                let currentCredits = await credits.snapshot()
-                #expect(currentCredits.inFlightCredits == 0 && currentCredits.committedCredits == initialCredits.committedCredits)
             }
             try await sql.raw("UPDATE im_v2.rooms SET \(unsafeRaw: column) = \(bind: Int64.max - needed) WHERE room_id = \(bind: room)").run()
             let outcomes = try await perform()
@@ -1349,8 +1269,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 rooms.append(room.roomID); openingIDs.append(operation)
             }
             let writer = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             let requests = try rooms.map { room in
                 V2RoomWriteRequest(command: try .init(roomID: room, senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
                     text: "Direct auxiliary precision", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile,
@@ -1727,8 +1646,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             func writer(cache: V2DirectRoomLogFastAppendCache) throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: cache,
-                    shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
+                    directRoomLogFastAppendCache: cache)
             }
             let warm = try writer(cache: fastCache)
             func request(_ index: Int) throws -> V2RoomWriteRequest {

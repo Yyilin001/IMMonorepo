@@ -11,6 +11,7 @@ import Glibc
 #endif
 import IMV2Server
 import IMV2ServerInfrastructure
+import IMV2ActorApplication
 import IMV2ServerHTTP
 import NIOPosix
 import Vapor
@@ -41,8 +42,15 @@ enum IMV2OperatorServerApp {
     private static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
         let configuration: V2OperatorReplayRuntimeConfiguration
+        let policyConfiguration: V2RoomActorApplicationConfiguration?
         do {
-            configuration = try V2OperatorReplayRuntimeConfiguration(environment: ProcessRuntimeEnvironment())
+            let environment = ProcessRuntimeEnvironment()
+            configuration = try V2OperatorReplayRuntimeConfiguration(environment: environment)
+            if environment.value(for: "IMV2_ROOM_ACTOR_CONFIGURATION_FILE") != nil {
+                let actor = try V2RoomActorApplicationConfiguration(environment: environment, hostsRooms: false,
+                    configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)))
+                policyConfiguration = actor.policyPlacement == nil ? nil : actor
+            } else { policyConfiguration = nil }
         } catch {
             throw V2StagedOperationalError(stage: "operator_configuration", error: error)
         }
@@ -60,6 +68,7 @@ enum IMV2OperatorServerApp {
         }
         V2RedactedHTTPMiddlewareConfiguration.install(on: app)
         var stage = "operator_composition"
+        var policyCaller: V2RoomActorApplication?
         do {
             resources.databases.use(
                 try postgresDatabaseConfiguration(
@@ -85,6 +94,10 @@ enum IMV2OperatorServerApp {
             }
             let database: any Database = controlPool.database
             try await V2SchemaReadiness.verify(database: database)
+            let deployment = PostgresV2PolicyDeploymentPlacementStore(database: database)
+            if let placement = policyConfiguration?.policyPlacement {
+                try await deployment.require(V2PolicyOwnerPlacement(placement))
+            } else { try await deployment.requireLegacy() }
             // 解析操作不借用预留连接池或策略写入连接池。
             // 控制回执与归属方中止操作可共用此专用物理连接池：
             // 每笔事务结束后才开始下一笔。
@@ -148,6 +161,7 @@ enum IMV2OperatorServerApp {
             let userShardStorage = try V2StaticUserShardStorageRegistry(locations: shardLocations)
             var userStateReplayStores: [String: any V2DurableWorkReplayStore] = [:]
             var forwardReplayStores: [String: any V2ForwardWorkReplayStore] = [:]
+            var roomDatabases: [String: any Database] = [:]
             for storage in configuration.roomShardStorage {
                 let ownerDatabase: any Database
                 if let existing = shardDatabasesByURL[storage.databaseURL] {
@@ -165,9 +179,15 @@ enum IMV2OperatorServerApp {
                 try await V2SchemaReadiness.verify(database: ownerDatabase)
                 userStateReplayStores[storage.shardID] = PostgresV2DurableWorkReplayStore(database: ownerDatabase)
                 forwardReplayStores[storage.shardID] = PostgresV2ForwardWorkReplayStore(database: ownerDatabase)
+                roomDatabases[storage.shardID] = ownerDatabase
             }
-            // Operator 重放只改变工作流队列状态。Gateway 的投递 worker
-            // 通过 RoomRef 执行来源回执和目标导入；此进程无需集群客户端。
+            // Queue replay remains local; policy changes use the authenticated
+            // caller only when owner authorization is configured.
+            if let policyConfiguration {
+                stage = "operator_policy_caller"
+                policyCaller = try await V2RoomActorApplication.start(configuration: policyConfiguration,
+                    ownerRouter: V2PostgresRoomShardRouter(database: database), roomDatabases: roomDatabases)
+            }
             let forwardReplay = try V2ForwardWorkOperatorReplayService(stores: forwardReplayStores,
                 operatorPrincipal: configuration.operatorPrincipal)
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
@@ -184,14 +204,14 @@ enum IMV2OperatorServerApp {
                 )
             ).register(on: app)
             V2VaporForwardWorkOperatorReplayRoutes(authenticator: configuration.authenticator, service: forwardReplay).register(on: app)
-            V2VaporAccountDisableOperatorRoutes(
-                authenticator: configuration.accountDisableAuthenticator,
-                service: try V2PostgresAccountDisableService(
-                    database: database,
-                    operatorPrincipal: configuration.accountDisableOperatorPrincipal,
-                    authorizationCoordinator: directAuthorizationCoordinator
-                )
-            ).register(on: app)
+            var disableService = try V2PostgresAccountDisableService(database: database,
+                operatorPrincipal: configuration.accountDisableOperatorPrincipal,
+                authorizationCoordinator: directAuthorizationCoordinator)
+            if let policyCaller {
+                disableService = disableService.usingPolicyOwners(try await policyCaller.policyMutationExecutor())
+            }
+            V2VaporAccountDisableOperatorRoutes(authenticator: configuration.accountDisableAuthenticator,
+                service: disableService).register(on: app)
             V2VaporDeviceSnapshotResetOperatorRoutes(
                 authenticator: configuration.authenticator,
                 service: try V2PostgresDeviceSnapshotResetService(
@@ -215,13 +235,36 @@ enum IMV2OperatorServerApp {
             }
             stage = "operator_shutdown"
             try await app.shutdown()
+            await stopPolicyCaller(policyCaller, logger: logger)
+            policyCaller = nil
             try await resources.shutdown()
             try await applicationEventLoops.shutdownGracefully()
         } catch {
+            if case V2RoomActorApplicationError.incompleteShutdown = error {
+                logger.critical("IM V2 operator policy caller startup drain incomplete; retaining shared resources",
+                    metadata: V2SafeLogMetadata.failure(error, stage: "operator_policy_startup_drain"))
+                exit(EXIT_FAILURE)
+            }
             try? await app.shutdown()
+            await stopPolicyCaller(policyCaller, logger: logger)
             try? await resources.shutdown()
             try? await applicationEventLoops.shutdownGracefully()
             throw V2StagedOperationalError(stage: stage, error: error)
+        }
+    }
+
+    private static func stopPolicyCaller(_ caller: V2RoomActorApplication?, logger: Logger) async {
+        guard let caller else { return }
+        do {
+            guard try await caller.stop(deadline: .now + caller.configuration.drainTimeout.duration) else {
+                logger.critical("IM V2 operator policy caller drain incomplete; retaining database resources",
+                    metadata: V2SafeLogMetadata.drainTimeout(stage: "operator_policy_shutdown"))
+                exit(EXIT_FAILURE)
+            }
+        } catch {
+            logger.critical("IM V2 operator policy caller shutdown failed; retaining database resources",
+                metadata: V2SafeLogMetadata.failure(error, stage: "operator_policy_shutdown"))
+            exit(EXIT_FAILURE)
         }
     }
 }

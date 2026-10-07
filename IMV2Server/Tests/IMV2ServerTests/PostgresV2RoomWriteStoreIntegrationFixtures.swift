@@ -43,9 +43,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     internal func withForwardOwnerDatabases(mode: V2GroupCapacityClass,
         _ operation: (any Database, any Database, any SQLDatabase, any SQLDatabase, RoomID) async throws -> Void
     ) async throws {
-        guard let primary = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              let secondary = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"),
-              primary != secondary, Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        let primary = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), "disposable integration tests require the primary database URL")
+        let secondary = try #require(Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"), "forward Owner tests require a separate secondary database URL")
+        try #require(primary != secondary, "primary and secondary Owner databases must be distinct")
         let resources = makeV2DatabaseTestResources()
         let secondaryID = DatabaseID(string: "forward-import-target")
         do {

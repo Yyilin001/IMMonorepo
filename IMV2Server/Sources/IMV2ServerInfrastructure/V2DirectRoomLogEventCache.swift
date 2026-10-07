@@ -210,7 +210,7 @@ public final class V2DirectRoomLogEventCache: V2CommittedRoomLogObserving {
 
     /// 跨 Gateway 中继使用的批量对应实现。
     ///
-    /// 一条已解码的 NATS 微批通常属于同一房间/通道；
+    /// 一条已解码的 Actor 微批通常属于同一房间/通道；
     /// 让这种批量形态贯穿信箱与分片 actor，而不是把它重新拆成每个事件一次互斥获取、
     /// 一次流信号与一次 actor 跳转。
     ///

@@ -18,7 +18,6 @@ struct V2RoomWriteCommitEffectsTests {
             text: "message", limits: .init(maxUTF8Bytes: 64))
         let effects = V2RoomWriteCommitEffects(ownership: borrowed ? .operationReceipt : .store,
             directSendPolicyCache: policy, directRoomLogFastAppendCache: fast,
-            shardAdmissionCommandCreditPool: nil, roomAdmissionCommandCreditPool: nil,
             appendStageMetrics: nil)
         let outcome = try await effects.finalize(command: command, cacheKey: key,
             commit: .init(outcome: .rateLimited(retryAfterSeconds: 1), directPolicyCacheUpdate: entry))
@@ -83,7 +82,6 @@ struct V2RoomWriteCommitEffectsTests {
     ) -> V2RoomWriteCommitEffects {
         .init(ownership: .store, directSendPolicyCache: policy,
               directRoomLogFastAppendCache: fast,
-              shardAdmissionCommandCreditPool: nil, roomAdmissionCommandCreditPool: nil,
               appendStageMetrics: nil)
     }
 

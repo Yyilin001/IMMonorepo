@@ -6,7 +6,8 @@ import Synchronization
 /// A one-shot plaintext PostgreSQL wire proxy. It proves that PostgreSQL has
 /// emitted CommandComplete for COMMIT, then withholds that packet and closes
 /// the client connection. It is deliberately available only to tests.
-final class V2PostgresCommitAckLossProxy {
+// Immutable NIO handles are thread-safe; mutable observations are protected by a mutex.
+final class V2PostgresCommitAckLossProxy: @unchecked Sendable {
     private let group: MultiThreadedEventLoopGroup
     private let listener: any Channel
     let port: Int
@@ -20,9 +21,9 @@ final class V2PostgresCommitAckLossProxy {
         self.observation = observation
     }
 
-    static func start(backendHost: String, backendPort: Int) async throws -> Self {
+    static func start(backendHost: String, backendPort: Int, initiallyArmed: Bool = true) async throws -> Self {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let observation = V2CommitAckLossObservation()
+        let observation = V2CommitAckLossObservation(initiallyArmed: initiallyArmed)
         do {
             let listener = try await ServerBootstrap(group: group)
                 .childChannelInitializer { frontend in
@@ -51,6 +52,8 @@ final class V2PostgresCommitAckLossProxy {
 
     var observedSuccessfulCommit: Bool { observation.observedSuccessfulCommit }
 
+    func arm() { observation.arm() }
+
     func shutdown() async throws {
         try await listener.close().get()
         try await group.shutdownGracefully()
@@ -60,16 +63,18 @@ final class V2PostgresCommitAckLossProxy {
 private enum V2PostgresCommitAckLossProxyError: Error { case missingListenerPort }
 
 private final class V2CommitAckLossObservation: Sendable {
-    private let value = Mutex(false)
+    private struct State: Sendable { var armed: Bool; var dropped = false }
+    private let value: Mutex<State>
 
-    var observedSuccessfulCommit: Bool { value.withLock { $0 } }
+    init(initiallyArmed: Bool) { value = Mutex(State(armed: initiallyArmed)) }
+    func arm() { value.withLock { $0.armed = true } }
+    var observedSuccessfulCommit: Bool { value.withLock { $0.dropped } }
 
-    /// Only the first successful COMMIT is dropped; subsequent connections
-    /// remain useful for diagnosing a failed test instead of hanging forever.
+    /// Only the first armed COMMIT is dropped; earlier setup/read transactions pass through.
     func claimSuccessfulCommit() -> Bool {
-        value.withLock { seen in
-            guard !seen else { return false }
-            seen = true
+        value.withLock { state in
+            guard state.armed, !state.dropped else { return false }
+            state.dropped = true
             return true
         }
     }

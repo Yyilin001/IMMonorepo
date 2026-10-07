@@ -377,10 +377,6 @@ public protocol V2SendMessageBatchMetricsReading: Sendable {
 public protocol V2SendMessageAdmission: V2SendMessageBatchMetricsReading {
     /// 是否由准入实现围绕实际数据库工作管理前台写入许可，以避免等待批次的请求重复占用许可。
     var managesForegroundWriteAdmission: Bool { get }
-    /// 是否在有序提交后、恢复请求等待者之前发布已接受的 Hybrid 群事件。
-    ///
-    /// 为 `true` 时 Gateway 应避免再次发布同一事件。此提示不替代持久化房间日志的恢复能力。
-    var publishesCommittedGroupEvents: Bool { get }
 
     /// 提交不可变写入请求并等待该请求的独立结果。
     ///
@@ -390,11 +386,6 @@ public protocol V2SendMessageAdmission: V2SendMessageBatchMetricsReading {
     func accept(
         _ request: consuming V2RoomWriteRequest
     ) async throws -> V2SendMessageOutcome
-}
-
-extension V2SendMessageAdmission {
-    /// 默认不负责发布提交后的群事件，交给调用边缘处理。
-    public var publishesCommittedGroupEvents: Bool { false }
 }
 
 /// 生成消息接受标识时发现的输入错误。

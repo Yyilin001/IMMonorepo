@@ -123,7 +123,7 @@ extension GRDBV2LocalSyncStore {
                 guard let sequence = Int64(exactly: acceptance.roomSequence), sequence > 0 else { throw V2OperationWorkError.invalidRecord }
                 try db.execute(sql: "UPDATE v2_message_send_operations SET accepted_message_id=?,accepted_room_sequence=? WHERE work_id=(SELECT work_id FROM v2_operation_work WHERE identity_key=?)",
                     arguments: [acceptance.messageID.rawValue,sequence,identity.storageKey])
-                // A projection may have arrived before the HTTP response.
+                // A projection may have arrived before the send receipt.
                 try Self.settleAcceptedSendPresentations(roomID: command.command.roomID.rawValue, db: db)
                 // Receipt installation may race the interval between shadow
                 // preparation and ACK activation. Attach this one receipt to
@@ -166,7 +166,7 @@ public actor V2MessageSendOperationService {
             if claim.action == .submit { result=try await client.submit(command) }
             else {
                 result=try await client.recover(.init(identity:claim.work.identity,fingerprint:claim.work.fingerprint,
-                    domainFingerprint:command.command.fingerprint,action:Date().timeIntervalSince1970*1_000>=Double(command.firstSubmissionDeadlineMilliseconds) ? .closeIfAbsent : .query))
+                    domainFingerprint:command.command.fingerprint,action:.query))
             }
             switch result {
             case .receipt(let receipt):try await store.completeMessageSend(command,receipt:receipt)
@@ -178,43 +178,51 @@ public actor V2MessageSendOperationService {
                 let deadline=(claim.action == .submit ? claim.work.submissionRoundDeadline : claim.work.reconciliationRoundDeadline) ?? now.addingTimeInterval(policy.totalBudget)
                 let attempts=claim.action == .submit ? claim.work.submissionRoundAttempts : claim.work.reconciliationRoundAttempts
                 let retry=policy.nextAttempt(now:now,startedAt:deadline.addingTimeInterval(-policy.totalBudget),attemptsCompleted:attempts,randomUnit:Double.random(in:0...1),serverRetryNotBefore:floor)
-                try await store.deferOperationWork(claim,until:max(retry ?? now,floor),code:hint.reason == .rateLimited ? "RATE_LIMITED" : "ADMISSION_UNAVAILABLE",scheduling:retry == nil ? .needsAttention : .backingOff)
+                try await store.deferOperationWork(claim,until:max(retry ?? now,floor),code:hint.reason == .rateLimited ? "RATE_LIMITED" : "ADMISSION_UNAVAILABLE",scheduling:retry == nil ? .needsAttention : .backingOff,nextAction:claim.action)
             case .unresolved:
-                let next:V2OperationWorkAction=Date().timeIntervalSince1970*1_000<Double(command.firstSubmissionDeadlineMilliseconds) ? .submit : .reconcile
-                try await store.deferOperationWork(claim,until:Date().addingTimeInterval(V2NetworkWorkPolicy.acceptedResultPollDelay(attempt:claim.work.reconciliationRoundAttempts)),code:"MESSAGE_SEND_UNRESOLVED",nextAction:next)
+                let now = Date()
+                let canResubmit = now.timeIntervalSince1970 * 1_000 < Double(command.firstSubmissionDeadlineMilliseconds)
+                try await store.deferOperationWork(claim,
+                    until: now.addingTimeInterval(V2NetworkWorkPolicy.acceptedResultPollDelay(attempt: claim.work.reconciliationRoundAttempts)),
+                    code: "MESSAGE_SEND_UNRESOLVED",
+                    scheduling: canResubmit ? .backingOff : .needsAttention,
+                    nextAction: canResubmit ? .submit : .reconcile)
             }
         } catch is CancellationError {
             try await store.deferOperationWork(claim,until:Date(),code:"MESSAGE_SEND_INTERRUPTED")
             throw CancellationError()
         } catch {
-            let now=Date(),failure=error as? V2HTTPFailure,transportFailure=error as? V2MessageSendTransportError,policy=V2NetworkWorkPolicy.commandRecovery
-            let deadline=(claim.action == .submit ? claim.work.submissionRoundDeadline : claim.work.reconciliationRoundDeadline) ?? now.addingTimeInterval(policy.totalBudget)
+            let now=Date(),transportFailure=error as? V2MessageSendTransportError,policy=V2NetworkWorkPolicy.commandRecovery
+            let nextAction: V2OperationWorkAction
+            switch transportFailure {
+            case .unavailableBeforeSubmission, .authenticationRequired:
+                nextAction = claim.action
+            default:
+                nextAction = .reconcile
+            }
+            // Outcome recovery owns a separate durable round. Exhausting the
+            // submission round must not prevent its first original-ID query.
+            let deadline=(nextAction == .submit ? claim.work.submissionRoundDeadline : claim.work.reconciliationRoundDeadline) ?? now.addingTimeInterval(policy.totalBudget)
             let retryAfter: Date?
             if case .retryAfter(let date) = transportFailure { retryAfter = date }
-            else { retryAfter = failure?.retryAfter }
-            let attempts = claim.action == .submit ? claim.work.submissionRoundAttempts : claim.work.reconciliationRoundAttempts
+            else { retryAfter = nil }
+            let attempts = nextAction == .submit ? claim.work.submissionRoundAttempts : claim.work.reconciliationRoundAttempts
             let retry=policy.nextAttempt(now:now,startedAt:deadline.addingTimeInterval(-policy.totalBudget),attemptsCompleted:attempts,randomUnit:Double.random(in:0...1),serverRetryNotBefore:retryAfter)
             let malformed=error is V2OperationWorkError || error is V2MessageOperationValidationError ||
-                (failure.map{[.invalidEndpoint,.invalidResponse,.responseTooLarge].contains($0.kind)} ?? false) ||
                 transportFailure == .invalidResponse || transportFailure == .unsupportedCapability
-            let nextAction: V2OperationWorkAction
             let scheduling: V2OperationSchedulingState
             let code: String
             switch transportFailure {
             case .unavailableBeforeSubmission:
-                nextAction = claim.action == .submit ? .submit : .reconcile
                 scheduling = retry == nil ? .needsAttention : .backingOff
                 code = "MESSAGE_SEND_TRANSPORT_UNAVAILABLE"
             case .authenticationRequired:
-                nextAction = claim.action
                 scheduling = .waitingForAuthentication
                 code = "MESSAGE_SEND_AUTHENTICATION_REQUIRED"
             case .outcomeUnknown:
-                nextAction = .reconcile
                 scheduling = retry == nil ? .needsAttention : .backingOff
                 code = "MESSAGE_SEND_OUTCOME_UNKNOWN"
             default:
-                nextAction = .reconcile
                 scheduling = malformed || retry == nil ? .needsAttention : .backingOff
                 code = "MESSAGE_SEND_CONFIRMATION_REQUIRED"
             }

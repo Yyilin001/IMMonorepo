@@ -1349,21 +1349,9 @@ private struct ReceiptOperationReplayRow: Decodable {
         case resultingSequence = "resulting_room_sequence", recordedAt = "recorded_at"
     }
 }
-private struct ReceiptGroupDiagnosticRow: Decodable {
-    let roomKind: String
-    let roomSequence: Int64
-    let actorIsMember: Bool
-    enum CodingKeys: String, CodingKey {
-        case roomKind = "room_kind"
-        case roomSequence = "room_sequence"
-        case actorIsMember = "actor_is_member"
-    }
-}
 private struct ReceiptPeerRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "user_id" } }
-private struct ReceiptPreferenceUserRow: Decodable { let userID: UUID; let allowsDirect: Bool; enum CodingKeys: String, CodingKey { case userID = "user_id", allowsDirect = "allows_direct_read_receipts" } }
 private struct ReceiptPreferenceStateRow: Decodable { let allowsDirect: Bool; enum CodingKeys: String, CodingKey { case allowsDirect = "allows_direct_read_receipts" } }
 private struct ReceiptPreferenceRevisionRow: Decodable { let revision: Int64 }
-private struct ReceiptPreferenceOperationRow: Decodable { let allowsDirect: Bool; let allowsGroup: Bool; let preferenceRevision: Int64; let updatedAt: Date; enum CodingKeys: String, CodingKey { case allowsDirect = "allows_direct_read_receipts", allowsGroup = "allows_group_read_receipts", preferenceRevision = "preference_revision", updatedAt = "updated_at" }; func preferences() throws -> V2ReadReceiptPreferences { .init(allowsDirectReadReceipts: allowsDirect, allowsGroupReadReceipts: allowsGroup, updatedAt: updatedAt) } }
 private struct ReceiptSyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
 private struct ReceiptReaderContextRow: Decodable {
     let messageRoomSequence: Int64
@@ -1418,17 +1406,6 @@ private struct ReceiptCursor: Codable {
     let committedMembershipRevision: Int64
     let readThroughRoomSequence: Int64
     let userID: UUID
-}
-private struct ReceiptProjectionDeliveryRequest: Sendable {
-    let userID: UserID
-    let sourceEventID: EventID
-    let projectionKinds: Set<String>
-
-    init(userID: UserID, sourceEventID: UUID, projectionKinds: Set<String>) throws {
-        self.userID = userID
-        self.sourceEventID = try .init(sourceEventID.uuidString)
-        self.projectionKinds = projectionKinds
-    }
 }
 
 /// 生成回执墓碑的来源事件 ID。

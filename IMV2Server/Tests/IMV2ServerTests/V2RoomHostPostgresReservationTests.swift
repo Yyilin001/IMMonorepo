@@ -256,11 +256,7 @@ private func makePairHost(database: any Database, profile: V2CapacityProfile,
         maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
         timeout: .seconds(2)))
     let writes = PostgresV2RoomWriteStore(database: database)
-    let sends = V2SendMessageAdmissionBatcher(store: writes,
-        configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)),
-        actorGrantedStore: writes)
     let resources = try V2RoomServerOwnerResources(database: database, writes: writes,
-        sendBatcher: sends,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),

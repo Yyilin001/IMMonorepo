@@ -13,135 +13,67 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
     private let database: any Database
     private let schema: String
     private let timeouts: V2RoomActivationSQLTimeouts
+    private let lifecycle: V2RoomActivationLifecycleBatcher
+    private let renewals: V2RoomActivationRenewalBatcher
 
-    public init(database: any Database, schema: String = "im_v2", timeouts: V2RoomActivationSQLTimeouts = .default) {
+    public init(database: any Database, schema: String = "im_v2", timeouts: V2RoomActivationSQLTimeouts = .default,
+                renewalDatabase: (any Database)? = nil, sqlContinuationMetrics: V2SendOperationBatchMetrics? = nil) {
         v2PreconditionSQLSchema(schema)
-        self.database = database
+        let balanced = database as? V2EventLoopBalancedDatabase
+        // These facades share the existing physical gate and selection cursor.
+        // Build them once per Store: lifecycle recovery has a bounded ordinary
+        // sublimit, while lease renewal retains its reserved loan class.
+        let activation = balanced?.usingLoanClass(.activation) ?? database
+        self.database = activation
+        self.lifecycle = V2RoomActivationLifecycleBatcher(database: activation, schema: schema, timeouts: timeouts, sqlContinuationMetrics: sqlContinuationMetrics)
         self.schema = schema
         self.timeouts = timeouts
+        let renewal = renewalDatabase ?? balanced?.usingLoanClass(.renewal) ?? database
+        self.renewals = V2RoomActivationRenewalBatcher(database: renewal, schema: schema, timeouts: timeouts)
     }
 
     public func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
-        let roomUUID = try uuid(roomID)
-        return try await v2WithRoomScopedTransaction(database: database, timeouts: timeouts) { transaction in
-            let sql = try activationSQL(transaction)
-            try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
-            try await v2LockRoomActivationOwner(roomID: roomUUID, owner: owner, sql: sql, schema: schema)
-            let row = try await activationRow(roomID: roomUUID, sql: sql)
-            let observed = try await v2RoomActivationDatabaseClock(sql: sql)
-            guard let row, row.ownerShardID == owner.shardID, row.ownerEpoch == owner.epoch else { return nil }
-            return try row.lease(roomID: roomID, observedAt: observed)
-        }
+        _ = try uuid(roomID)
+        let value = try await lifecycle.execute(.init(roomID: roomID, operation: .locate(owner: owner)))
+        guard case .located(let lease) = value else { throw V2RoomActivationLeaseError.outcomeUnknown }
+        return lease
     }
 
-    public func acquire(
-        roomID: RoomID,
-        owner: V2RoomDataOwner,
-        host: V2ActorHostIdentity,
-        duration: V2ActorMilliseconds
-    ) async throws -> V2RoomActivationAcquisition {
-        let roomUUID = try uuid(roomID)
-        return try await mutation { transaction in
-            let sql = try activationSQL(transaction)
-            try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
-            try await v2LockRoomActivationOwner(roomID: roomUUID, owner: owner, sql: sql, schema: schema)
-            // 房间锁串行化首次插入及所有后续操作。
-            // 第二把行锁覆盖外部读取方，并在采样数据库时间前取得。
-            let row = try await activationRow(roomID: roomUUID, sql: sql)
-            let observed = try await v2RoomActivationDatabaseClock(sql: sql)
-            if let row, let existing = try row.lease(roomID: roomID, observedAt: observed),
-               row.ownerShardID == owner.shardID, row.ownerEpoch == owner.epoch {
-                return .occupied(existing)
-            }
-            let nextEpoch: Int64
-            if let row {
-                guard row.activationEpoch < Int64.max else { throw V2RoomActivationLeaseError.epochExhausted }
-                nextEpoch = row.activationEpoch + 1
-            } else {
-                nextEpoch = 1
-            }
-            let expiry = observed.addingTimeInterval(Double(duration.rawValue) / 1_000)
-            if row == nil {
-                try await sql.raw("""
-                    INSERT INTO \(unsafeRaw: schema).room_activation_leases
-                        (room_id, activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at)
-                    VALUES (\(bind: roomUUID), \(bind: nextEpoch), \(bind: owner.shardID), \(bind: owner.epoch),
-                            \(bind: host.hostID.rawValue), \(bind: host.incarnationID), \(bind: expiry))
-                    """).run()
-            } else {
-                try await sql.raw("""
-                    UPDATE \(unsafeRaw: schema).room_activation_leases SET
-                        activation_epoch = \(bind: nextEpoch), owner_shard_id = \(bind: owner.shardID),
-                        owner_epoch = \(bind: owner.epoch), host_id = \(bind: host.hostID.rawValue),
-                        host_incarnation_id = \(bind: host.incarnationID), expires_at = \(bind: expiry)
-                    WHERE room_id = \(bind: roomUUID)
-                    """).run()
-            }
-            let token = V2RoomActivationToken(roomID: roomID, owner: owner,
-                activationEpoch: try V2ActorEpoch(nextEpoch), host: host)
-            return .acquired(try V2RoomActivationLease(token: token,
-                databaseObservedAt: observed, expiresAt: expiry))
-        }
+    public func acquire(roomID: RoomID, owner: V2RoomDataOwner, host: V2ActorHostIdentity,
+                        duration: V2ActorMilliseconds) async throws -> V2RoomActivationAcquisition {
+        _ = try uuid(roomID)
+        let value = try await lifecycle.execute(.init(roomID: roomID,
+            operation: .acquire(owner: owner, host: host, duration: duration)))
+        guard case .acquired(let acquisition) = value else { throw V2RoomActivationLeaseError.outcomeUnknown }
+        return acquisition
+    }
+
+    /// Restoration uses the same physical collector as lifecycle mutations.
+    /// Success is returned only after the locked database check actually settles.
+    public func validate(token: V2RoomActivationToken) async throws {
+        _ = try uuid(token.roomID)
+        let value = try await lifecycle.execute(.init(roomID: token.roomID, operation: .validate(token: token)))
+        guard case .validated = value else { throw V2RoomActivationLeaseError.outcomeUnknown }
     }
 
     public func renew(token: V2RoomActivationToken, duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
-        let roomUUID = try uuid(token.roomID)
-        return try await mutation { transaction in
-            let sql = try activationSQL(transaction)
-            try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
-            try await v2LockRoomActivationOwner(roomID: roomUUID, owner: token.owner, sql: sql, schema: schema)
-            let row = try await activationRow(roomID: roomUUID, sql: sql)
-            let observed = try await v2RoomActivationDatabaseClock(sql: sql)
-            guard let row, row.matches(token) else { throw V2RoomActivationLeaseError.activationChanged }
-            guard let expiresAt = row.expiresAt, expiresAt > observed else { throw V2RoomActivationLeaseError.leaseExpired }
-            let renewedExpiry = observed.addingTimeInterval(Double(duration.rawValue) / 1_000)
-            try await sql.raw("""
-                UPDATE \(unsafeRaw: schema).room_activation_leases SET expires_at = \(bind: renewedExpiry)
-                WHERE room_id = \(bind: roomUUID)
-                """).run()
-            return try V2RoomActivationLease(token: token, databaseObservedAt: observed, expiresAt: renewedExpiry)
-        }
+        _ = try uuid(token.roomID)
+        return try await renewals.renew(token: token, duration: duration)
     }
+
+    public func shutdownRenewals() async { await renewals.shutdown() }
+
+    /// Application-owner shutdown, after all Hosts finish release. Host.stop
+    /// must not close this shared collector: a successor may reuse the Store.
+    public func shutdownLifecycle() async { await lifecycle.shutdown() }
+    var renewalBatcherIdentity: ObjectIdentifier { ObjectIdentifier(renewals) }
+    var lifecycleBatcherIdentity: ObjectIdentifier { ObjectIdentifier(lifecycle) }
 
     public func release(token: V2RoomActivationToken) async throws -> Bool {
-        let roomUUID = try uuid(token.roomID)
-        return try await mutation { transaction in
-            let sql = try activationSQL(transaction)
-            try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
-            do {
-                try await v2LockRoomActivationOwner(roomID: roomUUID, owner: token.owner, sql: sql, schema: schema)
-            } catch let error as V2RoomActivationLeaseError where error == .roomNotFound || error == .ownerChanged {
-                return false
-            }
-            let row = try await activationRow(roomID: roomUUID, sql: sql)
-            let observed = try await v2RoomActivationDatabaseClock(sql: sql)
-            guard let row, row.matches(token), let expiresAt = row.expiresAt, expiresAt > observed else { return false }
-            try await sql.raw("""
-                UPDATE \(unsafeRaw: schema).room_activation_leases SET
-                    host_id = NULL, host_incarnation_id = NULL, expires_at = NULL
-                WHERE room_id = \(bind: roomUUID)
-                """).run()
-            return true
-        }
-    }
-
-    private func mutation<Value: Sendable>(
-        _ operation: @escaping @Sendable (any Database) async throws -> Value
-    ) async throws -> Value {
-        do {
-            return try await v2WithPostgresTransactionRetry(database: database,
-                maximumRetryCount: 0, classifyCommitFailure: true,
-                useRoomDeadline: true, operation)
-        } catch is V2RoomTransactionOutcomeUnknown {
-            throw V2RoomActivationLeaseError.outcomeUnknown
-        }
-    }
-
-    private func activationRow(roomID: UUID, sql: any SQLDatabase) async throws -> V2RoomActivationPersistenceRow? {
-        try await sql.raw("""
-            SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
-            FROM \(unsafeRaw: schema).room_activation_leases WHERE room_id = \(bind: roomID) FOR UPDATE
-            """).first(decoding: V2RoomActivationPersistenceRow.self)
+        _ = try uuid(token.roomID)
+        let value = try await lifecycle.execute(.init(roomID: token.roomID, operation: .release(token: token)))
+        guard case .released(let released) = value else { throw V2RoomActivationLeaseError.outcomeUnknown }
+        return released
     }
 
     private func uuid(_ roomID: RoomID) throws -> UUID {
@@ -149,8 +81,4 @@ public struct PostgresV2RoomActivationStore: V2RoomActivationLeaseStore {
         return value
     }
 
-    private func activationSQL(_ database: any Database) throws -> any SQLDatabase {
-        guard let sql = database as? any SQLDatabase else { throw V2SchemaReadinessError.unsupportedDatabase }
-        return sql
-    }
 }

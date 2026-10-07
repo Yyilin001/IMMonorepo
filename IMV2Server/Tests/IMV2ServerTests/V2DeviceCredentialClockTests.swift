@@ -405,87 +405,8 @@ struct V2LivePresenceLeaseDurationTests {
                     _ = try await valid.renewConnection(identity: identity, connectionID: connection, now: now)
                 } else { _ = try await valid.renewConnections([request]) }
             }
-            #expect(database.transactions.withLock { $0 } == (path == "admit" ? 1 : 0))
-            #expect(database.writes.withLock { $0 } == (path == "admit" ? 0 : 1))
-        }
-    }
-}
-
-@Suite("Room credit heat elapsed time")
-struct V2RoomCreditHeatClockTests {
-    @Test("Batched commits restart promotion after an idle window")
-    func idleWindowRestartsPromotion() async throws {
-        try await withClockDatabase { database in
-            let clock = Mutex(ContinuousClock.now)
-            let pool = V2RoomAdmissionCommandCreditPool(database: database, batchSize: 8,
-                monotonicNow: { clock.withLock { $0 } })
-            let first = UUID(), second = UUID(), wall = Date()
-            await pool.recordNormalAdmissionCommits(
-                Array(repeating: (first, wall), count: 4) + Array(repeating: (second, wall), count: 3))
-            #expect(await pool.shouldUseCredits(roomIDs: [first, second], now: wall) == [true, false])
-
-            clock.withLock { $0 = $0.advanced(by: .milliseconds(5_001)) }
-            // A commit must reset an idle room even if no admission lookup
-            // or metrics sweep has removed its old heat record yet.
-            await pool.recordNormalAdmissionCommits([(second, wall)])
-            #expect(await pool.shouldUseCredits(roomIDs: [first, second], now: wall) == [false, false])
-            await pool.recordNormalAdmissionCommits(
-                Array(repeating: (first, wall), count: 3) + Array(repeating: (second, wall), count: 3))
-            #expect(await pool.shouldUseCredits(roomIDs: [first, second], now: wall) == [false, true])
-            await pool.recordNormalAdmissionCommits([(first, wall)])
-            #expect(await pool.shouldUseCredits(roomIDs: [first, second], now: wall) == [true, true])
-            #expect(await pool.snapshot().promotedHotRooms == 2)
-            #expect(database.transactions.withLock { $0 } == 0)
+            #expect(database.transactions.withLock { $0 } == 1)
             #expect(database.writes.withLock { $0 } == 0)
-        }
-    }
-
-    @Test("Room heat survives wall-clock corrections and expires after actual elapsed time",
-          arguments: [false, true], [Double(-3_600), 3_600, -1_000_000_000, 1_000_000_000, 0])
-    func wallClockCorrections(duringCommits: Bool, jump: Double) async throws {
-        try await withClockDatabase { database in
-            let clock = Mutex(ContinuousClock.now)
-            let pool = V2RoomAdmissionCommandCreditPool(database: database, batchSize: 8,
-                monotonicNow: { clock.withLock { $0 } })
-            let room = UUID(), wall = Date()
-            for index in 0..<4 {
-                let observed = duringCommits && index >= 2 ? wall.addingTimeInterval(jump) : wall
-                await pool.recordNormalAdmissionCommit(roomID: room, now: observed)
-                if index < 3 { #expect(await pool.shouldUseCredits(roomID: room, now: observed) == false) }
-            }
-            let corrected = wall.addingTimeInterval(jump)
-            #expect(await pool.shouldUseCredits(roomID: room, now: corrected))
-            #expect(await pool.snapshot().promotedHotRooms == 1)
-            clock.withLock { $0 = $0.advanced(by: .seconds(5)) }
-            #expect(await pool.shouldUseCredits(roomID: room, now: corrected))
-            #expect(await pool.snapshot().promotedHotRooms == 1)
-            clock.withLock { $0 = $0.advanced(by: .milliseconds(1)) }
-            // Metrics must expire heat even without a subsequent admission.
-            #expect(await pool.snapshot().promotedHotRooms == 0)
-            #expect(await pool.shouldUseCredits(roomID: room, now: corrected) == false)
-            #expect(await pool.snapshot().promotedHotRooms == 0)
-            #expect(database.transactions.withLock { $0 } == 0)
-            #expect(database.writes.withLock { $0 } == 0)
-        }
-    }
-
-    @Test("Invalid wall clocks neither promote rooms nor erase valid heat")
-    func invalidWallClocks() async throws {
-        try await withClockDatabase { database in
-            let instant = ContinuousClock.now
-            let pool = V2RoomAdmissionCommandCreditPool(database: database, batchSize: 8, monotonicNow: { instant })
-            let room = UUID(), coldRoom = UUID(), wall = Date()
-            for _ in 0..<4 { await pool.recordNormalAdmissionCommit(roomID: room, now: wall) }
-            for seconds in [Double.nan, .infinity, -.infinity, 1e14, -1e14] {
-                let invalid = Date(timeIntervalSince1970: seconds)
-                for _ in 0..<4 { await pool.recordNormalAdmissionCommit(roomID: coldRoom, now: invalid) }
-                #expect(await pool.shouldUseCredits(roomID: coldRoom, now: wall) == false)
-                #expect(await pool.shouldUseCredits(roomID: room, now: invalid) == false)
-                await pool.recordNormalAdmissionCommit(roomID: room, now: invalid)
-                #expect(await pool.shouldUseCredits(roomID: room, now: wall))
-                #expect(await pool.snapshot().promotedHotRooms == 1)
-            }
-            #expect(database.transactions.withLock { $0 } == 0)
         }
     }
 }

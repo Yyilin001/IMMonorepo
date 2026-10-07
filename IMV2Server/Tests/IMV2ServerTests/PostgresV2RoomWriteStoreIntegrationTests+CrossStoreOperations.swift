@@ -1002,8 +1002,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await sql.raw("""
                     SELECT COUNT(*)::bigint AS value FROM im_v2.user_live_presence_leases
                     WHERE user_id = \(bind: user) AND connection_id = \(bind: connection)
-                      AND expires_at > updated_at AND updated_at = \(bind: later)
-                      AND expires_at = \(bind: later.addingTimeInterval(0.5))
+                      AND expires_at > updated_at
+                      AND expires_at >= updated_at + interval '0.499 seconds'
+                      AND expires_at <= updated_at + interval '0.501 seconds'
                     """).first(decoding: CountRow.self)?.value == 1)
             }
         }
@@ -1011,105 +1012,75 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("Presence leases validate database bounds and never regress on older heartbeats")
     func liveLeaseTimestampBoundaries() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
-        let resources = makeV2DatabaseTestResources()
-        do {
-            resources.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
-            let sql = try #require(resources.database(.psql) as? any SQLDatabase)
-            try await installSchema(on: sql)
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let users = [UUID(), UUID()], devices = [UUID(), UUID()], connections = [UUID(), UUID()]
-            var identities: [V2AuthenticatedConnection] = []
-            for (user, device) in zip(users, devices) {
-                try await sql.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at) VALUES (\(bind: user), \(bind: device), \(bind: now), \(bind: now))").run()
-                identities.append(.init(userID: .init(uuid: user), deviceID: .init(uuid: device), capabilityProfile: "base"))
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let now = Date(), users = [UUID(),UUID()], devices = [UUID(),UUID()], connections = [UUID(),UUID()]
+            let identities = users.indices.map { V2AuthenticatedConnection(userID: .init(uuid:users[$0]), deviceID:.init(uuid:devices[$0]), capabilityProfile:"base") }
+            for i in users.indices {
+                try await sql.raw("INSERT INTO im_v2.auth_devices(user_id,device_id,created_at,last_active_at) VALUES(\(bind:users[i]),\(bind:devices[i]),\(bind:now),\(bind:now))").run()
             }
-            for duration in [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, 0, -1, Double(Int64.max) / 1_000_000] {
-                #expect(throws: V2LiveActivityConfigurationError.invalidOnlineLease) {
-                    try PostgresV2LiveActivityStore(database: resources.database(.psql), onlineLease: duration)
-                }
+            for duration in [Double.nan,.infinity,-.infinity,.greatestFiniteMagnitude,0,-1,Double(Int64.max)/1_000_000] {
+                #expect(throws: V2LiveActivityConfigurationError.invalidOnlineLease) { try PostgresV2LiveActivityStore(database:database,onlineLease:duration) }
             }
-            let store = try PostgresV2LiveActivityStore(database: resources.database(.psql))
-            let policy = V2AuthenticatedConnectionAdmissionPolicy(maximumConnectionsPerDevice: 2, maximumConnectionsPerUser: 8)
-            let upper = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 45)
-            #expect(v2PostgresTimestampCanEncode(upper))
-            #expect(!v2PostgresTimestampCanEncode(upper.addingTimeInterval(90)))
-            let invalidDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) } + [upper]
+            let store = try PostgresV2LiveActivityStore(database:database)
+            let policy = V2AuthenticatedConnectionAdmissionPolicy(maximumConnectionsPerDevice:2,maximumConnectionsPerUser:8)
+            let upper = Date(timeIntervalSince1970:946_684_800 + 9_223_371_331_200 - 45)
+            let invalidDates = [Double.nan,.infinity,-.infinity,.greatestFiniteMagnitude,-.greatestFiniteMagnitude,1e14,-1e14,-1e12].map { Date(timeIntervalSince1970:$0) } + [upper]
             for invalid in invalidDates {
-                await #expect(throws: V2LiveActivityStoreError.corruptPersistenceState) {
-                    try await store.admitConnection(identity: identities[0], connectionID: connections[0], publicationSuppressed: false, policy: policy, now: invalid)
-                }
-                await #expect(throws: V2LiveActivityStoreError.corruptPersistenceState) {
-                    try await store.renewConnection(identity: identities[0], connectionID: connections[0], now: invalid)
-                }
-                let batch = try await store.renewConnections([.init(identity: identities[0], connectionID: connections[0], now: invalid)])
-                #expect(batch[connections[0]] == .init(outcome: .rejected, allowsOnlinePresence: false))
+                await #expect(throws:V2LiveActivityStoreError.corruptPersistenceState) { try await store.admitConnection(identity:identities[0],connectionID:connections[0],publicationSuppressed:false,policy:policy,now:invalid) }
+                await #expect(throws:V2LiveActivityStoreError.corruptPersistenceState) { try await store.renewConnection(identity:identities[0],connectionID:connections[0],now:invalid) }
+                #expect(try await store.renewConnections([.init(identity:identities[0],connectionID:connections[0],now:invalid)])[connections[0]] == .init(outcome:.rejected,allowsOnlinePresence:false))
             }
-            let tiny = try PostgresV2LiveActivityStore(database: resources.database(.psql), onlineLease: 0.0000001)
-            await #expect(throws: V2LiveActivityStoreError.corruptPersistenceState) {
-                try await tiny.admitConnection(identity: identities[0], connectionID: connections[0], publicationSuppressed: false, policy: policy, now: now)
+            let tiny = try PostgresV2LiveActivityStore(database:database,onlineLease:0.0000001)
+            await #expect(throws:V2LiveActivityStoreError.corruptPersistenceState) { try await tiny.admitConnection(identity:identities[0],connectionID:connections[0],publicationSuppressed:false,policy:policy,now:now) }
+            #expect(try await count("im_v2.user_live_presence_leases",on:sql)==0)
+            struct Clock:Decodable { let value:Date }
+            func dbClock() async throws -> Date { try #require(try await sql.raw("SELECT clock_timestamp() AS value").first(decoding:Clock.self)).value }
+            for i in identities.indices {
+                let before = try await dbClock()
+                let value = try await store.admitConnectionRefresh(identity:identities[i],connectionID:connections[i],publicationSuppressed:false,policy:policy,now:now)
+                let after = try await dbClock()
+                guard case .accepted(let expiry)=value.outcome else { throw CancellationError() }
+                #expect(expiry >= before.addingTimeInterval(89.999) && expiry <= after.addingTimeInterval(90.001))
+                #expect((value.remainingLeaseSeconds ?? 0)>89 && (value.remainingLeaseSeconds ?? 91)<=90.001)
             }
-            #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 0)
-            for index in identities.indices {
-                #expect(try await store.admitConnection(identity: identities[index], connectionID: connections[index], publicationSuppressed: false, policy: policy, now: now) == .accepted(expiresAt: now.addingTimeInterval(90)))
-            }
-            // A bad clock during cleanup must neither bind an invalid date
-            // nor partially delete the still-owned lease.
             for invalid in invalidDates.dropLast() {
-                await #expect(throws: V2LiveActivityStoreError.corruptPersistenceState) {
-                    try await store.removePresence(identity: identities[0], connectionID: connections[0], now: invalid)
-                }
+                await #expect(throws:V2LiveActivityStoreError.corruptPersistenceState) { try await store.removePresence(identity:identities[0],connectionID:connections[0],now:invalid) }
             }
-            #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 2)
-            #expect(try await store.renewConnection(identity: identities[0], connectionID: connections[0], now: now.addingTimeInterval(20)) == .accepted(expiresAt: now.addingTimeInterval(110)))
-            #expect(try await store.renewConnection(identity: identities[0], connectionID: connections[0], now: now.addingTimeInterval(10)) == .accepted(expiresAt: now.addingTimeInterval(110)))
-            #expect(try await store.admitConnection(identity: identities[0], connectionID: connections[0], publicationSuppressed: false, policy: policy, now: now.addingTimeInterval(5)) == .accepted(expiresAt: now.addingTimeInterval(110)))
-            let preferenceActorUserID = identities[1].userID
-            _ = try await resources.database(.psql).transaction { tx in
-                try await store.applyAccountLiveActivityPreferences(command: .init(actorUserID: preferenceActorUserID,
-                    operationID: .init(uuid: UUID()), allowsOnlinePresence: false, allowsTypingIndicators: true), transaction: tx, now: now)
-            }
+            // A future caller clock must not extend the actual lifetime; older clocks cannot regress it.
+            let before = try await dbClock()
+            guard case .accepted(let first)=try await store.renewConnection(identity:identities[0],connectionID:connections[0],now:now.addingTimeInterval(20)),
+                  case .accepted(let second)=try await store.renewConnection(identity:identities[0],connectionID:connections[0],now:now.addingTimeInterval(10)) else { throw CancellationError() }
+            let after = try await dbClock()
+            #expect(first >= before.addingTimeInterval(89.999) && second >= first && second <= after.addingTimeInterval(90.001))
+            try await sql.raw("INSERT INTO im_v2.user_live_activity_preferences(user_id,allows_online_presence,allows_typing_indicators,updated_at) VALUES(\(bind:users[1]),false,true,\(bind:now))").run()
             let invalidConnection = UUID()
             let mixed = try await store.renewConnections([
-                .init(identity: identities[0], connectionID: connections[0], now: Date(timeIntervalSince1970: .nan)),
-                .init(identity: identities[0], connectionID: connections[0], now: now.addingTimeInterval(30)),
-                .init(identity: identities[1], connectionID: invalidConnection, now: Date(timeIntervalSince1970: -1e12)),
-                .init(identity: identities[1], connectionID: connections[1], now: now.addingTimeInterval(40)),
-                .init(identity: identities[0], connectionID: connections[0], now: now.addingTimeInterval(15)),
-                .init(identity: identities[1], connectionID: connections[1], now: Date(timeIntervalSince1970: 1e14))
-            ])
-            #expect(mixed.count == 3)
-            #expect(mixed[connections[0]] == .init(outcome: .accepted(expiresAt: now.addingTimeInterval(120)), allowsOnlinePresence: true))
-            #expect(mixed[connections[1]] == .init(outcome: .accepted(expiresAt: now.addingTimeInterval(130)), allowsOnlinePresence: false))
-            #expect(mixed[invalidConnection] == .init(outcome: .rejected, allowsOnlinePresence: false))
-            let stale = try await store.renewConnections(identities.indices.map { .init(identity: identities[$0], connectionID: connections[$0], now: now.addingTimeInterval(1)) })
-            #expect(stale[connections[0]] == mixed[connections[0]])
-            #expect(stale[connections[1]] == mixed[connections[1]])
-            #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_live_presence_leases WHERE (connection_id = \(bind: connections[0]) AND updated_at = \(bind: now.addingTimeInterval(30)) AND expires_at = \(bind: now.addingTimeInterval(120))) OR (connection_id = \(bind: connections[1]) AND updated_at = \(bind: now.addingTimeInterval(40)) AND expires_at = \(bind: now.addingTimeInterval(130)))").first(decoding: CountRow.self)?.value == 2)
-            #expect(try await store.renewConnection(identity: identities[1], connectionID: connections[1], now: now.addingTimeInterval(130)) == .rejected)
-            let expired = try await store.renewConnections(identities.indices.map { .init(identity: identities[$0], connectionID: connections[$0], now: now.addingTimeInterval(130)) })
-            for value in expired.values { #expect(value.outcome == .rejected) }
-            for index in identities.indices {
-                #expect(try await store.removePresence(identity: identities[index], connectionID: connections[index], now: now.addingTimeInterval(131)) == false)
+                .init(identity:identities[0],connectionID:connections[0],now:Date(timeIntervalSince1970:.nan)),
+                .init(identity:identities[0],connectionID:connections[0],now:now.addingTimeInterval(30)),
+                .init(identity:identities[1],connectionID:invalidConnection,now:Date(timeIntervalSince1970:-1e12)),
+                .init(identity:identities[1],connectionID:connections[1],now:now.addingTimeInterval(40)),
+                .init(identity:identities[0],connectionID:connections[0],now:now.addingTimeInterval(15))])
+            #expect(mixed.count==3 && mixed[connections[0]]?.allowsOnlinePresence==true && mixed[connections[1]]?.allowsOnlinePresence==false)
+            #expect(mixed[invalidConnection] == .init(outcome:.rejected,allowsOnlinePresence:false))
+            let stale = try await store.renewConnections(identities.indices.map { .init(identity:identities[$0],connectionID:connections[$0],now:now.addingTimeInterval(1)) })
+            for i in identities.indices {
+                guard case .accepted(let old)?=mixed[connections[i]]?.outcome, case .accepted(let new)?=stale[connections[i]]?.outcome else { throw CancellationError() }
+                #expect(new>=old && (stale[connections[i]]?.remainingLeaseSeconds ?? 0)>0)
             }
-            #expect(try await count("im_v2.user_live_presence_leases", on: sql) == 0)
-            // A valid database date before Date.distantPast must not be
-            // discarded by the duplicate-heartbeat selection default.
-            let historical = Date(timeIntervalSince1970: -100_000_000_000)
-            #expect(historical < Date.distantPast)
-            #expect(try await store.admitConnection(identity: identities[0], connectionID: connections[0], publicationSuppressed: false, policy: policy, now: historical) == .accepted(expiresAt: historical.addingTimeInterval(90)))
-            let historicalBatch = try await store.renewConnections([.init(identity: identities[0], connectionID: connections[0], now: historical.addingTimeInterval(1))])
-            #expect(historicalBatch[connections[0]]?.outcome == .accepted(expiresAt: historical.addingTimeInterval(91)))
-            #expect(try await store.removePresence(identity: identities[0], connectionID: connections[0], now: historical.addingTimeInterval(2)) == false)
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await resources.shutdown()
-        } catch {
-            if let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
-            try? await resources.shutdown()
-            throw error
+            // Expiry is a database fact, not a caller-controlled simulated clock advance.
+            try await sql.raw("UPDATE im_v2.user_live_presence_leases SET expires_at=clock_timestamp()-interval '1 second'").run()
+            #expect(try await store.renewConnection(identity:identities[1],connectionID:connections[1],now:now.addingTimeInterval(-3600)) == .rejected)
+            let expired=try await store.renewConnections(identities.indices.map { .init(identity:identities[$0],connectionID:connections[$0],now:now.addingTimeInterval(-3600)) })
+            #expect(expired.values.allSatisfy { $0.outcome == .rejected && $0.remainingLeaseSeconds == nil })
+            for i in identities.indices { #expect(try await store.removePresence(identity:identities[i],connectionID:connections[i],now:Date())==false) }
+            let historical=Date(timeIntervalSince1970:-100_000_000_000)
+            let confirmed=try await store.admitConnectionRefresh(identity:identities[0],connectionID:connections[0],publicationSuppressed:false,policy:policy,now:historical)
+            #expect((confirmed.remainingLeaseSeconds ?? 0)>89)
+            #expect(try await store.renewConnections([.init(identity:identities[0],connectionID:connections[0],now:historical.addingTimeInterval(1))])[connections[0]]?.remainingLeaseSeconds != nil)
+            #expect(try await store.removePresence(identity:identities[0],connectionID:connections[0],now:Date())==false)
         }
     }
+
 
     @Test("Admitted membership writes reject invalid clocks and preserve original proof on replay")
     func membershipTimestampBoundaries() async throws {

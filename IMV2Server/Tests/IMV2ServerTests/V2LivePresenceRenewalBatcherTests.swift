@@ -5,6 +5,7 @@ import IMV2Core
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 import Testing
+import Synchronization
 
 @Suite("V2 live presence renewal batching")
 struct V2LivePresenceRenewalBatcherTests {
@@ -77,6 +78,38 @@ struct V2LivePresenceRenewalBatcherTests {
         #expect(snapshot.pendingConnections == 0)
     }
 
+    @Test("actual batches retain the slot after caller cancellation and repeated shutdown drains them")
+    func cancelledActualBatchStillDrains() async throws {
+        let leases = RecordingRenewalLeases(block: true)
+        let batcher = V2LivePresenceRenewalBatcher(leases: leases,
+            configuration: .init(maximumBatchSize: 1, maximumDelay: .zero), maximumPendingConnections: 2)
+        let identity = V2AuthenticatedConnection(userID: .init(uuid: UUID()), deviceID: .init(uuid: UUID()), capabilityProfile: "base")
+        let actual = Task { try await batcher.renew(identity: identity, connectionID: UUID(), now: Date()) }
+        let bound = ContinuousClock.now + .seconds(2)
+        while await leases.batchSizes().isEmpty {
+            guard ContinuousClock.now < bound else { throw CancellationError() }
+            await Task.yield()
+        }
+        actual.cancel()
+        let queuedID = UUID()
+        #expect(await batcher.enqueue(identity: identity, connectionID: queuedID, now: Date(), completion: { _ in }))
+        #expect(await batcher.enqueue(identity: identity, connectionID: queuedID, now: Date(), completion: { _ in }))
+        #expect(await batcher.snapshot().pendingConnections == 1)
+        #expect(await leases.batchSizes() == [1])
+        let state = RenewalDrainResult()
+        let shutdown = Task { await batcher.finish(); state.mark() }
+        let repeated = Task { await batcher.finish() }
+        await Task.yield()
+        #expect(!state.completed)
+        #expect(await leases.batchSizes() == [1])
+        await leases.release()
+        _ = try await actual.value
+        await shutdown.value; await repeated.value
+        #expect(state.completed)
+        #expect(await batcher.snapshot().pendingConnections == 0)
+        #expect(!(await batcher.enqueue(identity: identity, connectionID: UUID(), now: Date(), completion: { _ in })))
+    }
+
     @Test("a store that omits a renewal fails that connection closed")
     func missingRenewalFailsClosed() async throws {
         let leases = RecordingRenewalLeases(omitResults: true)
@@ -102,10 +135,13 @@ struct V2LivePresenceRenewalBatcherTests {
 
 private actor RecordingRenewalLeases: V2LivePresenceLeaseManaging {
     private let omitResults: Bool
+    private var blocked: Bool
+    private var gate: CheckedContinuation<Void, Never>?
     private var batches: [Int] = []
     private var singletonCalls = 0
 
-    init(omitResults: Bool = false) {
+    init(omitResults: Bool = false, block: Bool = false) {
+        self.blocked = block
         self.omitResults = omitResults
     }
 
@@ -136,8 +172,9 @@ private actor RecordingRenewalLeases: V2LivePresenceLeaseManaging {
 
     func renewConnections(
         _ requests: [V2LivePresenceLeaseRenewalRequest]
-    ) -> [UUID: V2LivePresenceLeaseRefresh] {
+    ) async -> [UUID: V2LivePresenceLeaseRefresh] {
         batches.append(requests.count)
+        if blocked { await withCheckedContinuation { gate = $0 } }
         guard !omitResults else { return [:] }
         return Dictionary(uniqueKeysWithValues: requests.map { request in
             (
@@ -157,6 +194,13 @@ private actor RecordingRenewalLeases: V2LivePresenceLeaseManaging {
     ) -> Bool { false }
 
     func allowsOnlinePresence(userID _: UserID) -> Bool { true }
+    func release() { blocked = false; gate?.resume(); gate = nil }
     func batchSizes() -> [Int] { batches }
     func singletonRenewalCalls() -> Int { singletonCalls }
+}
+
+private final class RenewalDrainResult: Sendable {
+    private let state = Mutex(false)
+    func mark() { state.withLock { $0 = true } }
+    var completed: Bool { state.withLock { $0 } }
 }

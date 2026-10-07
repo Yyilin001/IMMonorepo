@@ -205,11 +205,7 @@ private func g2Host(database: any Database, fixture: PostgresV2RoomWriteStoreInt
     leaseStore: PostgresV2RoomActivationStore, configuration: V2RoomRuntimeConfiguration,
     restoreBarrier: G2PhaseBarrier, closeBarrier: G2PhaseBarrier? = nil) throws -> G2HostedRoom {
     let writes = PostgresV2RoomWriteStore(database: database)
-    let batcher = V2SendMessageAdmissionBatcher(store: writes,
-        configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)),
-        actorGrantedStore: writes)
     let ownerResources = try V2RoomServerOwnerResources(database: database, writes: writes,
-        sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),

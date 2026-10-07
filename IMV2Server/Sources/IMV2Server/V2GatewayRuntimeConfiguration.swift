@@ -6,7 +6,6 @@ import IMV2Compression
 import IMV2Core
 import IMV2ServerGateway
 
-
 /// 指标刻意只绑定到 loopback 监听器。
 ///
 /// 采集器必须运行在同一主机或 Pod 命名空间内；
@@ -33,13 +32,9 @@ public enum V2PushRuntimeConfiguration: Sendable {
     case apns(V2APNSRuntimeConfiguration)
 }
 
-/// 混合前台唤醒路由配置。
-///
-/// 对单个网关它是可选的；
-/// 但当活跃观看者可能连接在其他副本上时，必须使用共享 broker。
+/// 跨网关实时路由默认使用经认证的分布式 Actor。
 public enum V2GroupEventWakeRuntimeConfiguration: Sendable {
-    case localOnly
-    case nats(V2NATSGroupEventWakeConfiguration)
+    case actor
 }
 
 public struct V2APNSRuntimeConfiguration: Sendable {
@@ -78,6 +73,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
     public let databaseWorkloadPoolIsolationEnabled: Bool
+    /// Optional cap for non-message pool handles; omitted uses all configured loops.
+    public let databaseNonMessagePoolEventLoopThreads: Int
+    public func databasePoolEventLoopCount(for role: V2PostgresWorkloadPoolBudget.Role) -> Int {
+        role == .messageWrite ? databasePolicy.eventLoopThreads : databaseNonMessagePoolEventLoopThreads
+    }
     /// 独立的权威私聊发送连接池；容量与每个 EventLoop 的前台连接池相匹配。
     public let directSendControlConnectionsPerEventLoop: Int
     public let directAuthorizationResolutionDatabaseURLs: [String]
@@ -106,11 +106,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let frameCompression: V2NegotiatedFrameCompression?
     public let frameCompressionThresholdBytes: Int
     public let frameCompressionMaximumExpansionRatio: Int
-    public let foregroundGroupBatchMaximumEvents: Int
-    public let foregroundGroupPendingMaximumEventsPerRoom: Int
-    public let foregroundGroupBatchDelayMilliseconds: Int
-    public let foregroundGroupBatchExtensionDelayMilliseconds: Int
-    public let foregroundGroupBatchExtensionMinimumEvents: Int
     /// 群组已读游标仍各自幂等且持久，但相互独立的操作可以共享同一个有界的 PostgreSQL 事务。
     ///
     /// 这些部署控制项把延迟与吞吐之间的取舍显式化，
@@ -127,6 +122,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     ///
     /// 它为每连接队列、actor 与 TLS 状态设界。
     public let maximumConnections: Int
+    /// 在线成员覆盖按房间及用户／房间关系计数，与物理连接数独立。
+    public let onlineDeliveryMaximumRooms: Int
+    public let onlineDeliveryMaximumRelations: Int
     /// TLS 监听器请求的内核监听队列长度。
     ///
     /// 显式设置可避免 SwiftNIO 那个刻意保守的默认值 128——
@@ -220,48 +218,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let roomLogRetentionMode: V2RoomLogRetentionMode
     /// 窗口模式下读者不再钉住日志下界的宽限秒数；永久模式不使用该值。
     public let roomLogRetentionWindowSeconds: TimeInterval
-    /// 仅用于 direct-room-log 部署的分片额度预扣优化。
-    ///
-    /// 取零表示保留精确的每消息分片准入；每房间准入始终有效。
-    ///
-    /// 正值是一个显式的、仅用于 direct-room-log 的预扣命令额度批大小；
-    /// 它绝不会由客户端请求开启。
-    public let directRoomLogShardAdmissionCreditBatchSize: Int
-    /// 取零表示为每条已接受单聊命令保留一次精确的房间准入更新。
-    ///
-    /// 正值会以有界批次预扣既有的每房间命令窗口，
-    /// 在保留房间上限的同时，避免对每个符合条件的微批条目都做一次 `room_admission` 锁/更新。
-    public let directRoomLogRoomAdmissionCreditBatchSize: Int
-    /// 取零表示单聊房间日志追加保持每条命令一个事务。
-    ///
-    /// 正值只开启那条刻意收窄的、有序的普通单聊消息微批；
-    /// 不符合条件的命令会透明地走既有的单命令写入路径。
-    public let directRoomLogAppendBatchSize: Int
-    /// 可并发执行的追加微批数量上限。
-    ///
-    /// 默认值保留原先的八批部署行为；
-    /// 正值覆盖是一次经过明确测量的吞吐实验，绝不是客户端可控的并发设置。
+    /// 无物理连接池元数据时的执行并发后备值；生产发送以写池实际容量为准。
     public let directRoomLogAppendBatchMaximumInFlightBatches: Int
-    /// 在分配给持久微批之前最多保留的单聊追加请求数。
-    ///
-    /// 它刻意独立于数据库工作队列：一个排队的数据库操作可能代表许多追加请求，
-    /// 因此把操作数当作请求数复用会过早拒绝本应有界的流量突发。
+    /// 每个物理 Owner 保留的发送请求上限，独立于其他数据库工作队列。
     public let directRoomLogAppendMaximumPendingRequests: Int
-    /// 稳定的、按房间建键的调度通道数。
-    ///
-    /// 在途与待处理预算在各通道之间共享，而不是乘以该值。
-    public let directRoomLogAppendLaneCount: Int
-    /// 追加微批在服务端额外等待的最长时间。
-    ///
-    /// 只有当 `directRoomLogAppendBatchSize` 为正时才有意义。
+    /// 房间生命周期覆盖轮次等待的时间预算，兼容原部署变量名。
     public let directRoomLogAppendBatchMaximumDelayMilliseconds: Int
-    /// 追加微批的可选持续到达策略。
-    ///
-    /// 基础延迟仍为交互式默认值；
-    /// 只有当有界检测器在其配置的单调观察窗口内看到足够多的到达之后，才会选用这个更长的上限。
+    /// 可选的更长覆盖预算；不再启用旧 Batcher 的活跃度检测器。
     public let directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds: Int?
-    public let directRoomLogAppendBatchHighActivityMinimumRequests: Int?
-    public let directRoomLogAppendBatchHighActivityWindowMilliseconds: Int?
     /// 稳定单聊策略快照的有界 LRU 容量。
     ///
     /// 该缓存只是加速提示；每次 PostgreSQL 追加仍保留持久的修订围栏。
@@ -327,6 +291,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let contentReviewViolationTerms: [String]
     public let contentReviewEscalationTerms: [String]
 
+    /// Only bounds retained work; physical write connections determine concurrency.
+    public func durableSendSchedulingConfiguration() -> V2SendOperationSchedulingConfiguration {
+        .init(maximumPendingRequests: directRoomLogAppendMaximumPendingRequests,
+              fallbackConnectionCapacity: directRoomLogAppendBatchMaximumInFlightBatches)
+    }
+
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
         databasePolicy = try .init(environment: environment)
@@ -334,6 +304,13 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         databaseWorkloadPoolIsolationEnabled = try Self.explicitBoolean(
             "IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED", environment: environment
         )
+        if let raw = Self.optional("IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS", environment: environment) {
+            guard let count = Int(raw), count > 0, count <= databasePolicy.eventLoopThreads,
+                  databaseWorkloadPoolIsolationEnabled || count == databasePolicy.eventLoopThreads else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS")
+            }
+            databaseNonMessagePoolEventLoopThreads = count
+        } else { databaseNonMessagePoolEventLoopThreads = databasePolicy.eventLoopThreads }
         directSendControlConnectionsPerEventLoop = databaseWorkloadPoolIsolationEnabled
             ? databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop
             : databasePolicy.maximumConnectionsPerEventLoop
@@ -387,49 +364,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_FRAME_COMPRESSION_MAX_EXPANSION_RATIO")
         }
         frameCompressionMaximumExpansionRatio = parsedMaximumExpansionRatio
-        foregroundGroupBatchMaximumEvents = try Self.nonNegativeWithDefault(
-            "IM_V2_FOREGROUND_GROUP_BATCH_MAX_EVENTS",
-            defaultValue: 64,
-            maximum: 1_024,
-            environment: environment
-        )
-        foregroundGroupPendingMaximumEventsPerRoom = try Self.nonNegativeWithDefault(
-            "IM_V2_FOREGROUND_GROUP_PENDING_MAX_EVENTS_PER_ROOM",
-            defaultValue: 1_024,
-            maximum: 65_536,
-            environment: environment
-        )
-        foregroundGroupBatchDelayMilliseconds = try Self.nonNegativeWithDefault(
-            "IM_V2_FOREGROUND_GROUP_BATCH_DELAY_MS",
-            defaultValue: 10,
-            maximum: 100,
-            environment: environment
-        )
-        foregroundGroupBatchExtensionDelayMilliseconds = try Self.nonNegativeWithDefault(
-            "IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_DELAY_MS",
-            defaultValue: 10,
-            maximum: 100,
-            environment: environment
-        )
-        foregroundGroupBatchExtensionMinimumEvents = try Self.nonNegativeWithDefault(
-            "IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_MIN_EVENTS",
-            defaultValue: 8,
-            maximum: 1_024,
-            environment: environment
-        )
-        guard foregroundGroupBatchMaximumEvents > 0,
-              foregroundGroupPendingMaximumEventsPerRoom
-                >= foregroundGroupBatchMaximumEvents,
-              foregroundGroupBatchExtensionMinimumEvents > 0,
-              foregroundGroupBatchExtensionMinimumEvents
-                <= foregroundGroupBatchMaximumEvents,
-              foregroundGroupBatchDelayMilliseconds
-                + foregroundGroupBatchExtensionDelayMilliseconds <= 100
-        else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_FOREGROUND_GROUP_BATCH_MAX_EVENTS/IM_V2_FOREGROUND_GROUP_PENDING_MAX_EVENTS_PER_ROOM/IM_V2_FOREGROUND_GROUP_BATCH_DELAY_MS/IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_DELAY_MS/IM_V2_FOREGROUND_GROUP_BATCH_EXTENSION_MIN_EVENTS"
-            )
-        }
         preparedGroupEventPageCacheMaximumEntries = try Self.nonNegativeWithDefault(
             "IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_ENTRIES",
             defaultValue: 0,
@@ -464,6 +398,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         }
         connectionLimits = try .init(maximumInFlightRequests: try Self.integer("IM_V2_MAX_IN_FLIGHT_REQUESTS", environment: environment))
         maximumConnections = try Self.boundedPositive("IM_V2_MAX_CONNECTIONS", maximum: 1_000_000, environment: environment)
+        onlineDeliveryMaximumRooms = try Self.positiveWithDefault("IM_V2_ONLINE_DELIVERY_MAX_ROOMS", defaultValue: 65_536, maximum: 1_000_000, environment: environment)
+        onlineDeliveryMaximumRelations = try Self.positiveWithDefault("IM_V2_ONLINE_DELIVERY_MAX_RELATIONS", defaultValue: 262_144, maximum: 1_000_000, environment: environment)
         listenBacklog = try Self.boundedPositive("IM_V2_LISTEN_BACKLOG", maximum: 1_000_000, environment: environment)
         acceptBatchSize = try Self.boundedPositive("IM_V2_ACCEPT_BATCH_SIZE", maximum: 4_096, environment: environment)
         let maximumConnectionsPerDevice = try Self.boundedPositive(
@@ -714,53 +650,15 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 "IM_V2_DIRECT_ROOM_LOG_ADMISSION_MODE"
             )
         }
-        let rawDirectRoomLogShardCreditBatchSize = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE", environment: environment
-        ) ?? "0"
-        guard let parsedDirectRoomLogShardCreditBatchSize = Int(rawDirectRoomLogShardCreditBatchSize),
-              (0 ... 128).contains(parsedDirectRoomLogShardCreditBatchSize)
-        else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE"
-            )
-        }
-        directRoomLogShardAdmissionCreditBatchSize = parsedDirectRoomLogShardCreditBatchSize
-        let rawDirectRoomLogRoomCreditBatchSize = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE", environment: environment
-        ) ?? "0"
-        guard let parsedDirectRoomLogRoomCreditBatchSize = Int(rawDirectRoomLogRoomCreditBatchSize),
-              (0 ... 32).contains(parsedDirectRoomLogRoomCreditBatchSize),
-              parsedDirectRoomLogRoomCreditBatchSize == 0 || parsedDirectRoomLogShardCreditBatchSize > 0
-        else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_DIRECT_ROOM_LOG_ROOM_CREDIT_BATCH_SIZE"
-            )
-        }
-        directRoomLogRoomAdmissionCreditBatchSize = parsedDirectRoomLogRoomCreditBatchSize
-        let rawDirectRoomLogAppendBatchSize = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE", environment: environment
-        ) ?? "0"
-        guard let parsedDirectRoomLogAppendBatchSize = Int(rawDirectRoomLogAppendBatchSize),
-              parsedDirectRoomLogAppendBatchSize == 0 || (2 ... 128).contains(parsedDirectRoomLogAppendBatchSize),
-              parsedDirectRoomLogAppendBatchSize == 0 || (
-                  parsedDirectRoomLogShardCreditBatchSize > 0
-              )
-        else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE"
-            )
-        }
-        directRoomLogAppendBatchSize = parsedDirectRoomLogAppendBatchSize
         let rawDirectRoomLogAppendMaximumPending = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_APPEND_MAX_PENDING_REQUESTS",
             environment: environment
         )
         if let rawDirectRoomLogAppendMaximumPending {
-            guard parsedDirectRoomLogAppendBatchSize > 0,
-                  let parsedDirectRoomLogAppendMaximumPending = Int(
+            guard let parsedDirectRoomLogAppendMaximumPending = Int(
                       rawDirectRoomLogAppendMaximumPending
                   ),
-                  (parsedDirectRoomLogAppendBatchSize ... 1_048_576).contains(
+                  (1 ... 1_048_576).contains(
                       parsedDirectRoomLogAppendMaximumPending
                   )
             else {
@@ -785,7 +683,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             guard let parsedDirectRoomLogAppendBatchMaximumInFlight = Int(
                 rawDirectRoomLogAppendBatchMaximumInFlight
             ),
-            parsedDirectRoomLogAppendBatchSize > 0,
             (1 ... maximumAppendBatchConcurrency).contains(
                 parsedDirectRoomLogAppendBatchMaximumInFlight
             )
@@ -803,25 +700,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 foregroundWriteDatabaseWorkLimit
             )
         }
-        let rawDirectRoomLogAppendLaneCount = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_LANES", environment: environment
-        ) ?? "1"
-        guard let parsedDirectRoomLogAppendLaneCount = Int(rawDirectRoomLogAppendLaneCount),
-              parsedDirectRoomLogAppendLaneCount >= 1,
-              parsedDirectRoomLogAppendLaneCount <= 64,
-              parsedDirectRoomLogAppendLaneCount == 1 || (
-                  parsedDirectRoomLogAppendBatchSize > 0
-                      && parsedDirectRoomLogAppendLaneCount
-                          <= directRoomLogAppendBatchMaximumInFlightBatches
-                      && parsedDirectRoomLogAppendLaneCount
-                          <= directRoomLogAppendMaximumPendingRequests
-              )
-        else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_DIRECT_ROOM_LOG_APPEND_LANES"
-            )
-        }
-        directRoomLogAppendLaneCount = parsedDirectRoomLogAppendLaneCount
         let rawDirectRoomLogAppendBatchDelay = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS", environment: environment
         ) ?? "2"
@@ -840,45 +718,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS",
             environment: environment
         )
-        let rawHighActivityAppendMinimumRequests = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS",
-            environment: environment
-        )
-        let rawHighActivityAppendWindow = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS",
-            environment: environment
-        )
-        let highActivityAppendValues = [
-            rawHighActivityAppendDelay,
-            rawHighActivityAppendMinimumRequests,
-            rawHighActivityAppendWindow,
-        ]
-        if highActivityAppendValues.allSatisfy({ $0 == nil }) {
-            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = nil
-            directRoomLogAppendBatchHighActivityMinimumRequests = nil
-            directRoomLogAppendBatchHighActivityWindowMilliseconds = nil
-        } else {
-            guard parsedDirectRoomLogAppendBatchSize > 0,
-                  let rawHighActivityAppendDelay,
-                  let rawHighActivityAppendMinimumRequests,
-                  let rawHighActivityAppendWindow,
-                  let parsedHighActivityAppendDelay = Int(rawHighActivityAppendDelay),
-                  let parsedHighActivityAppendMinimumRequests = Int(rawHighActivityAppendMinimumRequests),
-                  let parsedHighActivityAppendWindow = Int(rawHighActivityAppendWindow),
-                  parsedHighActivityAppendDelay > parsedDirectRoomLogAppendBatchDelay,
-                  parsedHighActivityAppendDelay <= 25,
-                  parsedHighActivityAppendMinimumRequests >= 2,
-                  parsedHighActivityAppendMinimumRequests
-                      <= directRoomLogAppendMaximumPendingRequests,
-                  (1 ... 1_000).contains(parsedHighActivityAppendWindow)
-            else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_MIN_REQUESTS/IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_WINDOW_MS"
-                )
+        if let rawHighActivityAppendDelay {
+            guard let parsed = Int(rawHighActivityAppendDelay),
+                  parsed > parsedDirectRoomLogAppendBatchDelay, parsed <= 25 else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS")
             }
-            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = parsedHighActivityAppendDelay
-            directRoomLogAppendBatchHighActivityMinimumRequests = parsedHighActivityAppendMinimumRequests
-            directRoomLogAppendBatchHighActivityWindowMilliseconds = parsedHighActivityAppendWindow
+            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = parsed
+        } else {
+            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = nil
         }
         let rawDirectSendPolicyCacheMaximumEntries = Self.optional(
             "IM_V2_DIRECT_SEND_POLICY_CACHE_MAX_ENTRIES", environment: environment
@@ -1085,26 +932,27 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
               roomShardStorage.count <= databasePolicy.maximumUserShardStores else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_MAX_USER_SHARD_STORES")
         }
-        let foregroundPoolCapacity = databasePolicy.eventLoopThreads * (
+        let foregroundPoolCapacity = databaseNonMessagePoolEventLoopThreads * (
             databaseWorkloadPoolIsolationEnabled
                 ? databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop
                 : databasePolicy.maximumConnectionsPerEventLoop
         )
-        let syncPoolCapacity = databasePolicy.eventLoopThreads * (
+        let syncPoolCapacity = databaseNonMessagePoolEventLoopThreads * (
             databaseWorkloadPoolIsolationEnabled
                 ? databaseWorkloadPoolBudget.syncConnectionsPerEventLoop
                 : databasePolicy.maximumConnectionsPerEventLoop
         )
         if databaseWorkloadPoolIsolationEnabled {
-            guard foregroundWriteDatabaseWorkLimit + foregroundControlWriteDatabaseWorkLimit +
-                    interactiveReadDatabaseWorkLimit <= foregroundPoolCapacity,
+            let messageWriteCapacity = databasePolicy.eventLoopThreads * databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop
+            guard (messageWriteCapacity > 0 ? foregroundControlWriteDatabaseWorkLimit + interactiveReadDatabaseWorkLimit :
+                    foregroundWriteDatabaseWorkLimit + foregroundControlWriteDatabaseWorkLimit + interactiveReadDatabaseWorkLimit) <= foregroundPoolCapacity,
                   syncDatabaseWorkLimit <= syncPoolCapacity
             else {
                 throw V2GatewayRuntimeConfigurationError.invalid(
                     "IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT/IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT/IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT/IM_V2_SYNC_DATABASE_WORK_LIMIT"
                 )
             }
-            let projectionPoolCapacity = databasePolicy.eventLoopThreads *
+            let projectionPoolCapacity = databaseNonMessagePoolEventLoopThreads *
                 databaseWorkloadPoolBudget.projectionConnectionsPerEventLoop
             let projectionStoreCountsByURL = Dictionary(
                 grouping: userShardStorage,
@@ -1142,7 +990,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         directAuthorizationResolutionDatabaseURLs = Set([databaseURL] + roomShardStorage.map(\.databaseURL)).sorted()
         let (baseDedicated, baseOverflow) = directSendControlConnectionsPerEventLoop.addingReportingOverflow(1)
         let (dedicatedPerLoop, dedicatedOverflow) = baseDedicated.addingReportingOverflow(directAuthorizationResolutionDatabaseURLs.count)
-        let (dedicatedConnections, dedicatedTotalOverflow) = databasePolicy.eventLoopThreads.multipliedReportingOverflow(by: dedicatedPerLoop)
+        let (dedicatedConnections, dedicatedTotalOverflow) = databaseNonMessagePoolEventLoopThreads.multipliedReportingOverflow(by: dedicatedPerLoop)
         guard !baseOverflow, !dedicatedOverflow, !dedicatedTotalOverflow else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")
         }
@@ -1153,7 +1001,11 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                     ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
                     : databasePolicy.maximumConnectionsPerEventLoop,
             // 路由、预留和解析连接池均不借用前台连接。
-            additionalConnections: dedicatedConnections
+            additionalConnections: dedicatedConnections,
+            workloadConnectionsPerPhysicalStore: databaseWorkloadPoolIsolationEnabled
+                ? databasePolicy.eventLoopThreads * databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop
+                    + databaseNonMessagePoolEventLoopThreads * (databaseWorkloadPoolBudget.totalConnectionsPerEventLoop - databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop)
+                : nil
         )
         strangerMessagePolicy = try .init(
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),
@@ -1343,13 +1195,17 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     private static func roomShardStorage(
         rawValue: String?, requiredShardIDs: Set<String>, localDatabaseURL: String
     ) throws -> [V2RoomShardStorageConfiguration] {
+        guard requiredShardIDs.allSatisfy({ !$0.hasPrefix("user:") }) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON")
+        }
         guard let rawValue else {
             return try requiredShardIDs.sorted().map {
                 try .init(shardID: $0, databaseURL: localDatabaseURL)
             }
         }
         let decoded = try V2RoomShardStorageConfiguration.parseRegistryJSON(rawValue)
-        guard Set(decoded.map(\.shardID)) == requiredShardIDs else {
+        guard decoded.allSatisfy({ !$0.shardID.hasPrefix("user:") }),
+              Set(decoded.map(\.shardID)) == requiredShardIDs else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ROOM_SHARD_STORES_JSON")
         }
         return decoded
@@ -1359,67 +1215,18 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         environment: any V2RuntimeEnvironment,
         gatewayReplicaCount: Int
     ) throws -> V2GroupEventWakeRuntimeConfiguration {
-        let rawURL = optional("IM_V2_GROUP_WAKE_NATS_URL", environment: environment)
-        let subject = optional("IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX", environment: environment)
-        let token = optional("IM_V2_GROUP_WAKE_NATS_TOKEN", environment: environment)
-        let routingKeyBase64 = optional("IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64", environment: environment)
-        let tlsCAPath = optional("IM_V2_GROUP_WAKE_NATS_TLS_CA_PATH", environment: environment)
-        let tlsServerName = optional("IM_V2_GROUP_WAKE_NATS_TLS_SERVER_NAME", environment: environment)
-        let rawWakeDeferralDelay = optional(
-            "IM_V2_GROUP_WAKE_DEFERRAL_MS",
-            environment: environment
-        )
-        switch (rawURL, subject, routingKeyBase64) {
-        case (nil, nil, nil):
-            guard token == nil else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_TOKEN") }
-            guard tlsCAPath == nil, tlsServerName == nil else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_GROUP_WAKE_NATS_TLS_CA_PATH/IM_V2_GROUP_WAKE_NATS_TLS_SERVER_NAME"
-                )
+        let transport = optional("IM_V2_REALTIME_ROOM_TRANSPORT", environment: environment) ?? "actor"
+        switch transport {
+        case "actor":
+            guard optional("IMV2_ROOM_ACTOR_CONFIGURATION_FILE", environment: environment) != nil else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IMV2_ROOM_ACTOR_CONFIGURATION_FILE")
             }
-            guard rawWakeDeferralDelay == nil else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_GROUP_WAKE_DEFERRAL_MS"
-                )
-            }
-            guard gatewayReplicaCount == 1 else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_GATEWAY_REPLICA_COUNT/IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64"
-                )
-            }
-            return .localOnly
-        case let (rawURL?, subject?, routingKeyBase64?):
-            guard let url = URL(string: rawURL) else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL") }
-            guard let routingKey = Data(base64Encoded: routingKeyBase64) else {
-                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")
-            }
-            let wakeDeferralDelayMilliseconds: Int
-            if let rawWakeDeferralDelay {
-                guard let parsed = Int(rawWakeDeferralDelay),
-                      (0 ... 1_000).contains(parsed)
-                else {
-                    throw V2GatewayRuntimeConfigurationError.invalid(
-                        "IM_V2_GROUP_WAKE_DEFERRAL_MS"
-                    )
-                }
-                wakeDeferralDelayMilliseconds = parsed
-            } else {
-                wakeDeferralDelayMilliseconds = 60
-            }
-            do {
-                return .nats(try .init(
-                    url: url,
-                    subjectPrefix: subject,
-                    token: token,
-                    routingKey: routingKey,
-                    tlsCAPath: tlsCAPath,
-                    tlsServerName: tlsServerName,
-                    wakeDeferralDelayMilliseconds:
-                        wakeDeferralDelayMilliseconds
-                ))
-            }
-            catch { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64") }
-        default: throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_WAKE_NATS_URL/IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX/IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64")
+            return .actor
+        case "local":
+            // Account-wide delivery requires the authenticated room-to-Gateway route.
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_REALTIME_ROOM_TRANSPORT")
+        default:
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_REALTIME_ROOM_TRANSPORT")
         }
     }
 

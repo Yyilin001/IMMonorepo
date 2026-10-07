@@ -12,8 +12,8 @@ import Testing
 
 @Suite("V2 NIO gateway timer regressions", .timeLimit(.minutes(1)))
 struct V2NIOGatewayTimerRegressionTests {
-    @Test("authentication deadline ends when auth succeeds even if a coalesced command is slow")
-    func authenticatedBatchDoesNotExpireDuringSlowCommand() async throws {
+    @Test("authenticated suspended requests neither expire nor retain a disconnected registration", arguments: [false, true])
+    func authenticatedBatchDoesNotExpireDuringSlowCommand(closeBeforeRelease: Bool) async throws {
         let registry = V2DeviceConnectionRegistry()
         let command = SuspendedGatewayCommand()
         let stream = try makeStream(registry: registry, handler: command)
@@ -56,8 +56,20 @@ struct V2NIOGatewayTimerRegressionTests {
         #expect(channel.isActive)
         #expect((await metrics.gatewayTransportMetricsSnapshot()).closureCount(for: .authenticationTimeout) == 0)
 
+        #expect(await registry.connectionMetricsSnapshot().activeConnections == 1)
+        if closeBeforeRelease {
+            try await channel.close().get()
+            let deadline = ContinuousClock.now + .seconds(2)
+            while await registry.connectionMetricsSnapshot().activeConnections != 0, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            // The command ignores cancellation until its gate is released.
+            // Transport retirement must not wait for that release.
+            #expect(await registry.connectionMetricsSnapshot().activeConnections == 0)
+        }
+
         await command.release()
-        try await channel.close().get()
+        if !closeBeforeRelease { try await channel.close().get() }
         _ = try await channel.finish(acceptAlreadyClosed: true)
     }
 

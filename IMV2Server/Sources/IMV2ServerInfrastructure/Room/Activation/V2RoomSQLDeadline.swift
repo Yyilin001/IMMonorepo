@@ -38,12 +38,17 @@ func v2WithRoomScopedTransaction<Value: Sendable>(
     database: any Database,
     timeouts: V2RoomActivationSQLTimeouts = .default,
     useRoomDeadline: Bool = true,
+    sendOperationMetrics: V2SendOperationBatchMetrics? = nil,
+    measureConnectionAcquire: Bool = true,
+    pinnedConnection: V2BorrowedRoomConnection? = nil,
     _ operation: @escaping @Sendable (any Database) async throws -> Value
 ) async throws -> Value {
     if useRoomDeadline {
         return try await v2WithRoomActivationTransaction(
             database: database, deadline: V2RoomSQLDeadline.boundedTransactionDeadline(),
-            timeouts: timeouts, operation)
+            timeouts: timeouts, sendOperationMetrics: sendOperationMetrics,
+            measureConnectionAcquire: measureConnectionAcquire,
+            pinnedConnection: pinnedConnection, operation)
     }
     return try await database.transaction(operation)
 }

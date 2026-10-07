@@ -27,11 +27,6 @@ public struct V2SendMessageService: Sendable {
         batcher?.managesForegroundWriteAdmission ?? false
     }
 
-    /// 报告批处理器是否已负责提交后群事件发布；未配置批处理器时为 `false`。
-    var publishesCommittedGroupEvents: Bool {
-        batcher?.publishesCommittedGroupEvents ?? false
-    }
-
     /// 配置发送服务及其可注入依赖。
     ///
     /// - Parameters:

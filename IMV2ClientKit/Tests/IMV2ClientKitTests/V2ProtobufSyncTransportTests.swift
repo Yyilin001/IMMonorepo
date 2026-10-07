@@ -1,9 +1,90 @@
 import Foundation
-import IMV2ClientKit
+@testable import IMV2ClientKit
 import IMV2Core
 import Testing
 
 struct V2ProtobufSyncTransportTests {
+    @Test("bounded background confirmation preserves progress arriving during its snapshot")
+    func backgroundConfirmationSnapshot() async throws {
+        let wire = DeviceProgressWorkerWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        let room = RoomID(uuid: UUID())
+        try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: 3)
+        let flush = Task { try await transport.flushDeviceRoomProgressReports() }
+        var batches = wire.batches.makeAsyncIterator()
+        #expect(await batches.next() == [room: 3])
+        try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: 5)
+        await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
+            try await transport.flushDeviceRoomProgressReports()
+        }
+        await wire.release()
+        try await flush.value
+        try await transport.flushDeviceRoomProgressReports()
+        #expect(await batches.next() == [room: 5])
+    }
+    @Test("a revoked room does not stall other device confirmations")
+    func revokedRoomDoesNotBlockConfirmations() async throws {
+        let revoked = RoomID(uuid: UUID()), allowed = RoomID(uuid: UUID())
+        let wire = ForbiddenDeviceProgressWire(revoked: revoked)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        try await transport.enqueueDeviceRoomProgress(roomID: revoked, appliedThrough: 3)
+        try await transport.enqueueDeviceRoomProgress(roomID: allowed, appliedThrough: 5)
+        let worker = Task { try await transport.runDeviceRoomProgressReports() }
+        var accepted = wire.accepted.makeAsyncIterator()
+        #expect(await accepted.next() == allowed)
+        worker.cancel()
+        await #expect(throws: CancellationError.self) { try await worker.value }
+    }
+    @Test("confirmation worker coalesces rooms and keeps progress arriving during an acknowledgement")
+    func confirmationWorkerCoalescing() async throws {
+        let wire = DeviceProgressWorkerWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        let a = RoomID(uuid: UUID()), b = RoomID(uuid: UUID())
+        try await transport.enqueueDeviceRoomProgress(roomID: a, appliedThrough: 3)
+        try await transport.enqueueDeviceRoomProgress(roomID: a, appliedThrough: 5)
+        let worker = Task { try await transport.runDeviceRoomProgressReports() }
+        var batches = wire.batches.makeAsyncIterator()
+        let first = try #require(await batches.next())
+        #expect(first == [a: 5])
+        try await transport.enqueueDeviceRoomProgress(roomID: a, appliedThrough: 8)
+        try await transport.enqueueDeviceRoomProgress(roomID: b, appliedThrough: 2)
+        await wire.release()
+        let second = try #require(await batches.next())
+        #expect(second == [a: 8, b: 2])
+        worker.cancel()
+        await #expect(throws: CancellationError.self) { try await worker.value }
+    }
+    @Test("device progress uses an independent room batch and validates the exact acknowledgement", arguments: [false, true])
+    func deviceProgressAcknowledgement(wrongAcknowledgement: Bool) async throws {
+        let wire = DeviceProgressWire(wrongAcknowledgement: wrongAcknowledgement)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        let cursors: [RoomID: UInt64] = [RoomID(uuid: UUID()): 3, RoomID(uuid: UUID()): 8]
+        if wrongAcknowledgement {
+            await #expect(throws: V2RealtimeTransportError.unexpectedResponse) {
+                try await transport.reportDeviceRoomProgress(cursors)
+            }
+        } else {
+            try await transport.reportDeviceRoomProgress(cursors)
+        }
+        #expect(await wire.roomCount == 2)
+    }
+    @Test("Sync BUSY cannot extend its deadline or retry on a replacement connection", arguments: [false, true])
+    func syncBusyRejectsFloorOrNewGeneration(replaced: Bool) async throws {
+        let wire = BusyScopeWire(replaced: replaced)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        if replaced {
+            await #expect(throws: V2TLSFrameConnectionError.connectionClosed) {
+                _ = try await transport.pull(syncToken: nil, maxRecords: 100)
+            }
+        } else {
+            await #expect(throws: V2RealtimeTransportError.server(code: "SERVER_BUSY", retryable: true,
+                retryAfterSeconds: 11, currentRevision: nil)) {
+                _ = try await transport.pull(syncToken: nil, maxRecords: 100)
+            }
+        }
+        #expect(await wire.requests == 1)
+    }
+
     @Test("snapshot expiry checks reject invalid local clocks and preserve the exact expiry boundary", arguments: ["nan", "negativeInfinity", "positiveInfinity", "belowMinimum", "aboveMaximum", "negative", "epoch", "beforeExpiry", "atExpiry", "afterExpiry"])
     func snapshotExpiryClockBounds(scenario: String) async throws {
         let expiry = Date.distantFuture
@@ -117,6 +198,37 @@ struct V2ProtobufSyncTransportTests {
 
         try await transport.sendHeartbeat(clientTime: Date(timeIntervalSince1970: 1_750_000_000))
         #expect(await wire.receivedHeartbeat())
+    }
+
+    @Test("heartbeat reports durable C and discovers a lost final body and hint through authoritative H")
+    func heartbeatRoomProgress() async throws {
+        let wire = RoomProgressHeartbeatWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1,
+            durableRoomProgress: { _ in 4 })
+        try await transport.sendHeartbeat()
+        #expect(await wire.reportedApplied == 4)
+        #expect(await wire.receivedHead == 7)
+    }
+
+    @Test("heartbeat without durable cursor still discovers authoritative room head")
+    func heartbeatRoomStateWithoutProgress() async throws {
+        let wire = RoomProgressHeartbeatWire()
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1,
+            durableRoomProgress: { _ in nil })
+        try await transport.sendHeartbeat()
+        #expect(await wire.reportedApplied == nil)
+        #expect(await wire.receivedHead == 7)
+    }
+
+    @Test("a recovering server room state does not become Ready or wake room pulling")
+    func heartbeatRecoveringRoomState() async throws {
+        let wire = RoomProgressHeartbeatWire(ready: false)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1,
+            durableRoomProgress: { _ in 4 })
+        try await transport.sendHeartbeat()
+        #expect(await wire.reportedApplied == 4)
+        #expect(await wire.receivedHead == nil)
+        #expect(await wire.roomProgressScope()?.scopeGeneration == 2)
     }
 
     @Test("snapshot manifests with a different projection schema are rejected before a reset begins")
@@ -376,6 +488,74 @@ private actor ReadReceiptReadersWire: V2AuthenticatedFrameTransport {
 
 
 
+private actor ForbiddenDeviceProgressWire: V2AuthenticatedFrameTransport {
+    let revoked: RoomID
+    nonisolated let accepted: AsyncStream<RoomID>
+    private let continuation: AsyncStream<RoomID>.Continuation
+    init(revoked: RoomID) {
+        self.revoked = revoked
+        let stream = AsyncStream<RoomID>.makeStream()
+        accepted = stream.stream; continuation = stream.continuation
+    }
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .deviceRoomProgressReport(let report)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        var response = IMV2Envelope()
+        response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
+        if report.rooms.contains(where: { $0.roomID == revoked.rawValue }) {
+            response.error = .init(); response.error.code = "FORBIDDEN"; response.error.retryable = false
+        } else {
+            response.deviceRoomProgressRecorded = .init(); response.deviceRoomProgressRecorded.rooms = report.rooms
+            for room in report.rooms { continuation.yield(try RoomID(room.roomID)) }
+        }
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: frame.version)
+    }
+}
+
+private actor DeviceProgressWorkerWire: V2AuthenticatedFrameTransport {
+    nonisolated let batches: AsyncStream<[RoomID: UInt64]>
+    private let continuation: AsyncStream<[RoomID: UInt64]>.Continuation
+    private var first = true
+    private var gate: CheckedContinuation<Void, Never>?
+    init() {
+        let stream = AsyncStream<[RoomID: UInt64]>.makeStream()
+        batches = stream.stream; continuation = stream.continuation
+    }
+    func release() { gate?.resume(); gate = nil }
+    func request(_ frame: V2Frame) async throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .deviceRoomProgressReport(let report)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        let values = try Dictionary(uniqueKeysWithValues: report.rooms.map { (try RoomID($0.roomID), $0.appliedThrough) })
+        continuation.yield(values)
+        if first {
+            first = false
+            await withCheckedContinuation { gate = $0 }
+        }
+        var response = IMV2Envelope()
+        response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
+        response.deviceRoomProgressRecorded = .init()
+        response.deviceRoomProgressRecorded.rooms = report.rooms
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: frame.version)
+    }
+}
+
+private actor DeviceProgressWire: V2AuthenticatedFrameTransport {
+    let wrongAcknowledgement: Bool
+    private(set) var roomCount = 0
+    init(wrongAcknowledgement: Bool) { self.wrongAcknowledgement = wrongAcknowledgement }
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .deviceRoomProgressReport(let report)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        roomCount = report.rooms.count
+        var response = IMV2Envelope()
+        response.requestID = request.requestID
+        response.protocolVersion = request.protocolVersion
+        response.deviceRoomProgressRecorded = .init()
+        response.deviceRoomProgressRecorded.rooms = wrongAcknowledgement ? [] : report.rooms
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: frame.version)
+    }
+}
+
 private actor HeartbeatWire: V2AuthenticatedFrameTransport {
     private var didReceiveHeartbeat = false
 
@@ -531,5 +711,78 @@ private struct ScannedRoomCursorWire: V2AuthenticatedFrameTransport {
             response.groupEventPage.events = [event]
         }
         return try V2ProtobufFrameCodec.encode(response, frameVersion: UInt8(request.protocolVersion))
+    }
+}
+
+private actor BusyScopeWire: V2AuthenticatedFrameTransport {
+    let replaced: Bool
+    var generation = UUID()
+    var requests = 0
+    init(replaced: Bool) { self.replaced = replaced }
+    func authenticatedConnectionID() -> UUID? { generation }
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        #expect(V2ConnectionRequestScope.connectionID == generation)
+        requests += 1
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        var response = IMV2Envelope(); response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
+        response.error.code = "SERVER_BUSY"; response.error.retryable = true
+        response.error.retryAfterSeconds = replaced ? 0 : 11
+        if replaced { generation = UUID() }
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: frame.version)
+    }
+}
+
+actor RoomProgressHeartbeatWire: V2AuthenticatedFrameTransport, V2RoomProgressConnection {
+    let connectionID = UUID()
+    let room: RoomID
+    let ready: Bool
+    let serverAccepted: UInt64?
+    var reportedApplied: UInt64?
+    var receivedHead: UInt64?
+
+    init(room: RoomID = RoomID(uuid: UUID()), ready: Bool = true, serverAccepted: UInt64? = nil) {
+        self.room = room; self.ready = ready; self.serverAccepted = serverAccepted
+    }
+
+    func authenticatedConnectionID() -> UUID? { connectionID }
+    func roomProgressScope() -> V2RealtimeCoverageState? {
+        var coverage = IMV2RealtimeCoverage()
+        coverage.scope = .room
+        coverage.scopeID = room.rawValue
+        coverage.scopeGeneration = 2
+        coverage.highWatermark = 4
+        coverage.revision = 1
+        coverage.state = .ready
+        coverage.reason = .unspecified
+        return try? V2RealtimeCoverageState(wire: coverage, generation: connectionID)
+    }
+    func acceptRoomProgressHead(roomID: String, scopeGeneration: UInt64, highWatermark: UInt64,
+                                connectionID incomingConnection: UUID) throws {
+        #expect(roomID == room.rawValue)
+        #expect(scopeGeneration == 2)
+        #expect(incomingConnection == connectionID)
+        receivedHead = highWatermark
+    }
+    func request(_ frame: V2Frame) throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        guard case .heartbeat(let heartbeat)? = request.body else { throw V2RealtimeTransportError.unexpectedResponse }
+        #expect(heartbeat.roomProgress.count <= 1)
+        if let progress = heartbeat.roomProgress.first {
+            #expect(progress.roomID == room.rawValue)
+            #expect(progress.scopeGeneration == 2)
+            reportedApplied = progress.appliedRoomSequence
+        }
+        var state = IMV2GroupEventProgressState()
+        state.roomID = room.rawValue
+        state.scopeGeneration = 2
+        state.highWatermark = 7
+        state.appliedRoomSequence = serverAccepted ?? reportedApplied ?? 0
+        state.ready = ready
+        var response = IMV2Envelope()
+        response.requestID = request.requestID
+        response.protocolVersion = 1
+        response.heartbeatAck = .init()
+        response.heartbeatAck.roomSubscriptionStates = [state]
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: 1)
     }
 }

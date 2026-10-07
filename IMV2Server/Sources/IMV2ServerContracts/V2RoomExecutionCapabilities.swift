@@ -2,11 +2,35 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
+/// A store-bound preparation capability. The captured executor retains the
+/// exact store, commands and activation; preparation alone grants no write
+/// authority. Concrete persistence handles stay below the application boundary.
+public struct V2PreparedRoomSendOperationBatch: Sendable {
+    private let operation: @Sendable () async throws -> [V2RoomMessagingResult]
+
+    package init(operation: @escaping @Sendable () async throws -> [V2RoomMessagingResult]) {
+        self.operation = operation
+    }
+
+    package func execute() async throws -> [V2RoomMessagingResult] {
+        try await operation()
+    }
+}
+
 // Each activation lane receives only the commands it can execute. The concrete
 // SQL implementations are assembled by the server activation factory.
 package protocol V2RoomMessagingExecuting: Sendable {
     func execute(_ command: V2RoomMessagingCommand) async throws -> V2RoomMessagingResult
     func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult]
+    func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
+                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch
+}
+
+package extension V2RoomMessagingExecuting {
+    func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
+                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
+        .init { try await self.executeSendOperationBatch(commands) }
+    }
 }
 
 package protocol V2RoomAdministrationExecuting: Sendable {
@@ -34,7 +58,16 @@ package protocol V2RoomMediaAuthorizationExecuting: Sendable {
 package protocol V2RoomMessagingPersisting: Sendable {
     func execute(_ command: V2RoomMessagingCommand) async throws -> V2RoomMessagingResult
     func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult]
+    func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
+                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch
     func accept(_ request: V2RoomWriteRequest) async throws -> V2RoomMessagingResult
+}
+
+package extension V2RoomMessagingPersisting {
+    func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
+                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
+        .init { try await self.executeSendOperationBatch(commands) }
+    }
 }
 
 package protocol V2RoomAdministrationStoring: Sendable {

@@ -520,11 +520,7 @@ private func cancelMaintenanceHost(database: any Database,
         maximumCommandsPerTurn: 1, maximumConcurrentReservations: 2)
     let budget = V2RoomCommandBudget(configuration: configuration)
     let writes = PostgresV2RoomWriteStore(database: database)
-    let batcher = V2SendMessageAdmissionBatcher(store: writes,
-        configuration: .init(maximumBatchSize: 1, maximumDelay: .milliseconds(2)),
-        databaseWorkAdmission: admission, actorGrantedStore: writes)
     let resources = try V2RoomServerOwnerResources(database: database, writes: writes,
-        sendBatcher: batcher,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -693,9 +689,9 @@ private func cancelMaintenanceRoomLockWait(sql: any SQLDatabase) async throws ->
 
 private func cancelMaintenanceOperationCount(sql: any SQLDatabase, operation: UUID) async throws -> Int64 {
     try #require(try await sql.raw("""
-        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_operation_receipts
-        WHERE room_id = \(bind: roomUUID) AND actor_user_id = \(bind: senderUUID)
-          AND operation_id = \(bind: operation)
+        SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_completions
+        WHERE room_id = \(bind: roomUUID) AND sender_user_id = \(bind: senderUUID)
+          AND client_message_id = \(bind: operation)
         """).first(decoding: CancelMaintenanceCountRow.self)).value
 }
 

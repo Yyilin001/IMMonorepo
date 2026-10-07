@@ -4,31 +4,6 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-private func v2MessageEntity(_ wire: IMV2MessageEntity) throws -> V2MessageEntity {
-    let kind: V2MessageEntity.Kind
-    switch wire.kind {
-    case .bold: kind = .bold
-    case .italic: kind = .italic
-    case .underline: kind = .underline
-    case .strikethrough: kind = .strikethrough
-    case .spoiler: kind = .spoiler
-    case .code: kind = .code
-    case .preformatted: kind = .preformatted
-    case .link: kind = .link
-    case .unspecified, .UNRECOGNIZED: throw V2RichMessageContentError.invalidEntity
-    }
-    return try .init(offsetUTF16: Int(wire.offsetUtf16), lengthUTF16: Int(wire.lengthUtf16), kind: kind, linkURL: wire.linkURL.isEmpty ? nil : URL(string: wire.linkURL))
-}
-
-private enum V2GatewayResponseValueError: Error {
-    case invalidCount
-}
-
-private func v2GatewayCount(_ value: Int) throws -> UInt32 {
-    guard let count = UInt32(exactly: value) else { throw V2GatewayResponseValueError.invalidCount }
-    return count
-}
-
 /// 网关 `GroupEventPage` 信封的精确 protobuf 载荷字节数。
 ///
 /// 早期实现每追加一条事件就整体序列化一次候选页面，使满页场景在 protobuf 计算与临时分配上
@@ -86,15 +61,6 @@ func v2ProtobufVarintByteCount(_ value: UInt64) -> Int {
     return count
 }
 
-
-
-
-
-
-
-
-
-
 /// A command has exactly one database-work admission owner. Commands with no
 /// database work have no admission owner, so cleanup remains available during
 /// overload. Room Host admission includes its own release and cancellation.
@@ -113,7 +79,6 @@ public struct V2GatewayDomainCommandHandler:
     private let messageCommands: V2GatewayMessageCommands
     private let liveActivityCommands: V2GatewayLiveActivityCommands
     private let groupEventCommands: V2GatewayGroupEventCommands
-    private let foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting
     private let roomQueryCommands: V2GatewayRoomQueryCommands
     private let accountChanges: any V2AccountRoomChangesStarting
     private let roomRecovery: any V2RoomRecoveryCommandHandling
@@ -136,7 +101,6 @@ public struct V2GatewayDomainCommandHandler:
         messageLimits: V2MessageCommandLimits = try! .init(maxUTF8Bytes: 65_536),
         liveActivityHandler: any V2GatewayLiveActivityHandling,
         groupEventLogHandler: any V2GatewayGroupEventLogHandling,
-        foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting,
         membershipDirectoryHandler: any V2GatewayRoomMembershipDirectoryHandling,
         roomRecovery: any V2RoomRecoveryCommandHandling,
         accountChanges: any V2AccountRoomChangesStarting,
@@ -158,7 +122,6 @@ public struct V2GatewayDomainCommandHandler:
         roomQueryCommands = .init(groupRolePolicyBaseline: groupRolePolicyBaseline, membershipDirectory: membershipDirectoryHandler)
         syncCommands = .init(sync: sync)
         groupEventCommands = .init(groupEventLog: groupEventLogHandler, maximumGroupEventPagePayloadBytes: maximumGroupEventPagePayloadBytes)
-        self.foregroundGroupEventHints = foregroundGroupEventHints
         self.roomRecovery = roomRecovery
         self.accountChanges = accountChanges
         self.telemetry = telemetry
@@ -354,6 +317,11 @@ public struct V2GatewayDomainCommandHandler:
                 startedAt: startedAt
             ))
         } catch {
+            if let failure = error as? V2RoomCallFailure,
+               let response = groupEventPullBackpressure(failure) {
+                return .envelope(await recordAndReturn(response, traceID: traceID,
+                    command: command, startedAt: startedAt))
+            }
             await telemetry.record(.gatewayCommand(
                 traceID: traceID,
                 command: command,
@@ -364,8 +332,6 @@ public struct V2GatewayDomainCommandHandler:
             throw error
         }
     }
-
-
 
     private func recordAndReturn(
         _ response: IMV2Envelope,
@@ -398,6 +364,8 @@ public struct V2GatewayDomainCommandHandler:
         for envelope: IMV2Envelope
     ) -> V2DatabaseWorkClass? {
         guard envelope.body != nil else { return nil }
+        if case .messageSendOperationRecover = envelope.body,
+           messageCommands.messageSendOperations.usesReadOnlySendRecovery { return .interactiveRead }
         switch envelope.body {
         case .syncPull, .syncAck, .syncSnapshot, .snapshotPagePull, .snapshotAck:
             return .sync
@@ -427,6 +395,8 @@ public struct V2GatewayDomainCommandHandler:
 
     private func admissionOwner(for envelope: IMV2Envelope) -> V2GatewayAdmissionOwner {
         guard databaseWorkClass(for: envelope) != nil else { return .none }
+        if case .messageSendOperationRecover = envelope.body,
+           messageCommands.messageSendOperations.usesReadOnlySendRecovery { return .gateway }
         if roomCommandsHostAdmitted {
             switch envelope.body {
             case .recordReadReceipt,
@@ -498,10 +468,12 @@ public struct V2GatewayDomainCommandHandler:
                 return successEnvelope()
             default: return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
             }
-        } catch V2GatewayTimestampError.unrepresentable, V2GatewayResponseValueError.invalidCount, V2GroupMessagingValidationError.invalidMemberCount,
+        } catch V2GatewayTimestampError.unrepresentable, V2GroupMessagingValidationError.invalidMemberCount,
                 V2AcceptanceIdentifierError.invalidTimestamp {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2AccountRoomChangeService.Failure.closed, V2AccountRoomChangeService.Failure.staleConnection {
+            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
+        } catch is V2RealtimePublicationBackpressure {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2RoomRecoveryReadError.invalidRequest, V2RoomRecoveryReadError.invalidCursor {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -518,7 +490,47 @@ public struct V2GatewayDomainCommandHandler:
         } catch is V2MessageSendOperationWireCodecError,
                 is V2MessageOperationValidationError {
             return errorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+        } catch let overload as V2GatewayMessageOverloadFailure {
+            let command: V2MessageSendFailureCommand
+            switch envelope.body {
+            case .messageSendOperation: command = .submit
+            case .messageSendOperationRecover: command = .recover
+            default: throw overload // the decoded operation wrapper is family-specific
+            }
+            let disposition: V2MessageSendFailureDisposition
+            switch overload.failure {
+            case .notAccepted(.overloaded): disposition = .notAccepted
+            case .rolledBack(.overloaded): disposition = .rolledBack
+            default: throw overload // no inferred rollback or generic availability mapping
+            }
+            await telemetry.record(.messageSendInternalFailure(command: command,
+                disposition: disposition, reason: .overloaded))
+            let hint = try V2MessageOperationRetryHint(identity: overload.identity,
+                fingerprint: overload.fingerprint, reason: .admissionUnavailable,
+                retryAfterMilliseconds: nil)
+            var response = IMV2Envelope()
+            response.messageSendOperationResult = V2MessageSendOperationWireCodec.encode(result: .deferred(hint))
+            return response
         } catch let failure as V2RoomCallFailure {
+            if case .groupEventPull = envelope.body,
+               let response = groupEventPullBackpressure(failure) { return response }
+            let diagnosticCommand: V2MessageSendFailureCommand?
+            switch envelope.body {
+            case .messageSendOperation: diagnosticCommand = .submit
+            case .messageSendOperationRecover: diagnosticCommand = .recover
+            default: diagnosticCommand = nil
+            }
+            if let diagnosticCommand {
+                let disposition: V2MessageSendFailureDisposition
+                let reason: V2MessageSendFailureReason
+                switch failure {
+                case .outcomeUnknown: disposition = .outcomeUnknown; reason = .none
+                case .notAccepted(let actorReason): disposition = .notAccepted; reason = messageFailureReason(actorReason)
+                case .rolledBack(let actorReason): disposition = .rolledBack; reason = messageFailureReason(actorReason)
+                }
+                await telemetry.record(.messageSendInternalFailure(command: diagnosticCommand,
+                    disposition: disposition, reason: reason))
+            }
             switch failure {
             case .outcomeUnknown:
                 // 客户端重试时沿用操作 ID；超时的写入可能已在前一实例中持久化。
@@ -693,82 +705,36 @@ public struct V2GatewayDomainCommandHandler:
         }
     }
 
-
-
-    private func acceptedMessageEnvelope(_ message: V2MessageAcceptanceReceipt) throws -> IMV2Envelope {
-            var response = IMV2Envelope(); response.messageAccepted = .init()
-            response.messageAccepted.messageID = message.messageID.rawValue
-            response.messageAccepted.roomID = message.roomID.rawValue
-            response.messageAccepted.roomSequence = message.roomSequence
-            response.messageAccepted.serverCreatedAtMs = try v2GatewayMilliseconds(message.createdAt)
-            return response
+    private func successEnvelope() -> IMV2Envelope { v2GatewaySuccessEnvelope() }
+    /// Only a known rejected/rolled-back read is backpressure. Unknown results
+    /// and unavailable transports retain their existing error handling.
+    private func groupEventPullBackpressure(_ failure: V2RoomCallFailure) -> IMV2Envelope? {
+        switch failure {
+        case .notAccepted(.overloaded), .rolledBack(.overloaded):
+            return errorEnvelope(code: "SERVER_BUSY", retryable: true, retryAfter: 1)
+        default: return nil
+        }
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    /// 用与普通群事件命令完全相同的载荷预算规则构造持久化回落响应。
-    ///
-    /// 预编码快速路径只会在本地不可变覆盖不足，或最新成员栅栏无法为缓存分页授权时
-    /// 才回落到本方法。
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    private func successEnvelope() -> IMV2Envelope { v2GatewaySuccessEnvelope() }
     private func errorEnvelope(code: String, retryable: Bool, retryAfter: Int = 0, currentRevision: UInt64 = 0) -> IMV2Envelope {
         v2GatewayErrorEnvelope(code: code, retryable: retryable, retryAfter: retryAfter, currentRevision: currentRevision)
+    }
+}
+
+private func messageFailureReason(_ reason: V2RoomFailureReason) -> V2MessageSendFailureReason {
+    switch reason {
+    case .staleActivation: .staleActivation
+    case .notReady: .notReady
+    case .retired: .retired
+    case .leaseLost: .leaseLost
+    case .unavailable: .unavailable
+    case .overloaded: .overloaded
+    case .deadlineExceeded: .deadlineExceeded
+    case .cancelled: .cancelled
+    case .notFound: .notFound
+    case .forbidden: .forbidden
+    case .invalidRequest: .invalidRequest
+    case .unsupportedVersion: .unsupportedVersion
+    case .idempotencyConflict: .idempotencyConflict
     }
 }

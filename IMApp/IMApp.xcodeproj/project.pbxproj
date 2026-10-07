@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C1D2E3F405162738495A6B01 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = C1D2E3F405162738495A6B02 /* GRDB */; };
 		1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC422F73859E00E89B24 /* IMV2ClientKit */; };
 		1BADBC432F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC442F73859E00E89B24 /* IMV2ClientKit */; };
 		1BADBC452F73859E00E89B24 /* IMV2Core in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC482F73859E00E89B24 /* IMV2Core */; };
@@ -99,6 +100,7 @@
 			files = (
 				1BADBC432F73859E00E89B24 /* IMV2ClientKit in Frameworks */,
 				1BADBC462F73859E00E89B24 /* IMV2Core in Frameworks */,
+				C1D2E3F405162738495A6B01 /* GRDB in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -201,6 +203,7 @@
 			packageProductDependencies = (
 				1BADBC442F73859E00E89B24 /* IMV2ClientKit */,
 				1BADBC492F73859E00E89B24 /* IMV2Core */,
+				C1D2E3F405162738495A6B02 /* GRDB */,
 			);
 			productName = IMAppTests;
 			productReference = 1BADBC1B2F73859E00E89B24 /* IMAppTests.xctest */;
@@ -939,6 +942,11 @@
 			productName = IMV2Core;
 		};
 		A1E2E3E4F567891011121326 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
+			productName = GRDB;
+		};
+		C1D2E3F405162738495A6B02 /* GRDB */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */;
 			productName = GRDB;

@@ -23,9 +23,15 @@ public struct V2NetworkWorkPolicy: Sendable {
         guard attemptsCompleted < maximumAttempts else { return nil }
         let exponent = min(max(0, attemptsCompleted - 1), 16)
         let ceiling = min(30, 0.5 * pow(2, Double(exponent)))
-        let proposed = now.addingTimeInterval(ceiling * min(1, max(0, randomUnit)))
-        let next = max(proposed, serverRetryNotBefore ?? now)
-        return next < startedAt.addingTimeInterval(totalBudget) ? next : nil
+        let deadline = startedAt.addingTimeInterval(totalBudget)
+        let base = max(now, serverRetryNotBefore ?? now)
+        let remaining = deadline.timeIntervalSince(base)
+        guard remaining > 0 else { return nil }
+        // Jitter starts after the server's minimum cooldown. Taking max after
+        // sampling collapses clients onto the same cooldown boundary.
+        let window = min(ceiling, remaining)
+        let next = base.addingTimeInterval(window * min(1, max(0, randomUnit)))
+        return next < deadline ? next : nil
     }
     public static func acceptedResultPollDelay(attempt: Int, serverDelay: TimeInterval? = nil) -> TimeInterval {
         let defaults: [TimeInterval] = [2, 5, 10, 30]

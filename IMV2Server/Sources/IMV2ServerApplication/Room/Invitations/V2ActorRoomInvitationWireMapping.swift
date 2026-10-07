@@ -451,14 +451,6 @@ extension V2ActorGroupJoinOwnerSubmissionWire {
     }
 }
 
-extension V2ActorReadyInvitesQueryWire {
-    public func validatedInviteIDs() throws -> Set<GroupInviteID> {
-        guard inviteIDs.count <= 1_000, Set(inviteIDs).count == inviteIDs.count else {
-            throw V2GroupInviteDirectoryError.invalidRequest
-        }
-        return Set(inviteIDs)
-    }
-}
 extension V2ActorResolvedInvitePreviewQueryWire {
     public func validatedDigest() throws -> Data { try tokenDigest.validatedBytes() }
 }

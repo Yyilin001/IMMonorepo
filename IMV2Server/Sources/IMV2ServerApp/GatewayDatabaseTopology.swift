@@ -30,6 +30,51 @@ struct GatewayDatabaseTopology {
         databasesByRole[role]?[url] ?? databasesByRole[.foreground]?[url]
     }
 
+    /// Counts each actual composed pool once; facades share the same gates.
+    /// Physical addresses and schemas never enter the exported snapshot.
+    private var physicalLoanDatabases: [V2EventLoopBalancedDatabase] {
+        var seen = Set<ObjectIdentifier>()
+        let workloads = V2PostgresWorkloadPoolBudget.Role.allCases.flatMap { role -> [V2EventLoopBalancedDatabase] in
+            (databasesByRole[role] ?? [:]).values.compactMap { database -> V2EventLoopBalancedDatabase? in
+                guard let balanced = database as? V2EventLoopBalancedDatabase,
+                      seen.insert(ObjectIdentifier(balanced)).inserted else { return nil }
+                return balanced
+            }
+        }
+        if let control = directSendControlPool.database as? V2EventLoopBalancedDatabase,
+           seen.insert(ObjectIdentifier(control)).inserted { return workloads + [control] }
+        return workloads
+    }
+
+    func loanMetricsSnapshot() -> V2PhysicalDatabaseLoanMetricsSnapshot {
+        var total = V2PhysicalDatabaseLoanMetricsSnapshot()
+        for database in physicalLoanDatabases {
+            let snapshot = database.loanMetricsSnapshot()
+            for loanClass in V2PhysicalDatabaseLoanClass.allCases {
+                let value = snapshot.classes[loanClass, default: .init()]
+                var aggregate = total.classes[loanClass, default: .init()]
+                aggregate.inFlight += value.inFlight
+                aggregate.queued += value.queued
+                let granted = aggregate.granted.addingReportingOverflow(value.granted)
+                let rejected = aggregate.rejected.addingReportingOverflow(value.rejected)
+                aggregate.granted = granted.overflow ? .max : granted.partialValue
+                aggregate.rejected = rejected.overflow ? .max : rejected.partialValue
+                total.classes[loanClass] = aggregate
+            }
+            for source in V2DatabaseLoanSource.allCases {
+                total.observations[source, default: .init()].merge(
+                    snapshot.observations[source, default: .init()])
+            }
+        }
+        return total
+    }
+
+    /// Call only after workers and actors have stopped issuing renewal/cleanup
+    /// work. Closing the gates rejects pending loans and awaits actual borrowers.
+    func shutdownLoans() async {
+        for database in physicalLoanDatabases { await database.shutdownLoans() }
+    }
+
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         resources: V2DatabaseResources,
@@ -49,39 +94,46 @@ struct GatewayDatabaseTopology {
         ] = [:]
         let databaseRoles: [V2PostgresWorkloadPoolBudget.Role] =
             configuration.databaseWorkloadPoolIsolationEnabled
-                ? V2PostgresWorkloadPoolBudget.Role.allCases
+                ? V2PostgresWorkloadPoolBudget.Role.allCases.filter { configuration.databaseWorkloadPoolBudget.connectionsPerEventLoop(for: $0) > 0 }
                 : [.foreground]
         for (urlIndex, url) in physicalDatabaseURLs.enumerated() {
             for role in databaseRoles {
                 let identifier: DatabaseID = role == .foreground && url == configuration.databaseURL
                     ? .psql
                     : DatabaseID(string: "gateway-\(role.rawValue)-pool-\(urlIndex)")
+                let capacity = configuration.databaseWorkloadPoolIsolationEnabled
+                    ? configuration.databaseWorkloadPoolBudget.connectionsPerEventLoop(for: role)
+                    : configuration.databasePolicy.maximumConnectionsPerEventLoop
+                let loanPolicy = try V2PhysicalDatabaseLoanPolicy(
+                    maximumConnections: capacity,
+                    reservedRenewalConnections: role == .foreground ? min(2, max(0, capacity - 1)) :
+                        (role == .maintenance ? min(1, max(0, capacity - 1)) : 0),
+                    maximumQueued: configuration.foregroundWriteDatabaseWorkMaximumQueued,
+                    maximumWait: .milliseconds(configuration.databasePolicy.poolTimeoutMilliseconds))
                 resources.databases.use(
                     try postgresDatabaseConfiguration(
                         url: url,
                         policy: configuration.databasePolicy,
-                        maximumConnectionsPerEventLoop:
-                            configuration.databaseWorkloadPoolIsolationEnabled
-                                ? configuration.databaseWorkloadPoolBudget
-                                    .connectionsPerEventLoop(for: role)
-                                : configuration.databasePolicy
-                                    .maximumConnectionsPerEventLoop
+                        maximumConnectionsPerEventLoop: capacity,
+                        sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil
                     ),
                     as: identifier
                 )
                 let eventLoopPool = try V2EventLoopDatabasePool(
                     databases: resources.databases, logger: logger,
                     identifier: identifier,
-                    eventLoops: databaseEventLoops
+                    eventLoops: Array(databaseEventLoops.prefix(configuration.databasePoolEventLoopCount(for: role))), loanPolicy: loanPolicy,
+                    sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil
                 )
                 // 逐一验证每个 EventLoop 所属连接池的会话 GUC。
                 // 若只使用一个长期存活的 `app.db(identifier)` 句柄，所有 Store
                 // 都会绑定到同一个连接池，配置的逐 EventLoop 连接数便无法生效。
                 for eventLoopDatabase in eventLoopPool.eventLoopDatabases {
-                    try await V2PostgresSessionReadiness.verify(
-                        database: eventLoopDatabase,
-                        policy: configuration.databasePolicy
-                    )
+                    if role == .foreground || role == .messageWrite {
+                        try await V2PostgresSessionReadiness.verify(database: eventLoopDatabase, timeouts: .default)
+                    } else {
+                        try await V2PostgresSessionReadiness.verify(database: eventLoopDatabase, policy: configuration.databasePolicy)
+                    }
                 }
                 databasesByRole[role, default: [:]][url] = eventLoopPool.database
             }
@@ -98,6 +150,7 @@ struct GatewayDatabaseTopology {
               let maintenanceDatabase = databaseForRole(for: .maintenance, url: configuration.databaseURL)
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
 
+        let controlEventLoops = Array(databaseEventLoops.prefix(configuration.databaseNonMessagePoolEventLoopThreads))
         // 独立控制连接持有路由围栏，数据连接先提交源端再投递到当前归属。
         // 即使关闭工作类别隔离也不能合并这两个池；总连接数已在配置阶段计入预算。
         let userStateRouteDatabaseID = DatabaseID(string: "gateway-user-state-route")
@@ -107,7 +160,7 @@ struct GatewayDatabaseTopology {
             maximumConnectionsPerEventLoop: 1
         ), as: userStateRouteDatabaseID)
         let userStateRoutePool = try V2EventLoopDatabasePool(
-            databases: resources.databases, logger: logger, identifier: userStateRouteDatabaseID, eventLoops: databaseEventLoops
+            databases: resources.databases, logger: logger, identifier: userStateRouteDatabaseID, eventLoops: controlEventLoops
         )
         for routeDatabase in userStateRoutePool.eventLoopDatabases {
             try await V2PostgresSessionReadiness.verify(database: routeDatabase, policy: configuration.databasePolicy)
@@ -120,7 +173,11 @@ struct GatewayDatabaseTopology {
             maximumConnectionsPerEventLoop: configuration.directSendControlConnectionsPerEventLoop),
             as: directSendControlID)
         let directSendControlPool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger,
-            identifier: directSendControlID, eventLoops: databaseEventLoops)
+            identifier: directSendControlID, eventLoops: controlEventLoops,
+            loanPolicy: try .init(maximumConnections: configuration.directSendControlConnectionsPerEventLoop,
+                reservedRenewalConnections: 0,
+                maximumQueued: configuration.interactiveReadDatabaseWorkMaximumQueued,
+                maximumWait: .milliseconds(configuration.databasePolicy.poolTimeoutMilliseconds)))
         for policyDatabase in directSendControlPool.eventLoopDatabases {
             try await V2PostgresSessionReadiness.verify(database: policyDatabase, policy: configuration.databasePolicy)
         }
@@ -133,7 +190,7 @@ struct GatewayDatabaseTopology {
             let id = DatabaseID(string: "gateway-authorization-resolution-\(index)")
             resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
                 maximumConnectionsPerEventLoop: 1), as: id)
-            let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: id, eventLoops: databaseEventLoops)
+            let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: id, eventLoops: controlEventLoops)
             for member in pool.eventLoopDatabases {
                 try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
             }
@@ -152,6 +209,7 @@ struct GatewayDatabaseTopology {
         // Schema 就绪性属于拓扑状态，不属于工作类别状态。
         // 各类别连接池验证会话 GUC 后，通过前台连接池逐一验证配置的 Schema。
         try await V2SchemaReadiness.verify(database: database)
+        try await V2RealtimeJournalSchemaReadiness.verify(database: database)
         for storage in configuration.userShardStorage {
             guard let shardDatabase = databaseForRole(for: .foreground, url: storage.databaseURL)
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -170,6 +228,8 @@ struct GatewayDatabaseTopology {
             try await V2SchemaReadiness.verify(
                 database: shardDatabase, schema: storage.schema
             )
+            try await V2RealtimeJournalSchemaReadiness.verify(
+                database: shardDatabase, schema: storage.schema)
             try await V2CapacityProfileReadiness.verify(
                 database: shardDatabase,
                 schema: storage.schema,
@@ -233,14 +293,15 @@ struct GatewayDatabaseTopology {
 private func postgresDatabaseConfiguration(
     url: String,
     policy: V2PostgresRuntimePolicy,
-    maximumConnectionsPerEventLoop: Int
+    maximumConnectionsPerEventLoop: Int,
+    sessionTimeouts: V2RoomActivationSQLTimeouts? = nil
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
     configuration.coreConfiguration.options.connectTimeout = .milliseconds(
         Int64(policy.connectTimeoutMilliseconds)
     )
     configuration.coreConfiguration.options.additionalStartupParameters.append(
-        contentsOf: policy.startupParameters
+        contentsOf: sessionTimeouts?.startupParameters ?? policy.startupParameters
     )
     return .postgres(
         configuration: configuration,

@@ -49,14 +49,11 @@ struct V2RoomProfileCohortPostgresTests {
     func productionComposition() async throws {
         try await withRoom { database, _, token, requests in
             let writes = PostgresV2RoomWriteStore(database: database)
-            let sendBatcher = V2SendMessageAdmissionBatcher(store: writes,
-                configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)), actorGrantedStore: writes)
             let admission = V2DatabaseWorkAdmissionController(policy: .init(
                 maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
                 maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1, timeout: .seconds(1)))
-            let owner = try V2RoomServerOwnerResources(database: database, writes: writes, sendBatcher: sendBatcher,
-                membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
+            let owner = try V2RoomServerOwnerResources(database: database, writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: CohortProjectionDelivery(),

@@ -219,6 +219,41 @@ public actor V2GroupEventSyncEngine {
     }
     /// 按房间保存进行中的页面任务；同房间调用排队，不同房间可独立进行。
     private var pageFlights: [RoomID: PageFlight] = [:]
+
+    /// Online bodies share the same room flight as durable pulls. Only a
+    /// contiguous prefix advances the cursor; gaps remain recovery work.
+    /// Returns false without waiting when the room already has a flight.
+    /// The caller must retain the hint's target head for durable recovery.
+    public func applyOnlineEvents(_ hint: V2GroupEventAvailabilityHint) async throws -> Bool {
+        let roomID = hint.roomID
+        try Task.checkCancellation()
+        guard pageFlights[roomID] == nil else { return false }
+        let current = PageFlight(id: UUID(), task: Task { [store] in
+            let cursor = try await store.groupEventCursor(roomID: roomID)
+            if hint.highWatermark <= cursor { return .init(appliedEventCount: 0, hasMore: false) }
+            let events = Array(hint.liveEvents.drop(while: { $0.roomSequence <= cursor }))
+            guard let first = events.first, let last = events.last,
+                  events.count <= V2GroupEventLogLimits.maximumPageSize,
+                  events.allSatisfy({ $0.roomSequence <= UInt64(Int64.max) }),
+                  cursor < UInt64(Int64.max), first.roomSequence == cursor + 1,
+                  last.roomSequence <= hint.highWatermark,
+                  zip(events, events.dropFirst()).allSatisfy({ $1.roomSequence == $0.roomSequence + 1 }) else {
+                return .init(appliedEventCount: 0, hasMore: true)
+            }
+            try Task.checkCancellation()
+            let page = try V2ClientGroupEventPage(roomID: roomID, events: events,
+                nextRoomSequence: last.roomSequence, hasMore: last.roomSequence < hint.highWatermark)
+            let commit = try await store.applyGroupEventPageReportingChanges(page)
+            return .init(appliedEventCount: commit.insertedEventCount, hasMore: commit.appliedThrough < hint.highWatermark)
+        })
+        pageFlights[roomID] = current
+        defer { if pageFlights[roomID]?.id == current.id { pageFlights[roomID] = nil } }
+        return try await withTaskCancellationHandler(operation: {
+            let result = await current.task.result
+            try Task.checkCancellation()
+            return try !result.get().hasMore
+        }, onCancel: { current.task.cancel() })
+    }
     /// 串行处理指定房间的一页可靠日志。
     ///
     /// - Parameter roomID: 要同步的房间。

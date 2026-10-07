@@ -76,8 +76,23 @@ public struct V2ProtobufMessageSendOperationClient: V2MessageSendRealtimeClient 
             // whether the server committed the command.
             throw V2MessageSendTransportError.outcomeUnknown
         }
+        return try Self.decodeCorrelatedResponse(response, identity: identity, fingerprint: fingerprint)
+    }
+
+    /// Only called after requestEnvelope has verified the request ID and wire
+    /// version. SERVER_BUSY is emitted before message dispatch by Gateway's
+    /// connection/process budget or foreground admission; UNAVAILABLE can also
+    /// represent a lost COMMIT acknowledgement and does not prove rejection.
+    static func decodeCorrelatedResponse(_ response: IMV2Envelope,
+        identity: V2OperationIdentity, fingerprint: V2OperationFingerprint
+    ) throws -> V2MessageSendOperationRecoveryResult {
         if case .error(let error)? = response.body {
-            if error.retryable || error.code == "SERVER_BUSY" || error.retryAfterSeconds > 0 {
+            if error.code == "SERVER_BUSY" {
+                return .deferred(try .init(identity: identity, fingerprint: fingerprint,
+                    reason: .admissionUnavailable,
+                    retryAfterMilliseconds: max(500, UInt64(error.retryAfterSeconds) * 1_000)))
+            }
+            if error.retryable || error.retryAfterSeconds > 0 {
                 throw V2MessageSendTransportError.retryAfter(Date().addingTimeInterval(max(0.5, TimeInterval(error.retryAfterSeconds))))
             }
             if error.code == "UNAUTHENTICATED" { throw V2MessageSendTransportError.authenticationRequired }

@@ -2,7 +2,6 @@
 @testable import IMV2ServerContracts
 import AsyncKit
 import Foundation
-import HTTPTypes
 import IMV2ActorContracts
 import IMV2Core
 import IMV2ServerHTTP
@@ -10,14 +9,98 @@ import IMV2ServerHTTP
 @testable import IMV2ServerInfrastructure
 import Synchronization
 import Testing
-import Vapor
-import VaporTesting
 @testable import IMV2ServerGateway
 
 @Suite("V2 gateway domain command handler")
 struct V2GatewayDomainCommandHandlerTests {
-    @Test("HTTP submission and Gateway recovery use one room operation receipt")
-    func dualTransportSharedRoomOperation() async throws {
+    @Test("message operation diagnostics defer proven overload and preserve unsafe wire errors")
+    func messageOperationInternalFailureDiagnostics() async throws {
+        let fixture = try GatewayDomainFixture()
+        let operation = try V2MessageSendOperationCommand(
+            command: .init(roomID: fixture.roomID, senderUserID: fixture.userID,
+                clientMessageID: fixture.clientMessageID, text: "diagnostic",
+                limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+        let failures: [(V2RoomCallFailure, String, String)] = [
+            (.notAccepted(.overloaded), "not_accepted", "overloaded"),
+            (.rolledBack(.overloaded), "rolled_back", "overloaded"),
+            (.notAccepted(.unavailable), "not_accepted", "unavailable"),
+            (.rolledBack(.deadlineExceeded), "rolled_back", "deadline_exceeded"),
+            (.notAccepted(.leaseLost), "not_accepted", "lease_lost"),
+            (.outcomeUnknown, "outcome_unknown", "none")
+        ]
+        for (failure, disposition, reason) in failures {
+            for recovering in [false, true] {
+                let metrics = V2PrometheusTelemetrySink()
+                let client = V2RoomRefMessagingClient(callTimeout: try .init(1_000)) { _, _, _ in throw failure }
+                let handler = makeGatewayDomainCommandHandler(messageSendOperations: client,
+                    sync: fixture.syncService(), telemetry: metrics)
+                var envelope = IMV2Envelope()
+                if recovering {
+                    envelope.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
+                        try .init(identity: operation.identity, fingerprint: operation.fingerprint,
+                            domainFingerprint: operation.command.fingerprint, action: .query))
+                } else {
+                    envelope.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
+                }
+                let response = try await handler.handle(envelope: envelope, identity: fixture.identity)
+                if reason == "overloaded" {
+                    guard case .messageSendOperationResult(let wire)? = response.body,
+                          case .deferred(let hint) = try V2MessageSendOperationWireCodec.decode(result: wire) else {
+                        Issue.record("proven overload did not return a durable deferral")
+                        continue
+                    }
+                    #expect(hint.validates(identity: try operation.identity, fingerprint: try operation.fingerprint))
+                    #expect(hint.reason == .admissionUnavailable && hint.retryAfterMilliseconds == nil)
+                } else {
+                    #expect(response.error.code == "UNAVAILABLE" && response.error.retryable)
+                    #expect(response.error.retryAfterSeconds == 0)
+                }
+                let rendered = await metrics.renderPrometheus()
+                let command = recovering ? "message_send_operation_recover" : "message_send_operation"
+                #expect(rendered.contains("im_v2_gateway_message_operation_internal_failures_total{command=\"\(command)\",disposition=\"\(disposition)\",reason=\"\(reason)\"} 1"))
+                #expect(!rendered.contains(fixture.roomID.rawValue))
+                #expect(!rendered.contains(fixture.userID.rawValue))
+            }
+        }
+    }
+
+    @Test("Actor-independent send recovery uses Gateway read admission and authenticated identity")
+    func readOnlyMessageRecoveryAdmission() async throws {
+        let fixture = try GatewayDomainFixture()
+        let operation = try V2MessageSendOperationCommand(command: .init(roomID: fixture.roomID,
+            senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID,
+            text: "query", limits: .init(maxUTF8Bytes: 64)),
+            firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+        let client = V2RoomRefMessagingClient(callTimeout: try .init(1_000), recoveryQuery: { request in
+            #expect(request.identity.accountID == fixture.userID)
+            return .unresolved
+        }) { _, _, _ in
+            Issue.record("Recovery must not call the room actor")
+            throw V2RoomCallFailure.notAccepted(.unavailable)
+        }
+        let admission = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1, maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 1, maximumSyncQueued: 1, timeout: .milliseconds(40)))
+        let handler = makeGatewayDomainCommandHandler(messageSendOperations: client,
+            sync: fixture.syncService(), databaseWorkAdmission: admission, roomCommandsHostAdmitted: true)
+        var query = IMV2Envelope()
+        query.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
+            try .init(identity: operation.identity, fingerprint: operation.fingerprint,
+                domainFingerprint: operation.command.fingerprint, action: .query))
+        let response = try await handler.handle(envelope: query, identity: fixture.identity)
+        #expect(try V2MessageSendOperationWireCodec.decode(result: response.messageSendOperationResult) == .unresolved)
+        let snapshot = await admission.snapshot()
+        #expect(snapshot.interactiveRead.admittedRequests == 1)
+        #expect(snapshot.foregroundWrite.admittedRequests == 0)
+        #expect(snapshot.interactiveRead.inFlight == 0)
+        let other = V2AuthenticatedConnection(userID: .init(uuid: UUID()),
+            deviceID: fixture.deviceID, capabilityProfile: "base")
+        #expect(try await handler.handle(envelope: query, identity: other).error.code == "FORBIDDEN")
+    }
+
+    @Test("TCP submission and recovery preserve one room operation receipt")
+    func tcpSharedRoomOperation() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewaySharedSendOperationStore()
         let client = V2RoomRefMessagingClient(callTimeout: try .init(1_000)) { request, actor, _ in
@@ -30,39 +113,41 @@ struct V2GatewayDomainCommandHandlerTests {
                            clientMessageID: fixture.clientMessageID, text: "one",
                            limits: .init(maxUTF8Bytes: 64)),
             firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
-        let app = try await Application(.testing)
-        V2VaporMessageSendOperationRoutes(
-            authenticator: GatewayDualTransportRouteAuth(actor: fixture.userID), messages: client)
-            .register(on: app)
-        do {
-            try await app.testing { http in
-                let sent = try await http.send(.post,
-                    to: URI(string: "v2/rooms/\(fixture.roomID.rawValue)/message-operations/send"),
-                    beforeSend: { request in
-                        request.headers.bearerAuthorization = .init(token: "token")
-                        request.headers[HTTPField.Name("X-IM-Device-ID")!] = fixture.deviceID.rawValue
-                        try request.content.encode(operation, using: JSONEncoder())
-                    })
-                #expect(sent.status == .ok)
-                let receipt = try await sent.content.decode(V2MessageSendOperationRecoveryResult.self)
-                var recover = IMV2Envelope()
-                recover.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
-                    try .init(identity: operation.identity, fingerprint: operation.fingerprint,
-                              domainFingerprint: operation.command.fingerprint, action: .query))
-                let recovered = try await handler.handle(envelope: recover, identity: fixture.identity)
-                #expect(try V2MessageSendOperationWireCodec.decode(result: recovered.messageSendOperationResult) == receipt)
-                var repeatSend = IMV2Envelope()
-                repeatSend.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
-                let repeated = try await handler.handle(envelope: repeatSend, identity: fixture.identity)
-                #expect(try V2MessageSendOperationWireCodec.decode(result: repeated.messageSendOperationResult) == receipt)
-                #expect(await store.executions == 1)
-            }
-            try await app.shutdown()
-        } catch {
-            try? await app.shutdown()
-            throw error
-        }
+        var submission = IMV2Envelope()
+        submission.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
+        let submitted = try await handler.handle(envelope: submission, identity: fixture.identity)
+        let receipt = try V2MessageSendOperationWireCodec.decode(result: submitted.messageSendOperationResult)
+        guard case .receipt = receipt else { Issue.record("TCP submission must produce the durable receipt"); return }
+        var recover = IMV2Envelope()
+        recover.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
+            try .init(identity: operation.identity, fingerprint: operation.fingerprint,
+                      domainFingerprint: operation.command.fingerprint, action: .query))
+        let recovered = try await handler.handle(envelope: recover, identity: fixture.identity)
+        #expect(try V2MessageSendOperationWireCodec.decode(result: recovered.messageSendOperationResult) == receipt)
+        let repeated = try await handler.handle(envelope: submission, identity: fixture.identity)
+        #expect(try V2MessageSendOperationWireCodec.decode(result: repeated.messageSendOperationResult) == receipt)
+        #expect(await store.executions == 1)
     }
+    @Test("TCP preserves a typed rate deferral bound to the authenticated operation")
+    func messageSendOperationRateDeferral() async throws {
+        let fixture = try GatewayDomainFixture()
+        let operation = try V2MessageSendOperationCommand(command: .init(roomID: fixture.roomID,
+            senderUserID: fixture.userID, clientMessageID: fixture.clientMessageID, text: "Rate",
+            limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+        let hint = try V2MessageOperationRetryHint(identity: operation.identity, fingerprint: operation.fingerprint,
+            reason: .rateLimited, retryAfterMilliseconds: 1_200)
+        let client = V2RoomRefMessagingClient(callTimeout: try .init(1_000)) { request, actor, _ in
+            guard actor == fixture.userID, case .messaging(.sendOperation(let command)) = request,
+                  command == operation else { throw V2RoomCallFailure.outcomeUnknown }
+            return .messaging(.sendOperation(.deferred(hint)))
+        }
+        let handler = makeGatewayDomainCommandHandler(messageSendOperations: client, sync: fixture.syncService())
+        var envelope = IMV2Envelope()
+        envelope.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
+        let response = try await handler.handle(envelope: envelope, identity: fixture.identity)
+        #expect(try V2MessageSendOperationWireCodec.decode(result: response.messageSendOperationResult) == .deferred(hint))
+    }
+
     @Test("Gateway send and recover share the authenticated room operation identity")
     func messageSendOperationIdentity() async throws {
         let fixture = try GatewayDomainFixture()
@@ -94,6 +179,9 @@ struct V2GatewayDomainCommandHandlerTests {
         let denied = try await handler.handle(envelope: submission, identity: other)
         #expect(denied.error.code == "FORBIDDEN")
         #expect(await messages.submissionCount == 1)
+        let deniedRecovery = try await handler.handle(envelope: query, identity: other)
+        #expect(deniedRecovery.error.code == "FORBIDDEN")
+        #expect(await messages.recoveryCount == 1)
     }
     @Test("retired domain wire fields cannot invoke a Gateway mutation", arguments: [20, 22, 24, 26, 28, 51, 53, 55, 57, 58, 67, 69, 71, 72, 97, 99, 101, 103, 105, 106])
     func retiredMutationWireIsNotExecutable(field: Int) async throws {
@@ -107,6 +195,17 @@ struct V2GatewayDomainCommandHandlerTests {
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
         #expect(response.error.code == "INVALID_ARGUMENT")
         #expect(!response.error.retryable)
+    }
+
+    @Test("Account directory waits for authority through a retryable response")
+    func accountCoverageAuthorityPending() async throws {
+        let fixture = try GatewayDomainFixture(), probe = GatewayAccountStartProbe(authorityPending: true)
+        let handler = makeGatewayDomainCommandHandler(accountChanges: probe, sync: fixture.syncService())
+        var request = IMV2Envelope(); request.accountRoomChangesStart = .init()
+        let response = try await handler.handle(envelope: request, identity: fixture.identity,
+            originatingConnectionID: UUID())
+        #expect(response.error.code == "UNAVAILABLE")
+        #expect(response.error.retryable)
     }
 
     @Test("Account coverage start uses the authenticated origin connection", arguments: [false, true])
@@ -339,7 +438,7 @@ struct V2GatewayDomainCommandHandlerTests {
         func publish() async {
             let expiry = fixture.now.addingTimeInterval(6)
             switch kind {
-            case "group": await registry.notifyForegroundGroupAvailable(roomID: room, highWatermark: 9)
+            case "group": break // Assert detail state separately from account receipt.
             case "presence": await registry.receivePresence(targetUserID: subject, isOnline: true, expiresAt: expiry)
             default: await registry.receiveTyping(.init(roomID: room, userID: subject, isTyping: true, expiresAt: expiry))
             }
@@ -360,7 +459,10 @@ struct V2GatewayDomainCommandHandlerTests {
             #expect(rejected.error.code == "INVALID_ARGUMENT" && !rejected.error.retryable)
             #expect(await stream.isAuthenticated())
             await publish()
-            expectedNotifications += 1
+            if kind == "group" {
+                let detail = await registry.activeForegroundGroupMetrics()
+                #expect(detail.rooms == 1 && detail.viewers == 1)
+            } else { expectedNotifications += 1 }
             #expect(delivered.withLock { $0.count } == expectedNotifications)
         }
         // Reusing the completed request ID also verifies the in-flight slot
@@ -372,6 +474,10 @@ struct V2GatewayDomainCommandHandlerTests {
                 return
             }
             await publish()
+            if kind == "group" {
+                let detail = await registry.activeForegroundGroupMetrics()
+                #expect(detail.rooms == 0 && detail.viewers == 0)
+            }
             #expect(delivered.withLock { $0.count } == expectedNotifications)
         }
         #expect(await stream.isAuthenticated())
@@ -438,6 +544,57 @@ struct V2GatewayDomainCommandHandlerTests {
         }
         await admission.release(.foregroundWrite)
         await admission.release(.interactiveRead)
+    }
+
+    @Test("both room-pull entries preserve proven overload without relabeling unknown reads")
+    func groupEventPullPreservesTypedBackpressure() async throws {
+        let fixture = try GatewayDomainFixture()
+        let failures: [(V2RoomCallFailure, Bool)] = [
+            (.notAccepted(.overloaded), true), (.rolledBack(.overloaded), true),
+            (.notAccepted(.unavailable), false), (.outcomeUnknown, false)
+        ]
+        for (failure, isOverload) in failures {
+            let store = GatewayFailingGroupEventLogStore(failure: failure)
+            let telemetry = V2InMemoryTelemetrySink()
+            let handler = makeGatewayDomainCommandHandler(groupEventLog: .init(store: store),
+                sync: fixture.syncService(), telemetry: telemetry, roomCommandsHostAdmitted: true)
+            var request = IMV2Envelope()
+            request.groupEventPull.roomID = fixture.roomID.rawValue
+            request.groupEventPull.pageSize = 100
+            let ordinary = try await handler.handle(envelope: request, identity: fixture.identity)
+            #expect(ordinary.error.code == (isOverload ? "SERVER_BUSY" : "UNAVAILABLE"))
+            #expect(ordinary.error.retryable)
+            #expect(ordinary.error.retryAfterSeconds == (isOverload ? 1 : 0))
+
+            let context = V2PreparedGroupEventCommandContext(requestID: 7,
+                frameVersion: UInt8(IMV2ProtocolVersion.current), compression: nil,
+                maximumUncompressedPayloadBytes: 64 * 1_024, compressionThresholdBytes: 1_024,
+                maximumExpansionRatio: 16,
+                cache: .init(configuration: .init(maximumEntries: 1, maximumBytes: 64 * 1_024, shardCount: 1)))
+            do {
+                let prepared = try await handler.handlePreparedGroupEventPull(request.groupEventPull,
+                    identity: fixture.identity, originatingConnectionID: nil, context: context)
+                guard isOverload, case .envelope(let response) = prepared else {
+                    Issue.record("prepared entry changed its non-overload failure contract")
+                    continue
+                }
+                #expect(response.error.code == "SERVER_BUSY" && response.error.retryable)
+                #expect(response.error.retryAfterSeconds == 1)
+                guard case .gatewayCommand(_, .groupEventPull, .rejected, .serverBusy, _) =
+                    await telemetry.events().last else {
+                    Issue.record("prepared overload must record rejected read telemetry")
+                    continue
+                }
+            } catch let actual as V2RoomCallFailure {
+                #expect(!isOverload && actual == failure)
+                guard case .gatewayCommand(_, .groupEventPull, .failed, nil, _) =
+                    await telemetry.events().last else {
+                    Issue.record("prepared unknown/unavailable keeps failed telemetry")
+                    continue
+                }
+            }
+            #expect(await store.calls == 2)
+        }
     }
 
     @Test("room-log pulls use the interactive-read reservation instead of send capacity")
@@ -852,6 +1009,7 @@ private actor GatewayMessageSendOperationProbe: V2GatewayMessageSendOperationHan
     private(set) var submitted: V2MessageSendOperationCommand?
     private(set) var recovered: V2MessageSendOperationRecoveryRequest?
     private(set) var submissionCount = 0
+    private(set) var recoveryCount = 0
 
     func sendOperation(_ command: V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
         submitted = command
@@ -861,6 +1019,7 @@ private actor GatewayMessageSendOperationProbe: V2GatewayMessageSendOperationHan
 
     func recoverSendOperation(_ request: V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
         recovered = request
+        recoveryCount += 1
         return .unresolved
     }
 }
@@ -890,12 +1049,6 @@ private actor GatewaySharedSendOperationStore {
     }
 }
 
-private struct GatewayDualTransportRouteAuth: V2GatewayAuthenticator {
-    let actor: UserID
-    func authenticateSession(accessToken _: String, deviceID _: DeviceID) async throws -> V2GatewayAuthentication {
-        .init(userID: actor, expiresAt: nil)
-    }
-}
 
 extension V2GatewayDomainCommandHandlerTests {
     @Test("read receipt transport contains only reader IDs and preserves the authenticated actor")
@@ -939,11 +1092,14 @@ private struct GatewayResponseAuthenticator: V2GatewayAuthenticator {
 
 private actor GatewayAccountStartProbe: V2AccountRoomChangesStarting {
     let epoch = UUID()
+    let authorityPending: Bool
+    init(authorityPending: Bool = false) { self.authorityPending = authorityPending }
     private(set) var connectionID: UUID?
     private(set) var userID: UserID?
     func startAccountRoomChanges(connectionID: UUID, userID: UserID) async throws -> String {
         self.connectionID = connectionID
         self.userID = userID
+        if authorityPending { throw V2RealtimePublicationBackpressure.receiverQueue }
         return epoch.uuidString
     }
 }
@@ -1444,5 +1600,19 @@ private actor GatewayReadReceiptSequenceStore: V2ReadReceiptStore {
 private struct GatewayMovedMembershipDirectory: V2RoomMembershipDirectoryStore {
     func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage {
         throw V2RoomMembershipDirectoryError.ownerChanged
+    }
+}
+
+private actor GatewayFailingGroupEventLogStore: V2GroupEventLogStore {
+    let failure: V2RoomCallFailure
+    private(set) var calls = 0
+    init(failure: V2RoomCallFailure) { self.failure = failure }
+    func pull(roomID: RoomID, actorUserID: UserID, afterRoomSequence: UInt64,
+              pageSize: Int) throws -> V2GroupEventLogPage {
+        calls += 1
+        throw failure
+    }
+    func subscribe(roomID: RoomID, actorUserID: UserID) throws -> V2GroupEventSubscription {
+        throw failure
     }
 }

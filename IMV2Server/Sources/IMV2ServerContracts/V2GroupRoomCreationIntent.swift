@@ -75,26 +75,4 @@ public struct V2GroupRoomCreationIntent: Equatable, Sendable {
         self.state = state
     }
 
-    /// 以同一身份派生指定状态的新意图。
-    ///
-    /// - Parameter state: 目标状态。
-    /// - Returns: 除状态外字段完全一致的意图。
-    /// - Throws: 字段校验失败时抛出
-    ///   ``V2GroupRoomCreationIntentStoreError/invalidIntent``。
-    fileprivate func withState(
-        _ state: V2GroupRoomCreationIntentState
-    ) throws -> Self {
-        try .init(
-            actorUserID: actorUserID,
-            operationID: operationID,
-            roomID: roomID,
-            eventID: eventID,
-
-            roomShardID: roomShardID,
-            routeEpoch: routeEpoch,
-            requestFingerprint: requestFingerprint,
-            audienceMemberCount: audienceMemberCount,
-            state: state
-        )
-    }
 }

@@ -53,7 +53,6 @@ extension V2ActorAdministrationFailureWire {
             case .invalidPageLimit: self = .input(.invalidPageLimit)
             case .invalidRetryAfter: self = .input(.invalidRetryAfter)
             case .trustedActionOnUserLane: self = .input(.trustedActionOnUserLane)
-            case .unsupportedAuthenticatedRevision: self = .input(.unsupportedAuthenticatedRevision)
             }
         } else if let value = error as? V2CoreError {
             switch value {
@@ -162,7 +161,6 @@ extension V2ActorAdministrationFailureWire {
             case .invalidPageLimit: return V2ActorAdministrationWireError.invalidPageLimit
             case .invalidRetryAfter: return V2ActorAdministrationWireError.invalidRetryAfter
             case .trustedActionOnUserLane: return V2ActorAdministrationWireError.trustedActionOnUserLane
-            case .unsupportedAuthenticatedRevision: return V2ActorAdministrationWireError.unsupportedAuthenticatedRevision
             }
         }
     }

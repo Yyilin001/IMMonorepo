@@ -60,13 +60,6 @@ struct V2DiscardingTelemetrySink: V2TelemetrySink {
     func record(_: V2TelemetryEvent) async {}
 }
 
-struct V2DiscardingForegroundGroupEventHintPublisher: V2ForegroundGroupEventHintSubmitting {
-    func submitForegroundHint(_: V2GroupEventWake) {}
-    func submitForegroundDirectEvent(_: V2DirectRoomLiveEvent) {}
-    func submitForegroundDirectMessage(_: V2AcceptedMessage) {}
-    func submitForegroundDirectMessage(_: V2AcceptedMessage, excludingConnectionID _: UUID?) {}
-}
-
 private struct V2UnsupportedGatewayTestDependency: Error,
     V2GatewayMessageSendOperationHandling,
     V2GatewayReadReceiptHandling,
@@ -105,7 +98,6 @@ func makeGatewayDomainCommandHandler(
     readReceipt: V2ReadReceiptService? = nil,
     liveActivity: V2LiveActivityService? = nil,
     groupEventLog: V2GroupEventLogService? = nil,
-    foregroundGroupEventHints: any V2ForegroundGroupEventHintSubmitting = V2DiscardingForegroundGroupEventHintPublisher(),
     membershipDirectory: V2RoomMembershipDirectoryService? = nil,
     roomRecovery: (any V2RoomRecoveryCommandHandling)? = nil,
     accountChanges: (any V2AccountRoomChangesStarting)? = nil,
@@ -125,7 +117,6 @@ func makeGatewayDomainCommandHandler(
         messageSendOperations: messageSendOperations ?? unsupported,
         liveActivityHandler: liveActivity.map { $0 as any V2GatewayLiveActivityHandling } ?? unsupported,
         groupEventLogHandler: groupEventLog.map { $0 as any V2GatewayGroupEventLogHandling } ?? unsupported,
-        foregroundGroupEventHints: foregroundGroupEventHints,
         membershipDirectoryHandler: membershipDirectory.map { $0 as any V2GatewayRoomMembershipDirectoryHandling } ?? unsupported,
         roomRecovery: roomRecovery ?? unsupported,
         accountChanges: accountChanges ?? unsupported,
@@ -139,6 +130,12 @@ func makeGatewayDomainCommandHandler(
         now: now,
         monotonicNow: monotonicNow
     )
+}
+
+/// Fixtures whose online route port is tested separately need no broker registration.
+struct TestLocalRoomChangeInterest: V2GroupEventWakeInterestManaging {
+    func activate(roomID: RoomID) async throws { try Task.checkCancellation() }
+    func deactivate(roomID: RoomID) async {}
 }
 
 struct V2AllowingGatewayCommandAdmission: V2AuthenticatedGatewayCommandAdmitting {

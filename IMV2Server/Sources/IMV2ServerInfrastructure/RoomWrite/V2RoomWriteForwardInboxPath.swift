@@ -22,21 +22,40 @@ struct V2RoomWriteForwardInboxPath: Sendable {
     func preflight(
         export: V2ForwardExport,
         transaction: any Database
-    ) async throws -> (V2SendMessageCommand?, V2ForwardImportOutcome?) {
+    ) async throws -> (V2SendMessageCommand?, V2ForwardImportOutcome?, RoomWriteCommit?) {
         guard let sql = transaction as? any SQLDatabase else { throw V2ForwardInboxError.corruptPersistenceState }
         let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
         try await activationScope?.require([export.intent.targetRoomID], sql: sql)
         guard row.digest == export.digest else { throw V2ForwardInboxError.idempotencyConflict }
-        if row.state == "completed" || row.state == "rejected" { return (nil, try row.outcome) }
+        if row.state == "completed" || row.state == "rejected" { return (nil, try row.outcome, nil) }
         guard row.payload == export.payload else { throw V2ForwardInboxError.idempotencyConflict }
         guard let authority = try await v2ForwardInboxAuthorization(row, sql: sql) else {
             guard row.state == "pending" else { throw V2ForwardInboxError.corruptPersistenceState }
-            return (nil, .pending(.media))
+            return (nil, .pending(.media), nil)
         }
         // 限制值不参与命令身份。接受事务中应用当前限制，
         // 保持持久化 INVALID_ARGUMENT 拒绝和已接受回执恢复语义。
         let identityLimits = try V2MessageCommandLimits(maxUTF8Bytes: max(export.intent.text.utf8.count, 1))
-        return (try authority.command(limits: identityLimits), nil)
+        let command = try authority.command(limits: identityLimits)
+        if row.state == "accepted" {
+            guard let completion = try await sql.raw("""
+                SELECT 'accepted'::text AS outcome_kind, message_id,room_id,room_sequence,timeline_sequence,
+                    sender_user_id,client_message_id,fingerprint_version,request_fingerprint,created_at,
+                    event_id AS source_event_id,accepted_membership_revision,direct_recipient_user_id,
+                    NULL::text AS denial_reason,group_capacity_class
+                FROM im_v2.message_send_completions WHERE room_id=\(bind: export.intent.targetRoomID)
+                    AND sender_user_id=\(bind: export.intent.actorUserID)
+                    AND client_message_id=\(bind: export.intent.targetClientMessageID)
+                """).first(decoding: MessageOperationReplayRow.self),
+                case .accepted(let receipt, let fingerprint) = try completion.operation(),
+                fingerprint == command.fingerprint, receipt.messageID.uuidValue == row.messageID,
+                Int64(exactly: receipt.roomSequence) == row.roomSequence,
+                v2PostgresTimestampCanEncode(receipt.createdAt) else {
+                throw V2ForwardInboxError.corruptPersistenceState
+            }
+            return (command, nil, .init(outcome: .idempotent(receipt)))
+        }
+        return (command, nil, nil)
     }
 
     func accept(

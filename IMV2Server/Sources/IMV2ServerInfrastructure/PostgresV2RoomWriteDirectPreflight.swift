@@ -20,8 +20,24 @@ enum PlainDirectRoomLogPreflight {
     /// - Throws: 预检不匹配或查询失败时抛出。
     static func load(
         _ ordered: [OrderedRoomWriteRequest],
+        leasedPolicies: [Int: V2DirectSendControlPolicy]? = nil,
         sql: any SQLDatabase
     ) async throws -> [PlainDirectRoomLogBatchPreflightRow] {
+        let rows = try await sql.raw(query(ordered, leasedPolicies: leasedPolicies)).all()
+            .map { try PlainDirectRoomLogBatchPreflightRow(row: $0) }
+        guard rows.count == ordered.count,
+              zip(rows, ordered).allSatisfy({ $0.0.ordinal == $0.1.preflightOrdinal })
+        else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
+        return rows
+    }
+
+    static func query(
+        _ ordered: [OrderedRoomWriteRequest],
+        leasedPolicies: [Int: V2DirectSendControlPolicy]? = nil,
+        priorOperation: SQLQueryString? = nil,
+        validatesDirectMemberships: Bool = false,
+        usesAcceptedRoomState: Bool = false
+    ) throws -> SQLQueryString {
         let input = try ordered.map { item in
             PlainDirectRoomLogBatchPreflightInput(
                 ordinal: item.preflightOrdinal,
@@ -34,8 +50,212 @@ enum PlainDirectRoomLogPreflight {
             )
         }
         let inputJSON = try roomWriteJSON(input)
-        let rows = try await sql.raw("""
-            WITH input AS MATERIALIZED (
+        let policyInput: SQLQueryString
+        let senderActive: SQLQueryString
+        let policyCTEs: SQLQueryString
+        if let leasedPolicies {
+            guard leasedPolicies.count == ordered.count,
+                  ordered.allSatisfy({ leasedPolicies[$0.preflightOrdinal] != nil }) else {
+                throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
+            }
+            let policies = try roomWriteJSON(ordered.map {
+                LeasedDirectPreflightInput(ordinal: $0.preflightOrdinal, policy: leasedPolicies[$0.preflightOrdinal]!)
+            })
+            policyInput = """
+                leased_policy AS MATERIALIZED (
+                    SELECT (value->>'ordinal')::integer AS ordinal, value->'policy' AS policy
+                    FROM jsonb_array_elements(\(bind: policies)::jsonb)
+                    LIMIT \(literal: ordered.count)
+                ),
+                """
+            senderActive = "(SELECT (policy->'sender'->>'is_active')::boolean FROM leased_policy WHERE ordinal=room.ordinal)"
+            policyCTEs = """
+                direct_policy AS MATERIALIZED (
+                    SELECT pair.*, 0::bigint AS sender_policy_revision, 0::bigint AS recipient_policy_revision,
+                           (lease.policy->'recipient'->>'is_active')::boolean AS recipient_is_active,
+                           (lease.policy->>'blocked')::boolean AS blocked,
+                           (lease.policy->>'isFriend')::boolean AS is_friend,
+                           (lease.policy->>'allowsStrangers')::boolean AS allows_strangers,
+                           lease.policy->'sender'->>'special_kind' AS sender_account_kind,
+                           lease.policy->'sender'->>'special_status' AS sender_account_status,
+                           (lease.policy->'sender'->>'allows_service_messages')::boolean AS sender_allows_service_messages,
+                           lease.policy->'recipient'->>'special_kind' AS recipient_account_kind,
+                           lease.policy->'recipient'->>'special_status' AS recipient_account_status,
+                           (lease.policy->'recipient'->>'allows_customer_messages')::boolean AS recipient_allows_customer_messages
+                    FROM direct_pair AS pair
+                    JOIN fresh_room AS room ON room.ordinal=pair.ordinal
+                    JOIN leased_policy AS lease ON lease.ordinal=pair.ordinal
+                        AND pair.recipient_user_id=(lease.policy->'recipient'->>'user_id')::uuid
+                        AND room.sender_id=(lease.policy->'sender'->>'user_id')::uuid
+                )
+                """
+        } else {
+            policyInput = ""
+            senderActive = """
+                EXISTS (
+                    SELECT 1
+                    FROM im_v2.public_user_profiles AS profile
+                    WHERE profile.user_id = room.sender_id
+                      AND profile.state = 'active'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM im_v2.account_disables AS disabled
+                          WHERE disabled.user_id = profile.user_id
+                      )
+                )
+                """
+            policyCTEs = """
+                direct_policy_versions AS MATERIALIZED (
+                    SELECT pair.*,
+                           sender_version.revision AS sender_policy_revision,
+                           recipient_version.revision AS recipient_policy_revision
+                    FROM direct_pair AS pair
+                    JOIN fresh_room AS room ON room.ordinal = pair.ordinal
+                    JOIN im_v2.user_direct_send_policy_versions AS sender_version
+                      ON sender_version.user_id = room.sender_id
+                    JOIN im_v2.user_direct_send_policy_versions AS recipient_version
+                      ON recipient_version.user_id = pair.recipient_user_id
+                    FOR KEY SHARE OF sender_version, recipient_version
+                ), special AS MATERIALIZED (
+                    SELECT pair.ordinal, account.account_user_id, account.account_kind,
+                           account.status, account.allows_customer_messages,
+                           account.allows_service_messages
+                    FROM direct_policy_versions AS pair
+                    JOIN fresh_room AS room ON room.ordinal = pair.ordinal
+                    JOIN im_v2.special_accounts AS account
+                      ON account.account_user_id = room.sender_id
+                      OR account.account_user_id = pair.recipient_user_id
+                    ORDER BY pair.ordinal, account.account_user_id
+                    FOR KEY SHARE OF account
+                ), direct_policy AS MATERIALIZED (
+                    SELECT pair.ordinal, pair.recipient_user_id,
+                           pair.direct_policy_revision, pair.sender_policy_revision,
+                           pair.recipient_policy_revision,
+                           pair.sender_profile_visible_to_recipient,
+                           pair.sender_can_send, pair.sender_has_replied,
+                           pair.recipient_has_replied,
+                           CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                          AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                          AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                          AND pair.recipient_user_id = room.cached_recipient_id
+                                THEN room.cached_recipient_is_active
+                                ELSE EXISTS (
+                               SELECT 1 FROM im_v2.public_user_profiles AS profile
+                               WHERE profile.user_id = pair.recipient_user_id
+                                 AND profile.state = 'active'
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM im_v2.account_disables AS disabled
+                                     WHERE disabled.user_id = profile.user_id
+                                 )
+                           ) END AS recipient_is_active,
+                           CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                          AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                          AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                          AND pair.recipient_user_id = room.cached_recipient_id
+                                THEN room.cached_blocked
+                                ELSE EXISTS (
+                               SELECT 1 FROM im_v2.user_blocks AS block
+                               WHERE (block.blocker_user_id = pair.lower_user_id
+                                      AND block.blocked_user_id = pair.higher_user_id)
+                                  OR (block.blocker_user_id = pair.higher_user_id
+                                      AND block.blocked_user_id = pair.lower_user_id)
+                           ) END AS blocked,
+                           CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                          AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                          AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                          AND pair.recipient_user_id = room.cached_recipient_id
+                                THEN room.cached_is_friend
+                                ELSE EXISTS (
+                               SELECT 1 FROM im_v2.user_relationships AS relationship
+                               WHERE relationship.lower_user_id = pair.lower_user_id
+                                 AND relationship.higher_user_id = pair.higher_user_id
+                                 AND relationship.state = 'accepted'
+                           ) END AS is_friend,
+                           CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
+                                          AND pair.sender_policy_revision = room.cached_sender_policy_revision
+                                          AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
+                                          AND pair.recipient_user_id = room.cached_recipient_id
+                                THEN room.cached_allows_strangers
+                                ELSE COALESCE((
+                               SELECT preference.allows_stranger_messages
+                               FROM im_v2.user_stranger_message_preferences AS preference
+                               WHERE preference.user_id = pair.recipient_user_id
+                           ), TRUE) END AS allows_strangers,
+                           (SELECT account_kind FROM special
+                            WHERE ordinal = pair.ordinal
+                              AND account_user_id = room.sender_id) AS sender_account_kind,
+                           (SELECT status FROM special
+                            WHERE ordinal = pair.ordinal
+                              AND account_user_id = room.sender_id) AS sender_account_status,
+                           (SELECT allows_service_messages FROM special
+                            WHERE ordinal = pair.ordinal
+                              AND account_user_id = room.sender_id) AS sender_allows_service_messages,
+                           (SELECT account_kind FROM special
+                            WHERE ordinal = pair.ordinal
+                              AND account_user_id = pair.recipient_user_id) AS recipient_account_kind,
+                           (SELECT status FROM special
+                            WHERE ordinal = pair.ordinal
+                              AND account_user_id = pair.recipient_user_id) AS recipient_account_status,
+                           (SELECT allows_customer_messages FROM special
+                            WHERE ordinal = pair.ordinal
+                              AND account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
+                    FROM direct_policy_versions AS pair
+                    JOIN fresh_room AS room ON room.ordinal = pair.ordinal
+                )
+                """
+        }
+        let priorOperationQuery: SQLQueryString = priorOperation ?? """
+                SELECT room.ordinal
+                FROM locked_room AS room
+                JOIN im_v2.message_send_completions AS message
+                  ON message.sender_user_id = room.sender_id
+                  AND message.room_id = room.room_id
+                 AND message.client_message_id = room.client_message_id
+                UNION
+                SELECT room.ordinal
+                FROM locked_room AS room
+                JOIN im_v2.direct_message_denials AS denial
+                  ON denial.sender_user_id = room.sender_id
+                  AND denial.room_id = room.room_id
+                 AND denial.client_message_id = room.client_message_id
+            """
+        let membershipValidation: SQLQueryString = validatesDirectMemberships ? """
+            room.room_kind <> 'direct' OR EXISTS (
+                SELECT 1 FROM im_v2.direct_room_pairs pair WHERE pair.room_id=room.room_id
+                  AND COALESCE((SELECT count(*)=2 AND bool_and(member.user_id IN (pair.lower_user_id,pair.higher_user_id))
+                    FROM (SELECT user_id FROM im_v2.room_memberships
+                          WHERE room_id=room.room_id AND joined_revision<=room.membership_revision
+                            AND (left_revision IS NULL OR left_revision>room.membership_revision) LIMIT 3) member),false)
+            )
+            """ : "true"
+        // A typed accepted send already checked membership/mute in the room
+        // runtime. Do not read or lock those policy rows again during persistence.
+        let actorQuery: SQLQueryString = usesAcceptedRoomState ? """
+                SELECT room.ordinal, 'member'::text AS actor_role,
+                       true AS sender_is_active, false AS muted
+                FROM fresh_room room
+            """ : """
+                SELECT room.ordinal, membership.role AS actor_role,
+                       \(senderActive) AS sender_is_active,
+                       EXISTS (
+                           SELECT 1 FROM im_v2.room_member_mutes AS mute
+                           WHERE mute.room_id = room.room_id
+                             AND mute.user_id = room.sender_id
+                             AND mute.mute_until > ((TIMESTAMP '2000-01-01 00:00:00'
+                             + (room.now_postgres_microseconds / 86400000000) * INTERVAL '1 day'
+                             + (room.now_postgres_microseconds % 86400000000) * INTERVAL '1 microsecond')
+                             AT TIME ZONE 'UTC')
+                       ) AS muted
+                FROM fresh_room AS room
+                JOIN im_v2.room_memberships AS membership
+                  ON membership.room_id = room.room_id
+                 AND membership.user_id = room.sender_id
+                 AND membership.joined_revision <= room.membership_revision
+                 AND (membership.left_revision IS NULL
+                      OR membership.left_revision > room.membership_revision)
+                FOR UPDATE OF membership
+            """
+        return """
+            WITH \(policyInput) input AS MATERIALIZED (
                 SELECT input.ordinal, input.room_id, input.sender_id,
                        input.client_message_id, input.now_postgres_microseconds,
                        input.cached_recipient_id,
@@ -62,6 +282,10 @@ enum PlainDirectRoomLogPreflight {
                     cached_allows_strangers boolean,
                     uses_room_admission_credits boolean
                 )
+                -- The JSON is generated from exactly input.count requests.
+                -- Expose that bound to the planner instead of its SRF estimate
+                -- of 100, which scans every room for a singleton turn.
+                LIMIT \(literal: input.count)
             ), locked_room AS MATERIALIZED (
                 SELECT input.ordinal, input.sender_id, input.client_message_id,
                        input.now_postgres_microseconds, input.cached_recipient_id,
@@ -83,19 +307,7 @@ enum PlainDirectRoomLogPreflight {
                 -- allowing independent KEY SHARE credit reservations.
                 FOR NO KEY UPDATE OF room
             ), prior_operation AS MATERIALIZED (
-                SELECT room.ordinal
-                FROM locked_room AS room
-                JOIN im_v2.message_send_completions AS message
-                  ON message.sender_user_id = room.sender_id
-                  AND message.room_id = room.room_id
-                 AND message.client_message_id = room.client_message_id
-                UNION
-                SELECT room.ordinal
-                FROM locked_room AS room
-                JOIN im_v2.direct_message_denials AS denial
-                  ON denial.sender_user_id = room.sender_id
-                  AND denial.room_id = room.room_id
-                 AND denial.client_message_id = room.client_message_id
+                \(priorOperationQuery)
             ), fresh_room AS MATERIALIZED (
                 SELECT room.*
                 FROM locked_room AS room
@@ -103,66 +315,8 @@ enum PlainDirectRoomLogPreflight {
                     SELECT 1 FROM prior_operation AS prior
                     WHERE prior.ordinal = room.ordinal
                 )
-            ), locked_room_admission AS MATERIALIZED (
-                SELECT room.ordinal,
-                       admission.eligible_member_count AS room_eligible_member_count,
-                       admission.command_window_limit AS room_command_window_limit,
-                       admission.command_window_used AS room_command_window_used,
-                       admission.shard_lease_id AS room_shard_lease_id,
-                       admission.shard_lease_generation AS room_shard_lease_generation
-                FROM fresh_room AS room
-                JOIN im_v2.room_admission AS admission ON admission.room_id = room.room_id
-                -- Precharged room credits already account for the room
-                -- command window; all other sends lock its durable row.
-                WHERE NOT room.uses_room_admission_credits
-                FOR UPDATE OF admission
-            ), locked_admission AS MATERIALIZED (
-                SELECT room.ordinal,
-                       admission.room_eligible_member_count,
-                       admission.room_command_window_limit,
-                       admission.room_command_window_used,
-                       admission.room_shard_lease_id,
-                       admission.room_shard_lease_generation,
-                       shard.lease_id AS shard_lease_id,
-                       shard.generation AS shard_generation,
-                       shard.valid_until AS shard_valid_until,
-                       shard.command_window_limit AS shard_command_window_limit,
-                       shard.command_window_used AS shard_command_window_used
-                FROM fresh_room AS room
-                LEFT JOIN locked_room_admission AS admission ON admission.ordinal = room.ordinal
-                JOIN im_v2.shard_admission_pools AS shard
-                  ON shard.room_shard_id = room.room_shard_id
-                 AND shard.capacity_profile_id = room.capacity_profile_id
             ), locked_actor AS MATERIALIZED (
-                SELECT room.ordinal, membership.role AS actor_role,
-                       EXISTS (
-                           SELECT 1
-                           FROM im_v2.public_user_profiles AS profile
-                           WHERE profile.user_id = room.sender_id
-                             AND profile.state = 'active'
-                             AND NOT EXISTS (
-                                 SELECT 1 FROM im_v2.account_disables AS disabled
-                                 WHERE disabled.user_id = profile.user_id
-                             )
-                       ) AS sender_is_active,
-                       EXISTS (
-                           SELECT 1 FROM im_v2.room_member_mutes AS mute
-                           WHERE mute.room_id = room.room_id
-                             AND mute.user_id = room.sender_id
-                             AND mute.mute_until > ((TIMESTAMP '2000-01-01 00:00:00'
-                             + (room.now_postgres_microseconds / 86400000000) * INTERVAL '1 day'
-                             + (room.now_postgres_microseconds % 86400000000) * INTERVAL '1 microsecond')
-                             AT TIME ZONE 'UTC')
-                       ) AS muted
-                FROM fresh_room AS room
-                JOIN locked_admission AS admission ON admission.ordinal = room.ordinal
-                JOIN im_v2.room_memberships AS membership
-                  ON membership.room_id = room.room_id
-                 AND membership.user_id = room.sender_id
-                 AND membership.joined_revision <= room.membership_revision
-                 AND (membership.left_revision IS NULL
-                      OR membership.left_revision > room.membership_revision)
-                FOR UPDATE OF membership
+                \(actorQuery)
             ), direct_pair AS MATERIALIZED (
                 SELECT room.ordinal, pair.lower_user_id, pair.higher_user_id,
                        CASE WHEN pair.lower_user_id = room.sender_id
@@ -186,116 +340,11 @@ enum PlainDirectRoomLogPreflight {
                   AND (pair.lower_user_id = room.sender_id
                        OR pair.higher_user_id = room.sender_id)
                 FOR UPDATE OF pair
-            ), direct_policy_versions AS MATERIALIZED (
-                SELECT pair.*,
-                       sender_version.revision AS sender_policy_revision,
-                       recipient_version.revision AS recipient_policy_revision
-                FROM direct_pair AS pair
-                JOIN fresh_room AS room ON room.ordinal = pair.ordinal
-                JOIN im_v2.user_direct_send_policy_versions AS sender_version
-                  ON sender_version.user_id = room.sender_id
-                JOIN im_v2.user_direct_send_policy_versions AS recipient_version
-                  ON recipient_version.user_id = pair.recipient_user_id
-                FOR KEY SHARE OF sender_version, recipient_version
-            ), special AS MATERIALIZED (
-                SELECT pair.ordinal, account.account_user_id, account.account_kind,
-                       account.status, account.allows_customer_messages,
-                       account.allows_service_messages
-                FROM direct_policy_versions AS pair
-                JOIN fresh_room AS room ON room.ordinal = pair.ordinal
-                JOIN im_v2.special_accounts AS account
-                  ON account.account_user_id = room.sender_id
-                  OR account.account_user_id = pair.recipient_user_id
-                ORDER BY pair.ordinal, account.account_user_id
-                FOR KEY SHARE OF account
-            ), direct_policy AS MATERIALIZED (
-                SELECT pair.ordinal, pair.recipient_user_id,
-                       pair.direct_policy_revision, pair.sender_policy_revision,
-                       pair.recipient_policy_revision,
-                       pair.sender_profile_visible_to_recipient,
-                       pair.sender_can_send, pair.sender_has_replied,
-                       pair.recipient_has_replied,
-                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
-                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
-                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
-                                      AND pair.recipient_user_id = room.cached_recipient_id
-                            THEN room.cached_recipient_is_active
-                            ELSE EXISTS (
-                           SELECT 1 FROM im_v2.public_user_profiles AS profile
-                           WHERE profile.user_id = pair.recipient_user_id
-                             AND profile.state = 'active'
-                             AND NOT EXISTS (
-                                 SELECT 1 FROM im_v2.account_disables AS disabled
-                                 WHERE disabled.user_id = profile.user_id
-                             )
-                       ) END AS recipient_is_active,
-                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
-                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
-                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
-                                      AND pair.recipient_user_id = room.cached_recipient_id
-                            THEN room.cached_blocked
-                            ELSE EXISTS (
-                           SELECT 1 FROM im_v2.user_blocks AS block
-                           WHERE (block.blocker_user_id = pair.lower_user_id
-                                  AND block.blocked_user_id = pair.higher_user_id)
-                              OR (block.blocker_user_id = pair.higher_user_id
-                                  AND block.blocked_user_id = pair.lower_user_id)
-                       ) END AS blocked,
-                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
-                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
-                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
-                                      AND pair.recipient_user_id = room.cached_recipient_id
-                            THEN room.cached_is_friend
-                            ELSE EXISTS (
-                           SELECT 1 FROM im_v2.user_relationships AS relationship
-                           WHERE relationship.lower_user_id = pair.lower_user_id
-                             AND relationship.higher_user_id = pair.higher_user_id
-                             AND relationship.state = 'accepted'
-                       ) END AS is_friend,
-                       CASE WHEN pair.direct_policy_revision = room.cached_direct_pair_revision
-                                      AND pair.sender_policy_revision = room.cached_sender_policy_revision
-                                      AND pair.recipient_policy_revision = room.cached_recipient_policy_revision
-                                      AND pair.recipient_user_id = room.cached_recipient_id
-                            THEN room.cached_allows_strangers
-                            ELSE COALESCE((
-                           SELECT preference.allows_stranger_messages
-                           FROM im_v2.user_stranger_message_preferences AS preference
-                           WHERE preference.user_id = pair.recipient_user_id
-                       ), TRUE) END AS allows_strangers,
-                       (SELECT account_kind FROM special
-                        WHERE ordinal = pair.ordinal
-                          AND account_user_id = room.sender_id) AS sender_account_kind,
-                       (SELECT status FROM special
-                        WHERE ordinal = pair.ordinal
-                          AND account_user_id = room.sender_id) AS sender_account_status,
-                       (SELECT allows_service_messages FROM special
-                        WHERE ordinal = pair.ordinal
-                          AND account_user_id = room.sender_id) AS sender_allows_service_messages,
-                       (SELECT account_kind FROM special
-                        WHERE ordinal = pair.ordinal
-                          AND account_user_id = pair.recipient_user_id) AS recipient_account_kind,
-                       (SELECT status FROM special
-                        WHERE ordinal = pair.ordinal
-                          AND account_user_id = pair.recipient_user_id) AS recipient_account_status,
-                       (SELECT allows_customer_messages FROM special
-                        WHERE ordinal = pair.ordinal
-                          AND account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
-                FROM direct_policy_versions AS pair
-                JOIN fresh_room AS room ON room.ordinal = pair.ordinal
-            )
+            ), \(policyCTEs)
             SELECT room.ordinal, room.room_kind, room.room_shard_id,
                    room.room_sequence, room.timeline_sequence,
                    room.membership_revision, room.capacity_profile_id,
                    room.capacity_class, room.frozen_at,
-                   admission.room_eligible_member_count,
-                   admission.room_command_window_limit,
-                   admission.room_command_window_used,
-                   admission.room_shard_lease_id,
-                   admission.room_shard_lease_generation,
-                   admission.shard_lease_id, admission.shard_generation,
-                   admission.shard_valid_until,
-                   admission.shard_command_window_limit,
-                   admission.shard_command_window_used,
                    actor.actor_role, actor.sender_is_active, actor.muted,
                    policy.recipient_user_id,
                    policy.sender_profile_visible_to_recipient,
@@ -307,19 +356,13 @@ enum PlainDirectRoomLogPreflight {
                    policy.sender_account_kind, policy.sender_account_status,
                    policy.sender_allows_service_messages,
                    policy.recipient_account_kind, policy.recipient_account_status,
-                   policy.recipient_allows_customer_messages
+                   policy.recipient_allows_customer_messages,
+                   \(membershipValidation) AS valid_direct_memberships
             FROM fresh_room AS room
-            LEFT JOIN locked_admission AS admission ON admission.ordinal = room.ordinal
             LEFT JOIN locked_actor AS actor ON actor.ordinal = room.ordinal
             LEFT JOIN direct_policy AS policy ON policy.ordinal = room.ordinal
             ORDER BY room.ordinal
-            """).all().map { try PlainDirectRoomLogBatchPreflightRow(row: $0) }
-        guard rows.count == ordered.count,
-              zip(rows, ordered).allSatisfy({ $0.0.ordinal == $0.1.preflightOrdinal })
-        else {
-            throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
-        }
-        return rows
+            """
     }
 }
 
@@ -392,6 +435,7 @@ private struct PlainDirectRoomLogBatchPreflightInput: Encodable {
 }
 
 struct PlainDirectRoomLogBatchPreflightRow {
+    var usesRuntimeState = false
     let ordinal: Int
     let kind: String
     let roomShardID: String
@@ -449,17 +493,16 @@ struct PlainDirectRoomLogBatchPreflightRow {
         capacityProfileID = try row.decode(column: "capacity_profile_id")
         capacityClass = try row.decode(column: "capacity_class")
         frozenAt = try row.decode(column: "frozen_at", as: Date?.self)
-        roomEligibleMemberCount = try row.decode(column: "room_eligible_member_count", as: Int?.self)
-        roomCommandWindowLimit = try row.decode(column: "room_command_window_limit", as: Int?.self)
-        roomCommandWindowUsed = try row.decode(column: "room_command_window_used", as: Int?.self)
-
-        roomShardLeaseID = try row.decode(column: "room_shard_lease_id", as: UUID?.self)
-        roomShardLeaseGeneration = try row.decode(column: "room_shard_lease_generation", as: Int64?.self)
-        shardLeaseID = try row.decode(column: "shard_lease_id", as: UUID?.self)
-        shardGeneration = try row.decode(column: "shard_generation", as: Int64?.self)
-        shardValidUntil = try row.decode(column: "shard_valid_until", as: Date?.self)
-        shardCommandWindowLimit = try row.decode(column: "shard_command_window_limit", as: Int?.self)
-        shardCommandWindowUsed = try row.decode(column: "shard_command_window_used", as: Int?.self)
+        roomEligibleMemberCount = nil
+        roomCommandWindowLimit = nil
+        roomCommandWindowUsed = nil
+        roomShardLeaseID = nil
+        roomShardLeaseGeneration = nil
+        shardLeaseID = nil
+        shardGeneration = nil
+        shardValidUntil = nil
+        shardCommandWindowLimit = nil
+        shardCommandWindowUsed = nil
 
         actorRole = try row.decode(column: "actor_role", as: String?.self)
         senderIsActive = try row.decode(column: "sender_is_active", as: Bool?.self)
@@ -482,6 +525,28 @@ struct PlainDirectRoomLogBatchPreflightRow {
         recipientAccountKind = try row.decode(column: "recipient_account_kind", as: String?.self)
         recipientAccountStatus = try row.decode(column: "recipient_account_status", as: String?.self)
         recipientAllowsCustomerMessages = try row.decode(column: "recipient_allows_customer_messages", as: Bool?.self)
+    }
+
+    init(ordinal: Int, room: RoomRow,
+        context: DirectMessageAcceptanceContext, policy: V2DirectSendControlPolicy, directPolicyRevision: Int64, recipientHasReplied: Bool) {
+        self.ordinal = ordinal
+        usesRuntimeState = true
+        kind = room.kind; roomShardID = room.roomShardID
+        roomSequence = room.roomSequence; timelineSequence = room.timelineSequence
+        membershipRevision = room.membershipRevision; capacityProfileID = room.capacityProfileID
+        capacityClass = room.capacityClass; frozenAt = room.frozenAt
+        roomEligibleMemberCount = nil; roomCommandWindowLimit = nil; roomCommandWindowUsed = nil
+        roomShardLeaseID = nil; roomShardLeaseGeneration = nil
+        shardLeaseID = nil; shardGeneration = nil; shardValidUntil = nil
+        shardCommandWindowLimit = nil; shardCommandWindowUsed = nil
+        actorRole = "member"; senderIsActive = true; muted = false
+        recipientUserID = context.recipientID; senderProfileVisibleToRecipient = context.senderProfileVisibleToRecipient
+        self.directPolicyRevision = directPolicyRevision; senderPolicyRevision = 0; recipientPolicyRevision = 0
+        senderCanSend = context.senderCanSend; recipientIsActive = policy.recipient.isActive
+        blocked = policy.blocked; isFriend = policy.isFriend; senderHasReplied = context.senderHasReplied
+        self.recipientHasReplied = recipientHasReplied; allowsStrangers = policy.allowsStrangers
+        senderAccountKind = nil; senderAccountStatus = nil; senderAllowsServiceMessages = nil
+        recipientAccountKind = nil; recipientAccountStatus = nil; recipientAllowsCustomerMessages = nil
     }
 
     var room: RoomRow {
@@ -593,4 +658,10 @@ struct PlainDirectRoomLogBatchPreflightRow {
             commandWindowLimit: shardCommandWindowLimit,
             commandWindowUsed: shardCommandWindowUsed)
     }
+}
+
+/// Generated only from opaque runtime executions, never client input.
+private struct LeasedDirectPreflightInput: Encodable {
+    let ordinal: Int
+    let policy: V2DirectSendControlPolicy
 }

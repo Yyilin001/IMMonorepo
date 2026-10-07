@@ -240,9 +240,38 @@ public enum V2GatewayTelemetryRejection: String, CaseIterable, Hashable, Sendabl
     }
 }
 
+/// Internal failure dimensions remain independent of ActorContracts and wire errors.
+public enum V2MessageSendFailureCommand: String, CaseIterable, Hashable, Sendable {
+    case submit = "message_send_operation"
+    case recover = "message_send_operation_recover"
+}
+public enum V2MessageSendFailureDisposition: String, CaseIterable, Hashable, Sendable {
+    case outcomeUnknown = "outcome_unknown"
+    case notAccepted = "not_accepted"
+    case rolledBack = "rolled_back"
+}
+public enum V2MessageSendFailureReason: String, CaseIterable, Hashable, Sendable {
+    case none
+    case staleActivation = "stale_activation"
+    case notReady = "not_ready"
+    case retired
+    case leaseLost = "lease_lost"
+    case unavailable
+    case overloaded
+    case deadlineExceeded = "deadline_exceeded"
+    case cancelled
+    case notFound = "not_found"
+    case forbidden
+    case invalidRequest = "invalid_request"
+    case unsupportedVersion = "unsupported_version"
+    case idempotencyConflict = "idempotency_conflict"
+}
+
 // Swift 6.4 的 Linux Release 构建中，异步组合接收端记录内联事件布局时会崩溃。
 // 在工具链修复前保留此间接调用。
 public indirect enum V2TelemetryEvent: Equatable, Sendable {
+    case messageSendInternalFailure(command: V2MessageSendFailureCommand,
+        disposition: V2MessageSendFailureDisposition, reason: V2MessageSendFailureReason)
     /// 跟踪 ID 用于关联单条网关命令，且不标识任何用户、设备、房间、消息、令牌或协议载荷。
     case gatewayCommand(
         traceID: UUID,

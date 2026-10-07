@@ -8,7 +8,7 @@ public struct V2ClientUserRoomEntry: Equatable, Sendable {
     public let ownerEpoch: UInt64
 
     public init(roomID: RoomID, kind: V2ClientRoomKind, viewerMembershipRevision: UInt64, ownerEpoch: UInt64) throws {
-        guard roomID.uuidValue != nil, viewerMembershipRevision > 0,
+        guard roomID.uuidValue != nil,
               viewerMembershipRevision <= UInt64(Int64.max), ownerEpoch <= UInt64(Int64.max)
         else { throw V2RealtimeTransportError.unexpectedResponse }
         self.roomID = roomID

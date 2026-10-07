@@ -37,7 +37,13 @@ struct V2RoomActorMetricsTests {
         #expect(text.contains("im_v2_room_actor_peak_outstanding_bytes 32"))
         #expect(text.contains("im_v2_room_actor_active_rooms 2"))
         #expect(!text.contains("private-room"))
-        #expect(!text.contains("{"))
+        let allowedStages = Set(V2RoomDirectoryRecoveryStage.allCases.map(\.rawValue)
+            + V2RoomTransportRecoveryStage.allCases.map(\.rawValue))
+        for line in text.split(separator: "\n") where line.contains("{") {
+            #expect(line.hasPrefix("im_v2_room_directory_recovery_") || line.hasPrefix("im_v2_room_transport_recovery_"))
+            let labels = line.split(separator: "{")[1].split(separator: "}")[0]
+            #expect(allowedStages.contains { labels == "stage=\"\($0)\"" })
+        }
         #expect(await budget.snapshot() == state)
     }
 }

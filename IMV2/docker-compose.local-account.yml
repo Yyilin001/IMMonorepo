@@ -15,6 +15,7 @@ services:
       # of any stale deployment-side SQL artifacts.
       - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/realtime-change-journal.sql:/docker-entrypoint-initdb.d/02-realtime-change-journal.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
       interval: 1s
@@ -110,6 +111,7 @@ services:
       IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PER_CONNECTION: ${IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PER_CONNECTION:-4194304}
       IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PROCESS: ${IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PROCESS:-67108864}
       IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
+      IM_V2_REALTIME_ROOM_TRANSPORT: ${IM_V2_REALTIME_ROOM_TRANSPORT:-actor}
       IM_V2_LOCAL_MEDIA_MODE: filesystem
       IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY: "1"
       IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY: /var/lib/im-v2-local-media
@@ -119,12 +121,13 @@ services:
       # The gateway has foreground command/sync work plus durable fan-out in
       # one process. One connection per event loop can deadlock that mix.
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 8
-      IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP: 4
+      IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP: 1
+      IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP: 2
       IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP: 1
       IM_V2_DATABASE_DELIVERY_CONNECTIONS_PER_EVENT_LOOP: 1
-      IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP: 1
+      IM_V2_DATABASE_PROJECTION_CONNECTIONS_PER_EVENT_LOOP: 2
       IM_V2_DATABASE_MAINTENANCE_CONNECTIONS_PER_EVENT_LOOP: 1
-      IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED: "false"
+      IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED: "true"
       IM_V2_DATABASE_EVENT_LOOP_THREADS: 4
       IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS: 512
       IM_V2_MAX_USER_SHARD_STORES: 16
@@ -143,6 +146,8 @@ services:
       IM_V2_MAX_PROTOBUF_MESSAGE_DEPTH: 32
       IM_V2_MAX_IN_FLIGHT_REQUESTS: 32
       IM_V2_MAX_CONNECTIONS: 10000
+      IM_V2_ONLINE_DELIVERY_MAX_ROOMS: ${IM_V2_ONLINE_DELIVERY_MAX_ROOMS:-65536}
+      IM_V2_ONLINE_DELIVERY_MAX_RELATIONS: ${IM_V2_ONLINE_DELIVERY_MAX_RELATIONS:-262144}
       IM_V2_LISTEN_BACKLOG: 4096
       IM_V2_ACCEPT_BATCH_SIZE: 256
       IM_V2_MAX_CONNECTIONS_PER_DEVICE: 2
@@ -193,7 +198,7 @@ services:
       IM_V2_METRICS_PORT: 9464
       IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS: 30000
       IM_V2_METRICS_REFRESH_TIMEOUT_MS: 4000
-      IM_V2_GATEWAY_NODE_ID: local-gateway-1
+      IM_V2_GATEWAY_NODE_ID: gateway
       IM_V2_GATEWAY_REPLICA_COUNT: "1"
       IM_V2_USER_SHARD_BUCKET: users-primary
       IM_V2_USER_SHARD_ROUTER_EPOCH: 1
@@ -241,6 +246,7 @@ services:
     env_file:
       - .env.local
     environment:
+      IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
       IM_V2_DATABASE_EVENT_LOOP_THREADS: 2
       IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 4
@@ -258,6 +264,8 @@ services:
       IM_V2_CAPABILITY_PROFILE: base
       IM_V2_ROOM_SHARD_STORES_JSON: '[{"shard_id":"rooms-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
       IM_V2_USER_SHARD_STORES_JSON: '[{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2","schema":"im_v2"}]'
+    volumes:
+      - ./local-room-actors/operator:/run/im-v2-room-actor:ro
     depends_on:
       postgres:
         condition: service_healthy

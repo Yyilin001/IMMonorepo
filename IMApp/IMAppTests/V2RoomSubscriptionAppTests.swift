@@ -1,5 +1,5 @@
 import Foundation
-import IMV2ClientKit
+@testable import IMV2ClientKit
 import IMV2Core
 import Testing
 @testable import IMApp
@@ -81,6 +81,51 @@ actor AppSubscriptionWire: V2ClientGroupEventSubscriptionTransport, V2ClientLive
 
 @Suite("App room subscription ownership", .timeLimit(.minutes(1)))
 struct V2RoomSubscriptionAppTests {
+    @MainActor @Test("coverage presentation waits for every active scope and discards ended and old generations")
+    func realtimeCoverageAggregatesRequestedScopes() throws {
+        let coverage = V2AppRealtimeCoverage()
+        let account = UserID(uuid: UUID()), room = UUID(), physical = UUID(), loop = UUID()
+        func value(_ scope: IMV2RealtimeCoverage.Scope, _ status: IMV2RealtimeCoverage.State,
+            revision: UInt64, generation: UInt64 = 1,
+            reason: IMV2RealtimeCoverage.Reason = .unspecified) throws -> V2RealtimeCoverageState {
+            var wire = IMV2RealtimeCoverage()
+            wire.scope = scope; wire.state = status; wire.revision = revision; wire.scopeGeneration = generation
+            wire.scopeID = scope == .account || scope == .directory ? account.rawValue : room.uuidString
+            wire.highWatermark = 8
+            wire.reason = reason
+            return try V2RealtimeCoverageState(wire: wire, generation: physical)
+        }
+        coverage.begin(loop)
+        coverage.receive(try value(.account, .ready, revision: 1), loop: loop, account: account)
+        #expect(coverage.state == .ready) // Unrequested directory/presence/typing do not block.
+        coverage.receive(try value(.room, .recovering, revision: 2, reason: .installing), loop: loop, account: account)
+        coverage.receive(try value(.account, .ready, revision: 3), loop: loop, account: account)
+        #expect(coverage.state == .recovering && coverage.reason == .installing)
+        coverage.receive(try value(.typing, .ready, revision: 4), loop: loop, account: account)
+        #expect(coverage.state == .recovering)
+        coverage.receive(try value(.room, .ready, revision: 5), loop: loop, account: account)
+        #expect(coverage.state == .ready)
+        coverage.receive(try value(.room, .recovering, revision: 6, reason: .coverageLost), loop: loop, account: account)
+        #expect(coverage.state == .recovering && coverage.reason == .coverageLost)
+        coverage.receive(try value(.room, .ended, revision: 7, generation: 2, reason: .cancelled), loop: loop, account: account)
+        #expect(coverage.state == .ready && coverage.scopes[.room] == nil)
+        coverage.receive(try value(.room, .ready, revision: 8, generation: 1), loop: loop, account: account)
+        coverage.receive(try value(.room, .recovering, revision: 9, generation: 2, reason: .installing), loop: loop, account: account)
+        coverage.receive(try value(.room, .ready, revision: 10, generation: 2), loop: loop, account: account)
+        #expect(coverage.state == .ready && coverage.scopes[.room] == nil)
+        coverage.receive(try value(.room, .recovering, revision: 11, generation: 3, reason: .installing), loop: loop, account: account)
+        #expect(coverage.state == .recovering && coverage.scopes[.room]?.scopeGeneration == 3)
+        coverage.receive(try value(.room, .ready, revision: 12, generation: 3), loop: loop, account: account)
+        #expect(coverage.state == .ready && coverage.scopes[.room]?.scopeGeneration == 3)
+        let replacement = UUID()
+        coverage.begin(replacement)
+        coverage.receive(try value(.account, .ready, revision: 10), loop: loop, account: account)
+        coverage.end(loop)
+        #expect(coverage.state == .recovering)
+        coverage.end(replacement)
+        #expect(coverage.state == .disconnected)
+    }
+
     @Test("cancelling one grace waiter keeps both scene leases alive")
     func graceCancellationDoesNotUnsubscribe() async throws {
         let wire = AppSubscriptionWire()

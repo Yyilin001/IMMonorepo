@@ -72,10 +72,8 @@ public struct PostgresV2SyncStore: V2SyncStore {
         let deviceUUID = try uuid(deviceID)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            try await prepareActiveCursor(sql: sql, userID: userUUID, deviceID: deviceUUID)
-            guard let cursor = try await fetchCursor(sql: sql, userID: userUUID, deviceID: deviceUUID, lock: true) else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
+            let metadata = try await preparePullCursor(sql: sql, userID: userUUID, deviceID: deviceUUID)
+            let cursor = metadata.cursor
             if cursor.state == "reset_preparing" {
                 guard let snapshotID = cursor.pendingSnapshotID else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
@@ -127,12 +125,7 @@ public struct PostgresV2SyncStore: V2SyncStore {
             } else {
                 startSequence = cursor.acknowledgedSequence
             }
-            let retainedFloor = try await sql.raw("""
-                SELECT compacted_through_sequence
-                FROM \(unsafeRaw: table("user_sync_retention"))
-                WHERE user_id = \(bind: userUUID)
-                FOR SHARE
-                """).first(decoding: SyncRetentionRow.self)?.compactedThroughSequence ?? 0
+            let retainedFloor = metadata.retainedFloor
             if requireSnapshot {
                 // 空账号没有同步日志触发器来初始化检查点。
                 // 首个事件前基准值为零有效；已确认的非零游标
@@ -466,23 +459,83 @@ public struct PostgresV2SyncStore: V2SyncStore {
         }
     }
 
+    /// Advisory waiting must end before establishing the authority snapshot. A CTE
+    /// dependency orders execution, but cannot refresh a statement's MVCC snapshot.
+    private func lockDevice(sql: any SQLDatabase, userID: UUID, deviceID: UUID) async throws {
+        try await sql.raw("""
+            SELECT pg_advisory_xact_lock(hashtextextended(
+                CONCAT(\(bind: userID), ':', \(bind: deviceID)), 684927
+            ))
+            """).run()
+    }
+
+    private func preparePullCursor(
+        sql: any SQLDatabase, userID: UUID, deviceID: UUID
+    ) async throws -> (cursor: DeviceCursorRow, retainedFloor: Int64) {
+        try await lockDevice(sql: sql, userID: userID, deviceID: deviceID)
+        // Existing rows are actually locked. Newly inserted rows are returned by
+        // the modifying CTE, never read back from its older statement snapshot.
+        // The device advisory lock serializes every supported cursor creator.
+        guard let row = try await sql.raw("""
+            WITH active AS MATERIALIZED (
+                SELECT NOT EXISTS (
+                    SELECT 1 FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
+                    WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
+                ) AS is_active
+            ), existing AS MATERIALIZED (
+                SELECT cursor.* FROM \(unsafeRaw: table("device_sync_cursors")) AS cursor
+                CROSS JOIN active
+                WHERE cursor.user_id = \(bind: userID) AND cursor.device_id = \(bind: deviceID)
+                  AND active.is_active
+                FOR UPDATE OF cursor
+            ), inserted AS (
+                INSERT INTO \(unsafeRaw: table("device_sync_cursors"))
+                    (user_id, device_id, state, reset_generation)
+                SELECT \(bind: userID), \(bind: deviceID), 'ready', 1 FROM active
+                WHERE is_active AND NOT EXISTS (SELECT 1 FROM existing)
+                ON CONFLICT (user_id, device_id) DO NOTHING
+                RETURNING *
+            ), selected AS MATERIALIZED (
+                SELECT * FROM existing UNION ALL SELECT * FROM inserted
+            ), cursor_barrier AS MATERIALIZED (
+                SELECT count(*) AS cursor_count, bool_and(state = 'ready') AS is_ready FROM selected
+            ), retention AS MATERIALIZED (
+                SELECT retained.compacted_through_sequence
+                FROM \(unsafeRaw: table("user_sync_retention")) AS retained
+                CROSS JOIN cursor_barrier
+                WHERE retained.user_id = \(bind: userID) AND cursor_barrier.cursor_count = 1
+                  AND cursor_barrier.is_ready
+                FOR SHARE OF retained
+            )
+            SELECT active.is_active, cursor_barrier.cursor_count, selected.*,
+                   COALESCE(retention.compacted_through_sequence, 0) AS retained_floor
+            FROM active CROSS JOIN cursor_barrier
+            LEFT JOIN selected ON TRUE LEFT JOIN retention ON TRUE
+            """).first()
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        guard try row.decode(column: "is_active", as: Bool.self) else {
+            throw V2SyncStoreError.deviceRevoked
+        }
+        guard try row.decode(column: "cursor_count", as: Int64.self) == 1 else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
+        }
+        return (try row.decode(model: DeviceCursorRow.self),
+                try row.decode(column: "retained_floor", as: Int64.self))
+    }
+
     private func prepareActiveCursor(
         sql: any SQLDatabase,
         userID: UUID,
         deviceID: UUID
     ) async throws {
+        try await lockDevice(sql: sql, userID: userID, deviceID: deviceID)
         guard let active = try await sql.raw("""
-            WITH locked AS MATERIALIZED (
-                SELECT pg_advisory_xact_lock(hashtextextended(
-                    CONCAT(\(bind: userID), ':', \(bind: deviceID)), 684927
-                ))
-            ), active AS MATERIALIZED (
+            WITH active AS MATERIALIZED (
                 SELECT NOT EXISTS (
                     SELECT 1
                     FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
                     WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
                 ) AS is_active
-                FROM locked
             ), inserted AS (
                 INSERT INTO \(unsafeRaw: table("device_sync_cursors"))
                     (user_id, device_id, state, reset_generation)
@@ -512,18 +565,13 @@ public struct PostgresV2SyncStore: V2SyncStore {
         userID: UUID,
         deviceID: UUID
     ) async throws {
+        try await lockDevice(sql: sql, userID: userID, deviceID: deviceID)
         guard let active = try await sql.raw("""
-            WITH locked AS MATERIALIZED (
-                SELECT pg_advisory_xact_lock(hashtextextended(
-                    CONCAT(\(bind: userID), ':', \(bind: deviceID)), 684927
-                ))
-            )
             SELECT NOT EXISTS (
                 SELECT 1
                 FROM \(unsafeRaw: table("revoked_device_projection_tombstones"))
                 WHERE user_id = \(bind: userID) AND device_id = \(bind: deviceID)
             ) AS is_active
-            FROM locked
             """).first(decoding: ActiveDeviceRow.self)
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         guard active.isActive else { throw V2SyncStoreError.deviceRevoked }
@@ -632,17 +680,6 @@ private struct SyncLogRow: Decodable {
     enum CodingKeys: String, CodingKey { case sequence = "user_sync_sequence", sourceEventID = "source_event_id", projectionKind = "projection_kind", payloadJSON = "payload_json" }
 }
 private struct SyncTokenRow: Decodable { let watermark: Int64 }
-private struct SyncRetentionRow: Decodable {
-    let compactedThroughSequence: Int64
-    enum CodingKeys: String, CodingKey {
-        case compactedThroughSequence = "compacted_through_sequence"
-    }
-}
-private struct SyncReceiptRow: Decodable {
-    let firstSequence: Int64
-    let lastSequence: Int64
-    enum CodingKeys: String, CodingKey { case firstSequence = "first_sequence", lastSequence = "last_sequence" }
-}
 private struct SnapshotMetadataRow: Decodable {
     let expiresAt: Date
     enum CodingKeys: String, CodingKey { case expiresAt = "expires_at" }

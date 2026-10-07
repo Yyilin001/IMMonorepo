@@ -13,6 +13,7 @@
 | 你想知道 | 看这里 |
 | --- | --- |
 | 如何逐项审核设计、实现与体验（执行计划，非通过证明） | [设计与实现质量审核蓝图](design-implementation-review-blueprint.md) |
+| Gateway 分布式 Actor 路由修正（新设计，待实施验收） | [Gateway Actor 实时路由修正方案](actor-realtime-routing-plan.md) |
 | 如何判断测试是否有独立验证价值（首轮治理台账） | [测试有效性治理](test-governance-audit.md) |
 | 账号密码变更、离线恢复码、断言版本与登录限流 | [账号认证生命周期](account-authentication-lifecycle.md) |
 | 系统由哪些组件组成、消息怎么流动 | [当前系统架构](../current-system-map.md) |

@@ -85,43 +85,6 @@ public struct V2MessageWithdrawalIDFactory: Sendable {
     }
 }
 
-/// 消息撤回的对外服务，负责补齐标识与授时后转交存储。
-public struct V2MessageWithdrawalService: Sendable {
-    private let store: any V2MessageWithdrawalStore
-    private let capacityProfile: V2CapacityProfile
-    private let identifiers: V2MessageWithdrawalIDFactory
-    private let now: @Sendable () -> Date
-
-    /// 组合撤回存储与运行参数。
-    ///
-    /// - Parameters:
-    ///   - store: 实际执行撤回的存储实现。
-    ///   - capacityProfile: 固定的容量档位。
-    ///   - identifiers: 事件标识生成器。
-    ///   - now: 可注入的当前时刻读取函数。
-    public init(store: any V2MessageWithdrawalStore, capacityProfile: V2CapacityProfile, identifiers: V2MessageWithdrawalIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
-        self.store = store
-        self.capacityProfile = capacityProfile
-        self.identifiers = identifiers
-        self.now = now
-    }
-
-    /// 撤回一条已认证用户可见的消息。
-    ///
-    /// - Parameter request: 已认证的撤回请求。
-    /// - Returns: 撤回结果；标识与授时由本方法补齐。
-    /// - Throws: 标识生成失败，或存储判定无权限、修订冲突、持久化失败时抛出。
-    public func withdraw(_ request: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome {
-        let eventID = try identifiers.make()
-        return try await store.withdraw(
-            command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, messageID: request.messageID, expectedMessageRevision: request.expectedMessageRevision),
-            capacityProfile: capacityProfile,
-            eventID: eventID,
-            now: now()
-        )
-    }
-}
-
 /// 消息撤回存储错误。
 public enum V2MessageWithdrawalStoreError: Error, Equatable, Sendable {
     /// 房间不存在。

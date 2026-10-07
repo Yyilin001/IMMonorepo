@@ -87,16 +87,11 @@ actor_configuration_directory="${v2_dir}/local-room-actors"
 if [[ ! -d "${actor_configuration_directory}" ]]; then
   python3 "${script_dir}/prepare_v2_room_actor_configuration.py" \
     --output-dir "${actor_configuration_directory}" \
-    --host gateway=gateway:7337 --caller account=account:7338 \
-    --shards rooms-primary --mount-root /run/im-v2-room-actor
+    --host gateway=gateway:7337 --caller account=account:7338 --caller operator=operator:7339 \
+    --shards rooms-primary --user-buckets users-primary --mount-root /run/im-v2-room-actor \
+    --policy-partitions 16
 fi
-for actor_process in gateway account; do
-  test -s "${actor_configuration_directory}/${actor_process}/configuration.json" || {
-    printf 'Room Actor configuration is incomplete for %s; inspect %s before restarting.\n' \
-      "${actor_process}" "${actor_configuration_directory}" >&2
-    exit 1
-  }
-done
+python3 "${script_dir}/validate_v2_local_policy_configuration.py" "${actor_configuration_directory}"
 
 
 # Older local Docker installations can lack Buildx and therefore ignore a
@@ -151,6 +146,9 @@ test "${schema_is_current}" = 't' || {
   printf 'Then rerun this script. No automatic schema or data migration was attempted.\n' >&2
   exit 1
 }
+# Repeatable extension install also covers a retained canonical source database.
+"${script_dir}/install_v2_realtime_journal.sh" --print-sql |
+  compose exec -T postgres psql -X --set=ON_ERROR_STOP=1 -U im_v2 -d im_v2 > /dev/null
 v2_seed_local_admission_pool
 # Caddy's development leaf certificate is intentionally short-lived. Recreate
 # the local TLS edge on every explicit start so a retained Compose project

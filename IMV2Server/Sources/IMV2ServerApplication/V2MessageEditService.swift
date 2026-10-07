@@ -80,44 +80,6 @@ public struct V2MessageEditIDFactory: Sendable {
     public func make() throws -> EventID { try .init(makeUUID().uuidString) }
 }
 
-/// 消息编辑服务。
-///
-/// 它把已认证请求转换为编辑命令，并在此处注入正文长度上限，
-/// 使长度校验在持久化之前就以部署策略为准。
-public struct V2MessageEditService: Sendable {
-    private let store: any V2MessageEditStore
-    private let capacityProfile: V2CapacityProfile
-    private let identifiers: V2MessageEditIDFactory
-    private let now: @Sendable () -> Date
-    private let maximumTextUTF8Bytes: Int
-
-    /// 创建编辑服务。
-    ///
-    /// - Parameters:
-    ///   - store: 编辑持久化边界。
-    ///   - capacityProfile: 本次部署使用的容量档位。
-    ///   - maximumTextUTF8Bytes: 编辑后正文允许的最大 UTF-8 字节数。
-    ///   - identifiers: 标识工厂，默认使用随机 UUID。
-    ///   - now: 服务端时钟，默认取当前时间。
-    public init(store: any V2MessageEditStore, capacityProfile: V2CapacityProfile, maximumTextUTF8Bytes: Int, identifiers: V2MessageEditIDFactory = .init(), now: @escaping @Sendable () -> Date = Date.init) {
-        self.store = store; self.capacityProfile = capacityProfile; self.maximumTextUTF8Bytes = maximumTextUTF8Bytes
-        self.identifiers = identifiers; self.now = now
-    }
-
-    /// 执行一次消息编辑。
-    ///
-    /// - Parameter request: 已认证的编辑请求。
-    /// - Returns: 编辑处理结果。
-    /// - Throws: 存储拒绝或持久化失败时抛出。
-    public func edit(_ request: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome {
-        let eventID = try identifiers.make()
-        return try await store.edit(
-            command: .init(roomID: request.roomID, actorUserID: request.actorUserID, operationID: request.operationID, messageID: request.messageID, expectedMessageRevision: request.expectedMessageRevision, text: request.text, maximumUTF8Bytes: maximumTextUTF8Bytes),
-            capacityProfile: capacityProfile, eventID: eventID, now: now()
-        )
-    }
-}
-
 /// 消息编辑存储的错误分类。
 public enum V2MessageEditStoreError: Error, Equatable, Sendable {
     /// 目标房间不存在。

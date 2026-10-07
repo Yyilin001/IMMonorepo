@@ -9,15 +9,6 @@ public enum V2ActorAdministrationWireError: Error, Equatable, Sendable {
     case invalidPageLimit
     case invalidRetryAfter
     case trustedActionOnUserLane
-    case unsupportedAuthenticatedRevision
-}
-
-private func v2ActorPermissions(_ values: [V2GroupPermission]) throws -> Set<V2GroupPermission> {
-    let set = Set(values)
-    guard set.count == values.count, values.count <= V2GroupPermission.allCases.count else {
-        throw V2ActorAdministrationWireError.invalidPermissionList
-    }
-    return set
 }
 
 func v2ActorSortedPermissions(_ values: Set<V2GroupPermission>) -> [V2GroupPermission] {

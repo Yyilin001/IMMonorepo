@@ -19,31 +19,14 @@ struct V2GroupNicknameEventPostgresTests {
             let originalOperation = GroupNicknameOperationID(uuid: UUID())
             let first = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
                 operationID: originalOperation, expectedRevision: nil, nickname: "Secret first name",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
-            let wakeToken = UUID()
-            try await f.sql.raw("""
-                UPDATE im_v2.group_event_wake_outbox SET state='leased',lease_token=\(bind: wakeToken),
-                    lease_expires_at=\(bind: f.now.addingTimeInterval(30)),attempt_count=1
-                WHERE room_id=\(bind: f.room.uuidValue!)
-                """).run()
-            let initialWake = try await f.wake()
             let noOp = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
                 operationID: .init(uuid: UUID()), expectedRevision: first.revision, nickname: first.groupNickname,firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             #expect(noOp.revision.rawValue == 2 && noOp.groupNickname == first.groupNickname)
-            #expect(try await f.wake() != initialWake)
             let second = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
                 operationID: .init(uuid: UUID()), expectedRevision: noOp.revision, nickname: "Secret second name",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
-            let replacedWake = try await f.wake()
-            #expect(replacedWake.state == "pending" && replacedWake.revision == 2 && replacedWake.leaseToken == nil)
-            #expect(replacedWake.target == 2 && replacedWake.high == 3)
             let third = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
                 operationID: .init(uuid: UUID()), expectedRevision: second.revision, nickname: nil,firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
             #expect(third.revision.rawValue == 4 && third.groupNickname == nil)
-            let coalescedWake = try await f.wake()
-            #expect(coalescedWake.revision == 2 && coalescedWake.target == 2 && coalescedWake.high == 4)
-            // A publisher completing the previous lease cannot delete the new wake.
-            try await PostgresV2GroupEventWakeStore(database: f.database).markPublished(.init(
-                wake: .init(roomID: f.room, highWatermark: 1), revision: 1, claimToken: wakeToken, attempt: 1))
-            #expect(try await f.wake() == coalescedWake)
             await #expect(throws: V2RoomCallFailure.rolledBack(.overloaded)) {
                 _ = try await f.store.updateOwnGroupNickname(.init(actorUserID: f.user, roomID: f.room,
                     operationID: .init(uuid: UUID()), expectedRevision: third.revision, nickname: "Must roll back",firstSubmissionDeadlineMilliseconds:UInt64(Int64.max))).committedValue
@@ -64,8 +47,6 @@ struct V2GroupNicknameEventPostgresTests {
                 #expect(payload["target_user_id"] as? String == f.user.rawValue)
                 #expect(payload["revision"] as? Int == index + 1)
             }
-            let wake = try #require(try await f.sql.raw("SELECT COUNT(*)::bigint AS value FROM im_v2.group_event_wake_outbox WHERE room_id=\(bind: f.room.uuidValue!)").first(decoding: NicknameCount.self))
-            #expect(wake.value == 1)
             let fanout = try #require(try await f.sql.raw("SELECT COUNT(*)::bigint AS value FROM im_v2.user_sync_log WHERE source_event_id IN (SELECT event_id FROM im_v2.room_events WHERE room_id=\(bind: f.room.uuidValue!))").first(decoding: NicknameCount.self))
             #expect(fanout.value == 0)
         }
@@ -129,14 +110,6 @@ private struct NicknameFixture {
     let database: any Database; let sql: any SQLDatabase
     let user: UserID; let room: RoomID; let store: PostgresV2ProfilePresentationStore
     let profile: V2CapacityProfile; let now: Date
-    func wake() async throws -> NicknameWake {
-        try #require(try await sql.raw("""
-            SELECT wake.state,wake.revision,wake.lease_token AS "leaseToken",wake.target_room_sequence AS target,
-                   GREATEST(wake.target_room_sequence,room.room_sequence) AS high
-            FROM im_v2.group_event_wake_outbox wake JOIN im_v2.rooms room USING(room_id)
-            WHERE room_id=\(bind: room.uuidValue!)
-            """).first(decoding: NicknameWake.self))
-    }
     func state() async throws -> NicknameState {
         try #require(try await sql.raw("""
             SELECT r.room_sequence AS sequence, a.command_window_used AS used, n.revision, n.nickname,
@@ -149,4 +122,3 @@ private struct NicknameFixture {
 }
 private struct NicknameState: Decodable, Equatable { let sequence: Int64; let used: Int; let revision: Int64; let nickname: String?; let operations: Int64 }
 private struct NicknameCount: Decodable { let value: Int64 }
-private struct NicknameWake: Decodable, Equatable { let state: String; let revision: Int64; let leaseToken: UUID?; let target: Int64; let high: Int64 }

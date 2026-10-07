@@ -1,4 +1,6 @@
-# Direct room-log command-credit batching
+# Direct room-log command-credit batching (retired)
+
+> Historical record: the process-local room and shard command-credit pools, their metrics, and refill tests have been removed. This procedure no longer applies to the current server.
 
 This is an opt-in single-gateway optimization for the direct-room event-log
 write path. It removes most of the serialized per-message updates to the

@@ -12,6 +12,43 @@ import Testing
 
 @Suite("V2 room activation transaction deadline")
 struct V2RoomActivationTransactionDeadlineTests {
+    @Test("pinned loan supports rollback then an independent transaction on the same physical loop",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func pinnedTransactionReuse() async throws {
+        let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_DATABASE_URL"])
+        let resources = makeV2DatabaseTestResources()
+        resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+        do {
+            let database = resources.database(.psql)
+            try await v2WithOwnerBatchConnection(database: database, deadline: .now + .seconds(5),
+                metrics: nil, acquisitionOnly: true, interrupted: { _ in }) { _, _ in
+                let pinned = try #require(V2BorrowedRoomConnectionScope.current)
+                #expect(pinned.physical.eventLoop.inEventLoop)
+                let original = try #require(try await pinned.sql.raw("SELECT pg_backend_pid() AS value").first(decoding: DeadlineCount.self)).value
+                do {
+                    _ = try await v2WithRoomActivationTransaction(database: database,
+                        deadline: .now + .seconds(2), pinnedConnection: pinned) { borrowed -> Int in
+                        #expect(pinned.physical.eventLoop.inEventLoop)
+                        try await deadlineSQL(borrowed).raw("SELECT 1").run()
+                        throw PinnedRollback.expected
+                    }
+                    Issue.record("Expected transaction rollback")
+                } catch PinnedRollback.expected {}
+                let current = try await v2WithRoomActivationTransaction(database: database,
+                    deadline: .now + .seconds(2), pinnedConnection: pinned) { borrowed in
+                    let result = try #require(try await deadlineSQL(borrowed).raw("SELECT pg_backend_pid() AS value").first(decoding: DeadlineCount.self))
+                    #expect(pinned.physical.eventLoop.inEventLoop)
+                    return result.value
+                }
+                #expect(current == original)
+            }
+        } catch {
+            try await resources.shutdown()
+            throw error
+        }
+        try await resources.shutdown()
+    }
+
     @Test("PG16 borrowed connection enforces total deadline and commit uncertainty",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func physicalDeadlineAndCommitClassification() async throws {
@@ -36,13 +73,23 @@ struct V2RoomActivationTransactionDeadlineTests {
                 CREATE TABLE public.v2_actor_deadline_probe (id integer PRIMARY KEY)
                 """).run()
 
+            let committedMetrics = V2SendOperationBatchMetrics()
             let committed: Int = try await v2WithRoomActivationTransaction(
-                database: database, deadline: .now + .seconds(2), timeouts: timeouts) { borrowed in
+                database: database, deadline: .now + .seconds(2), timeouts: timeouts,
+                sendOperationMetrics: committedMetrics) { borrowed in
+                #expect(committedMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerBody]?.inFlight == 1)
+                #expect(committedMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSetup]?.count == 1)
                 let connection = try deadlineSQL(borrowed)
                 try await connection.raw("INSERT INTO public.v2_actor_deadline_probe VALUES (1)").run()
                 return 17
             }
             #expect(committed == 17)
+            let committedStages = committedMetrics.sendOperationBatchMetricsSnapshot().stages
+            for stage in [V2SendOperationStage.ownerConnectionAcquire, .ownerSetup, .ownerBody, .ownerCommit] {
+                #expect(committedStages[stage]?.count == 1)
+                #expect(committedStages[stage]?.inFlight == 0)
+            }
+            #expect(committedStages[.ownerRollback]?.count == 0)
             #expect(try await count(id: 1, sql: sql) == 1)
 
             let distinctTimeouts = try V2RoomActivationSQLTimeouts(lockMilliseconds: 75,
@@ -59,8 +106,11 @@ struct V2RoomActivationTransactionDeadlineTests {
             #expect(settings.statementTimeout == "250ms")
             #expect(settings.idleTimeout == "400ms")
 
+            let scopedDeadline = ContinuousClock.now + .milliseconds(270)
             await #expect(throws: V2RoomCallFailure.rolledBack(.deadlineExceeded)) {
-                try await V2RoomSQLDeadline.withDeadline(.now + .milliseconds(270)) {
+                try await V2RoomSQLDeadline.withDeadline(scopedDeadline) {
+                    #expect(V2RoomSQLDeadline.current == scopedDeadline)
+                    #expect(V2RoomSQLDeadline.boundedTransactionDeadline() == scopedDeadline)
                     _ = try await v2WithRoomScopedTransaction(database: database,
                         timeouts: timeouts) { borrowed in
                         let connection = try deadlineSQL(borrowed)
@@ -130,13 +180,27 @@ struct V2RoomActivationTransactionDeadlineTests {
             }
             for await _ in borrowedReady.stream { break }
             let enteredBody = Mutex(false)
-            await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
-                _ = try await v2WithRoomActivationTransaction(
+            let poolMetrics = V2SendOperationBatchMetrics()
+            let waitingForConnection = Task {
+                try await v2WithRoomActivationTransaction(
                     database: singleConnectionDatabase,
-                    deadline: .now + .milliseconds(120), timeouts: timeouts) { _ in
+                    deadline: .now + .milliseconds(120), timeouts: timeouts,
+                    sendOperationMetrics: poolMetrics) { _ in
                     enteredBody.withLock { $0 = true }
                 }
             }
+            // Deadline has passed while the sole connection is still held.
+            // Recording completion here would falsely report the SQL as drained.
+            try await Task.sleep(for: .milliseconds(180))
+            #expect(poolMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerConnectionAcquire]?.inFlight == 1)
+            #expect(poolMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerConnectionAcquire]?.count == 0)
+            await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
+                try await waitingForConnection.value
+            }
+            let poolStages = poolMetrics.sendOperationBatchMetricsSnapshot().stages
+            #expect(poolStages[.ownerConnectionAcquire]?.inFlight == 0)
+            #expect(poolStages[.ownerConnectionAcquire]?.count == 1)
+            #expect(poolStages[.ownerBody]?.count == 0)
             try await poolHolder.value
             #expect(enteredBody.withLock { !$0 })
 
@@ -193,9 +257,11 @@ struct V2RoomActivationTransactionDeadlineTests {
             for await _ in sqlTimeoutReady.stream { break }
             let shortLockTimeout = try V2RoomActivationSQLTimeouts(lockMilliseconds: 75,
                 statementMilliseconds: 1_000, idleTransactionMilliseconds: 1_000)
+            let rollbackMetrics = V2SendOperationBatchMetrics()
             await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
                 _ = try await v2WithRoomActivationTransaction(database: database,
-                    deadline: .now + .seconds(1), timeouts: shortLockTimeout) { borrowed in
+                    deadline: .now + .seconds(1), timeouts: shortLockTimeout,
+                    sendOperationMetrics: rollbackMetrics) { borrowed in
                     let connection = try deadlineSQL(borrowed)
                     try await connection.raw("INSERT INTO public.v2_actor_deadline_probe VALUES (11)").run()
                     try await connection.raw("SELECT pg_advisory_xact_lock(\(bind: sqlTimeoutKey))").run()
@@ -203,6 +269,9 @@ struct V2RoomActivationTransactionDeadlineTests {
             }
             try await sqlTimeoutHolder.value
             #expect(try await count(id: 11, sql: sql) == 0)
+            #expect(rollbackMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerRollback]?.count == 1)
+            #expect(rollbackMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerRollback]?.inFlight == 0)
+            #expect(rollbackMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerCommit]?.count == 0)
 
             let cancellation = Task {
                 try await v2WithRoomActivationTransaction(database: database,
@@ -236,9 +305,11 @@ struct V2RoomActivationTransactionDeadlineTests {
                 WHEN (NEW.id IN (5, 6, 7))
                 EXECUTE FUNCTION public.v2_actor_deadline_commit_sleep()
                 """).run()
+            let commitFaultMetrics = V2SendOperationBatchMetrics()
             let commitFault = Task {
                 try await v2WithRoomActivationTransaction(database: database,
-                    deadline: .now + .milliseconds(450), timeouts: timeouts) { borrowed in
+                    deadline: .now + .milliseconds(450), timeouts: timeouts,
+                    sendOperationMetrics: commitFaultMetrics) { borrowed in
                     let connection = try deadlineSQL(borrowed)
                     try await connection.raw("INSERT INTO public.v2_actor_deadline_probe VALUES (5)").run()
                 }
@@ -256,12 +327,16 @@ struct V2RoomActivationTransactionDeadlineTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
             #expect(sawCommit)
+            #expect(commitFaultMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerCommit]?.inFlight == 1)
             // Fault injection closes the client connection while a deferred
             // COMMIT trigger sleeps. This proves classification of missing ACK;
             // it does not claim the server committed or model true ACK loss.
             await #expect(throws: V2RoomTransactionOutcomeUnknown.self) {
                 try await commitFault.value
             }
+            #expect(commitFaultMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerCommit]?.inFlight == 0)
+            #expect(commitFaultMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerCommit]?.count == 1)
+            #expect(commitFaultMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerRollback]?.count == 0)
 
             // A server SQLSTATE 40001 at deferred COMMIT proves rollback and
             // stays retryable even though it arrives after body success.
@@ -339,6 +414,7 @@ private func count(id: Int, sql: any SQLDatabase) async throws -> Int64 {
         .first(decoding: DeadlineCount.self)?.value ?? -1
 }
 
+private enum PinnedRollback: Error { case expected }
 private struct DeadlineBool: Decodable { let value: Bool }
 private struct DeadlineCount: Decodable { let value: Int64 }
 private struct DeadlinePID: Decodable { let value: Int32 }

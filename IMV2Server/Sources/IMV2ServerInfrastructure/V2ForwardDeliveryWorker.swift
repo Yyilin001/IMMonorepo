@@ -80,11 +80,10 @@ public struct V2ForwardDeliveryWorker: Sendable {
         guard limit > 0 else { throw V2ForwardDeliveryError.invalidConfiguration }
         try Task.checkCancellation()
         let leases = try await store.claim(sourceShardID: sourceShardID, now: now(), leaseDuration: leaseDuration, limit: min(limit, maximumConcurrency))
-        return try await withThrowingTaskGroup(of: Result.self) { group in
-            for lease in leases { group.addTask { try await deliver(lease) } }
-            var report = V2ForwardDeliveryReport()
-            report.claimed = leases.count
-            for try await result in group {
+        var initial = V2ForwardDeliveryReport()
+        initial.claimed = leases.count
+        return try await v2ProcessClaimedWorkBatch(leases, initial: initial,
+            process: { try await deliver($0) }, accumulate: { report, result in
                 switch result {
                 case .completed: report.completed += 1
                 case .deferred: report.deferred += 1
@@ -92,9 +91,7 @@ public struct V2ForwardDeliveryWorker: Sendable {
                 case .paused: report.paused += 1
                 case .superseded: report.superseded += 1
                 }
-            }
-            return report
-        }
+            })
     }
 
     /// 单次投递的处置结果。

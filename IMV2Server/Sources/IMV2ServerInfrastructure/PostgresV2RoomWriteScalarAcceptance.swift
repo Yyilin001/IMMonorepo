@@ -7,13 +7,12 @@ import IMV2Core
 import SQLKit
 
 // 仅在 Store 借用的事务中运行。事务仍由 Store 开启；
-// Store 负责完成授权回执，并严格在提交后结算缓存和命令额度。
+// Store 负责完成授权回执，并严格在提交后更新缓存。
 struct V2RoomWriteScalarAcceptancePath {
     let ownerGuard: V2RoomWriteSelectedOwnerGuard
     let policyContext: V2RoomWriteDirectPolicyContext
     let strangerMessagePolicy: V2StrangerMessagePolicy
     let contentReviewMode: V2ContentReviewMode
-    let observesRoomAdmissionHeat: Bool
 
     func acceptInTransaction(
         command: V2SendMessageCommand,
@@ -65,7 +64,9 @@ struct V2RoomWriteScalarAcceptancePath {
                 clientMessageID: clientMessageID, capacityProfileID: capacityProfile.id,
                 now: now, cachedDirectPolicy: cachedDirectPolicy,
                 importedForward: importedForward,
-                controlScopeRoomKinds: ownerGuard.controlScopeRoomKinds), sql: sql)
+                controlScopeRoomKinds: ownerGuard.controlScopeRoomKinds,
+                leasedPolicy: ownerGuard.controlResolution.policyExecution?.snapshot.policy,
+                leasedAccount: ownerGuard.controlResolution.policyExecution?.snapshot.account), sql: sql)
             let fresh: V2ScalarAcceptancePreparation.Fresh
             switch prepared {
             case .replay(let commit): return commit
@@ -73,11 +74,8 @@ struct V2RoomWriteScalarAcceptancePath {
             }
             let loadedContext = fresh.loaded
             let room = fresh.room
-            let usesDirectRoomLog = fresh.usesDirectRoomLog
             let authorized = try V2RoomWriteScalarPath.admission(fresh)
-            let admission = authorized.admission
-            let shard = authorized.shard
-            let actorIsActive = try policyContext.senderIsActive(authorized.snapshot.senderIsActive,
+            let actorIsActive = try policyContext.senderIsActive(authorized.senderIsActive,
                 roomID: roomID, senderID: senderID)
             try await V2RoomWriteScalarPath.authorizeContent(fresh,
                 admission: authorized, roomID: roomID,
@@ -87,6 +85,13 @@ struct V2RoomWriteScalarAcceptancePath {
                 let context = try policyContext.directMessageContext(from: loadedContext.directPolicySnapshot(), roomID: roomID, senderID: senderID)
                 directContext = context
                 if let restriction = context.restriction {
+                    if V2SendSuccessMetadata.current.contains(where: {
+                        $0.room == roomID && $0.sender == senderID && $0.operation == clientMessageID
+                    }) {
+                        // Operation sends return the current policy failure;
+                        // no denial event, projection or durable result is made.
+                        throw V2SendOperationResponseError.directPolicyDenied
+                    }
                     let denied = try await persistDirectMessageDenied(
                         fingerprint: command.fingerprint,
                         roomID: command.roomID,
@@ -115,17 +120,11 @@ struct V2RoomWriteScalarAcceptancePath {
                 sql: sql
             )
             try await assertReplyTarget(command.replyTo, roomID: roomID, actorID: senderID, sql: sql)
-            let roomState = try room.commandState(roomID: command.roomID, admission: admission)
-            let shardState = try shard.admissionState()
-            // 完整路径持有前台 PostgreSQL 事务，可能已取得房间、成员和策略锁。
-            // 此处绝不能调用进程额度 Actor：补充额度会从同一个有界连接池借用连接；
-            // 若所有前台连接都在等待这次嵌套获取，就会死锁。
-            // 已预热的普通发送在条件快速路径中于事务前预留额度；
-            // 此未预热或复杂路径则将下方精确的条件 SQL 预留作为最后一条语句。
-            let shardStateForReduction = try addingShardAdmissionCommandDelta(
-                priorShardAdmissionReservations,
-                to: shardState
-            )
+            let roomState = try V2RoomCommandState(roomID: command.roomID,
+                nextRoomSequence: try roomWriteNextSequence(room.roomSequence),
+                admission: .init(eligibleMemberCount: 0, commandWindow: try .init(limit: 0)))
+            let shardState = try ShardAdmissionState(lease: nil)
+            let shardStateForReduction = shardState
             let result: V2SendMessageAcceptanceResult
             // 房间日志是权威副本：不预留任何逐用户投递成本，被 @ 的成员只收到通知。
             result = try roomLogReduction(
@@ -193,12 +192,6 @@ struct V2RoomWriteScalarAcceptancePath {
                 stateEventID: messageStateEventID,
                 createdAt: acceptedMessage.createdAt
             )
-            let shardReservation = try roomWriteShardAdmissionReservation(
-                from: shardStateForReduction,
-                to: timelineWriteSet.nextShardState,
-                roomShardID: room.roomShardID,
-                capacityProfileID: room.capacityProfileID
-            )
             try await V2RoomWriteScalarPersistencePath.persist(
                 timelineWriteSet,
                 command: command,
@@ -237,39 +230,7 @@ struct V2RoomWriteScalarAcceptancePath {
                     )
                 }
             }
-            // 将竞争激烈的分片计数器更新保留为最后一条、范围很窄的语句。
-            // 若将这把锁并入大型数据修改 CTE，完整写入流程会等待九条共享分片记录之一，
-            // 并成倍增加前台连接占用。拒绝仍在此事务内抛出，
-            // 因而此前的消息与房间事件写入会原子回滚。
-            if !deferShardAdmission {
-                try await reserveShardAdmission(
-                    shardReservation,
-                    room: room,
-                    retryAfterSeconds: capacityProfile.limits.retryAfterSeconds,
-                    now: now,
-                    sql: sql
-                )
-            }
-            let fastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
-            if usesDirectRoomLog,
-               V2RoomWriteFastDirectEligibility.acceptsBatchShape(.init(
-                    command: command,
-                    capacityProfile: capacityProfile,
-                    identifiers: identifiers,
-                    now: now
-               )),
-               let cacheEntry = updatedDirectPolicyCacheEntry,
-               V2RoomWriteFastDirectEligibility.isCacheCandidate(cacheEntry) {
-                fastAppendCacheUpdate = .init(
-                    policy: cacheEntry,
-                    roomShardID: room.roomShardID,
-                    capacityProfileID: room.capacityProfileID,
-                    membershipRevision: room.membershipRevision,
-                    shardState: try shard.admissionState()
-                )
-            } else {
-                fastAppendCacheUpdate = nil
-            }
+            let fastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry? = nil
             let reciprocalReplyCacheUpdate: DirectReplyCacheUpdate?
             if replyMarkerAdvanced,
                let directContext,
@@ -289,187 +250,13 @@ struct V2RoomWriteScalarAcceptancePath {
                 directPolicyCacheUpdate: updatedDirectPolicyCacheEntry,
                 directRoomLogFastAppendCacheUpdate: fastAppendCacheUpdate,
                 reciprocalDirectReplyCacheUpdate: reciprocalReplyCacheUpdate,
-                shardAdmissionCommandCredit: nil,
-                shardAdmissionReservation: deferShardAdmission ? shardReservation : nil,
-                roomAdmissionHeatObservation: usesDirectRoomLog
-                    && observesRoomAdmissionHeat
-                    && directContext?.supportAccountID == nil
-                    && command.media.isEmpty
-                    && command.mentions.isEmpty
-                    && command.replyTo == nil
-                    && command.forwardedFrom == nil
-                    ? roomID : nil
+                shardAdmissionReservation: nil
+
             )
     }
 }
 
 extension V2RoomWriteScalarAcceptancePath {
-    private func addingShardAdmissionCommandDelta(
-        _ reservations: [ShardAdmissionReservation],
-        to state: ShardAdmissionState
-    ) throws -> ShardAdmissionState {
-        guard let lease = state.lease else { return state }
-        let delta = try reservations
-            .filter { $0.leaseID == lease.id.uuidValue && $0.generation == Int64(exactly: lease.generation) }
-            .reduce(into: 0) { value, reservation in
-                guard reservation.commandDelta > 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                let (sum, overflow) = value.addingReportingOverflow(reservation.commandDelta)
-                guard !overflow else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                value = sum
-            }
-        guard delta > 0 else { return state }
-        let (used, overflow) = lease.commandWindow.used.addingReportingOverflow(delta)
-        guard !overflow else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        return try .init(lease: .init(
-            id: lease.id,
-            generation: lease.generation,
-            validUntil: lease.validUntil,
-            commandWindow: .init(limit: lease.commandWindow.limit, used: used)
-        ))
-    }
-
-    /// 把归并器算出的分片增量应用到当前行，而不是覆盖基于更早快照推导出的计数器。
-    ///
-    /// 这样并发房间可以并行完成全部昂贵工作，只在最后一次尾部更新时串行化。
-    /// 谓词与 schema 约束保持一致，
-    /// 使一次容量竞争变成普通的准入拒绝，而绝不会成为部分提交或约束错误。
-    ///
-    /// - Parameter initial: 预检得到的初始分片准入状态。
-    /// - Returns: 预留结果。
-    func reserveShardAdmission(
-        _ reservation: ShardAdmissionReservation,
-        room: RoomRow,
-        retryAfterSeconds: Int,
-        now: Date,
-        sql: any SQLDatabase
-    ) async throws {
-        try await applyShardAdmission(
-            reservation,
-            roomShardID: room.roomShardID,
-            capacityProfileID: room.capacityProfileID,
-            retryAfterSeconds: retryAfterSeconds,
-            now: now,
-            sql: sql
-        )
-    }
-
-    /// 把一个操作批次内所有接受项的分片成本归并为一次尾部更新。
-    ///
-    /// 每项归约已计入此前成功项的批次增量；此处再将成功项求和，
-    /// 与数据库当前值执行一次条件自增，以同时覆盖跨事务竞争并避免覆盖旧快照。
-    func reserveShardAdmissionBatch(
-        _ reservations: [ShardAdmissionReservation],
-        retryAfterSeconds: Int,
-        now: Date,
-        sql: any SQLDatabase
-    ) async throws {
-        guard !reservations.isEmpty else { return }
-        let first = reservations[0]
-        guard reservations.allSatisfy({ $0.commandDelta > 0 }) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        guard let roomShardID = first.roomShardID,
-              let capacityProfileID = first.capacityProfileID else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        guard reservations.allSatisfy({ $0.leaseID == first.leaseID && $0.generation == first.generation
-            && $0.roomShardID == roomShardID && $0.capacityProfileID == capacityProfileID }) else {
-            throw LateShardAdmissionRejection.unavailable(.missingShardLease)
-        }
-        let delta = try reservations.reduce(into: 0) { value, reservation in
-            let (sum, overflow) = value.addingReportingOverflow(reservation.commandDelta)
-            guard !overflow, sum >= 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            value = sum
-        }
-        guard delta > 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        try await applyShardAdmission(
-            .init(leaseID: first.leaseID, generation: first.generation, commandDelta: delta,
-                  roomShardID: roomShardID, capacityProfileID: capacityProfileID),
-            roomShardID: roomShardID,
-            capacityProfileID: capacityProfileID,
-            retryAfterSeconds: retryAfterSeconds,
-            now: now,
-            sql: sql
-        )
-    }
-
-    private func applyShardAdmission(
-        _ reservation: ShardAdmissionReservation,
-        roomShardID: String,
-        capacityProfileID: String,
-        retryAfterSeconds: Int,
-        now: Date,
-        sql: any SQLDatabase
-    ) async throws {
-        let applied = try await sql.raw("""
-            UPDATE im_v2.shard_admission_pools
-            SET command_window_used = command_window_used + \(bind: reservation.commandDelta)
-            WHERE room_shard_id = \(bind: roomShardID)
-              AND capacity_profile_id = \(bind: capacityProfileID)
-              AND lease_id = \(bind: reservation.leaseID)
-              AND generation = \(bind: reservation.generation)
-              AND valid_until > \(bind: now)
-              AND command_window_used <= command_window_limit - \(bind: reservation.commandDelta)
-            RETURNING 1 AS applied
-            """).first(decoding: ShardAdmissionMutationRow.self)
-        guard applied != nil else {
-            try await throwShardAdmissionRejection(
-                reservation,
-                roomShardID: roomShardID,
-                capacityProfileID: capacityProfileID,
-                retryAfterSeconds: retryAfterSeconds,
-                now: now,
-                sql: sql
-            )
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-    }
-
-    /// 在不削弱权威谓词的前提下，对条件预留的「零行」结果进行分类。
-    ///
-    /// 这次额外读取只在事务被拒绝时发生；成功预留无需额外读取。
-    ///
-    /// - Parameters:
-    ///   - reservation: 本次分片准入预留。
-    ///   - room: 目标房间行。
-    ///   - retryAfterSeconds: 建议的重试等待秒数。
-    ///   - now: 服务端统一授时时刻。
-    ///   - sql: 参与当前事务的数据库连接。
-    /// - Throws: 租约缺失、过期或触发限流时抛出。
-    private func throwShardAdmissionRejection(
-        _ reservation: ShardAdmissionReservation,
-        roomShardID: String,
-        capacityProfileID: String,
-        retryAfterSeconds: Int,
-        now: Date,
-        sql: any SQLDatabase
-    ) async throws {
-        guard let current = try await sql.raw("""
-            SELECT lease_id, generation, valid_until
-            FROM im_v2.shard_admission_pools
-            WHERE room_shard_id = \(bind: roomShardID)
-              AND capacity_profile_id = \(bind: capacityProfileID)
-            """).first(decoding: CurrentShardLeaseRow.self)
-        else { throw LateShardAdmissionRejection.unavailable(.missingShardLease) }
-        guard current.leaseID == reservation.leaseID,
-              current.generation == reservation.generation
-        else { throw LateShardAdmissionRejection.unavailable(.missingShardLease) }
-        guard current.validUntil > now else {
-            throw LateShardAdmissionRejection.unavailable(.expiredShardLease)
-        }
-        throw LateShardAdmissionRejection.rateLimited(retryAfterSeconds: retryAfterSeconds)
-    }
-
-    /// 只有在通用准入归并器接受之后才消耗容量，
-    /// 从而为被拒绝的发送保留既有的「配额不丢失」不变量。
-    ///
-    /// - Parameters:
-    ///   - senderID: 发送者标识。
-    ///   - recipientID: 接收者标识。
-    ///   - policy: 陌生人消息策略。
-    ///   - now: 服务端统一授时时刻。
-    ///   - sql: 参与当前事务的数据库连接。
-    /// - Throws: 额度耗尽或写入失败时抛出。
     func consumeDirectMessageQuota(senderID: UUID, recipientID: UUID, policy: V2StrangerMessagePolicy, now: Date, sql: any SQLDatabase) async throws {
         let windowStart = try roomWriteStrangerWindowStart(now: now, interval: policy.window)
         let consumed = try await sql.raw("""
@@ -739,7 +526,6 @@ extension V2RoomWriteScalarAcceptancePath {
     }
 }
 
-
 struct V2RoomWriteSelectedOwnerGuard {
     let ownerSelection: V2RoomWriteOwnerSelection
     let controlResolution: V2RoomWriteControlResolution
@@ -752,13 +538,22 @@ struct V2RoomWriteSelectedOwnerGuard {
 
     func acquireMessageOperationLock(roomID: UUID, senderID: UUID, clientMessageID: UUID,
                                      sql: any SQLDatabase) async throws {
-        try await v2AcquireMessageOperationLock(roomID: roomID, senderID: senderID,
-            clientMessageID: clientMessageID, sql: sql)
+        if activationScope?.reliesOnRuntimeLifecycle != true {
+            try await v2AcquireMessageOperationLock(roomID: roomID, senderID: senderID,
+                clientMessageID: clientMessageID, sql: sql)
+        }
         try await prepareAuthorization(roomID: roomID, senderID: senderID,
             clientMessageID: clientMessageID, sql: sql)
     }
 
     func prepareAuthorization(roomID: UUID, senderID: UUID, clientMessageID: UUID, sql: any SQLDatabase) async throws {
+        if let execution = controlResolution.policyExecution {
+            guard let activationScope, try activationScope.token(for: roomID) == execution.activation else {
+                throw V2RoomActivationLeaseError.activationChanged
+            }
+            try await execution.requireActive(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID, sql: sql)
+            return
+        }
         guard let grants = authorizationGrants else { return }
         if controlScopeRoomKinds?[roomID] == "group" { return }
         let key = scalarAuthorizationOperationKey(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID)
@@ -779,6 +574,10 @@ struct V2RoomWriteSelectedOwnerGuard {
     ///   - sql: 参与当前事务的数据库连接。
     /// - Throws: 存在未选定归属的房间时抛出。
     func requireSelectedOwners(_ roomIDs: [UUID], sql: any SQLDatabase) async throws {
+        if let scope = activationScope, scope.reliesOnRuntimeLifecycle {
+            for room in Set(roomIDs) { _ = try scope.token(for: room) }
+            return
+        }
         let rooms = Set(roomIDs)
         if let ownerRoutes, !rooms.allSatisfy({ ownerRoutes[$0] != nil }) {
             throw V2RoomOwnerFenceError.ownerChanged
@@ -801,6 +600,17 @@ struct V2RoomWriteSelectedOwnerGuard {
             }) else { throw V2RoomOwnerFenceError.ownerChanged }
         }
         try await activationScope?.require(roomIDs, sql: sql)
+        if let execution = controlResolution.policyExecution {
+            let target = execution.activation.roomID.uuidValue!
+            var permitted = Set([target])
+            if let source = forwardOwnerSourceRoomID { permitted.insert(source) }
+            guard rooms.isSubset(of: permitted), rooms.contains(target), let activationScope,
+                  try activationScope.token(for: execution.activation.roomID.uuidValue!) == execution.activation,
+                  rows.contains(where: { $0.roomID == target && $0.epoch == execution.activation.owner.epoch
+                      && $0.shardID == execution.activation.owner.shardID }) else {
+                throw V2RoomOwnerFenceError.ownerChanged
+            }
+        }
         if let grants = authorizationGrants {
             guard let transaction = sql as? any Database else { throw V2DirectAuthorizationIntentError.corruptPersistence }
             for key in grants.keys.sorted() {

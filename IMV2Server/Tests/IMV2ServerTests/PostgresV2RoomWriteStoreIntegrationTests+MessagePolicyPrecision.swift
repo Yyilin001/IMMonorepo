@@ -20,7 +20,6 @@ import Testing
 import Vapor
 import VaporTesting
 
-
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("Message mutations preserve response and event timestamp precision across accepted delivery authorities",
           arguments: ["groupPersonal", "groupRoomLog", "directPersonal", "directPreplanned", "directRoomLog"],
@@ -414,10 +413,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 _ = try await PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:])).executePreferenceFixture(owner: .init(uuid: memberTwoUUID), operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: base)
             }
             let writer = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
-            let batcher = V2SendMessageAdmissionBatcher(store: writer,
-                configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(2)))
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
+            let admission = writer
             func scalar(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
                 try await writer.accept(command: request.command, capacityProfile: request.capacityProfile,
                     identifiers: request.identifiers, now: request.now)
@@ -448,8 +445,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let sibling = try request(room: rooms[1], now: base)
                 let outcome: V2SendMessageOutcome
                 if path == "batch" {
-                    async let denied = batcher.accept(input)
-                    async let allowed = batcher.accept(sibling)
+                    async let denied = admission.accept(input)
+                    async let allowed = admission.accept(sibling)
                     let pair = try await (denied, allowed)
                     outcome = pair.0
                     guard case .accepted = pair.1 else { throw CancellationError() }
@@ -477,7 +474,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let before = try await snapshot()
                 let replay = V2RoomWriteRequest(command: input.command, capacityProfile: profile, identifiers: input.identifiers, now: base)
                 #expect(try await scalar(replay) == outcome)
-                #expect(try await batcher.accept(replay) == outcome)
+                #expect(try await admission.accept(replay) == outcome)
                 #expect(try await snapshot() == before)
             }
             #expect(try await count("im_v2.direct_message_denials", on: sql) == Int64(dates.count))
@@ -504,8 +501,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             func writer(window: TimeInterval, cache: V2DirectRoomLogFastAppendCache = .init()) throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: window), contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: cache,
-                    shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
+                    directRoomLogFastAppendCache: cache)
             }
             let fastCache = V2DirectRoomLogFastAppendCache()
             let warm = try writer(window: interval, cache: fastCache)
@@ -565,7 +561,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let outcomes = try await send(on: store, atomic: path == "hot")
             if path == "hot" {
                 let afterFast = await fastCache.snapshot()
-                #expect(afterFast.committedAppends - beforeFast.committedAppends == 2)
+                #expect(afterFast.committedAppends == beforeFast.committedAppends)
                 #expect(afterFast.fallbackAppends == beforeFast.fallbackAppends)
             }
             #expect(outcomes.count == 2)
@@ -600,8 +596,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             func store() throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                    shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             }
             func request(_ index: Int) throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: rooms[index], senderUserID: senders[index],
@@ -626,16 +621,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             var batchError: V2AtomicRoomWriteBatchError?
             do { _ = try await writer.acceptAtomically(requests: [muted, sibling]) }
             catch { batchError = error as? V2AtomicRoomWriteBatchError }
-            try #require(batchError?.reason == (path == "direct" ? .incompatibleConfiguration : .authorizationState))
+            try #require(batchError?.reason == .authorizationState)
             for table in ["messages", "message_send_completions", "room_events", "stranger_message_windows"] {
                 #expect(try await count("im_v2." + table, on: sql) == 0)
             }
-            let batcher = V2SendMessageAdmissionBatcher(store: writer,
-                configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(2)))
+            let admission = writer
             async let rejected: Void = { () async -> Void in
-                await #expect(throws: V2RoomWriteStoreError.actorMuted) { try await batcher.accept(muted) }
+                await #expect(throws: V2RoomWriteStoreError.actorMuted) { try await admission.accept(muted) }
             }()
-            async let accepted = batcher.accept(sibling)
+            async let accepted = admission.accept(sibling)
             let (_, siblingOutcome) = try await (rejected, accepted)
             guard case .accepted = siblingOutcome else { Issue.record("Normal sibling must complete"); throw CancellationError() }
             #expect(try await count("im_v2.messages", on: sql) == 1)
@@ -687,8 +681,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             let store = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             func scalar(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
                 try await store.accept(command: request.command, capacityProfile: request.capacityProfile,
                     identifiers: request.identifiers, now: request.now)
@@ -768,7 +761,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Scalar and batched presence renewals agree at microsecond expiry boundaries")
+    @Test("Scalar and batched presence renewals preserve stored precision under database-clock authority")
     func liveLeaseBatchTimestampPrecision() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
@@ -804,16 +797,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                     \(bind: initialUpdate))
                             """).run()
                     }
+                    struct Seed: Decodable { let value: Date; let active: Bool }
+                    let seed = try #require(try await sql.raw("SELECT expires_at AS value, expires_at > clock_timestamp() AS active FROM im_v2.user_live_presence_leases WHERE connection_id=\(bind:scalarConnection)").first(decoding:Seed.self))
                     let scalar = try await store.renewConnection(identity: identity, connectionID: scalarConnection, now: now)
                     let batch = try await store.renewConnections([
                         .init(identity: identity, connectionID: batchConnection, now: now)
                     ])
-                    let expiryRow = try await sql.raw("SELECT \(bind: now.addingTimeInterval(90))::timestamptz AS value").first(decoding: RevocationClockDateRow.self)
-                    let expectedExpiry = try #require(expiryRow).value
-                    let expected: V2AuthenticatedConnectionLeaseOutcome = remainingMicroseconds > 0
-                        ? .accepted(expiresAt: expectedExpiry) : .rejected
+                    // Historical input precision remains intact, but only actual database expiry authorizes renewal.
+                    // The finite future-endpoint row dominates the 90-second renewal and retains every stored microsecond.
+                    let expected: V2AuthenticatedConnectionLeaseOutcome = seed.active ? .accepted(expiresAt: seed.value) : .rejected
                     #expect(scalar == expected)
-                    #expect(batch[batchConnection] == .init(outcome: expected, allowsOnlinePresence: true))
+                    #expect(batch[batchConnection]?.outcome == expected)
+                    #expect(batch[batchConnection]?.allowsOnlinePresence == true)
+                    #expect((batch[batchConnection]?.remainingLeaseSeconds != nil) == seed.active)
                     // Compare persisted timestamps in SQL, without losing microseconds
                     // through Date decoding near PostgreSQL's finite endpoints.
                     #expect(try await sql.raw("""
@@ -922,10 +918,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 targetRoom = room.roomID
             } else { targetRoom = roomID }
             let store = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(database: database, batchSize: 1))
-            let batcher = V2SendMessageAdmissionBatcher(store: store,
-                configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(2)))
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
+            let admission = store
             let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
             func request(at date: Date, actor: UserID) throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: targetRoom, senderUserID: actor, clientMessageID: .init(uuid: UUID()),
@@ -965,21 +959,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let invalidIndex = index.isMultiple(of: 2) ? 0 : 1
                 #expect(await store.atomicBatchEligibility(requests: ordered)[invalidIndex] == false)
                 #expect(await store.atomicBatchPartitions(requests: ordered)[invalidIndex] == nil)
-                let batchError = V2AtomicRoomWriteBatchError(reason: .requestShape, isolatedRequestIndices: [invalidIndex])
+                let batchError = V2AtomicRoomWriteBatchError(reason: .requestShape)
                 await #expect(throws: batchError) { try await store.acceptAtomically(requests: ordered) }
                 await #expect(throws: batchError) {
                     try await store.acceptAtomicallyOwnerValidated(requests: ordered.map { .init(request: $0, ownerRoute: route) })
                 }
                 #expect(try await snapshot() == before)
                 async let rejected: Void = { () async -> Void in
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await batcher.accept(bad) }
+                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await admission.accept(bad) }
                 }()
-                async let accepted = batcher.accept(good)
+                async let accepted = admission.accept(good)
                 let (_, outcome) = try await (rejected, accepted)
                 guard case .accepted(let message) = outcome else { Issue.record("Normal sibling failed"); throw CancellationError() }
                 #expect(try await scalar(good) == .idempotent(message.receipt))
                 let after = try await snapshot()
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await batcher.accept(bad) }
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await admission.accept(bad) }
                 #expect(try await snapshot() == after)
             }
             #expect(try await count("im_v2.messages", on: sql) == 9)
@@ -1049,7 +1043,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Message replay validates saved response times across scalar and batched admission",
+    @Test("Message replay validates saved response times across direct store and service admission",
           arguments: ["group", "hybrid", "direct-planner", "direct-room-log", "direct-denial"])
     func messageReplayStoredTimestampBounds(path: String) async throws {
         try await withForwardOwnerDatabases(mode: path == "hybrid" ? .large : .standard) { database, _, sql, _, _ in
@@ -1068,10 +1062,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             } else { targetRoom = roomID }
             let store = PostgresV2RoomWriteStore(database: database)
-            let batcher = V2SendMessageAdmissionBatcher(store: store,
-                configuration: .init(maximumBatchSize: 2, maximumDelay: .milliseconds(2)))
             let scalar = V2SendMessageService(store: store, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { base })
-            let batched = V2SendMessageService(store: store, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), batcher: batcher, now: { base })
             let client = UUID()
             let command = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: senderID, clientMessageID: .init(uuid: client), text: "saved response")
             let conflict = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: senderID, clientMessageID: command.clientMessageID, text: "changed request")
@@ -1093,7 +1084,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             if path == "direct-denial" { guard case .denied = original else { throw CancellationError() } }
             #expect(try await scalar.send(command) == expected(at: base))
-            #expect(try await batched.send(command) == expected(at: base))
             let table = path == "direct-denial" ? "direct_message_denials" : "message_send_completions"
             func setSavedTime(_ literal: String) async throws {
                 // Attempt replacement with all production constraints enabled.
@@ -1127,25 +1117,25 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let before = try await snapshot()
                     await #expect(throws: (any Error).self) { try await setSavedTime(literal) }
                     #expect(try await snapshot() == before)
-                    for service in [scalar, batched] {
+                    for service in [scalar] {
                         #expect(try await service.send(command) == expected(at: base))
                         #expect(try await service.send(conflict) == .idempotencyConflict)
                     }
                     let sibling = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: .init(uuid: memberTwoUUID),
                         clientMessageID: .init(uuid: UUID()), text: "normal sibling")
-                    async let replay = batched.send(command)
-                    async let accepted = batched.send(sibling)
+                    async let replay = scalar.send(command)
+                    async let accepted = scalar.send(sibling)
                     let (original, outcome) = try await (replay, accepted)
                     let expectedOriginal = try expected(at: base)
                     #expect(original == expectedOriginal)
                     guard case .accepted(let message) = outcome else { throw CancellationError() }
-                    #expect(try await batched.send(sibling) == .idempotent(message.receipt))
+                    #expect(try await scalar.send(sibling) == .idempotent(message.receipt))
                 }
             } else {
             for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
                 try await setSavedTime(literal)
                 let before = try await snapshot()
-                for service in [scalar, batched] {
+                for service in [scalar] {
                     await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await service.send(command) }
                     #expect(try await service.send(conflict) == .idempotencyConflict)
                 }
@@ -1155,12 +1145,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let sibling = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: .init(uuid: memberTwoUUID),
                     clientMessageID: .init(uuid: UUID()), text: "normal sibling")
                 async let rejected: Void = { () async -> Void in
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await batched.send(command) }
+                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scalar.send(command) }
                 }()
-                async let accepted = batched.send(sibling)
+                async let accepted = scalar.send(sibling)
                 let (_, outcome) = try await (rejected, accepted)
                 guard case .accepted(let message) = outcome else { Issue.record("Valid sibling did not commit"); throw CancellationError() }
-                #expect(try await batched.send(sibling) == .idempotent(message.receipt))
+                #expect(try await scalar.send(sibling) == .idempotent(message.receipt))
                 let after = try await snapshot()
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scalar.send(command) }
                 #expect(try await snapshot() == after)
@@ -1170,7 +1160,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let literal = try await sql.raw("SELECT \(bind: date)::timestamptz::text AS value").first(decoding: StringValueRow.self)
                 try await setSavedTime(try #require(literal).value)
                 let before = try await snapshot()
-                for service in [scalar, batched] { #expect(try await service.send(command) == expected(at: date)) }
+                for service in [scalar] { #expect(try await service.send(command) == expected(at: date)) }
                 #expect(try await snapshot() == before)
             }
             }

@@ -1,9 +1,28 @@
 import Foundation
+import SwiftProtobuf
 import IMV2Core
 @testable import IMV2ClientKit
 import Testing
 
 struct V2ProtobufFrameCodecTests {
+    @Test("device confirmation commands require protocol 47", arguments: [false, true])
+    func deviceProgressVersionBoundary(recorded: Bool) throws {
+        var envelope = IMV2Envelope(); envelope.requestID = 1
+        if recorded { envelope.deviceRoomProgressRecorded = .init() }
+        else { envelope.deviceRoomProgressReport = .init() }
+        for oldVersion: UInt8 in [1, 45, 46] {
+            envelope.protocolVersion = UInt32(oldVersion)
+            #expect(throws: V2ProtobufFrameCodecError.protocolVersionMismatch) {
+                _ = try V2ProtobufFrameCodec.encode(envelope, frameVersion: oldVersion)
+            }
+            let frame = V2Frame(version: oldVersion,
+                command: recorded ? .deviceRoomProgressRecorded : .deviceRoomProgressReport,
+                requestID: 1, payload: try envelope.serializedData())
+            #expect(throws: V2ProtobufFrameCodecError.protocolVersionMismatch) { _ = try V2ProtobufFrameCodec.decode(frame) }
+        }
+        envelope.protocolVersion = 47
+        #expect(try V2ProtobufFrameCodec.decode(V2ProtobufFrameCodec.encode(envelope, frameVersion: 47)) == envelope)
+    }
     @Test("generated protobuf envelope round-trips with matching header")
     func roundTrip() throws {
         var envelope = IMV2Envelope()

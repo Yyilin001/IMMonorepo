@@ -138,12 +138,12 @@ public struct PostgresV2MembershipOperationStore:Sendable {
     }
     private func admission(identity:V2OperationIdentity,sql:any SQLDatabase) async throws -> V2MembershipAdmission? {
         guard let row=try await sql.raw("SELECT admission::text AS payload FROM im_v2.membership_operation_admissions WHERE actor_user_id=\(bind:identity.accountID.uuidValue!) AND operation_id=\(bind:UUID(uuidString:identity.operation.rawOperationID)!)").first(decoding:PayloadRow.self) else { return nil }
-        let value=try JSONDecoder().decode(V2MembershipAdmission.self,from:Data(row.payload.utf8))
+        let value=try v2DecodePersistenceJSON(V2MembershipAdmission.self, from: row.payload)
         return value
     }
     private func original(identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,sql:any SQLDatabase) async throws -> V2MembershipRecoveryResult? {
         guard let row=try await sql.raw("SELECT receipt::text AS payload FROM im_v2.membership_operation_receipts WHERE actor_user_id=\(bind:identity.accountID.uuidValue!) AND operation_id=\(bind:UUID(uuidString:identity.operation.rawOperationID)!)").first(decoding:PayloadRow.self) else { return nil }
-        let value=try JSONDecoder().decode(V2MembershipReceipt.self,from:Data(row.payload.utf8))
+        let value=try v2DecodePersistenceJSON(V2MembershipReceipt.self, from: row.payload)
         guard value.identity==identity,value.fingerprint==fingerprint else { return .fingerprintConflict };return .receipt(value)
     }
     private func persist(_ identity:V2OperationIdentity,_ fingerprint:V2OperationFingerprint,_ outcome:V2MembershipTerminalOutcome,at:UInt64,sql:any SQLDatabase) async throws -> V2MembershipReceipt {
@@ -152,8 +152,10 @@ public struct PostgresV2MembershipOperationStore:Sendable {
         return receipt
     }
     private func room(_ identity:V2OperationIdentity) throws -> RoomID { guard case .room(let room)=identity.scope else { throw V2MembershipOperationValidationError.invalidIntent };return room }
-    private func milliseconds(_ date:Date) throws -> UInt64 { let value=date.timeIntervalSince1970*1000;guard v2PostgresTimestampCanEncode(date),value.isFinite,value>0,value<Double(Int64.max) else { throw V2MembershipOperationValidationError.invalidReceipt };return UInt64(value) }
-    private func json<T:Encodable>(_ value:T) throws -> String { String(decoding:try JSONEncoder().encode(value),as:UTF8.self) }
+    private func milliseconds(_ date: Date) throws -> UInt64 {
+        try v2PersistenceMilliseconds(date, invalid: V2MembershipOperationValidationError.invalidReceipt)
+    }
+    private func json<T:Encodable>(_ value:T) throws -> String { try v2EncodePersistenceJSON(value) }
     private struct PayloadRow:Decodable { let payload:String }
     private struct RoomRow:Decodable { let kind:String;let membership_revision:Int64 }
     private struct MemberRow:Decodable { let role:String;let joined_revision:Int64 }

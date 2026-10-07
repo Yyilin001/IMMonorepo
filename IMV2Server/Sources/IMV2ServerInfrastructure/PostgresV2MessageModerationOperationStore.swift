@@ -103,12 +103,12 @@ public struct PostgresV2MessageModerationOperationStore:Sendable {
     }
     private func original(_ intent:V2MessageModerationIntent,sql:any SQLDatabase) async throws -> V2MessageModerationRecoveryResult? {
         guard let row=try await sql.raw("SELECT receipt::text AS payload FROM im_v2.message_moderation_receipts WHERE actor_user_id=\(bind:intent.actorUserID.uuidValue!) AND operation_id=\(bind:intent.operationID.uuidValue!)").first(decoding:Payload.self) else {return nil}
-        let value=try JSONDecoder().decode(V2MessageModerationReceipt.self,from:Data(row.payload.utf8))
+        let value=try v2DecodePersistenceJSON(V2MessageModerationReceipt.self, from: row.payload)
         guard value.validates(intent:intent) else {return .fingerprintConflict};return .receipt(value)
     }
     private func admission(_ intent:V2MessageModerationIntent,sql:any SQLDatabase) async throws -> V2MessageModerationAdmission? {
         guard let row=try await sql.raw("SELECT admission::text AS payload FROM im_v2.message_moderation_admissions WHERE actor_user_id=\(bind:intent.actorUserID.uuidValue!) AND operation_id=\(bind:intent.operationID.uuidValue!)").first(decoding:Payload.self) else {return nil}
-        return try JSONDecoder().decode(V2MessageModerationAdmission.self,from:Data(row.payload.utf8))
+        return try v2DecodePersistenceJSON(V2MessageModerationAdmission.self, from: row.payload)
     }
     private func persist(_ intent:V2MessageModerationIntent,_ outcome:V2MessageModerationTerminalOutcome,ms:UInt64,sql:any SQLDatabase) async throws -> V2MessageModerationReceipt {
         let receipt=try V2MessageModerationReceipt(identity:intent.identity,fingerprint:intent.fingerprint,outcome:outcome,resolvedAtMilliseconds:ms)
@@ -133,4 +133,4 @@ private func authorized(_ actor:UUID,room:UUID,revision:Int64,sql:any SQLDatabas
     guard V2GroupPermissionDefaults.allows(role:role,permission:.moderateMessages,configured:configured) else {return nil};return UInt64(row.joined)
 }
 private func milliseconds(_ date:Date) throws -> UInt64 {let value=try v2GatewayMilliseconds(date);guard value>0 else {throw V2MessageModerationValidationError.invalidReceipt};return UInt64(value)}
-private func json<T:Encodable>(_ value:T) throws -> String {String(decoding:try JSONEncoder().encode(value),as:UTF8.self)}
+private func json<T:Encodable>(_ value:T) throws -> String {try v2EncodePersistenceJSON(value)}

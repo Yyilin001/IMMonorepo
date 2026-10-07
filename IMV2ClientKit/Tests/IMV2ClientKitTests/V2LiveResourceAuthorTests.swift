@@ -59,7 +59,7 @@ struct V2LiveResourceAuthorTests {
             // The held upload owns a permit; concurrent TLS maintenance may
             // legitimately own another permit in its independent lane.
             #expect(await scheduler.snapshot().active >= 1)
-            let client = try V2HTTPMessageSendOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let client = V2ProtobufMessageSendOperationClient(transport: transport, connection: connection)
             let command = try V2MessageSendOperationCommand(command: .init(roomID: room, senderUserID: author.userID,
                 clientMessageID: .init(uuid: UUID()), text: "control progresses while bytes remain blocked", media: [], mentions: [],
                 limits: .init(maxUTF8Bytes: 4096)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 86400000)
@@ -183,7 +183,7 @@ struct V2LiveResourceAuthorTests {
             let directView = try await viewerConnection.beginAuthorPresentationView(roomID: directRoom.roomID)
             _ = try await viewerTransport.subscribeToGroupEvents(roomID: directRoom.roomID,
                 afterRoomSequence: 0, authorPresentationView: directView)
-            let directSent = try await resourceSend(fixture,account:author,roomID: directRoom.roomID,
+            let directSent = try await resourceSend(fixture, client: .init(transport: authorTransport, connection: authorConnection), account:author,roomID: directRoom.roomID,
                 clientMessageID: .init(uuid: UUID()), text: "A direct author with an avatar", media: [], mentions: [])
             print("Live resource stage: awaiting direct availability hint.")
             let directHint = try await bounded { try await viewerConnection.nextGroupEventAvailabilityHint() }
@@ -209,7 +209,7 @@ struct V2LiveResourceAuthorTests {
             print("Live resource: direct-message TLS supplement authorized for its viewer, device and room without a profile pull.")
             let liveView = try await viewerConnection.beginAuthorPresentationView(roomID: room)
             _ = try await viewerTransport.subscribeToGroupEvents(roomID: room, afterRoomSequence: 1, authorPresentationView: liveView)
-            let sent = try await resourceSend(fixture,account:author,roomID: room, clientMessageID: .init(uuid: UUID()),
+            let sent = try await resourceSend(fixture, client: .init(transport: authorTransport, connection: authorConnection), account:author,roomID: room, clientMessageID: .init(uuid: UUID()),
                 text: "An author with a new avatar", media: [], mentions: [])
             print("Live resource stage: awaiting group availability hint.")
             let hint = try await bounded { try await viewerConnection.nextGroupEventAvailabilityHint() }
@@ -384,7 +384,7 @@ struct V2LiveResourceAuthorTests {
             // TTL. The block test asserts that no NEW access is issued.
             await viewerConnection.endAuthorPresentationView(view)
             try await viewerTransport.stopAuthorPresentation(view)
-            try await verifyMessageDownload(fixture, author: author, room: room, transport: authorTransport, directory: directory)
+            try await verifyMessageDownload(fixture, author: author, room: room, transport: authorTransport, connection: authorConnection, directory: directory)
             print("Live resource: Actor HTTP fallback and later TLS supplement both reject the newly blocked viewer.")
             print("Live resource: nickname room events persisted through revision 4; same-view authorized updates restored only current content.")
             print("Live resource: nickname directory pages carry leases, do not pre-sign avatars, and withhold blocked nickname text.")
@@ -404,7 +404,7 @@ struct V2LiveResourceAuthorTests {
     }
 
     private func verifyMessageDownload(_ fixture: LiveAccountFixture, author: V2AuthCredentials,
-                                       room: RoomID, transport: V2ProtobufSyncTransport, directory: URL) async throws {
+                                       room: RoomID, transport: V2ProtobufSyncTransport, connection: V2TLSFrameConnection, directory: URL) async throws {
         let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
         let credentials = ResourceLiveCredentials(value: author)
         let uploads = try V2HTTPResourceUploadClient(endpoint: fixture.url("v2/resource-uploads"), credentials: credentials, transport: http)
@@ -429,7 +429,7 @@ struct V2LiveResourceAuthorTests {
             session = try await uploads.status(session.locator)
         }
         try #require(session.resourceState == .ready)
-        let sent = try await resourceSend(fixture,account:credentials.value,roomID: room, clientMessageID: .init(uuid: UUID()),
+        let sent = try await resourceSend(fixture, client: .init(transport: transport, connection: connection), account:credentials.value,roomID: room, clientMessageID: .init(uuid: UUID()),
             text: "Attachment download contract", media: [.init(mediaID: media)], mentions: [])
         let message = V2MediaMessageLocation(roomID: room, messageID: sent.messageID)
         let resolver = try V2HTTPMediaDownloadTargetResolver(endpoint: fixture.url("v2/media"), credentials: credentials, transport: http)
@@ -622,8 +622,7 @@ private func resourceBlock(_ fixture:LiveAccountFixture,account:V2AuthCredential
     let command=try V2SocialOperationCommand(identity:.init(accountID:account.userID,scope:.userPair(account.userID,target),operation:.userBlock(.init(uuid:UUID()))),action:.userBlock(.block),expectedRevision:baseline.blockRevision,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+120000)
     guard case .receipt(let proof)=try await client.submit(command),proof.validates(command:command),case .applied(.userBlock(isBlocked:true,revision:_))=proof.outcome else {throw ResourceLiveFailure.presentation}
 }
-private func resourceSend(_ fixture:LiveAccountFixture,account:V2AuthCredentials,roomID:RoomID,clientMessageID:ClientMessageID,text:String,media:[V2MediaReference],mentions:[V2MentionTarget]) async throws -> V2MessageOperationAcceptance {
-    let client=try V2HTTPMessageSendOperationClient(baseURL:fixture.url(""),credentials:ResourceLiveCredentials(value:account),transport:V2URLSessionMediaEdgeHTTPTransport(session:fixture.http))
+private func resourceSend(_ fixture:LiveAccountFixture,client: V2ProtobufMessageSendOperationClient,account:V2AuthCredentials,roomID:RoomID,clientMessageID:ClientMessageID,text:String,media:[V2MediaReference],mentions:[V2MentionTarget]) async throws -> V2MessageOperationAcceptance {
     let command=try V2MessageSendOperationCommand(command:.init(roomID:roomID,senderUserID:account.userID,clientMessageID:clientMessageID,text:text,media:media,mentions:mentions,limits:.init(maxUTF8Bytes:4096)),firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+86400000)
     guard case .receipt(let proof)=try await client.submit(command),try proof.validates(identity:command.identity,fingerprint:command.fingerprint),case .accepted(let value)=proof.outcome else {throw ResourceLiveFailure.presentation};return value
 }

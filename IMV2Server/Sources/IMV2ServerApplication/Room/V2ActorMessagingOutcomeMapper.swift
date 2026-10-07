@@ -28,19 +28,8 @@ public extension V2ActorSendMessageResultWire {
     }
 }
 
-
-
-
-
-
-
 private enum V2ActorMessagingMapping {
     static func validateRetryDelay(_ value: Int) throws {
         guard value >= 0 else { throw V2ActorMessagingMappingError.invalidRetryDelay }
-    }
-    static func validateRevision(_ value: UInt64) throws {
-        guard value > 0, value <= UInt64(Int64.max) else {
-            throw V2ActorMessagingMappingError.invalidSequence
-        }
     }
 }

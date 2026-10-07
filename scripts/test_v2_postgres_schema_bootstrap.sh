@@ -21,7 +21,7 @@ if [[ "${IMV2_SCHEMA_BOOTSTRAP_NATIVE:-0}" == '1' ]]; then
   psql() { command psql -v ON_ERROR_STOP=1 -d "${bootstrap_db}" "$@"; }
   restore_psql() { command psql -v ON_ERROR_STOP=1 -d "${restore_db}" "$@"; }
   dump_schema() { command pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments -d "$1"; }
-  dump_topology() { command pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --no-owner --no-privileges -d "$1"; }
+  dump_topology() { command pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --table=im_v2.realtime_partition_leases --no-owner --no-privileges -d "$1"; }
   bootstrap_created=0
   restore_created=0
   cleanup() {
@@ -54,7 +54,7 @@ else
   psql() { "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2_test -d "${bootstrap_db}" "$@"; }
   restore_psql() { "${compose[@]}" exec -T postgres psql -v ON_ERROR_STOP=1 -U im_v2_test -d "${restore_db}" "$@"; }
   dump_schema() { "${compose[@]}" exec -T postgres pg_dump --schema-only --schema=im_v2 --no-owner --no-privileges --no-comments -U im_v2_test -d "$1"; }
-  dump_topology() { "${compose[@]}" exec -T postgres pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --no-owner --no-privileges -U im_v2_test -d "$1"; }
+  dump_topology() { "${compose[@]}" exec -T postgres pg_dump --data-only --table=im_v2.room_recovery_topology --table=im_v2.control_housekeeping_cursor --table=im_v2.realtime_partition_leases --no-owner --no-privileges -U im_v2_test -d "$1"; }
   psql -c "CREATE DATABASE ${restore_db} TEMPLATE template0" >/dev/null
 fi
 scalar() {
@@ -90,17 +90,17 @@ assert_scalar() {
   fi
 }
 
-# Fresh current66 canonical schema, including permanent typed receipts and
+# Fresh current68 canonical schema, including permanent typed receipts and
 # remote-device security metadata. Counts include views and application-only
 # triggers; retired ledgers must remain absent rather than be recreated.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '172'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '174'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '368'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '373'
 assert_scalar 'im_v2 application trigger count' \
-  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '64'
+  "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '65'
 assert_scalar 'im_v2 function count' \
-  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '40'
+  "SELECT count(*) FROM pg_proc AS procedure JOIN pg_namespace AS namespace ON namespace.oid = procedure.pronamespace WHERE namespace.nspname = 'im_v2'" '41'
 
 # A same-named trigger function is not enough: replacing its body must fail
 # readiness, as must a nullable ready-variant constraint or a weakened replay key.

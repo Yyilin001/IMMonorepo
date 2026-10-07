@@ -274,10 +274,6 @@ private struct CapabilityRoomRow: Decodable {
     enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" }
 }
 private struct CapabilityBooleanRow: Decodable { let value: Bool }
-private struct CapabilitySyncRow: Decodable {
-    let sequence: Int64
-    enum CodingKeys: String, CodingKey { case sequence = "next_sequence" }
-}
 private func capabilityUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let uuid = UUID(uuidString: id.rawValue) else {
         throw V2ConversationCapabilitiesStoreError.corruptPersistenceState

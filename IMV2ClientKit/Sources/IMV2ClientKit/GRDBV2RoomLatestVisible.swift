@@ -14,7 +14,7 @@ extension GRDBV2LocalSyncStore {
             room_id TEXT PRIMARY KEY,
             personal_generation INTEGER NOT NULL CHECK (personal_generation >= 0),
             owner_epoch INTEGER NOT NULL CHECK (owner_epoch >= 0),
-            membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
+            membership_revision INTEGER NOT NULL CHECK (membership_revision >= 0),
             head INTEGER NOT NULL CHECK (head >= 0),
             message_id TEXT, sender_id TEXT, message_sequence INTEGER, message_revision INTEGER,
             preview TEXT, media_count INTEGER, created_at_reference REAL,

@@ -26,11 +26,12 @@ enum ScalarMessagePreflight {
         clientMessageID: UUID,
         now: Date,
         cachedDirectPolicy: V2DirectSendPolicyCache.Entry?,
+        leasedPolicy: V2DirectSendControlPolicy? = nil,
+        leasedAccount: V2PolicyAccountFacts? = nil,
         sql: any SQLDatabase
     ) async throws -> MessageAcceptanceContextRow {
-        // 缓存的发送方回复标记只是性能提示。持久化私聊关系与策略版本记录
-        // 会一直锁定到消息事务提交，因此拉黑或偏好变更要么发生在此次决策前
-        // （修订不匹配时回到数据库校验），要么发生在消息被接受后。
+        // 缓存的发送方回复标记只是性能提示。旧授权路径锁定策略版本到提交；
+        // 新许可路径由调用方持有许可围栏，下面只锁定房间配对事实。
         // `senderHasReplied` 单调变化；缓存命中让稳定状态的发送
         // 使用兼容的共享锁，而非首次写入回复标记所需的独占锁。
         let directPairLockClause = cachedDirectPolicy?.senderHasReplied == true
@@ -39,6 +40,168 @@ enum ScalarMessagePreflight {
         let directPolicyVersionLockClause = cachedDirectPolicy?.senderHasReplied == true
             ? "FOR SHARE OF sender_version, recipient_version"
             : "FOR KEY SHARE OF sender_version, recipient_version"
+        // A leased execution has already held the durable room fence. Only
+        // room-owned membership, reply markers and admission are read here;
+        // account/pair facts come from its registered immutable snapshot.
+        let senderActive: SQLQueryString
+        let policyCTEs: SQLQueryString
+        guard leasedAccount == nil || leasedPolicy == nil else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        if let account = leasedAccount {
+            guard account.userID == senderID else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+            senderActive = "\(bind: account.isActive)"
+            policyCTEs = """
+                direct_policy AS MATERIALIZED (
+                    SELECT NULL::uuid AS recipient_user_id, NULL::bigint AS direct_policy_revision,
+                           NULL::bigint AS sender_policy_revision, NULL::bigint AS recipient_policy_revision,
+                           NULL::boolean AS sender_profile_visible_to_recipient, NULL::boolean AS sender_can_send,
+                           NULL::boolean AS sender_has_replied, NULL::boolean AS recipient_has_replied,
+                           NULL::boolean AS recipient_is_active, NULL::boolean AS blocked,
+                           NULL::boolean AS is_friend, NULL::boolean AS allows_strangers,
+                           NULL::text AS sender_account_kind, NULL::text AS sender_account_status,
+                           NULL::boolean AS sender_allows_service_messages,
+                           NULL::text AS recipient_account_kind, NULL::text AS recipient_account_status,
+                           NULL::boolean AS recipient_allows_customer_messages
+                    WHERE FALSE
+                )
+                """
+        } else if let policy = leasedPolicy {
+            senderActive = "\(bind: policy.sender.isActive)"
+            policyCTEs = """
+                direct_policy AS MATERIALIZED (
+                    SELECT pair.recipient_user_id, pair.direct_policy_revision,
+                           NULL::bigint AS sender_policy_revision,
+                           NULL::bigint AS recipient_policy_revision,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.lower_profile_visible_to_higher ELSE pair.higher_profile_visible_to_lower
+                           END AS sender_profile_visible_to_recipient,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.lower_can_send ELSE pair.higher_can_send
+                           END AS sender_can_send,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.lower_has_replied ELSE pair.higher_has_replied
+                           END AS sender_has_replied,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.higher_has_replied ELSE pair.lower_has_replied
+                           END AS recipient_has_replied,
+                           \(bind: policy.recipient.isActive)::boolean AS recipient_is_active,
+                           \(bind: policy.blocked)::boolean AS blocked,
+                           \(bind: policy.isFriend)::boolean AS is_friend,
+                           \(bind: policy.allowsStrangers)::boolean AS allows_strangers,
+                           \(bind: policy.sender.specialKind)::text AS sender_account_kind,
+                           \(bind: policy.sender.specialStatus)::text AS sender_account_status,
+                           \(bind: policy.sender.allowsServiceMessages)::boolean AS sender_allows_service_messages,
+                           \(bind: policy.recipient.specialKind)::text AS recipient_account_kind,
+                           \(bind: policy.recipient.specialStatus)::text AS recipient_account_status,
+                           \(bind: policy.recipient.allowsCustomerMessages)::boolean AS recipient_allows_customer_messages
+                    FROM direct_pair AS pair
+                )
+                """
+        } else {
+            senderActive = """
+                EXISTS (
+                    SELECT 1
+                    FROM im_v2.public_user_profiles AS profile
+                    WHERE profile.user_id = \(bind: senderID)
+                      AND profile.state = 'active'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM im_v2.account_disables AS disabled
+                          WHERE disabled.user_id = profile.user_id
+                      )
+                )
+                """
+            policyCTEs = """
+                direct_policy_versions AS MATERIALIZED (
+                    SELECT pair.*, sender_version.revision AS sender_policy_revision,
+                           recipient_version.revision AS recipient_policy_revision
+                    FROM direct_pair AS pair
+                    JOIN im_v2.user_direct_send_policy_versions AS sender_version
+                      ON sender_version.user_id = \(bind: senderID)
+                    JOIN im_v2.user_direct_send_policy_versions AS recipient_version
+                      ON recipient_version.user_id = pair.recipient_user_id
+                    \(unsafeRaw: directPolicyVersionLockClause)
+                ), special AS MATERIALIZED (
+                    SELECT account.account_user_id, account.account_kind, account.status,
+                           account.allows_customer_messages, account.allows_service_messages
+                    FROM im_v2.special_accounts AS account
+                    JOIN direct_policy_versions AS pair
+                      ON account.account_user_id = \(bind: senderID)
+                      OR account.account_user_id = pair.recipient_user_id
+                    ORDER BY account.account_user_id
+                    FOR KEY SHARE OF account
+                ), direct_policy AS MATERIALIZED (
+                    SELECT pair.recipient_user_id, pair.direct_policy_revision,
+                           pair.sender_policy_revision, pair.recipient_policy_revision,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.lower_profile_visible_to_higher
+                                ELSE pair.higher_profile_visible_to_lower
+                           END AS sender_profile_visible_to_recipient,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.lower_can_send
+                                ELSE pair.higher_can_send
+                           END AS sender_can_send,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.lower_has_replied
+                                ELSE pair.higher_has_replied
+                           END AS sender_has_replied,
+                           CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
+                                          AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
+                                          AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
+                                          AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
+                                THEN \(bind: cachedDirectPolicy?.recipientIsActive)
+                                ELSE EXISTS (
+                               SELECT 1 FROM im_v2.public_user_profiles AS profile
+                               WHERE profile.user_id = pair.recipient_user_id
+                                 AND profile.state = 'active'
+                                 AND NOT EXISTS (
+                                     SELECT 1 FROM im_v2.account_disables AS disabled
+                                     WHERE disabled.user_id = profile.user_id
+                                 )
+                           ) END AS recipient_is_active,
+                           CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
+                                          AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
+                                          AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
+                                          AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
+                                THEN \(bind: cachedDirectPolicy?.blocked)
+                                ELSE EXISTS (
+                               SELECT 1 FROM im_v2.user_blocks AS block
+                               WHERE (block.blocker_user_id = pair.lower_user_id AND block.blocked_user_id = pair.higher_user_id)
+                                  OR (block.blocker_user_id = pair.higher_user_id AND block.blocked_user_id = pair.lower_user_id)
+                           ) END AS blocked,
+                           CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
+                                          AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
+                                          AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
+                                          AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
+                                THEN \(bind: cachedDirectPolicy?.isFriend)
+                                ELSE EXISTS (
+                               SELECT 1 FROM im_v2.user_relationships AS relationship
+                               WHERE relationship.lower_user_id = pair.lower_user_id
+                                 AND relationship.higher_user_id = pair.higher_user_id
+                                 AND relationship.state = 'accepted'
+                           ) END AS is_friend,
+                           CASE WHEN pair.lower_user_id = \(bind: senderID)
+                                THEN pair.higher_has_replied
+                                ELSE pair.lower_has_replied
+                           END AS recipient_has_replied,
+                           CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
+                                          AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
+                                          AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
+                                          AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
+                                THEN \(bind: cachedDirectPolicy?.allowsStrangers)
+                                ELSE COALESCE((
+                               SELECT preference.allows_stranger_messages
+                               FROM im_v2.user_stranger_message_preferences AS preference
+                               WHERE preference.user_id = pair.recipient_user_id
+                           ), TRUE) END AS allows_strangers,
+                           (SELECT account_kind FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_kind,
+                           (SELECT status FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_status,
+                           (SELECT allows_service_messages FROM special WHERE account_user_id = \(bind: senderID)) AS sender_allows_service_messages,
+                           (SELECT account_kind FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_kind,
+                           (SELECT status FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_status,
+                           (SELECT allows_customer_messages FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
+                    FROM direct_policy_versions AS pair
+                )
+                """
+        }
         let rows = try await sql.raw("""
             WITH locked_room AS MATERIALIZED (
                 SELECT room.room_kind, room.room_shard_id, room.room_sequence,
@@ -95,35 +258,9 @@ enum ScalarMessagePreflight {
                 SELECT room.*
                 FROM locked_room AS room
                 WHERE NOT EXISTS (SELECT 1 FROM prior_operation)
-            ), locked_admission AS MATERIALIZED (
-                SELECT admission.eligible_member_count AS room_eligible_member_count,
-                       admission.command_window_limit AS room_command_window_limit,
-                       admission.command_window_used AS room_command_window_used,
-                       admission.shard_lease_id AS room_shard_lease_id,
-                       admission.shard_lease_generation AS room_shard_lease_generation,
-                       shard.lease_id AS shard_lease_id,
-                       shard.generation AS shard_generation,
-                       shard.valid_until AS shard_valid_until,
-                       shard.command_window_limit AS shard_command_window_limit,
-                       shard.command_window_used AS shard_command_window_used
-                FROM fresh_room AS room
-                JOIN im_v2.room_admission AS admission ON admission.room_id = room.room_id
-                JOIN im_v2.shard_admission_pools AS shard
-                  ON shard.room_shard_id = room.room_shard_id
-                 AND shard.capacity_profile_id = room.capacity_profile_id
-                FOR UPDATE OF admission
             ), locked_actor AS MATERIALIZED (
                 SELECT membership.role AS actor_role,
-                       EXISTS (
-                           SELECT 1
-                           FROM im_v2.public_user_profiles AS profile
-                           WHERE profile.user_id = \(bind: senderID)
-                             AND profile.state = 'active'
-                             AND NOT EXISTS (
-                                 SELECT 1 FROM im_v2.account_disables AS disabled
-                                 WHERE disabled.user_id = profile.user_id
-                             )
-                       ) AS sender_is_active,
+                       \(senderActive) AS sender_is_active,
                        EXISTS (
                            SELECT 1 FROM im_v2.room_member_mutes AS mute
                            WHERE mute.room_id = room.room_id
@@ -131,7 +268,6 @@ enum ScalarMessagePreflight {
                              AND mute.mute_until > \(bind: now)
                        ) AS muted
                 FROM fresh_room AS room
-                CROSS JOIN locked_admission
                 JOIN im_v2.room_memberships AS membership
                   ON membership.room_id = room.room_id
                  AND membership.user_id = \(bind: senderID)
@@ -155,96 +291,7 @@ enum ScalarMessagePreflight {
                   AND (pair.lower_user_id = \(bind: senderID)
                        OR pair.higher_user_id = \(bind: senderID))
                 \(unsafeRaw: directPairLockClause)
-            ), direct_policy_versions AS MATERIALIZED (
-                SELECT pair.*, sender_version.revision AS sender_policy_revision,
-                       recipient_version.revision AS recipient_policy_revision
-                FROM direct_pair AS pair
-                JOIN im_v2.user_direct_send_policy_versions AS sender_version
-                  ON sender_version.user_id = \(bind: senderID)
-                JOIN im_v2.user_direct_send_policy_versions AS recipient_version
-                  ON recipient_version.user_id = pair.recipient_user_id
-                \(unsafeRaw: directPolicyVersionLockClause)
-            ), special AS MATERIALIZED (
-                SELECT account.account_user_id, account.account_kind, account.status,
-                       account.allows_customer_messages, account.allows_service_messages
-                FROM im_v2.special_accounts AS account
-                JOIN direct_policy_versions AS pair
-                  ON account.account_user_id = \(bind: senderID)
-                  OR account.account_user_id = pair.recipient_user_id
-                ORDER BY account.account_user_id
-                FOR KEY SHARE OF account
-            ), direct_policy AS MATERIALIZED (
-                SELECT pair.recipient_user_id, pair.direct_policy_revision,
-                       pair.sender_policy_revision, pair.recipient_policy_revision,
-                       CASE WHEN pair.lower_user_id = \(bind: senderID)
-                            THEN pair.lower_profile_visible_to_higher
-                            ELSE pair.higher_profile_visible_to_lower
-                       END AS sender_profile_visible_to_recipient,
-                       CASE WHEN pair.lower_user_id = \(bind: senderID)
-                            THEN pair.lower_can_send
-                            ELSE pair.higher_can_send
-                       END AS sender_can_send,
-                       CASE WHEN pair.lower_user_id = \(bind: senderID)
-                            THEN pair.lower_has_replied
-                            ELSE pair.higher_has_replied
-                       END AS sender_has_replied,
-                       CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
-                                      AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
-                                      AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
-                                      AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
-                            THEN \(bind: cachedDirectPolicy?.recipientIsActive)
-                            ELSE EXISTS (
-                           SELECT 1 FROM im_v2.public_user_profiles AS profile
-                           WHERE profile.user_id = pair.recipient_user_id
-                             AND profile.state = 'active'
-                             AND NOT EXISTS (
-                                 SELECT 1 FROM im_v2.account_disables AS disabled
-                                 WHERE disabled.user_id = profile.user_id
-                             )
-                       ) END AS recipient_is_active,
-                       CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
-                                      AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
-                                      AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
-                                      AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
-                            THEN \(bind: cachedDirectPolicy?.blocked)
-                            ELSE EXISTS (
-                           SELECT 1 FROM im_v2.user_blocks AS block
-                           WHERE (block.blocker_user_id = pair.lower_user_id AND block.blocked_user_id = pair.higher_user_id)
-                              OR (block.blocker_user_id = pair.higher_user_id AND block.blocked_user_id = pair.lower_user_id)
-                       ) END AS blocked,
-                       CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
-                                      AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
-                                      AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
-                                      AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
-                            THEN \(bind: cachedDirectPolicy?.isFriend)
-                            ELSE EXISTS (
-                           SELECT 1 FROM im_v2.user_relationships AS relationship
-                           WHERE relationship.lower_user_id = pair.lower_user_id
-                             AND relationship.higher_user_id = pair.higher_user_id
-                             AND relationship.state = 'accepted'
-                       ) END AS is_friend,
-                       CASE WHEN pair.lower_user_id = \(bind: senderID)
-                            THEN pair.higher_has_replied
-                            ELSE pair.lower_has_replied
-                       END AS recipient_has_replied,
-                       CASE WHEN pair.direct_policy_revision = \(bind: cachedDirectPolicy?.directPairRevision)
-                                      AND pair.sender_policy_revision = \(bind: cachedDirectPolicy?.senderPolicyRevision)
-                                      AND pair.recipient_policy_revision = \(bind: cachedDirectPolicy?.recipientPolicyRevision)
-                                      AND pair.recipient_user_id = \(bind: cachedDirectPolicy?.recipientID)
-                            THEN \(bind: cachedDirectPolicy?.allowsStrangers)
-                            ELSE COALESCE((
-                           SELECT preference.allows_stranger_messages
-                           FROM im_v2.user_stranger_message_preferences AS preference
-                           WHERE preference.user_id = pair.recipient_user_id
-                       ), TRUE) END AS allows_strangers,
-                       (SELECT account_kind FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_kind,
-                       (SELECT status FROM special WHERE account_user_id = \(bind: senderID)) AS sender_account_status,
-                       (SELECT allows_service_messages FROM special WHERE account_user_id = \(bind: senderID)) AS sender_allows_service_messages,
-                       (SELECT account_kind FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_kind,
-                       (SELECT status FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_account_status,
-                       (SELECT allows_customer_messages FROM special WHERE account_user_id = pair.recipient_user_id) AS recipient_allows_customer_messages
-                FROM direct_policy_versions AS pair
-            )
+            ), \(policyCTEs)
             SELECT room.room_kind, room.room_shard_id, room.room_sequence,
                    room.timeline_sequence, room.membership_revision,
                    room.capacity_profile_id, room.capacity_class, room.frozen_at,
@@ -258,7 +305,7 @@ enum ScalarMessagePreflight {
                    prior.prior_accepted_membership_revision,
                    prior.prior_direct_recipient_user_id,
                    prior.prior_denial_reason, prior.prior_group_capacity_class,
-                   admission.*, actor.actor_role, actor.sender_is_active, actor.muted,
+                   actor.actor_role, actor.sender_is_active, actor.muted,
                    policy.recipient_user_id, policy.sender_profile_visible_to_recipient,
                    policy.direct_policy_revision, policy.sender_policy_revision,
                    policy.recipient_policy_revision,
@@ -271,7 +318,6 @@ enum ScalarMessagePreflight {
             FROM locked_room AS room
             CROSS JOIN prior_operation_count AS count
             LEFT JOIN prior_operation AS prior ON TRUE
-            LEFT JOIN locked_admission AS admission ON TRUE
             LEFT JOIN locked_actor AS actor ON TRUE
             LEFT JOIN direct_policy AS policy ON TRUE
             """).all(decoding: MessageAcceptanceContextRow.self)
@@ -545,7 +591,7 @@ enum ExistingMessageOperation {
     case denied(V2DirectMessageDenied, V2SendMessageFingerprint)
 }
 
-private struct MessageOperationReplayRow {
+struct MessageOperationReplayRow: Decodable {
     let outcomeKind: String
     let messageID: UUID?
     let roomID: UUID
@@ -561,6 +607,17 @@ private struct MessageOperationReplayRow {
     let directRecipientUserID: UUID?
     let denialReason: String?
     let groupCapacityClass: V2GroupCapacityClass?
+
+    enum CodingKeys: String, CodingKey {
+        case outcomeKind = "outcome_kind", messageID = "message_id", roomID = "room_id"
+        case roomSequence = "room_sequence", timelineSequence = "timeline_sequence"
+        case senderUserID = "sender_user_id", clientMessageID = "client_message_id"
+        case fingerprintVersion = "fingerprint_version", requestFingerprint = "request_fingerprint"
+        case createdAt = "created_at", sourceEventID = "source_event_id"
+        case acceptedMembershipRevision = "accepted_membership_revision"
+        case directRecipientUserID = "direct_recipient_user_id", denialReason = "denial_reason"
+        case groupCapacityClass = "group_capacity_class"
+    }
 
     func operation() throws -> ExistingMessageOperation {
         guard let fingerprintVersion, let version = UInt16(exactly: fingerprintVersion),

@@ -290,6 +290,124 @@ struct V2DatabaseWorkAdmissionTests {
         #expect(snapshot.foregroundControlWrite.rejectedRequests == 0)
     }
 
+    @Test("interactive coverage reserves queue space and alternates with ordinary FIFO without extra permits")
+    func interactiveCoverageFairnessAndSharedBudget() async throws {
+        let controller = V2DatabaseWorkAdmissionController(policy: .init(
+            maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
+            maximumSyncInFlight: 1, maximumForegroundWriteQueued: 1,
+            maximumInteractiveReadQueued: 4, maximumSyncQueued: 1,
+            timeout: .seconds(2)), interactiveReadCoverageReservedQueued: 2)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
+        let first = Task { await controller.acquire(.interactiveRead) }
+        try await waitForInteractiveQueue(controller, count: 1)
+        let second = Task { await controller.acquire(.interactiveRead) }
+        try await waitForInteractiveQueue(controller, count: 2)
+        #expect(await controller.acquire(.interactiveRead) == .rejected(.queueFull))
+        let coverage = Task { await controller.acquire(.interactiveRead,
+            interactiveReadPurpose: .coverageAuthorization) }
+        try await waitForInteractiveQueue(controller, count: 3)
+        let nextCoverage = Task { await controller.acquire(.interactiveRead,
+            interactiveReadPurpose: .coverageAuthorization) }
+        try await waitForInteractiveQueue(controller, count: 4)
+        #expect(await controller.acquire(.interactiveRead,
+            interactiveReadPurpose: .coverageAuthorization) == .rejected(.queueFull))
+        await controller.release(.interactiveRead)
+        #expect(await coverage.value == .admitted)
+        let afterCoverage = await controller.snapshot()
+        #expect(afterCoverage.interactiveRead.inFlight == 2)
+        #expect(afterCoverage.interactiveReadPurposes[.ordinary]?.inFlight == 1)
+        #expect(afterCoverage.interactiveReadPurposes[.coverageAuthorization]?.inFlight == 1)
+        #expect(afterCoverage.interactiveReadPurposes[.ordinary]?.queued == 2)
+        #expect(afterCoverage.interactiveReadPurposes[.coverageAuthorization]?.queued == 1)
+        await controller.release(.interactiveRead, interactiveReadPurpose: .coverageAuthorization)
+        #expect(await first.value == .admitted)
+        let afterOrdinary = await controller.snapshot()
+        #expect(afterOrdinary.interactiveReadPurposes[.ordinary]?.inFlight == 2)
+        #expect(afterOrdinary.interactiveReadPurposes[.coverageAuthorization]?.inFlight == 0)
+        #expect(afterOrdinary.interactiveReadPurposes[.ordinary]?.queued == 1)
+        #expect(afterOrdinary.interactiveReadPurposes[.coverageAuthorization]?.queued == 1)
+        // The reserved coverage waiter already occupies its slot: an ordinary
+        // replacement uses the now-free ordinary slot without reserving twice.
+        let replacement = Task { await controller.acquire(.interactiveRead) }
+        try await waitForInteractiveQueue(controller, count: 3)
+        await controller.release(.interactiveRead)
+        #expect(await nextCoverage.value == .admitted)
+        #expect(await controller.snapshot().interactiveReadPurposes[.ordinary]?.queued == 2)
+        await controller.release(.interactiveRead, interactiveReadPurpose: .coverageAuthorization)
+        #expect(await second.value == .admitted)
+        await controller.release(.interactiveRead)
+        #expect(await replacement.value == .admitted)
+        await controller.release(.interactiveRead)
+        await controller.release(.interactiveRead)
+        let end = await controller.snapshot()
+        let ordinary = try #require(end.interactiveReadPurposes[.ordinary])
+        let critical = try #require(end.interactiveReadPurposes[.coverageAuthorization])
+        #expect(end.interactiveRead.inFlight == 0 && end.interactiveRead.queued == 0)
+        #expect(end.interactiveRead.admittedRequests == ordinary.admittedRequests + critical.admittedRequests)
+        #expect(end.interactiveRead.queueWait.samples == ordinary.queueWait.samples + critical.queueWait.samples)
+        #expect(end.interactiveRead.queueFullRejections == ordinary.queueFullRejections + critical.queueFullRejections)
+    }
+
+    @Test("coverage cancellation and original deadline remove queued work; submitted work releases only at actual settlement")
+    func interactiveCoverageCancellationDeadlineAndSettlement() async throws {
+        let controller = coverageController()
+        let gate = CoverageAdmissionExecutionGate()
+        let actual = Task {
+            try await v2WithAdmittedRoomDatabaseWork(controller, workClass: .interactiveRead,
+                callerDeadline: .now + .seconds(2), interactiveReadPurpose: .coverageAuthorization) {
+                await gate.execute()
+            }
+        }
+        let entered = ContinuousClock.now + .seconds(1)
+        while !(await gate.started) {
+            guard ContinuousClock.now < entered else {
+                actual.cancel(); await gate.release(); _ = await actual.result
+                throw CoverageAdmissionTestFailure.timeout
+            }
+            await Task.yield()
+        }
+        #expect(await controller.acquire(.interactiveRead) == .admitted)
+        let cancelled = Task { await controller.acquire(.interactiveRead,
+            interactiveReadPurpose: .coverageAuthorization) }
+        do { try await waitForInteractiveQueue(controller, count: 1) }
+        catch {
+            cancelled.cancel(); _ = await cancelled.value
+            actual.cancel(); await gate.release(); _ = await actual.result
+            await controller.release(.interactiveRead)
+            throw error
+        }
+        cancelled.cancel()
+        #expect(await cancelled.value == .cancelled)
+        let expiry = ContinuousClock.now + .milliseconds(20)
+        #expect(await controller.acquire(.interactiveRead, callerDeadline: expiry,
+            interactiveReadPurpose: .coverageAuthorization) == .rejected(.timeout))
+        actual.cancel()
+        let held = await controller.snapshot()
+        #expect(held.interactiveRead.inFlight == 2)
+        #expect(held.interactiveReadPurposes[.coverageAuthorization]?.inFlight == 1)
+        #expect(held.interactiveReadPurposes[.coverageAuthorization]?.cancelledRequests == 1)
+        #expect(held.interactiveReadPurposes[.coverageAuthorization]?.timeoutRejections == 1)
+        await gate.release(); _ = try await actual.value
+        await controller.release(.interactiveRead)
+        #expect(await controller.snapshot().interactiveRead.inFlight == 0)
+    }
+
+    private func coverageController() -> V2DatabaseWorkAdmissionController {
+        .init(policy: .init(maximumForegroundWriteInFlight: 1,
+            maximumInteractiveReadInFlight: 1, maximumSyncInFlight: 1,
+            maximumForegroundWriteQueued: 1, maximumInteractiveReadQueued: 3,
+            maximumSyncQueued: 1, timeout: .seconds(1)), interactiveReadCoverageReservedQueued: 1)
+    }
+
+    private func waitForInteractiveQueue(_ controller: V2DatabaseWorkAdmissionController, count: Int) async throws {
+        let bound = ContinuousClock.now + .seconds(1)
+        while await controller.snapshot().interactiveRead.queued != count {
+            guard ContinuousClock.now < bound else { throw CoverageAdmissionTestFailure.timeout }
+            await Task.yield()
+        }
+    }
+
     private func makeController(
         timeout: Duration
     ) -> V2DatabaseWorkAdmissionController {
@@ -315,4 +433,15 @@ private actor AdmissionOrderRecorder {
     func values() -> [Int] {
         recorded
     }
+}
+
+private enum CoverageAdmissionTestFailure: Error { case timeout }
+private actor CoverageAdmissionExecutionGate {
+    private(set) var started = false
+    private var continuation: CheckedContinuation<Int, Never>?
+    func execute() async -> Int {
+        started = true
+        return await withCheckedContinuation { continuation = $0 }
+    }
+    func release() { continuation?.resume(returning: 1); continuation = nil }
 }

@@ -62,7 +62,8 @@ let package = Package(
         ),
         .target(
             name: "IMV2ActorRuntime",
-            dependencies: ["IMV2ActorContracts", "IMV2Core"]
+            dependencies: ["IMV2ActorContracts", "IMV2Core",
+                           .product(name: "Crypto", package: "swift-crypto")]
         ),
         .testTarget(
             name: "IMV2ActorRuntimeTests",
@@ -79,7 +80,7 @@ let package = Package(
         ),
         .testTarget(
             name: "IMV2ActorClusterTests",
-            dependencies: ["IMV2ActorCluster", "IMV2ActorContracts", "IMV2Core",
+            dependencies: ["IMV2ActorCluster", "IMV2ActorContracts", "IMV2Core", "IMV2ServerGateway",
                            .product(name: "Crypto", package: "swift-crypto")]
         ),
         .target(
@@ -104,7 +105,7 @@ let package = Package(
             name: "IMV2ServerInfrastructure",
             dependencies: [
                 "IMV2ServerContracts", "IMV2ServerApplication",
-                "IMV2ActorContracts", "IMV2ActorRuntime", "IMV2Core", "CIMV2Argon2",
+                "IMV2ActorContracts", "IMV2ActorRuntime", "IMV2ActorCluster", "IMV2Core", "CIMV2Argon2",
                 .product(name: "FluentKit", package: "fluent-kit"),
                 .product(name: "SQLKit", package: "sql-kit"),
                 .product(name: "PostgresNIO", package: "postgres-nio"),
@@ -307,6 +308,7 @@ let package = Package(
         .testTarget(
             name: "IMV2ServerTests",
             dependencies: ["IMV2ServerInfrastructure",
+                "IMV2ActorCluster", "IMV2ActorApplication",
                 "IMV2ActorContracts",
                 "IMV2ServerContracts",
                 "IMV2ServerApplication", "IMV2Server",

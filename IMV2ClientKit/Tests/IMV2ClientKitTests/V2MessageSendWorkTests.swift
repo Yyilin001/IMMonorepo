@@ -6,6 +6,37 @@ import Testing
 
 @Suite("Message send public work", .serialized)
 struct V2MessageSendWorkTests {
+    @Test("an unknown last submission starts the independent reconciliation round", arguments: [false, true])
+    func exhaustedSubmissionStillReconcilesOriginalIdentity(typedTransportFailure: Bool) async throws {
+        let fixture = try SendWorkFixture(); defer { fixture.remove() }
+        let intent = try fixture.intent("retained unknown result")
+        try await fixture.store.freezeSendIntent(intent)
+        try await fixture.store.handOffSendIntent(intent.id)
+        let original = try await fixture.head()
+        let command = try await fixture.store.messageSendCommand(workID: original.id)
+        for _ in 0..<4 {
+            let work = try #require(try await fixture.store.operationWork(id: original.id))
+            let claim = try await fixture.claim(work)
+            try await V2MessageSendOperationService(accountID: fixture.account, store: fixture.store,
+                client: FailingSendWorkRemote(failure: .unavailableBeforeSubmission)).execute(claim)
+        }
+        let last = try await fixture.claim(try #require(try await fixture.store.operationWork(id: original.id)))
+        let remote = SendWorkRemote(failure: typedTransportFailure ? V2MessageSendTransportError.outcomeUnknown : URLError(.networkConnectionLost))
+        try await V2MessageSendOperationService(accountID: fixture.account, store: fixture.store, client: remote).execute(last)
+        let unknown = try #require(try await fixture.store.operationWork(id: original.id))
+        #expect(unknown.submissionRoundAttempts == 5)
+        #expect(unknown.nextAction == .reconcile)
+        #expect(unknown.scheduling == .backingOff)
+        #expect(unknown.reconciliationRoundAttempts == 0)
+        #expect(try await fixture.store.messageSendCommand(workID: original.id) == command)
+        let recovery = try await fixture.claim(unknown)
+        try await V2MessageSendOperationService(accountID: fixture.account, store: fixture.store, client: remote).execute(recovery)
+        #expect(try await fixture.store.operationWork(id: original.id)?.execution == .committed)
+        #expect(await remote.submissions == 1)
+        #expect(await remote.recoveries == 1)
+        try await fixture.store.close()
+    }
+
     @Test(arguments: [V2MessageSendTransportError.unavailableBeforeSubmission, .outcomeUnknown])
     func transportCertaintyPersistsNextAction(_ failure: V2MessageSendTransportError) async throws {
         let fixture = try SendWorkFixture(); defer { fixture.remove() }
@@ -23,6 +54,33 @@ struct V2MessageSendWorkTests {
         #expect(await remote.submissions == 1)
         try await fixture.store.close()
     }
+    @Test("correlated TCP busy preserves the claim action; ambiguous unavailable reconciles",
+          arguments: ["SERVER_BUSY", "UNAVAILABLE"], [V2OperationWorkAction.submit, .reconcile])
+    func correlatedTCPRejectionPreservesIdentityAndRetryFloor(code: String, action: V2OperationWorkAction) async throws {
+        let fixture = try SendWorkFixture(); defer { fixture.remove() }
+        let intent = try fixture.intent("same frozen TCP operation")
+        try await fixture.store.freezeSendIntent(intent)
+        try await fixture.store.handOffSendIntent(intent.id)
+        let work = try await fixture.head()
+        var claim = try await fixture.claim(work)
+        if action == .reconcile {
+            try await fixture.store.deferOperationWork(claim, until: Date(), code: "prior unknown", nextAction: .reconcile)
+            let current = try #require(try await fixture.store.operationWork(id: work.id))
+            claim = try await fixture.claim(current)
+        }
+        let before = Date()
+        let remote = CorrelatedRejectedSendWorkRemote(code: code)
+        try await V2MessageSendOperationService(accountID: fixture.account, store: fixture.store, client: remote).execute(claim)
+        let current = try #require(try await fixture.store.operationWork(id: work.id))
+        #expect(current.nextAction == (code == "SERVER_BUSY" ? action : .reconcile))
+        #expect(current.nextActionAt >= before.addingTimeInterval(3))
+        #expect(current.identity == work.identity)
+        #expect(current.fingerprint == work.fingerprint)
+        #expect(try await fixture.store.messageSendCommand(workID: work.id).identity == work.identity)
+        #expect(current.scheduling == .backingOff)
+        try await fixture.store.close()
+    }
+
     @Test(arguments: ["negative", "expired", "unknown"])
     func provenUnsentDispositionPreservesUnknownIdentity(_ scenario: String) async throws {
         let f = try SendWorkFixture(); defer { f.remove() }
@@ -243,17 +301,38 @@ struct SendWorkFixture {
     func remove() { try? FileManager.default.removeItem(at:url.deletingLastPathComponent()) }
 }
 actor SendWorkRemote:V2MessageSendOperationClient {
+    private let failure: any Error
+    init(failure: any Error = URLError(.networkConnectionLost)) { self.failure = failure }
     var submissions=0,recoveries=0
     var receipt:V2MessageSendOperationReceipt?
     func submit(_ command:V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
         submissions += 1
         receipt=try .init(identity:command.identity,fingerprint:command.fingerprint,
             outcome:.accepted(.init(messageID:.init(uuid:UUID()),roomSequence:2)),resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1_000))
-        throw URLError(.networkConnectionLost)
+        throw failure
     }
     func recover(_ request:V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
         recoveries += 1
+        #expect(request.action == .query)
         guard let receipt else { return .unresolved }
         return .receipt(receipt)
+    }
+}
+
+private struct CorrelatedRejectedSendWorkRemote: V2MessageSendOperationClient {
+    let code: String
+    func submit(_ command: V2MessageSendOperationCommand) throws -> V2MessageSendOperationRecoveryResult {
+        try rejected(identity: command.identity, fingerprint: command.fingerprint)
+    }
+    func recover(_ request: V2MessageSendOperationRecoveryRequest) throws -> V2MessageSendOperationRecoveryResult {
+        try rejected(identity: request.identity, fingerprint: request.fingerprint)
+    }
+    private func rejected(identity: V2OperationIdentity, fingerprint: V2OperationFingerprint) throws -> V2MessageSendOperationRecoveryResult {
+        var response = IMV2Envelope()
+        response.error.code = code
+        response.error.retryable = true
+        response.error.retryAfterSeconds = 3
+        return try V2ProtobufMessageSendOperationClient.decodeCorrelatedResponse(response,
+            identity: identity, fingerprint: fingerprint)
     }
 }

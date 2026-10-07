@@ -48,6 +48,25 @@ struct V2RealtimeSessionCoordinatorTests {
         #expect(await auth.currentState() == .unauthenticated)
     }
 
+    @Test("temporary gateway refusal preserves credentials and authenticated session epoch",
+        arguments: ["SERVER_BUSY", "UNAVAILABLE"])
+    func temporaryGatewayRefusalPreservesSession(code: String) async throws {
+        let now = Date(timeIntervalSince1970: 1_750_001_100)
+        let current = try credentials(access: "current-access", refresh: "current-refresh", expiry: now.addingTimeInterval(60))
+        let store = RealtimeCredentialStore(record: .init(credentials: current))
+        let auth = V2AuthSession(credentialStore: store,
+            transport: RealtimeRefreshTransport(result: .failure(V2AuthTransportError.terminalRejection)), now: { now })
+        let before = try await auth.realtimeCredentials()
+        let error = V2RealtimeTransportError.server(code: code, retryable: true, retryAfterSeconds: 1, currentRevision: nil)
+        let coordinator = V2RealtimeSessionCoordinator(authSession: auth,
+            connection: RecordingRealtimeConnection(result: .failure(error)), supportedCapabilityProfiles: ["standard"])
+        await #expect(throws: error) { _ = try await coordinator.connect() }
+        #expect(await store.record() != nil)
+        let after = try await auth.realtimeCredentials()
+        #expect(after.sessionEpoch == before.sessionEpoch)
+        #expect(after.accessToken == before.accessToken)
+    }
+
     @Test("mismatched handshake identity is disconnected and never accepted")
     func rejectsIdentityMismatch() async throws {
         let now = Date(timeIntervalSince1970: 1_750_001_200)

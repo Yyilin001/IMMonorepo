@@ -13,6 +13,12 @@ struct V2PresencePublicationGatewayHandler:V2GatewayCommandHandler,V2PreparedGro
         try await handle(envelope:envelope,identity:identity,originatingConnectionID:connectionID)
     }
     func handle(envelope:IMV2Envelope,identity:V2AuthenticatedConnection,originatingConnectionID:UUID?) async throws -> IMV2Envelope {
+        if let response = await registry.handleDeviceRoomProgress(envelope, connectionID: connectionID, identity: identity) {
+            return response
+        }
+        if let response = await registry.handleRoomSubscriptionCommand(envelope, connectionID: connectionID, identity: identity) {
+            return response
+        }
         guard case .presencePublicationControl(let input)=envelope.body else {
             return try await delegate.handle(envelope:envelope,identity:identity,originatingConnectionID:originatingConnectionID)
         }

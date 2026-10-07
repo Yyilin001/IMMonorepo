@@ -6,6 +6,44 @@ import Testing
 
 @Suite("Room turns serialize across suspension and preserve cancellation evidence")
 struct V2RoomTurnLaneTests {
+    @Test("idle drain atomically rejects stale activity snapshots and closes new admission")
+    func idleDrainUsesCurrentActivity() async throws {
+        let fixture = try Fixture()
+        let observed = await fixture.lane.snapshot()
+        #expect(fixture.lane.wasActive(after: observed.lastActivity - .seconds(300)))
+        #expect(!fixture.lane.wasActive(after: observed.lastActivity))
+        let executing = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let queued = fixture.submit(.init(id: 1, send: false))
+        do {
+            try await fixture.waitForQueue(1)
+            #expect(fixture.lane.wasActive(after: observed.lastActivity))
+            // A recent synchronous observation is merely a filter; when a
+            // probe proceeds, executing/queued ownership is still authoritative.
+            #expect(await fixture.lane.beginIdleDrain(ifLastActivityAtOrBefore: .now) == false)
+            await fixture.executor.release()
+            _ = try await executing.value
+            _ = try await queued.value
+            // The Host may still hold the original idle snapshot. Both turns
+            // completed, but the atomic cutoff checks their newer activity.
+            #expect(await fixture.lane.beginIdleDrain(ifLastActivityAtOrBefore: observed.lastActivity) == false)
+            #expect(await fixture.lane.snapshot().phase == .ready)
+            let finalActivity = await fixture.lane.snapshot().lastActivity
+            #expect(!fixture.lane.wasActive(after: .now))
+            #expect(await fixture.lane.beginIdleDrain(ifLastActivityAtOrBefore: .now))
+            let late = fixture.submit(.init(id: 2, send: false))
+            await expectFailure(.notAccepted(.retired), from: late)
+            #expect(await fixture.lane.snapshot().lastActivity == finalActivity)
+            #expect(await fixture.executor.starts == [[0], [1]])
+            try await fixture.waitForBudget(0)
+        } catch {
+            await fixture.executor.release()
+            _ = await executing.result
+            _ = await queued.result
+            throw error
+        }
+    }
+
     @Test("profile cohorts obey target budgets and cannot cross send or write barriers")
     func profileCohortBoundaries() async throws {
         let fixture = try Fixture()
@@ -131,6 +169,78 @@ struct V2RoomTurnLaneTests {
         }
     }
 
+    @Test("one room wake expires an earlier middle deadline without releasing an executing turn")
+    func sharedDeadlineWake() async throws {
+        let fixture = try Fixture()
+        let held = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        let head = fixture.submit(.init(id: 1, send: false))
+        try await fixture.waitForQueue(1)
+        let middle = fixture.submit(.init(id: 2, send: false), deadline: .now + .milliseconds(200))
+        try await fixture.waitForQueue(2)
+        let tail = fixture.submit(.init(id: 3, send: false))
+        do {
+            try await fixture.waitForQueue(3)
+            #expect(await fixture.lane.deadlineTrackingSnapshot().entries == 4)
+            #expect(await fixture.lane.deadlineTrackingSnapshot().hasWake)
+            await expectFailure(.notAccepted(.deadlineExceeded), from: middle)
+            try await fixture.waitForQueue(2)
+            try await fixture.waitForBudget(3)
+            #expect(await fixture.lane.deadlineTrackingSnapshot().entries == 3)
+            #expect(await fixture.executor.starts == [[0]])
+            head.cancel()
+            await expectFailure(.notAccepted(.cancelled), from: head)
+            try await fixture.waitForBudget(2)
+            await fixture.executor.release()
+            #expect(try await held.value == 0)
+            #expect(try await tail.value == 3)
+            try await fixture.waitForBudget(0)
+            #expect(await fixture.lane.deadlineTrackingSnapshot().entries == 0)
+            #expect(await fixture.lane.deadlineTrackingSnapshot().hasWake == false)
+            #expect(await fixture.executor.starts == [[0], [3]])
+        } catch {
+            await fixture.executor.release()
+            for task in [held, head, middle, tail] { task.cancel(); _ = await task.result }
+            throw error
+        }
+    }
+
+    @Test("withdrawing the head, middle and tail preserves queued room order and releases only their permits")
+    func indexedQueueWithdrawalOrder() async throws {
+        let fixture = try Fixture()
+        let first = fixture.submit(.init(id: 0, send: false, hold: true))
+        await fixture.executor.waitForStarts(1)
+        var queued: [Task<Int, any Error>] = []
+        do {
+            for id in 1...8 {
+                queued.append(fixture.submit(.init(id: id, send: false)))
+                try await fixture.waitForQueue(id)
+            }
+            for id in [1, 4, 8] {
+                queued[id - 1].cancel()
+                await expectFailure(.notAccepted(.cancelled), from: queued[id - 1])
+            }
+            try await fixture.waitForQueue(5)
+            try await fixture.waitForBudget(6)
+            #expect(await fixture.executor.starts == [[0]])
+            await fixture.executor.release()
+            #expect(try await first.value == 0)
+            for id in [2, 3, 5, 6, 7] {
+                #expect(try await queued[id - 1].value == id)
+            }
+            let observed = await fixture.executor.observations()
+            #expect(observed.starts == [[0], [2], [3], [5], [6], [7]])
+            #expect(observed.ordinals == [1, 3, 4, 6, 7, 8])
+            #expect(observed.maximumConcurrentTurns == 1)
+            try await fixture.waitForBudget(0)
+        } catch {
+            await fixture.executor.release()
+            _ = await first.result
+            for task in queued { task.cancel(); _ = await task.result }
+            throw error
+        }
+    }
+
     @Test("send batches stop at a barrier and never overlap an awaited turn")
     func fifoAndBatching() async throws {
         let fixture = try Fixture()
@@ -184,7 +294,8 @@ struct V2RoomTurnLaneTests {
 
     @Test("durable sends collect arrivals within one admission-based window")
     func durableOperationCollectionWindow() async throws {
-        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))
+        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000,
+            durableSendCollectionWindowEnabled: true))
         let first = fixture.submit(.init(id: 1, send: false, operationSend: true))
         try await fixture.waitForQueue(1)
         let second = fixture.submit(.init(id: 2, send: false, operationSend: true))
@@ -196,11 +307,22 @@ struct V2RoomTurnLaneTests {
 
     @Test("a durable send deadline ends collection and releases its permit")
     func durableOperationDeadlineDuringCollection() async throws {
-        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))
+        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000,
+            durableSendCollectionWindowEnabled: true))
         let expired = fixture.submit(.init(id: 1, send: false, operationSend: true),
             deadline: .now + .milliseconds(50))
         await expectFailure(.notAccepted(.deadlineExceeded), from: expired)
         #expect(await fixture.executor.starts.isEmpty)
+        try await fixture.waitForBudget(0)
+    }
+
+    @Test("opportunistic durable sends do not wait for an empty collection window")
+    func durableOperationStartsWithoutWindow() async throws {
+        let fixture = try Fixture(configuration: .init(batchWaitMilliseconds: 1_000))
+        let first = fixture.submit(.init(id: 1, send: false, operationSend: true),
+            deadline: .now + .milliseconds(500))
+        #expect(try await first.value == 1)
+        #expect(await fixture.executor.starts == [[1]])
         try await fixture.waitForBudget(0)
     }
 
@@ -242,10 +364,12 @@ struct V2RoomTurnLaneTests {
         let next = fixture.submit(.init(id: 1, send: false))
         try await fixture.waitForQueue(1)
         #expect(await fixture.executor.starts == [[0]])
+        let beforeActualCompletion = ContinuousClock.now
         await fixture.executor.release()
         #expect(try await next.value == 1)
         #expect(await fixture.executor.observations().maximumConcurrentTurns == 1)
         try await fixture.waitForBudget(0)
+        #expect(fixture.lane.wasActive(after: beforeActualCompletion))
     }
 
     @Test("unknown transaction stops successors and holds capacity until fenced retirement")
@@ -329,13 +453,17 @@ struct V2RoomTurnLaneTests {
         #expect(await fixture.executor.starts == [[0]])
         try await fixture.lane.markReservationDispatched(grant)
         #expect(!(await fixture.lane.abortReservation(grant)))
+        let beforeFinish = ContinuousClock.now
         #expect(await fixture.lane.finishReservation(grant, completion: .committed))
+        #expect(fixture.lane.wasActive(after: beforeFinish))
         #expect(try await next.value == 1)
         try await fixture.waitForBudget(0)
         let successor = try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
         #expect(!(await fixture.lane.finishReservation(grant, completion: .committed)))
         #expect(await fixture.lane.snapshot().hasReservation)
+        let beforeAbort = ContinuousClock.now
         #expect(await fixture.lane.abortReservation(successor))
+        #expect(fixture.lane.wasActive(after: beforeAbort))
         try await fixture.waitForBudget(0)
     }
 

@@ -140,7 +140,7 @@ public actor V2RoomClusterDiscovery {
     private var active: [V2ActorHostID: V2RoomClusterHostDescriptor] = [:]
     private var activeBeaconIDs: [V2ActorHostID: ClusterSystem.ActorID] = [:]
     private var lastVerifiedAt: [V2ActorHostID: ContinuousClock.Instant] = [:]
-    private var failedNodesDowned: [V2ActorHostID: Cluster.Node] = [:]
+    private var failedNodesSuspended: [V2ActorHostID: Cluster.Node] = [:]
     private var pendingDown: [RetiredNode] = []
     private var nextJoinAllowed: [V2ActorHostID: ContinuousClock.Instant] = [:]
     private var polling = false
@@ -227,14 +227,14 @@ public actor V2RoomClusterDiscovery {
                     active[peer.hostID] = accepted
                     activeBeaconIDs[peer.hostID] = acceptedBeaconID
                     lastVerifiedAt[peer.hostID] = .now
-                    failedNodesDowned.removeValue(forKey: peer.hostID)
+                    failedNodesSuspended.removeValue(forKey: peer.hostID)
                     if let replaced { pendingDown.append(replaced) }
                 } catch {
                     await markUnhealthy(peer)
                 }
             } else {
                 await markUnhealthy(peer)
-                await downFailedNodeIfSafe(peer)
+                await suspendFailedNodeIfSafe(peer)
                 // Cluster.Node 包含进程实例标识。旧进程消失后，
                 // 重新加入配置的端点。
                 if ContinuousClock.now >= nextJoinAllowed[peer.hostID, default: .now] {
@@ -332,19 +332,18 @@ public actor V2RoomClusterDiscovery {
         active[peer.hostID] = unhealthy
     }
 
-    private func downFailedNodeIfSafe(_ peer: V2RoomDiscoveryPeer) async {
+    private func suspendFailedNodeIfSafe(_ peer: V2RoomDiscoveryPeer) async {
         guard let descriptor = active[peer.hostID],
               let oldNode = activeBeaconIDs[peer.hostID]?.node,
-              failedNodesDowned[peer.hostID] != oldNode,
+              failedNodesSuspended[peer.hostID] != oldNode,
               let verifiedAt = lastVerifiedAt[peer.hostID],
               verifiedAt.duration(to: .now) >= configuration.failedHostGrace,
               await client.suspendUnreachableHost(descriptor.identity) else { return }
-        // 只有在宽限期内既无已认证响应、也无未完成应用工作时，
-        // 才退役 Cluster 的旧物理关联。绝不会释放或抢占房间的数据库激活租约。
-        failedNodesDowned[peer.hostID] = oldNode
-        system.cluster.down(member: .init(node: oldNode, status: .up))
-        system.cluster.join(host: peer.address, port: peer.port)
-        nextJoinAllowed[peer.hostID] = .now + .seconds(5)
+        // Missing health is reversible, not evidence that this live process
+        // died. Close local admission and discard sessions only after actual
+        // work settles; authenticated discovery may resume this exact UID.
+        failedNodesSuspended[peer.hostID] = oldNode
+
     }
 
     private func reapRetiredNodes() async {

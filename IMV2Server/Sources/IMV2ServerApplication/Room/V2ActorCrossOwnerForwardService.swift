@@ -49,15 +49,17 @@ public struct V2ActorCrossOwnerForwardService: V2CrossOwnerForwarding {
         guard let endpoint = sources[sourceRoute.shardID] else {
             throw V2RoomShardStorageRegistryError.unknownShardID
         }
-        if let prior = try await endpoint.receipts.terminalStatus(actor: actor,
-            operation: operation, source: source, target: target) {
-            return try completed(prior, source: source.messageID, target: target)
-        }
         let request = V2ActorPrepareForwardExportWire(actorUserID: actor,
             operationID: operation, source: source, targetRoomID: target,
             targetShardID: targetRoute.shardID, targetEpoch: targetRoute.epoch)
         let export: V2ForwardExport
         do {
+            // Replay validates the original source fingerprint too. Its
+            // business failures use the same result mapping as preparation.
+            if let prior = try await endpoint.receipts.terminalStatus(actor: actor,
+                operation: operation, source: source, target: target) {
+                return try completed(prior, source: source.messageID, target: target)
+            }
             switch try await sourceCommand(.prepareExport(request), operationDeadline) {
             case .preparedExport(let value): export = try value.toDomain()
             case .terminalExport(let value):

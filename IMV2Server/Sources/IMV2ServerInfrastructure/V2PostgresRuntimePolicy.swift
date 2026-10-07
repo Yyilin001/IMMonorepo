@@ -9,6 +9,7 @@ public struct V2PostgresWorkloadPoolBudget: Equatable, Sendable {
     /// 工作类别。
     public enum Role: String, CaseIterable, Sendable {
         /// 前台请求路径。
+        case messageWrite = "message_write"
         case foreground
         /// 同步读取路径。
         case sync
@@ -21,6 +22,7 @@ public struct V2PostgresWorkloadPoolBudget: Equatable, Sendable {
     }
 
     /// 前台路径每事件循环连接数。
+    public let messageWriteConnectionsPerEventLoop: Int
     public let foregroundConnectionsPerEventLoop: Int
     /// 同步路径每事件循环连接数。
     public let syncConnectionsPerEventLoop: Int
@@ -38,6 +40,12 @@ public struct V2PostgresWorkloadPoolBudget: Equatable, Sendable {
     ///   ``V2GatewayRuntimeConfigurationError/missing(_:)``；
     ///   取值非整数或不在 `1...256` 时抛出 ``V2GatewayRuntimeConfigurationError/invalid(_:)``。
     public init(environment: any V2RuntimeEnvironment) throws {
+        if let raw = environment.value(for: "IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP") {
+            guard let value = Int(raw), (1...256).contains(value) else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP")
+            }
+            messageWriteConnectionsPerEventLoop = value
+        } else { messageWriteConnectionsPerEventLoop = 0 }
         foregroundConnectionsPerEventLoop = try Self.value(
             "IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP", environment: environment
         )
@@ -57,7 +65,7 @@ public struct V2PostgresWorkloadPoolBudget: Equatable, Sendable {
 
     /// 各工作类别每事件循环连接数之和。
     public var totalConnectionsPerEventLoop: Int {
-        foregroundConnectionsPerEventLoop + syncConnectionsPerEventLoop
+        messageWriteConnectionsPerEventLoop + foregroundConnectionsPerEventLoop + syncConnectionsPerEventLoop
             + deliveryConnectionsPerEventLoop + projectionConnectionsPerEventLoop
             + maintenanceConnectionsPerEventLoop
     }
@@ -68,6 +76,7 @@ public struct V2PostgresWorkloadPoolBudget: Equatable, Sendable {
     /// - Returns: 该类别的连接预算。
     public func connectionsPerEventLoop(for role: Role) -> Int {
         switch role {
+        case .messageWrite: messageWriteConnectionsPerEventLoop
         case .foreground: foregroundConnectionsPerEventLoop
         case .sync: syncConnectionsPerEventLoop
         case .delivery: deliveryConnectionsPerEventLoop
@@ -218,7 +227,8 @@ public struct V2PostgresRuntimePolicy: Equatable, Sendable {
     public func validate(
         databaseURLs: [String],
         connectionsPerEventLoopPerPhysicalStore: Int,
-        additionalConnections: Int = 0
+        additionalConnections: Int = 0,
+        workloadConnectionsPerPhysicalStore: Int? = nil
     ) throws {
         let physicalPoolCount = Set(databaseURLs).count
         guard physicalPoolCount > 0, additionalConnections >= 0, connectionsPerEventLoopPerPhysicalStore > 0,
@@ -234,7 +244,11 @@ public struct V2PostgresRuntimePolicy: Equatable, Sendable {
         let (perPool, perPoolOverflow) = eventLoopThreads.multipliedReportingOverflow(
             by: connectionsPerEventLoopPerPhysicalStore
         )
-        let (total, totalOverflow) = perPool.multipliedReportingOverflow(by: physicalPoolCount)
+        let effectivePerPool = workloadConnectionsPerPhysicalStore ?? perPool
+        guard !perPoolOverflow, effectivePerPool > 0, effectivePerPool <= perPool else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_WORKLOAD_POOL_BUDGET")
+        }
+        let (total, totalOverflow) = effectivePerPool.multipliedReportingOverflow(by: physicalPoolCount)
         let (combinedTotal, additionalOverflow) = total.addingReportingOverflow(additionalConnections)
         guard !perPoolOverflow, !totalOverflow, !additionalOverflow, combinedTotal <= maximumTotalConnections else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")

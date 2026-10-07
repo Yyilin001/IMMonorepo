@@ -20,7 +20,6 @@ import Testing
 import Vapor
 import VaporTesting
 
-
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("durable forward delivery recovers owner transport and commit boundaries", arguments: ["text", "media", "media-paused-response-loss", "media-paused-revoked", "target-ack-loss", "source-ack-loss", "lease", "concurrent", "cancel", "pending", "paused", "source-owner", "target-owner", "accepted-target-owner", "enqueue-rollback", "batch", "max-attempt", "deadline"])
     func forwardDeliveryWorkerRecovery(scenario: String) async throws {
@@ -227,14 +226,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await targetSQL.raw("UPDATE im_v2.rooms SET owner_epoch = 1 WHERE room_id = \(bind: targetRoom.uuidValue!)").run()
             }
             if scenario == "pending" {
-                try await targetSQL.raw("UPDATE im_v2.room_admission SET command_window_used = command_window_limit WHERE room_id = \(bind: targetRoom.uuidValue!)").run()
                 for tick in 0..<12 {
                     let report = try await worker(at: now.addingTimeInterval(Double(tick)), target: transport).runOnce(sourceShardID: "room-a", limit: 10)
                     #expect(report.deferred == 1 && report.paused == 0)
                     #expect(try await receipts.status(exportID: export.intent.exportID) == nil)
                 }
                 #expect(try await count("im_v2.messages", on: targetSQL) == 0)
-                try await targetSQL.raw("UPDATE im_v2.room_admission SET command_window_used = 0 WHERE room_id = \(bind: targetRoom.uuidValue!)").run()
+                #expect(await probe.calls == 12)
             }
             if scenario == "source-ack-loss" {
                 try await sourceSQL.raw("CREATE FUNCTION im_v2.zz_abort_job_complete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'lost completion'; END; $$").run()
@@ -305,10 +303,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sourceSQL.raw("INSERT INTO im_v2.auth_devices (user_id, device_id, created_at, last_active_at) VALUES (\(bind: memberTwoUUID), \(bind: device.uuidValue!), \(bind: now), \(bind: now))").run()
                 try await sourceSQL.raw("INSERT INTO im_v2.room_owner_routes (room_id, room_shard_id, route_epoch, created_at, updated_at) VALUES (\(bind: targetRoom.uuidValue!), 'room-b', 0, \(bind: now), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET room_shard_id = EXCLUDED.room_shard_id, route_epoch = EXCLUDED.route_epoch, updated_at = EXCLUDED.updated_at").run()
                 let copiedMessage = try #require(try await targetSQL.raw("SELECT message_id AS value FROM im_v2.messages").first(decoding: ForwardInboxUUIDAssertion.self))
-                let downloads = V2MediaEdgeHTTPHandler(resolver: V2RoutedMediaDownloadService(
+                let downloads = V2MediaEdgeHTTPHandler(resolver: V2RoomRefMediaDownloadClient(
                     local: .init(media: .init(store: PostgresV2MediaStore(database: sourceDB)), providerSessions: try .init(store: PostgresV2MediaDownloadSessionStore(database: sourceDB), provider: sourceProvider)),
                     rooms: V2PostgresRoomShardRouter(database: sourceDB), owners: ["room-b": .init(database: targetDB, provider: targetProvider)],
-                    controlDatabase: sourceDB, now: { now }))
+                    controlDatabase: sourceDB, authorization: roomMediaAuthorizationPort(database: targetDB), now: { now }))
                 for (row, value) in zip(mapped, ["first attachment", "second attachment"]) {
                     let id = MediaID(uuid: row.value)
                     let download = try await downloads.downloadTarget(actorUserID: .init(uuid: memberTwoUUID), deviceID: device, rawMediaID: id.rawValue, rawRoomID: targetRoom.rawValue, rawMessageID: copiedMessage.value.uuidString)
@@ -366,10 +364,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 if scenario == "cancel" { try await Task.sleep(for: .seconds(3_600)) }
             }
-            let service = V2RoutedMediaDownloadService(
+            let service = V2RoomRefMediaDownloadClient(
                 local: .init(media: .init(store: PostgresV2MediaStore(database: controlDB)), providerSessions: try .init(store: PostgresV2MediaDownloadSessionStore(database: controlDB), provider: provider)),
                 rooms: V2PostgresRoomShardRouter(database: controlDB), owners: ["room-b": .init(database: ownerDB, provider: signing)],
-                controlDatabase: controlDB, now: { clock.now() })
+                controlDatabase: controlDB, authorization: roomMediaAuthorizationPort(database: ownerDB), now: { clock.now() })
             let handler = V2MediaEdgeHTTPHandler(resolver: service)
             let rawMessage = scenario == "wrong-message" ? UUID().uuidString : message.messageID.rawValue
             @Sendable func download() async throws -> V2MediaDownloadTargetEnvelope {
@@ -441,6 +439,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     await #expect(throws: CancellationError.self) { try await task.value }
                     #expect(await signing.drained)
                 } catch { task.cancel(); _ = try? await task.value; throw error }
+            } else if scenario == "owner" {
+                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { try await download() }
+                #expect(await signing.calls == 0)
+                #expect(try await count("im_v2.media_download_grants", on: ownerSQL) == 0)
             } else {
                 await #expect(throws: V2MediaStoreError.downloadNotAuthorized) { try await download() }
                 #expect(await signing.calls == (scenario.hasPrefix("provider-") ? 1 : 0))
@@ -638,17 +640,24 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writeA = PostgresV2RoomWriteStore(database: sourceDB), writeB = PostgresV2RoomWriteStore(database: targetDB)
             let send = V2SendMessageService(store: writeA, capacityProfile: profile, limits: limits, now: { now })
             guard case .accepted(let source) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "routed runtime")) else { throw V2ForwardInboxError.corruptPersistenceState }
-            let cross = try V2CrossOwnerForwardService(sources: [
-                "room-a": .init(exports: PostgresV2ForwardExportStore(database: sourceDB), receipts: PostgresV2ForwardReceiptStore(database: sourceDB), jobs: PostgresV2ForwardDeliveryStore(database: sourceDB)),
-                "room-b": .init(exports: PostgresV2ForwardExportStore(database: targetDB), receipts: PostgresV2ForwardReceiptStore(database: targetDB), jobs: PostgresV2ForwardDeliveryStore(database: targetDB))
-            ], now: { now })
-            let router = try V2RoutedForwardMessagesService(router: V2PostgresRoomShardRouter(database: sourceDB), owners: [
-                "room-a": V2ForwardMessagesService(database: sourceDB, writeStore: writeA, capacityProfile: profile, limits: limits, now: { now }),
-                "room-b": V2ForwardMessagesService(database: targetDB, writeStore: writeB, capacityProfile: profile, limits: limits, now: { now })
-            ], crossOwner: cross)
+            let sourceCommand = forwardSourceCommand(database: sourceDB, now: { now })
+            let cross = try V2ActorCrossOwnerForwardService(sources: [
+                "room-a": .init(receipts: PostgresV2ForwardReceiptStore(database: sourceDB),
+                    jobs: PostgresV2ForwardDeliveryStore(database: sourceDB))
+            ], sourceCommand: sourceCommand, deadline: { .now + .seconds(30) })
+            let pairExecutor = V2ActorForwardPairDomainExecutor(database: sourceDB, write: writeA,
+                capacityProfile: profile, limits: limits, now: { now })
+            let router = try V2ActorForwardingCoordinator(router: V2PostgresRoomShardRouter(database: sourceDB),
+                physicalStoreKeyByShard: ["room-a": "source-database", "room-b": "target-database"],
+                pair: .init { pair, deadline in
+                    #expect(pair.source.roomID == roomID && pair.targetRoomID == roomID)
+                    return try await withRoomActivation(database: sourceDB, roomID: roomID) { token in
+                        try await pairExecutor.execute(pair, activationTokens: [token], deadline: deadline)
+                    }
+                }, crossOwner: cross, deadline: { .now + .seconds(30) })
             let target = V2ForwardImportEndpoint(inbox: PostgresV2ForwardInboxStore(database: targetDB), write: writeB.usingWorkloadDatabase(targetDB), capacityProfile: profile, limits: limits, now: { now })
             let transport = try V2ConfiguredForwardExportDelivery(targets: ["room-b": target])
-            let worker = try V2ForwardDeliveryWorker(store: .init(database: sourceDB), receipts: PostgresV2ForwardReceiptStore(database: sourceDB), target: transport, sourceCommand: forwardSourceCommand(database: sourceDB, now: { now }), deadline: { .now + .seconds(10) }, now: { now })
+            let worker = try V2ForwardDeliveryWorker(store: .init(database: sourceDB), receipts: PostgresV2ForwardReceiptStore(database: sourceDB), target: transport, sourceCommand: sourceCommand, deadline: { .now + .seconds(10) }, now: { now })
             let runtime = try V2ForwardDeliveryRuntime(workers: ["room-a": worker], minimumPollMilliseconds: 10)
             let reference = try V2ForwardMessageReference(roomID: roomID, messageID: source.messageID, revision: .init(1))
             let commands = try (0..<3).map { _ in try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference], targetRoomIDs: [roomID, targetRoom]) }
@@ -704,7 +713,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } catch { task?.cancel(); await task?.value; throw error }
         }
     }
-
 
     @Test("multi-hop media forwards use exact active source references and reject late revocation", arguments: [V2GroupCapacityClass.standard, .large])
     func forwardedMediaUsesSourceReferences(capacityClass: V2GroupCapacityClass) async throws {
@@ -1707,9 +1715,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 2, window: 86_400),
                 contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: fastCache,
-                shardAdmissionCommandCreditPool: .init(database: resources.database(.psql), batchSize: 4)
-            )
+                directRoomLogFastAppendCache: fastCache)
             let selectedWriter: any V2RoomWriteStore
             if actorScoped {
                 let owner = try V2RoomDataOwner(shardID: "reciprocal-shard", epoch: 0)
@@ -1981,6 +1987,8 @@ private actor ForwardDeliveryTestTarget: V2ForwardExportDelivering {
     init(target: any V2ForwardExportDelivering, mode: String) { self.target = target; self.mode = mode }
     func deliver(_ export: V2ForwardExport) async throws -> V2ForwardTerminalReceipt? {
         calls += 1
+        // Exercise target pending directly; retired room credits no longer gate delivery.
+        if mode == "pending", calls <= 12 { return nil }
         if mode == "paused" { throw V2ForwardDeliveryError.targetUnavailable }
         if mode == "deadline" {
             waiting = true
@@ -2084,4 +2092,14 @@ struct ConcurrentMediaResourceFixture: Sendable {
         else { throw V2ResourceProviderError.configurationInvalid }
         try FileManager.default.removeItem(at: root.appending(path: "objects").appending(path: reference.placementID.uuidString.lowercased()))
     }
+}
+
+/// The current production media executor runs each authorization query in a fresh room turn.
+private func roomMediaAuthorizationPort(database: any Database) -> V2ActorRoomMediaAuthorizationPort {
+    .init(query: { query, deadline in
+        guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+        return try await withRoomActivation(database: database, roomID: query.roomID, shardID: "room-b") { token in
+            try await V2RoomMediaAuthorizationDomainExecutor(database: database, token: token).execute(query)
+        }
+    })
 }

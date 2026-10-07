@@ -103,6 +103,13 @@ struct V2RootView: View {
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
                         .environment(\.v2AvatarPipeline, store.avatarPipeline)
                         .safeAreaInset(edge:.top) {
+                            VStack(spacing: 0) {
+                            if store.realtimeCoverage?.state == .recovering {
+                                Text("实时通知正在恢复，可继续发送消息。")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                                    .padding(.horizontal).padding(.vertical, 6)
+                                    .accessibilityIdentifier("v2.realtime.recovering")
+                            }
                             if store.accountWorkPaused {
                                 HStack {
                                     Text("账户后台同步已暂停，已保存的操作会保留。")
@@ -111,6 +118,7 @@ struct V2RootView: View {
                                         .accessibilityIdentifier("v2.account-work.resume")
                                 }
                                 .padding().background(.regularMaterial)
+                            }
                             }
                         }
                     } else {

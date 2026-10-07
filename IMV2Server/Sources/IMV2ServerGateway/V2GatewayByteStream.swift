@@ -5,6 +5,7 @@ import IMV2Compression
 import IMV2Core
 import NIOCore
 import Synchronization
+import IMV2ActorContracts
 
 /// 一份不可变的服务端推送帧，由协商到相同协议版本的每个已授权本地接收者共享。
 ///
@@ -246,7 +247,8 @@ private final class V2GatewayForegroundTransport: Sendable {
         }
     }
 
-    func submit(_ prepared: V2PreparedGatewayGroupEventAvailable) -> Bool {
+    func submit(_ prepared: V2PreparedGatewayGroupEventAvailable,
+                enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) -> Bool {
         let submission = state.withLock { state -> (
             writer: Writer,
             bytes: ByteBuffer,
@@ -260,10 +262,12 @@ private final class V2GatewayForegroundTransport: Sendable {
         switch submission.writer {
         case .callback(let writer):
             guard submission.authorization.isAuthorizedToWrite() else { return false }
+            if let enqueueIfCurrent { return enqueueIfCurrent { writer(submission.bytes) } }
             writer(submission.bytes)
         case .nio(let writer):
             let authorization = submission.authorization
-            writer.submit(submission.bytes, isAuthorizedToWrite: { authorization.isAuthorizedToWrite() })
+            writer.submit(submission.bytes, isAuthorizedToWrite: { authorization.isAuthorizedToWrite() },
+                enqueueIfCurrent: enqueueIfCurrent)
         }
         return true
     }
@@ -274,7 +278,8 @@ private final class V2GatewayForegroundTransport: Sendable {
     /// - Parameter prepared: 已准备的群组事件帧。
     /// - Returns: 可供批量提交的 NIO 提交对象；不满足快速路径条件时为 `nil`。
     func prepareNIOSubmission(
-        _ prepared: V2PreparedGatewayGroupEventAvailable
+        _ prepared: V2PreparedGatewayGroupEventAvailable,
+        enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil
     ) -> V2NIOGatewayForegroundWriteSubmission? {
         state.withLock { state in
             guard state.protocolVersion == prepared.protocolVersion,
@@ -285,10 +290,40 @@ private final class V2GatewayForegroundTransport: Sendable {
             return .init(
                 writer: writer,
                 bytes: prepared.bytes(for: state.compression),
-                isAuthorizedToWrite: { authorization.isAuthorizedToWrite() }
+                isAuthorizedToWrite: { authorization.isAuthorizedToWrite() }, enqueueIfCurrent: enqueueIfCurrent
             )
         }
     }
+}
+
+private final class V2GatewayNotificationDispatchResult: Sendable {
+    private let value = Mutex(false)
+    func mark() { value.withLock { $0 = true } }
+    var wasDispatched: Bool { value.withLock { $0 } }
+}
+
+/// A recovery notification with an atomic write-time lifecycle permit.
+/// The socket owner invokes enqueueIfCurrent synchronously at actual enqueue.
+public struct V2GatewayScopedNotificationWrite: Sendable {
+    public let bytes: Data
+    private let permit: @Sendable (@Sendable () -> Void) -> Bool
+    init(bytes: Data, permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) {
+        self.bytes = bytes
+        let consumed = Mutex(false)
+        self.permit = { enqueue in
+            consumed.withLock { used in
+                guard !used else { return false }
+                let accepted = permit(enqueue)
+                if accepted { used = true }
+                return accepted
+            }
+        }
+    }
+    public func enqueueIfCurrent(_ enqueue: @Sendable () -> Void) -> Bool { permit(enqueue) }
+}
+
+private enum V2RecoveryNotificationWorkerContext {
+    @TaskLocal static var connectionID: UUID?
 }
 
 /// 网关连接中与传输无关的那一半。
@@ -314,6 +349,49 @@ public actor V2GatewayByteStream {
     private let connectionID: UUID
     private let registry: V2DeviceConnectionRegistry
     private nonisolated let foregroundTransport = V2GatewayForegroundTransport()
+    private var authenticatedResponseWritten = false
+    private var notificationsReady = false
+    private var coverageRevision: UInt64 = 0
+    private var coverageGenerations: [Int: UInt64] = [:]
+    private var activeCoverageScopes: [Int: String] = [:]
+    private struct PendingCoverageTransition {
+        var state: IMV2RealtimeCoverage
+        let confirms: (@Sendable () -> Bool)?
+        let scopePermit: (@Sendable (@Sendable () -> Void) -> Bool)?
+        let onReadyAdmitted: (@Sendable () async -> Void)?
+    }
+    private struct CoverageWriteFence: Sendable {
+        let generation: UInt64
+        let revision: UInt64
+    }
+    // At most a Recovering predecessor and its Ready successor per scope.
+    private var pendingCoverage: [Int: [PendingCoverageTransition]] = [:]
+    private var coverageWritesInFlight: Set<Int> = []
+    private nonisolated let coverageWriteFences = Mutex<[Int: CoverageWriteFence]>([:])
+    private var recoveryNotificationRetry: Task<Void, Never>?
+    private struct RoomSubscriptionState {
+        let authorization: V2GatewayRoomSubscriptionAuthority.Permit
+        var highWatermark: UInt64
+        var submittedHighWatermark: UInt64?
+        var permit: @Sendable (@Sendable () -> Void) -> Bool
+    }
+    private var roomSubscriptionState: RoomSubscriptionState?
+    private var roomSubscriptionReportedProgress: (authorization: V2GatewayRoomSubscriptionAuthority.Permit, applied: UInt64)?
+    private var roomSubscriptionReady: V2GatewayRoomSubscriptionAuthority.Permit?
+    private var roomSubscriptionRecovering: V2GatewayRoomSubscriptionAuthority.Permit?
+    private let roomSubscriptionSignal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    private var roomSubscriptionWriter: Task<Void, Never>?
+    private nonisolated let roomSubscriptionConnectionRevocation = Mutex<V2CallbackBox<@Sendable () -> Void>?>(nil)
+    private let recoveryOutbound = V2GatewayRecoveryOutbound()
+
+    private var suppressesInitialPresencePublication = false
+    private struct PendingSyncRecovery: Sendable {
+        let eventID: UInt64
+        let highWatermark: UInt64
+        let required: Bool
+        let permit: @Sendable (@Sendable () -> Void) -> Bool
+    }
+    private nonisolated let pendingSyncRecovery = Mutex<PendingSyncRecovery?>(nil)
     private var registeredIdentity: V2AuthenticatedConnection?
     private var unregisterTask: Task<Void, Never>?
     private var revocationTask: Task<Void, Never>?
@@ -328,13 +406,16 @@ public actor V2GatewayByteStream {
     // 因此处理器将 NIO 关闭 future 桥接进此 Actor，
     // 而不只是安排一次尽力而为的关闭。
     private var deviceRevocationHandler: (@Sendable () async -> Void)?
+    private nonisolated let liveStatePrimaryAuthentication = Mutex<V2CallbackBox<@Sendable (@Sendable () -> Void) -> Bool>?>(nil)
     private var outboundWriter: (@Sendable (Data) async -> Void)?
+    private var scopedNotificationWriter: (@Sendable (V2GatewayScopedNotificationWrite) async -> Bool)?
     private var requiredNotificationWriter: (@Sendable (Data) async -> Bool)?
     private var requiredNotificationClose: (@Sendable () async -> Void)?
     /// 一旦所属传输关闭，迟到的回调安装就不得重新形成
     /// 流 -> 回调 -> channel handler -> 流的循环强引用。
     ///
     /// 它同时为 handlerAdded/channelInactive 之间的竞态建立围栏。
+    var roomSubscriptionSocketGate: V2RoomSubscriptionSocketGate?
     private var transportClosed = false
     private let messageSendBudget: V2GatewayMessageSendBudget
     private let maximumConcurrentMessageSends: Int
@@ -342,9 +423,30 @@ public actor V2GatewayByteStream {
     private var messageSendTasks: [UInt64: Task<Void, Never>] = [:]
     private var messageSendReservedBytes = 0
 
+    /// Physical connection revocation is independent of the persisted online projection.
+    nonisolated func connectionAllowsDispatch() -> Bool { session.connectionIsActive }
+
+    private nonisolated func connectionFencedNotification(bytes: Data,
+        permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) -> V2GatewayScopedNotificationWrite {
+        .init(bytes: bytes, permit: { enqueue in
+            self.recoveryOutbound.enqueueIfActive {
+                guard self.connectionAllowsDispatch() else { return false }
+                return permit(enqueue)
+            }
+        })
+    }
+
     /// Registry/device shutdown can invalidate every selected connection before
     /// awaiting any actor or database cleanup.
+    nonisolated func configureRoomSubscriptionConnectionRevocation(_ revoke: @escaping @Sendable () -> Void) {
+        roomSubscriptionConnectionRevocation.withLock { $0 = V2CallbackBox(revoke) }
+    }
+    private nonisolated func revokeRoomSubscriptionConnection() {
+        roomSubscriptionConnectionRevocation.withLock { $0?.callback }?()
+    }
+
     nonisolated func invalidateForegroundAuthorization() {
+        revokeRoomSubscriptionConnection()
         session.invalidateImmediately()
         foregroundTransport.deactivate()
     }
@@ -433,6 +535,7 @@ public actor V2GatewayByteStream {
             guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
             let inbound = try decoder.append(bytes)
             for frame in inbound {
+
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 if let concurrentMessageSendRespond,
                    frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
@@ -446,10 +549,14 @@ public actor V2GatewayByteStream {
                     }
                     let bytes = frame.flags.contains(.compressed)
                         ? frameLimits.maximumMessageSendPayloadBytes : frame.payload.count
-                    let hasConnectionCapacity = messageSendTasks.count < maximumConcurrentMessageSends &&
-                        bytes <= maximumConcurrentMessageSendBytes - messageSendReservedBytes
                     var hasProcessCapacity = false
-                    if hasConnectionCapacity { hasProcessCapacity = await messageSendBudget.reserve(bytes) }
+                    if messageSendTasks.count >= maximumConcurrentMessageSends {
+                        await messageSendBudget.recordRejection(.connectionCount)
+                    } else if bytes > maximumConcurrentMessageSendBytes - messageSendReservedBytes {
+                        await messageSendBudget.recordRejection(.connectionBytes)
+                    } else {
+                        hasProcessCapacity = await messageSendBudget.reserve(bytes)
+                    }
                     if !hasProcessCapacity {
                         var busy = IMV2Envelope()
                         busy.requestID = frame.requestID
@@ -466,28 +573,41 @@ public actor V2GatewayByteStream {
                         throw V2GatewaySessionError.unsupportedCommand
                     }
                     messageSendReservedBytes += bytes
+                    let sendTrace = V2SendPathTrace.enabled && frame.command == .messageSendOperation
+                        ? V2SendPathTrace(operations: [], segment: "gateway") : nil
                     messageSendTasks[frame.requestID] = Task { [self] in
+                        await V2SendPathTrace.$current.withValue(sendTrace) {
+                        defer { sendTrace?.finish() }
                         do {
+                            let startedAt = ContinuousClock.now
                             let exchange = try await session.receive(
                                 frame, handler: handler, originatingConnectionID: connectionID)
+                            sendTrace?.record("gateway_to_result_ready", from: startedAt)
                             guard canRespondToMessageSend() else { throw CancellationError() }
+                            let writeStartedAt = ContinuousClock.now
                             try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
                             try await concurrentMessageSendRespond(exchange.response)
+                            sendTrace?.record("result_ready_to_ack_write", from: writeStartedAt)
                         } catch {
                             closeAfterMessageSendFailure()
                         }
                         await finishMessageSend(requestID: frame.requestID, bytes: bytes, budget: messageSendBudget)
+                        }
                     }
                     continue
                 }
                 // Capture before the handler suspends. A late page must not
                 // become optional work for a replacement view of the same room.
                 let authorView = authorPresentationIngress == nil ? nil : authorPresentationView
+
                 let exchange = try await session.receive(
                     frame,
                     handler: handler,
                     originatingConnectionID: connectionID,
-                    captureAuthorSample: authorView != nil
+                    captureAuthorSample: authorView != nil,
+                    roomProgress: { [weak self] heartbeat in
+                        await self?.exchangeRoomProgress(heartbeat) ?? []
+                    }
                 )
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 let newlyAuthenticated = try await registerAuthenticatedDeviceIfNeeded()
@@ -504,6 +624,18 @@ public actor V2GatewayByteStream {
                 await endAuthorPresentationSubscription(inbound: exchange.request, response: exchange.responseEnvelope)
                 try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
                 try await respond(exchange.response)
+                if newlyAuthenticated, !transportClosed, registeredIdentity != nil {
+                    authenticatedResponseWritten = true
+                    await registry.authenticationResponseWritten(connectionID: connectionID)
+
+                    // Native clients explicitly suppress initial presence and
+                    // finish bootstrap with publication-control request 3.
+                    // Keep unsolicited sync behind that response as well.
+                    if !suppressesInitialPresencePublication { await makeNotificationsReady() }
+                    try await registry.installAuthenticatedAccountCoverage(connectionID: connectionID)
+                } else if authenticatedResponseWritten {
+                    await makeNotificationsReady()
+                }
                 offerPageAuthors(exchange, capturedView: authorView)
                 try await activateAuthorPresentationSubscription(inbound: exchange.request, response: exchange.responseEnvelope)
                 if case .accountRoomChangesReady(let ready)? = exchange.responseEnvelope.body {
@@ -528,6 +660,7 @@ public actor V2GatewayByteStream {
             await drainMessageSends()
             await session.close()
             await unregisterAuthenticatedDevice()
+            await drainRecoveryOutboundWork()
             throw error
         }
     }
@@ -544,9 +677,11 @@ public actor V2GatewayByteStream {
             try decoder.finish()
             await session.close()
             await unregisterAuthenticatedDevice()
+            await drainRecoveryOutboundWork()
         } catch {
             await session.close()
             await unregisterAuthenticatedDevice()
+            await drainRecoveryOutboundWork()
             throw error
         }
     }
@@ -554,6 +689,13 @@ public actor V2GatewayByteStream {
     func finishSilently() async { try? await finish() }
 
     public func revokeDevice() async {
+        await closeTransportForDeviceRevocation()
+        await unregisterAuthenticatedDevice()
+        await drainRecoveryOutboundWork()
+    }
+
+    /// Registry closes every selected transport before joining resource cleanup.
+    func closeTransportForDeviceRevocation() async {
         if let revocationTask {
             await revocationTask.value
             return
@@ -564,7 +706,6 @@ public actor V2GatewayByteStream {
             await session.revokeDevice()
             await drainMessageSends()
             if let revocationHandler { await revocationHandler() }
-            await unregisterAuthenticatedDevice()
         }
         revocationTask = task
         await task.value
@@ -599,6 +740,7 @@ public actor V2GatewayByteStream {
         deviceRevocationHandler: @escaping @Sendable () async -> Void,
         outboundWriter: @escaping @Sendable (Data) async -> Void,
         requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
+        scopedNotificationWriter: (@Sendable (V2GatewayScopedNotificationWrite) async -> Bool)? = nil,
         requiredNotificationClose: (@Sendable () async -> Void)? = nil,
         foregroundWriter: (@Sendable (Data) -> Void)? = nil,
         authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil
@@ -607,6 +749,7 @@ public actor V2GatewayByteStream {
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
         self.requiredNotificationWriter = requiredNotificationWriter
+        self.scopedNotificationWriter = scopedNotificationWriter
         self.requiredNotificationClose = requiredNotificationClose ?? deviceRevocationHandler
         self.authorPresentationWriter = authorPresentationWriter
         let adaptedForegroundWriter: (@Sendable (ByteBuffer) -> Void)?
@@ -635,14 +778,18 @@ public actor V2GatewayByteStream {
         deviceRevocationHandler: @escaping @Sendable () async -> Void,
         outboundWriter: @escaping @Sendable (Data) async -> Void,
         requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
+        scopedNotificationWriter: (@Sendable (V2GatewayScopedNotificationWrite) async -> Bool)? = nil,
         requiredNotificationClose: (@Sendable () async -> Void)? = nil,
         foregroundWriter: V2NIOGatewayForegroundWriter?,
-        authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil
+        authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil,
+        roomSubscriptionSocketGate: V2RoomSubscriptionSocketGate? = nil
     ) -> Bool {
         guard !transportClosed else { return false }
+        self.roomSubscriptionSocketGate = roomSubscriptionSocketGate
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
         self.requiredNotificationWriter = requiredNotificationWriter
+        self.scopedNotificationWriter = scopedNotificationWriter
         self.requiredNotificationClose = requiredNotificationClose ?? deviceRevocationHandler
         self.authorPresentationWriter = authorPresentationWriter
         foregroundTransport.attach(nioWriter: foregroundWriter)
@@ -659,17 +806,300 @@ public actor V2GatewayByteStream {
     }
 
     public func sendSyncAvailable(eventID: UInt64, highWatermark: UInt64) async {
+        // This ordinary API promises no Ready barrier and remains best effort.
+        guard !transportClosed else { return }
+        if !notificationsReady || !authenticatedResponseWritten {
+            _ = retainPendingSync(eventID: eventID, highWatermark: highWatermark, required: false,
+                permit: { enqueue in enqueue(); return true })
+            return
+        }
         guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return }
-        var envelope = IMV2Envelope()
-        envelope.requestID = 0
-        envelope.protocolVersion = UInt32(version)
-        envelope.syncAvailable = .init()
-        envelope.syncAvailable.eventID = eventID
-        envelope.syncAvailable.highWatermark = highWatermark
+        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version)
+        envelope.syncAvailable.eventID = eventID; envelope.syncAvailable.highWatermark = highWatermark
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
-              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
-        else { return }
+              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
         await outboundWriter(bytes)
+    }
+
+    @discardableResult
+    public func retainSyncAvailable(eventID: UInt64, highWatermark: UInt64,
+        enqueueIfCurrent: @escaping @Sendable (@Sendable () -> Void) -> Bool) async -> Bool {
+        guard !transportClosed, !recoveryOutbound.isRevoked else { return false }
+        if !notificationsReady || !authenticatedResponseWritten {
+            return retainPendingSync(eventID: eventID, highWatermark: highWatermark, permit: enqueueIfCurrent)
+        }
+        guard await admitPendingRecovering(kind: IMV2RealtimeCoverage.Scope.account.rawValue) else { return false }
+        guard let version = await session.authenticatedProtocolVersion(), let writer = scopedNotificationWriter,
+              !transportClosed else { return false }
+        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version)
+        envelope.syncAvailable.eventID = eventID; envelope.syncAvailable.highWatermark = highWatermark
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
+              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return false }
+        return await writer(connectionFencedNotification(bytes: bytes, permit: enqueueIfCurrent))
+    }
+
+    private func retainPendingSync(eventID: UInt64, highWatermark: UInt64, required: Bool = true,
+        permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) -> Bool {
+        return recoveryOutbound.enqueueIfActive {
+            permit {
+                self.pendingSyncRecovery.withLock { prior in
+                    prior = .init(eventID: max(prior?.eventID ?? 0, eventID),
+                        highWatermark: max(prior?.highWatermark ?? 0, highWatermark),
+                        required: required || prior?.required == true,
+                        permit: required || prior?.required != true ? permit : prior!.permit)
+                }
+            }
+        }
+    }
+
+    /// Accept bounded per-connection ownership without waiting for socket work.
+    /// `true` means retained; only `onSettled(true)` proves actual admission.
+    /// The operation retains its original scope generation and proof deadline.
+    public func offerRecoveryOperation(scope: IMV2RealtimeCoverage.Scope, scopeID: String,
+        scopeGeneration: UInt64, operation: @escaping @Sendable () async -> Bool,
+        onSettled: @escaping @Sendable (Bool) async -> Void) async -> Bool {
+        guard !transportClosed, !recoveryOutbound.isRevoked, registeredIdentity != nil, authenticatedResponseWritten,
+              scopeGeneration > 0, !scopeID.isEmpty else { return false }
+        return await recoveryOutbound.offer(kind: scope.rawValue, operation: operation, onSettled: onSettled)
+    }
+
+    func recoveryOutboundSnapshot() async -> V2GatewayRecoveryOutbound.Snapshot {
+        await recoveryOutbound.snapshot()
+    }
+
+    /// Service shutdown revokes admission before waiting on another owner.
+    /// The actual worker handles remain retained until drainRecoveryWork joins.
+    nonisolated func revokeRecoveryWorkImmediately() {
+        revokeRoomSubscriptionConnection()
+        recoveryOutbound.revoke()
+        coverageWriteFences.withLock { $0.removeAll() }
+        pendingSyncRecovery.withLock { $0 = nil }
+    }
+
+    func drainRecoveryWork() async {
+        revokeRecoveryWorkImmediately()
+        roomSubscriptionWriter?.cancel(); roomSubscriptionState = nil; roomSubscriptionReportedProgress = nil
+        pendingCoverage.removeAll()
+        recoveryNotificationRetry?.cancel()
+        await drainRecoveryOutboundWork()
+    }
+
+    public func sendRealtimeCoverage(scope: IMV2RealtimeCoverage.Scope, scopeID: String,
+                                     scopeGeneration: UInt64, highWatermark: UInt64 = 0,
+                                     connectionEpoch: String = "", ready: Bool, ended: Bool = false,
+                                     reason: IMV2RealtimeCoverage.Reason,
+                                     confirms: (@Sendable () -> Bool)? = nil,
+                                     scopePermit: (@Sendable (@Sendable () -> Void) -> Bool)? = nil,
+                                     onReadyAdmitted: (@Sendable () async -> Void)? = nil) async {
+        if !ready {
+            // Recovering/Ended are bounded control state, not a reason to hold
+            // a subscription caller across socket admission. The connection's
+            // existing worker owns retries. This return is NOT an enqueue ACK.
+            _ = storeRealtimeCoverage(scope: scope, scopeID: scopeID, scopeGeneration: scopeGeneration,
+                highWatermark: highWatermark, connectionEpoch: connectionEpoch, ready: false, ended: ended,
+                reason: reason, confirms: confirms, scopePermit: scopePermit, onReadyAdmitted: onReadyAdmitted)
+            scheduleRecoveryNotificationRetry()
+            return
+        }
+        _ = await enqueueRealtimeCoverage(scope: scope, scopeID: scopeID, scopeGeneration: scopeGeneration,
+            highWatermark: highWatermark, connectionEpoch: connectionEpoch, ready: ready, ended: ended,
+            reason: reason, confirms: confirms, scopePermit: scopePermit, onReadyAdmitted: onReadyAdmitted)
+    }
+
+    private func enqueueRealtimeCoverage(scope: IMV2RealtimeCoverage.Scope, scopeID: String,
+                                     scopeGeneration: UInt64, highWatermark: UInt64 = 0,
+                                     connectionEpoch: String = "", ready: Bool, ended: Bool = false,
+                                     reason: IMV2RealtimeCoverage.Reason,
+                                     confirms: (@Sendable () -> Bool)? = nil,
+                                     scopePermit: (@Sendable (@Sendable () -> Void) -> Bool)? = nil,
+                                     onReadyAdmitted: (@Sendable () async -> Void)? = nil) async -> Bool {
+        guard storeRealtimeCoverage(scope: scope, scopeID: scopeID, scopeGeneration: scopeGeneration,
+            highWatermark: highWatermark, connectionEpoch: connectionEpoch, ready: ready, ended: ended,
+            reason: reason, confirms: confirms, scopePermit: scopePermit, onReadyAdmitted: onReadyAdmitted) else { return false }
+        let targetRevision = pendingCoverage[scope.rawValue]?.last?.state.revision
+        // Retain Ready before awaiting its predecessor. An in-flight control
+        // write must not discard the successor when admission returns false.
+        if notificationsReady {
+            for _ in 0..<2 {
+                let revision = pendingCoverage[scope.rawValue]?.first?.state.revision
+                guard await writeRealtimeCoverage(kind: scope.rawValue) else { break }
+                if revision == targetRevision { scheduleRecoveryNotificationRetry(); return true }
+            }
+        }
+        scheduleRecoveryNotificationRetry()
+        return false
+    }
+
+    /// Explicit actual Recovering admission for a recovery handoff's dependency
+    /// barrier. Unlike the ordinary control API, `true` may clear that barrier.
+    public func retainRealtimeCoverageRecovering(scope: IMV2RealtimeCoverage.Scope, scopeID: String,
+        scopeGeneration: UInt64, reason: IMV2RealtimeCoverage.Reason,
+        scopePermit: @escaping @Sendable (@Sendable () -> Void) -> Bool) async -> Bool {
+        await enqueueRealtimeCoverage(scope: scope, scopeID: scopeID, scopeGeneration: scopeGeneration,
+            ready: false, reason: reason, scopePermit: scopePermit)
+    }
+
+    /// A retained control predecessor cannot be bypassed by its watermark.
+    /// Retries retain the same original permit; failure grants no Ready proof.
+    private func admitPendingRecovering(kind: Int) async -> Bool {
+        guard pendingCoverage[kind]?.first?.state.state == .recovering else { return !transportClosed }
+        let accepted = await writeRealtimeCoverage(kind: kind)
+        if !accepted { scheduleRecoveryNotificationRetry() }
+        return accepted
+    }
+
+    private func storeRealtimeCoverage(scope: IMV2RealtimeCoverage.Scope, scopeID: String,
+                                     scopeGeneration: UInt64, highWatermark: UInt64 = 0,
+                                     connectionEpoch: String = "", ready: Bool, ended: Bool = false,
+                                     reason: IMV2RealtimeCoverage.Reason,
+                                     confirms: (@Sendable () -> Bool)? = nil,
+                                     scopePermit: (@Sendable (@Sendable () -> Void) -> Bool)? = nil,
+                                     onReadyAdmitted: (@Sendable () async -> Void)? = nil) -> Bool {
+        guard !transportClosed, !recoveryOutbound.isRevoked, registeredIdentity != nil, authenticatedResponseWritten,
+              (1...5).contains(scope.rawValue), scopeGeneration > 0 else { return false }
+        let kind = scope.rawValue
+        let prior = coverageGenerations[kind] ?? 0
+        guard scopeGeneration >= prior else { return false }
+        if ready {
+            guard scopeGeneration == prior, activeCoverageScopes[kind] == scopeID else { return false }
+        } else {
+            coverageGenerations[kind] = scopeGeneration
+            activeCoverageScopes[kind] = ended ? nil : scopeID
+        }
+        guard coverageRevision < UInt64.max else { return false }
+        coverageRevision += 1
+        var state = IMV2RealtimeCoverage()
+        state.scope = scope; state.scopeID = scopeID; state.revision = coverageRevision
+        state.scopeGeneration = scopeGeneration; state.highWatermark = highWatermark
+        state.connectionEpoch = connectionEpoch
+        state.state = ended ? .ended : ready ? .ready : .recovering; state.reason = reason
+        let transition = PendingCoverageTransition(state: state, confirms: confirms, scopePermit: scopePermit, onReadyAdmitted: onReadyAdmitted)
+        if ready, let predecessor = pendingCoverage[kind]?.first,
+           predecessor.state.state == .recovering, predecessor.state.scopeGeneration == scopeGeneration {
+            pendingCoverage[kind] = [predecessor, transition]
+        } else { pendingCoverage[kind] = [transition] }
+        let front = pendingCoverage[kind]!.first!.state
+        coverageWriteFences.withLock { $0[kind] = .init(generation: front.scopeGeneration, revision: front.revision) }
+        return true
+    }
+
+    /// True means this actual scoped socket-owner enqueue, not completed wire
+    /// writing or client receipt. Failed transitions retain the existing owned retry.
+    public func retainRealtimeCoverageReady(scope: IMV2RealtimeCoverage.Scope, scopeID: String,
+        scopeGeneration: UInt64, highWatermark: UInt64,
+        confirms: @escaping @Sendable () -> Bool,
+        scopePermit: @escaping @Sendable (@Sendable () -> Void) -> Bool) async -> Bool {
+        await enqueueRealtimeCoverage(scope: scope, scopeID: scopeID, scopeGeneration: scopeGeneration,
+            highWatermark: highWatermark, ready: true, reason: .unspecified,
+            confirms: confirms, scopePermit: scopePermit)
+    }
+
+    @discardableResult
+    private func writeRealtimeCoverage(kind: Int) async -> Bool {
+        guard !transportClosed, authenticatedResponseWritten, notificationsReady,
+              let item = pendingCoverage[kind]?.first, let writer = scopedNotificationWriter,
+              coverageWritesInFlight.insert(kind).inserted else { return false }
+        // The retained-control worker and an explicit actual handoff may race.
+        // One kind owns at most one submitted writer until its real await ends.
+        defer { coverageWritesInFlight.remove(kind) }
+        guard let version = await session.authenticatedProtocolVersion(), !transportClosed,
+              pendingCoverage[kind]?.first?.state.revision == item.state.revision else { return false }
+        if item.state.state == .ready, item.confirms?() != true {
+            degradePendingCoverage(kind: kind, revision: item.state.revision)
+            return false
+        }
+        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version)
+        envelope.realtimeCoverage = item.state
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
+              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return false }
+        let generation = item.state.scopeGeneration, revision = item.state.revision
+        let ready = item.state.state == .ready, confirms = item.confirms, scopePermit = item.scopePermit
+        let accepted = await writer(connectionFencedNotification(bytes: bytes, permit: { enqueue in
+            self.coverageWriteFences.withLock { current in
+                guard current[kind]?.generation == generation, current[kind]?.revision == revision else { return false }
+                if let scopePermit {
+                    // The child callback stays synchronous and nonescaping;
+                    // no stored closure can retain the socket enqueue operation.
+                    let dispatched = V2GatewayNotificationDispatchResult()
+                    let result = scopePermit {
+                        guard !ready || confirms?() == true else { return }
+                        dispatched.mark(); enqueue()
+                    }
+                    return result && dispatched.wasDispatched
+                }
+                guard !ready || confirms?() == true else { return false }
+                enqueue(); return true
+            }
+        }))
+        guard pendingCoverage[kind]?.first?.state.revision == revision else { return false }
+        if accepted {
+            pendingCoverage[kind]?.removeFirst()
+            if let next = pendingCoverage[kind]?.first {
+                coverageWriteFences.withLock { $0[kind] = .init(generation: next.state.scopeGeneration, revision: next.state.revision) }
+            } else { pendingCoverage.removeValue(forKey: kind) }
+        }
+        else if let scopePermit, !scopePermit({}) {
+            // The scope was cancelled or replaced. Its generation can never
+            // become current again, so it must not keep a retry task alive.
+            pendingCoverage.removeValue(forKey: kind)
+        } else if ready, item.confirms?() != true { degradePendingCoverage(kind: kind, revision: revision) }
+        if accepted, ready { await item.onReadyAdmitted?() }
+        return accepted
+    }
+
+    private func degradePendingCoverage(kind: Int, revision: UInt64) {
+        guard var item = pendingCoverage[kind]?.first, item.state.revision == revision, coverageRevision < UInt64.max else { return }
+        coverageRevision += 1
+        item.state.revision = coverageRevision; item.state.state = .recovering
+        item.state.reason = .coverageLost; item.state.highWatermark = 0
+        pendingCoverage[kind] = [item]
+        coverageWriteFences.withLock { $0[kind] = .init(generation: item.state.scopeGeneration, revision: item.state.revision) }
+    }
+
+    private func scheduleRecoveryNotificationRetry() {
+        guard !transportClosed, !recoveryOutbound.isRevoked, notificationsReady, authenticatedResponseWritten,
+              scopedNotificationWriter != nil, recoveryNotificationRetry == nil, connectionAllowsDispatch(),
+              !pendingCoverage.isEmpty || pendingSyncRecovery.withLock({ $0 != nil }) else { return }
+        recoveryNotificationRetry = Task {
+            await V2RecoveryNotificationWorkerContext.$connectionID.withValue(connectionID) {
+                await self.retryRecoveryNotifications()
+            }
+        }
+    }
+
+    private func retryRecoveryNotifications() async {
+        defer { recoveryNotificationRetry = nil }
+        var delay = 250
+        while !Task.isCancelled, !transportClosed, !recoveryOutbound.isRevoked, notificationsReady, connectionAllowsDispatch(),
+              !pendingCoverage.isEmpty || pendingSyncRecovery.withLock({ $0 != nil }) {
+            do { try await Task.sleep(for: .milliseconds(delay)) } catch { return }
+            guard !Task.isCancelled, !transportClosed else { return }
+            await drainRecoveryNotifications()
+            delay = min(2_000, delay * 2)
+        }
+    }
+
+    private func drainRecoveryNotifications() async {
+        let kinds = pendingCoverage.keys.sorted { (pendingCoverage[$0]?.first?.state.revision ?? 0) < (pendingCoverage[$1]?.first?.state.revision ?? 0) }
+        for kind in kinds { await writeRealtimeCoverage(kind: kind) }
+        if let pending = pendingSyncRecovery.withLock({ value in let prior = value; value = nil; return prior }) {
+            if !pending.required {
+                await sendSyncAvailable(eventID: pending.eventID, highWatermark: pending.highWatermark)
+                return
+            }
+            let accepted = await retainSyncAvailable(eventID: pending.eventID,
+                highWatermark: pending.highWatermark, enqueueIfCurrent: pending.permit)
+            if !accepted, !transportClosed {
+                _ = retainPendingSync(eventID: pending.eventID, highWatermark: pending.highWatermark, permit: pending.permit)
+            }
+        }
+    }
+
+    private func makeNotificationsReady() async {
+        guard !transportClosed, registeredIdentity != nil, authenticatedResponseWritten else { return }
+        notificationsReady = true
+        await drainRecoveryNotifications()
+        scheduleRecoveryNotificationRetry()
     }
 
     /// 在同一条已认证 TLS 流上发送尽力而为的前台唤醒。
@@ -684,9 +1114,10 @@ public actor V2GatewayByteStream {
     public func sendGroupEventAvailable(
         roomID: RoomID,
         highWatermark: UInt64,
-        directEvent: V2DirectRoomLiveEvent? = nil
+        directEvent: V2DirectRoomLiveEvent? = nil,
+        enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil
     ) async -> Bool {
-        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter else { return false }
+        guard !transportClosed, let version = await session.authenticatedProtocolVersion(), let outboundWriter, !transportClosed else { return false }
         var envelope = IMV2Envelope()
         envelope.requestID = 0
         envelope.protocolVersion = UInt32(version)
@@ -704,8 +1135,172 @@ public actor V2GatewayByteStream {
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits)
         else { return false }
+        if let enqueueIfCurrent {
+            guard let scopedNotificationWriter else { return false }
+            return await scopedNotificationWriter(connectionFencedNotification(bytes: bytes, permit: enqueueIfCurrent))
+        }
         await outboundWriter(bytes)
+        return !transportClosed
+    }
+
+    /// Required recovery uses actual Bool admission at the socket owner. The
+    /// ordinary body accelerator above retains its existing NIO fast path.
+    public func retainGroupEventAvailable(roomID: RoomID, highWatermark: UInt64,
+        enqueueIfCurrent: @escaping @Sendable (@Sendable () -> Void) -> Bool) async -> Bool {
+        guard await admitPendingRecovering(kind: IMV2RealtimeCoverage.Scope.room.rawValue) else { return false }
+        guard !transportClosed, let writer = scopedNotificationWriter,
+              let version = await session.authenticatedProtocolVersion(), !transportClosed else { return false }
+        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version)
+        envelope.groupEventAvailable.roomID = roomID.rawValue
+        envelope.groupEventAvailable.highWatermark = highWatermark
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
+              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return false }
+        return await writer(connectionFencedNotification(bytes: bytes, permit: enqueueIfCurrent))
+    }
+
+    /// Independent room-local lifecycle. No partition coverage or Journal
+    /// witness enters this path; the supplied gate is checked at actual enqueue.
+    func beginRoomSubscription(roomID: RoomID, scopeGeneration: UInt64,
+        permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) async {
+        guard !transportClosed, !recoveryOutbound.isRevoked else { return }
+        if activeCoverageScopes[IMV2RealtimeCoverage.Scope.room.rawValue] == roomID.rawValue,
+           coverageGenerations[IMV2RealtimeCoverage.Scope.room.rawValue] == scopeGeneration { return }
+        await sendRealtimeCoverage(scope: .room, scopeID: roomID.rawValue, scopeGeneration: scopeGeneration,
+            ready: false, reason: .installing, scopePermit: permit)
+    }
+
+    /// H is trusted local authority state; C is only this device's report.
+    /// Actual socket enqueue (G) is deliberately not evidence of local application.
+    func exchangeRoomProgress(_ heartbeat: IMV2Heartbeat) async -> [IMV2GroupEventProgressState] {
+        guard !transportClosed, !recoveryOutbound.isRevoked, registeredIdentity != nil,
+              heartbeat.roomProgress.count <= 1,
+              let snapshot = await registry.roomSubscriptionProgressSnapshot(connectionID: connectionID) else { return [] }
+        let authorization = snapshot.authorization
+        var applied: UInt64 = 0
+        if let prior = roomSubscriptionReportedProgress, prior.authorization == authorization { applied = prior.applied }
+        if let report = heartbeat.roomProgress.first,
+           (try? RoomID(report.roomID)) == authorization.fence.roomID,
+           report.scopeGeneration == authorization.scopeGeneration,
+           report.appliedRoomSequence <= snapshot.highWatermark {
+            applied = max(applied, report.appliedRoomSequence)
+        }
+        roomSubscriptionReportedProgress = (authorization, applied)
+        var result = IMV2GroupEventProgressState()
+        result.roomID = authorization.fence.roomID.rawValue
+        result.scopeGeneration = authorization.scopeGeneration
+        result.highWatermark = snapshot.highWatermark
+        result.appliedRoomSequence = applied
+        result.ready = roomSubscriptionReady == authorization
+        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(result.ready ? .progressReady : .progressSocketNotReady)
+        return [result]
+    }
+
+    /// The socket retains only one latest H for its requested detail room.
+    /// Ready's S is immutable in the authorization; later H never changes it.
+    func offerRoomSubscriptionHead(_ authorization: V2GatewayRoomSubscriptionAuthority.Permit,
+        highWatermark: UInt64, permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) -> Bool {
+        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headOffered)
+        guard !transportClosed, !recoveryOutbound.isRevoked, scopedNotificationWriter != nil,
+              permit({}) else {
+            V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headOfferRefused)
+            return false
+        }
+        if var old = roomSubscriptionState, old.authorization == authorization {
+            old.highWatermark = max(old.highWatermark, highWatermark)
+            old.permit = permit
+            roomSubscriptionState = old
+        } else {
+            let retainedHead: UInt64
+            if let prior = roomSubscriptionState,
+               prior.authorization.fence.roomID == authorization.fence.roomID,
+               prior.authorization.scopeGeneration == authorization.scopeGeneration {
+                retainedHead = max(prior.highWatermark, highWatermark)
+            } else { retainedHead = highWatermark }
+            roomSubscriptionState = .init(authorization: authorization, highWatermark: retainedHead, permit: permit)
+            roomSubscriptionReady = nil; roomSubscriptionRecovering = nil
+        }
+        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headRetained)
+        if roomSubscriptionWriter == nil {
+            // One persistent worker per physical socket lifecycle, not one task
+            // per head/event. Closing joins its actual writer responsibility.
+            roomSubscriptionWriter = Task {
+                await V2RecoveryNotificationWorkerContext.$connectionID.withValue(connectionID) {
+                    await self.consumeRoomSubscriptionHeads()
+                }
+            }
+        }
+        roomSubscriptionSignal.continuation.yield(())
         return true
+    }
+    func endRoomSubscription(roomID: RoomID, scopeGeneration: UInt64) async {
+        if roomSubscriptionState?.authorization.fence.roomID == roomID {
+            roomSubscriptionState = nil; roomSubscriptionReportedProgress = nil
+            roomSubscriptionReady = nil; roomSubscriptionRecovering = nil
+        }
+        await sendRealtimeCoverage(scope: .room, scopeID: roomID.rawValue, scopeGeneration: scopeGeneration,
+            ready: false, ended: true, reason: .cancelled)
+    }
+    private func consumeRoomSubscriptionHeads() async {
+        for await _ in roomSubscriptionSignal.stream {
+            while !Task.isCancelled, !transportClosed, !recoveryOutbound.isRevoked,
+                  let selected = roomSubscriptionState {
+                let authorization = selected.authorization
+                guard selected.permit({}) else {
+                    if selected.submittedHighWatermark.map({ selected.highWatermark > $0 }) ?? true {
+                        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headPermitExpiredWithUnsentHead)
+                    }
+                    // Retain only the bounded hint. Do not retry this expired gate;
+                    // a new trusted offer must supply a valid permit and signal us.
+                    break
+                }
+                if !authenticatedResponseWritten || !notificationsReady {
+                    do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
+                    continue
+                }
+                if roomSubscriptionRecovering != authorization {
+                    let accepted = await retainRealtimeCoverageRecovering(scope: .room,
+                        scopeID: authorization.fence.roomID.rawValue, scopeGeneration: authorization.scopeGeneration,
+                        reason: .installing, scopePermit: selected.permit)
+                    guard roomSubscriptionState?.authorization == authorization else { continue }
+                    if accepted { roomSubscriptionRecovering = authorization }
+                    else {
+                        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headRecoveringRefused)
+                        do { try await Task.sleep(for: .milliseconds(100)) } catch { return }; continue
+                    }
+                }
+                if roomSubscriptionReady != authorization {
+                    // All authority validation belongs to scopePermit; confirms
+                    // must not recursively acquire that same authority mutex.
+                    let accepted = await retainRealtimeCoverageReady(scope: .room,
+                        scopeID: authorization.fence.roomID.rawValue, scopeGeneration: authorization.scopeGeneration,
+                        highWatermark: authorization.baselineSequence, confirms: { true }, scopePermit: selected.permit)
+                    guard roomSubscriptionState?.authorization == authorization else { continue }
+                    if accepted { roomSubscriptionReady = authorization }
+                    else {
+                        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headReadyRefused)
+                        do { try await Task.sleep(for: .milliseconds(100)) } catch { return }; continue
+                    }
+                }
+                guard let current = roomSubscriptionState, current.authorization == authorization else { continue }
+                // Admission is acknowledged by the socket owner. Repeated
+                // offers of the same H need not create another TCP frame;
+                // refused writes remain dirty and fresh authorization starts
+                // with no submitted watermark, including an initial H of zero.
+                if let submitted = current.submittedHighWatermark, current.highWatermark <= submitted {
+                    V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headAlreadySubmitted)
+                    break
+                }
+                let accepted = await sendGroupEventAvailable(roomID: authorization.fence.roomID,
+                    highWatermark: current.highWatermark, enqueueIfCurrent: current.permit)
+                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(accepted ? .headEnqueueAccepted : .headEnqueueRefused)
+                guard var latest = roomSubscriptionState, latest.authorization == authorization else { continue }
+                if accepted {
+                    latest.submittedHighWatermark = max(latest.submittedHighWatermark ?? 0, current.highWatermark)
+                    roomSubscriptionState = latest
+                } else { do { try await Task.sleep(for: .milliseconds(100)) } catch { return } }
+            }
+            if Task.isCancelled { return }
+        }
     }
 
     /// 发送一份为进程本地已授权受众编码一次的帧。
@@ -715,14 +1310,19 @@ public actor V2GatewayByteStream {
     ///
     /// - Parameter prepared: 已准备的群组事件帧。
     @discardableResult
-    func sendGroupEventAvailable(_ prepared: V2PreparedGatewayGroupEventAvailable) async -> Bool {
+    func sendGroupEventAvailable(_ prepared: V2PreparedGatewayGroupEventAvailable,
+        enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) async -> Bool {
         guard let contract = await session.authenticatedFrameContract(),
               contract.protocolVersion == prepared.protocolVersion,
               let outboundWriter
         else { return false }
         let buffer = prepared.bytes(for: contract.compression)
+        if let enqueueIfCurrent {
+            guard !transportClosed, let scopedNotificationWriter else { return false }
+            return await scopedNotificationWriter(connectionFencedNotification(bytes: Data(buffer.readableBytesView), permit: enqueueIfCurrent))
+        }
         await outboundWriter(Data(buffer.readableBytesView))
-        return true
+        return !transportClosed
     }
 
     /// 生产前台通知使用该 nonisolated 快速路径。
@@ -733,9 +1333,10 @@ public actor V2GatewayByteStream {
     /// - Parameter prepared: 已准备的群组事件帧。
     /// - Returns: 是否已通过快速路径提交。
     nonisolated func submitGroupEventAvailable(
-        _ prepared: V2PreparedGatewayGroupEventAvailable
+        _ prepared: V2PreparedGatewayGroupEventAvailable,
+        enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil
     ) -> Bool {
-        foregroundTransport.submit(prepared)
+        foregroundTransport.submit(prepared, enqueueIfCurrent: fencedForegroundPermit(enqueueIfCurrent))
     }
 
     /// 生产群组发布会先收集这些受生命周期围栏保护的 NIO 提交，再逐个进入每个 EventLoop 通道一次。
@@ -745,21 +1346,73 @@ public actor V2GatewayByteStream {
     /// - Parameter prepared: 已准备的群组事件帧。
     /// - Returns: NIO 提交对象；不满足快速路径条件时为 `nil`。
     nonisolated func prepareNIOGroupEventAvailable(
-        _ prepared: V2PreparedGatewayGroupEventAvailable
+        _ prepared: V2PreparedGatewayGroupEventAvailable,
+        enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil
     ) -> V2NIOGatewayForegroundWriteSubmission? {
-        foregroundTransport.prepareNIOSubmission(prepared)
+        foregroundTransport.prepareNIOSubmission(prepared, enqueueIfCurrent: fencedForegroundPermit(enqueueIfCurrent))
+    }
+
+    private nonisolated func fencedForegroundPermit(_ permit: (@Sendable (@Sendable () -> Void) -> Bool)?)
+        -> (@Sendable (@Sendable () -> Void) -> Bool)? {
+        guard let permit else { return nil }
+        let write = connectionFencedNotification(bytes: Data(), permit: permit)
+        return { enqueue in write.enqueueIfCurrent(enqueue) }
+    }
+
+    nonisolated func configureLiveStatePrimaryAuthentication(
+        _ permit: @escaping @Sendable (@Sendable () -> Void) -> Bool
+    ) {
+        liveStatePrimaryAuthentication.withLock { $0 = V2CallbackBox(permit) }
+    }
+
+    /// Observation authorization remains the caller's independent fence.
+    /// Primary auth is added only at actual enqueue, never as a room grant.
+    private nonisolated func liveStatePermit(
+        _ observation: @escaping @Sendable (@Sendable () -> Void) -> Bool,
+        primary: (@Sendable (@Sendable () -> Void) -> Bool)? = nil
+    ) -> @Sendable (@Sendable () -> Void) -> Bool {
+        let primary = primary ?? liveStatePrimaryAuthentication.withLock { $0?.callback }
+        guard let primary else { return observation }
+        return { enqueue in
+            let dispatched = Mutex(false)
+            let allowed = observation {
+                let written = primary(enqueue)
+                dispatched.withLock { $0 = written }
+            }
+            return allowed && dispatched.withLock { $0 }
+        }
     }
 
     public func sendPresenceState(_ state: V2PresenceState) async {
-        guard let version = await session.authenticatedProtocolVersion(), let outboundWriter,
-              let milliseconds = try? v2GatewayMilliseconds(state.expiresAt) else { return }
-        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version); envelope.presenceChanged = .init()
+        // Ordinary notifications remain best effort. This path never certifies Ready.
+        guard let bytes = await presenceNotificationBytes(state), let outboundWriter else { return }
+        if liveStatePrimaryAuthentication.withLock({ $0 != nil }) {
+            guard let scopedNotificationWriter else { return }
+            _ = await scopedNotificationWriter(connectionFencedNotification(bytes: bytes, permit: liveStatePermit { enqueue in enqueue(); return true }))
+        } else { await outboundWriter(bytes) }
+    }
+
+    @discardableResult
+    public func retainPresenceState(_ state: V2PresenceState,
+        enqueueIfCurrent: @escaping @Sendable (@Sendable () -> Void) -> Bool,
+        primaryAuthPermit: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) async -> Bool {
+        guard await admitPendingRecovering(kind: IMV2RealtimeCoverage.Scope.presence.rawValue) else { return false }
+        guard !transportClosed, let writer = scopedNotificationWriter,
+              let bytes = await presenceNotificationBytes(state), !transportClosed else { return false }
+        return await writer(connectionFencedNotification(bytes: bytes, permit: liveStatePermit(enqueueIfCurrent, primary: primaryAuthPermit)))
+    }
+
+    private func presenceNotificationBytes(_ state: V2PresenceState) async -> Data? {
+        guard !transportClosed, let version = await session.authenticatedProtocolVersion(),
+              let milliseconds = try? v2GatewayMilliseconds(state.expiresAt), !transportClosed else { return nil }
+        var envelope = IMV2Envelope(); envelope.requestID = 0; envelope.protocolVersion = UInt32(version)
         envelope.presenceChanged.roomID = state.roomID.rawValue
         envelope.presenceChanged.targetUserID = state.targetUserID.rawValue
         envelope.presenceChanged.isOnline = state.isOnline
         envelope.presenceChanged.expiresAtMs = milliseconds
-        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
-        await outboundWriter(bytes)
+        guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version),
+              let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return nil }
+        return bytes
     }
 
     public func sendTypingState(_ state: V2TypingState) async {
@@ -771,12 +1424,17 @@ public actor V2GatewayByteStream {
         envelope.typingStateChanged.isTyping = state.isTyping
         envelope.typingStateChanged.expiresAtMs = milliseconds
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope, frameVersion: version), let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return }
-        await outboundWriter(bytes)
+        if liveStatePrimaryAuthentication.withLock({ $0 != nil }) {
+            guard let scopedNotificationWriter else { return }
+            _ = await scopedNotificationWriter(connectionFencedNotification(bytes: bytes, permit: liveStatePermit { enqueue in enqueue(); return true }))
+        } else { await outboundWriter(bytes) }
     }
 
     /// 成功只确认传输写入，不代表客户端已持久化。
     /// 返回 false 时，通知所有者必须停止排空。
-    func sendAccountRoomNotification(_ notification: V2AccountRoomNotification) async -> Bool {
+    func sendAccountRoomNotification(_ notification: V2AccountRoomNotification,
+        enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) async -> Bool {
+        guard await admitPendingRecovering(kind: IMV2RealtimeCoverage.Scope.directory.rawValue) else { return false }
         guard let identity = registeredIdentity, let writer = requiredNotificationWriter,
               !transportClosed, let contract = await session.authenticatedFrameContract(),
               registeredIdentity == identity, !transportClosed else { return false }
@@ -786,7 +1444,11 @@ public actor V2GatewayByteStream {
         guard let frame = try? V2ServerProtobufFrameCodec.encode(envelope,
                 frameVersion: contract.protocolVersion, compression: contract.compression),
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return false }
-        let written = await writer(bytes)
+        let written: Bool
+        if let enqueueIfCurrent {
+            guard let scopedNotificationWriter else { return false }
+            written = await scopedNotificationWriter(connectionFencedNotification(bytes: bytes, permit: enqueueIfCurrent))
+        } else { written = await writer(bytes) }
         return written && !transportClosed && registeredIdentity == identity
     }
 
@@ -801,16 +1463,35 @@ public actor V2GatewayByteStream {
         await drainMessageSends()
         await session.close()
         await unregisterAuthenticatedDevice()
+        await drainRecoveryOutboundWork()
+    }
+
+    /// Revoke physical connection ownership before joining request tasks.
+    /// Those tasks may still be waiting for the coverage this connection owns.
+    func retireTransportConnection() async {
+        beginClosing()
+        await session.close()
+        await unregisterAuthenticatedDevice()
     }
 
     private func beginClosing() {
+        revokeRoomSubscriptionConnection()
+        recoveryOutbound.revoke()
+        notificationsReady = false; authenticatedResponseWritten = false
+        // Cancellation is only a request. Keep this actual handle until its
+        // writer await and terminal defer finish; closing joins it below.
+        recoveryNotificationRetry?.cancel()
+        roomSubscriptionWriter?.cancel(); roomSubscriptionState = nil; roomSubscriptionReportedProgress = nil
+        pendingSyncRecovery.withLock { $0 = nil }; pendingCoverage.removeAll()
+        coverageWriteFences.withLock { $0.removeAll() }
+        coverageGenerations.removeAll(); activeCoverageScopes.removeAll()
         invalidateForegroundAuthorization()
         detachTransport()
         for task in messageSendTasks.values { task.cancel() }
     }
 
     private func canRespondToMessageSend() -> Bool {
-        !transportClosed && registeredIdentity != nil && !Task.isCancelled
+        !transportClosed && registeredIdentity != nil && !Task.isCancelled && connectionAllowsDispatch()
     }
 
     private func closeAfterMessageSendFailure() {
@@ -832,10 +1513,29 @@ public actor V2GatewayByteStream {
         for task in tasks { await task.value }
     }
 
+    private func drainRecoveryOutboundWork() async {
+        if V2RecoveryNotificationWorkerContext.connectionID == connectionID || recoveryOutbound.isCurrentWorker {
+            // Closing from a writer callback must return to that callback so
+            // its actual owner can settle. Writer handles remain owned; an
+            // external close joins them normally.
+            await recoveryOutbound.requestCancellation()
+            recoveryNotificationRetry?.cancel()
+            roomSubscriptionWriter?.cancel()
+            return
+        }
+        await recoveryOutbound.drain()
+        let actual = recoveryNotificationRetry
+        actual?.cancel()
+        await actual?.value
+        let local = roomSubscriptionWriter
+        local?.cancel(); await local?.value
+    }
+
     private func detachTransport() {
         transportClosed = true
         deviceRevocationHandler = nil
         outboundWriter = nil
+        scopedNotificationWriter = nil
         requiredNotificationWriter = nil
         requiredNotificationClose = nil
         foregroundTransport.detach()
@@ -847,7 +1547,9 @@ public actor V2GatewayByteStream {
         guard !transportClosed, registeredIdentity == nil,
               let identity = await session.authenticatedIdentity() else { return false }
         registeredIdentity = identity
-        let accepted = try await registry.register(self, connectionID: connectionID, identity: identity,publicationSuppressed:await session.initialPresencePublicationSuppressed())
+        suppressesInitialPresencePublication = await session.initialPresencePublicationSuppressed()
+        let accepted = try await registry.register(self, connectionID: connectionID, identity: identity,
+            publicationSuppressed: suppressesInitialPresencePublication)
         guard accepted, registeredIdentity == identity, !transportClosed else {
             if registeredIdentity == identity { registeredIdentity = nil }
             foregroundTransport.deactivate()
@@ -887,7 +1589,10 @@ public actor V2GatewayByteStream {
         foregroundTransport.activate(
             protocolVersion: contract.protocolVersion,
             compression: contract.compression,
-            sessionIsLive: sessionIsLive
+            sessionIsLive: { [weak self] in
+                guard let self else { return false }
+                return self.connectionAllowsDispatch() && sessionIsLive()
+            }
         )
         return true
     }
@@ -988,22 +1693,15 @@ public actor V2GatewayByteStream {
             let delta = try V2AuthorPresentationDelta.decode(payload)
             guard delta.roomID == view.roomID, delta.viewID == view.viewID,
                   let write = authorPresentationTransport.prepare(bytes: bytes, viewID: view.viewID,
-                    deadline: deadline, sessionIsLive: sessionIsLive) else { return false }
+                    deadline: deadline, sessionIsLive: { [weak self] in
+                        self?.connectionAllowsDispatch() == true && sessionIsLive()
+                    }) else { return false }
             return await withTaskCancellationHandler(operation: { await writer(write) }, onCancel: { write.cancel() })
         } catch { return false }
     }
 
     private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
         switch inbound.body {
-        case .snapshotPagePull:
-            guard case .snapshotPage(let page)? = response.body else { return }
-            try await registry.refreshAccountRoomSnapshotMemberships(connectionID: connectionID, page: page)
-        case .syncPull:
-            guard case .syncBatch(let batch)? = response.body else { return }
-            try await registry.refreshAccountRoomMemberships(connectionID: connectionID, batch: batch)
-        case .userRoomDirectoryList:
-            guard case .userRoomDirectoryPage(let page)? = response.body else { return }
-            try await registry.installAccountRoomDirectory(connectionID: connectionID, page: page)
         case .groupEventSubscribe(let request):
             guard case .groupEventSubscribed(let subscribed)? = response.body,
                   let roomID = try? RoomID(request.roomID),
@@ -1041,7 +1739,7 @@ public actor V2GatewayByteStream {
             guard case .acknowledged? = response.body,
                   let identity = registeredIdentity
             else { return }
-            await registry.notifyTyping(roomID: try .init(request.roomID), actorUserID: identity.userID, isTyping: request.isTyping, expiresAt: request.isTyping ? Date().addingTimeInterval(6) : Date())
+            await registry.notifyTyping(roomID: try .init(request.roomID), actorUserID: identity.userID, isTyping: request.isTyping, expiresAt: request.isTyping ? Date().addingTimeInterval(6) : Date(), sourceConnectionID: connectionID)
         case .heartbeat:
             guard await registry.refreshLivePresence(connectionID: connectionID)
             else { throw V2GatewaySessionError.authenticatedConnectionLimit }

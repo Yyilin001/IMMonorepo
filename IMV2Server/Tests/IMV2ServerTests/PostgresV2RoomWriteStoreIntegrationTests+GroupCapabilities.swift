@@ -20,7 +20,6 @@ import Testing
 import Vapor
 import VaporTesting
 
-
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("group capabilities fence the selected owner before writes and operation replay", arguments: [V2GroupCapacityClass.standard, .large], ["pin", "announcement", "permissions", "role"])
     func routedGroupCapabilityOwnerEpochFence(_ mode: V2GroupCapacityClass, _ kind: String) async throws {
@@ -312,7 +311,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.membership_operation_receipts", on: sql) == 0)
         }
     }
-
 
     @Test("owner-first creation retry publishes its original binding and preserves terminal state", arguments: [V2GroupCapacityClass.standard, .large])
     func legacyInviteCreationRetryPreservesOwnerBinding(_ mode: V2GroupCapacityClass) async throws {
@@ -945,12 +943,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     maximumMessagesPerWindow: 10,
                     window: 86_400
                 ),
-                contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(
-                    database: resources.database(.psql),
-                    batchSize: 4
-                )
-            )
+                contentReviewMode: .disabled)
             let requests = try (1...2).map { ordinal in
                 V2RoomWriteRequest(
                     command: try .init(
@@ -1055,12 +1048,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     maximumMessagesPerWindow: 10,
                     window: 86_400
                 ),
-                contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(
-                    database: resources.database(.psql),
-                    batchSize: 4
-                )
-            )
+                contentReviewMode: .disabled)
             let roomIDs = [roomUUID, secondRoom]
             let requests = try roomIDs.enumerated().map { index, room in
                 V2RoomWriteRequest(
@@ -1105,8 +1093,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                      WHERE event_type = 'message.accepted')::bigint AS events,
                     (SELECT count(*) FROM im_v2.message_projection_states)::bigint
                         AS message_states,
-                    (SELECT count(*) FROM im_v2.group_event_wake_outbox)::bigint
-                        AS wake_rows,
                     (SELECT command_window_used FROM im_v2.shard_admission_pools
                      WHERE room_shard_id = 'room-a'
                        AND capacity_profile_id = 'standard')::bigint
@@ -1122,7 +1108,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // zero-target plan and revision-one projection state are omitted.
             #expect(artifacts.events == 0)
             #expect(artifacts.messageStates == 0)
-            #expect(artifacts.wakeRows == 2)
             #expect(artifacts.shardCommands == 4)
             #expect(artifacts.roomCommands == 2)
             #expect(artifacts.readableMessageStates == 0)
@@ -1317,12 +1302,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     maximumMessagesPerWindow: 10,
                     window: 86_400
                 ),
-                contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(
-                    database: resources.database(.psql),
-                    batchSize: 4
-                )
-            )
+                contentReviewMode: .disabled)
             #expect(await writer.atomicBatchSupportsRepeatedRooms(in: .large))
             #expect(!(await writer.atomicBatchSupportsRepeatedRooms(in: .standard)))
 
@@ -1380,16 +1360,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         WHERE room_id = \(bind: roomUUID)
                           AND event_type = 'message.accepted')::bigint AS events,
                        (SELECT count(*) FROM im_v2.message_projection_states
-                        WHERE room_id = \(bind: roomUUID))::bigint AS message_states,
-                       (SELECT count(*) FROM im_v2.group_event_wake_outbox
-                        WHERE room_id = \(bind: roomUUID))::bigint AS wake_rows,
-                       (SELECT target_room_sequence
-                        FROM im_v2.group_event_wake_outbox
-                        WHERE room_id = \(bind: roomUUID))::bigint
-                           AS wake_target_sequence,
-                       (SELECT revision
-                        FROM im_v2.group_event_wake_outbox
-                        WHERE room_id = \(bind: roomUUID))::bigint AS wake_revision
+                        WHERE room_id = \(bind: roomUUID))::bigint AS message_states
                 FROM im_v2.rooms WHERE room_id = \(bind: roomUUID)
                 """).first(decoding: RepeatedHybridGroupStateRow.self))
             #expect(state.roomSequence == 3)
@@ -1401,15 +1372,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(state.shardCommands == 4)
             #expect(state.events == 0)
             #expect(state.messageStates == 0)
-            // Wake delivery is intentionally coalesced per room; one row's
-            // high-watermark covers every event committed in this batch.
-            #expect(state.wakeRows == 1)
-            #expect(state.wakeTargetSequence == 3)
-            // A relay cannot observe individual rows from the atomic INSERT.
-            // The fencing revision therefore advances once for this statement,
-            // rather than producing three redundant revisions and UPSERTs.
-            #expect(state.wakeRevision == 1)
-
             let page = try await PostgresV2GroupEventLogStore(database: resources.database(.psql)).pull(
                 roomID: roomID,
                 actorUserID: senderID,
@@ -1433,103 +1395,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(materializedState.text == "同一热群消息 1")
             #expect(materializedState.acceptedRoomSequence == 1)
 
-            let laterRequests = try (4 ... 5).map { ordinal in
-                V2RoomWriteRequest(
-                    command: try .init(
-                        roomID: roomID,
-                        senderUserID: senderID,
-                        clientMessageID: .init(
-                            String(format: "00000000-0000-0000-000a-%012x", ordinal)
-                        ),
-                        text: "待唤醒合并群消息 \(ordinal)",
-                        limits: .init(maxUTF8Bytes: 128)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init(UUID().uuidString),
-                        eventID: .init(UUID().uuidString)
-                    ),
-                    now: Date(timeIntervalSince1970: 1_750_000_001 + Double(ordinal))
-                )
-            }
-
-            // A later commit while the durable row is already pending must not
-            // rewrite that hot row. The room counter is the authoritative
-            // watermark and advances independently.
-            guard case .accepted = try await writer.accept(
-                command: laterRequests[0].command,
-                capacityProfile: laterRequests[0].capacityProfile,
-                identifiers: laterRequests[0].identifiers,
-                now: laterRequests[0].now
-            ) else {
-                Issue.record("expected the pending-wake message to be accepted")
-                return
-            }
-            var wakeState = try #require(try await sql.raw("""
-                SELECT room.room_sequence,
-                       wake.target_room_sequence,
-                       wake.revision,
-                       wake.state
-                FROM im_v2.rooms AS room
-                JOIN im_v2.group_event_wake_outbox AS wake
-                  ON wake.room_id = room.room_id
-                WHERE room.room_id = \(bind: roomUUID)
-                """).first(decoding: HybridGroupWakeStateRow.self))
-            #expect(wakeState.roomSequence == 4)
-            #expect(wakeState.targetRoomSequence == 3)
-            #expect(wakeState.revision == 1)
-            #expect(wakeState.state == "pending")
-
-            let wakeStore = PostgresV2GroupEventWakeStore(database: resources.database(.psql))
-            let firstLease = try #require(try await wakeStore.claimPending(
-                now: Date(timeIntervalSince1970: 1_750_000_010),
-                leaseDuration: 30,
-                limit: 1
-            ).first)
-            // Claiming reads the fresh room counter in a second statement,
-            // rather than trusting the intentionally stale pending-row target.
-            #expect(firstLease.wake.roomID == roomID)
-            #expect(firstLease.wake.highWatermark == 4)
-            #expect(firstLease.revision == 1)
-
-            // A commit that races an in-flight publisher replaces the lease
-            // and advances the revision. The stale publisher's completion is
-            // fenced and cannot delete this newer wake.
-            guard case .accepted = try await writer.accept(
-                command: laterRequests[1].command,
-                capacityProfile: laterRequests[1].capacityProfile,
-                identifiers: laterRequests[1].identifiers,
-                now: laterRequests[1].now
-            ) else {
-                Issue.record("expected the leased-wake message to be accepted")
-                return
-            }
-            try await wakeStore.markPublished(firstLease)
-            wakeState = try #require(try await sql.raw("""
-                SELECT room.room_sequence,
-                       wake.target_room_sequence,
-                       wake.revision,
-                       wake.state
-                FROM im_v2.rooms AS room
-                JOIN im_v2.group_event_wake_outbox AS wake
-                  ON wake.room_id = room.room_id
-                WHERE room.room_id = \(bind: roomUUID)
-                """).first(decoding: HybridGroupWakeStateRow.self))
-            #expect(wakeState.roomSequence == 5)
-            #expect(wakeState.targetRoomSequence == 5)
-            #expect(wakeState.revision == 2)
-            #expect(wakeState.state == "pending")
-
-            let replacementLease = try #require(try await wakeStore.claimPending(
-                now: Date(timeIntervalSince1970: 1_750_000_011),
-                leaseDuration: 30,
-                limit: 1
-            ).first)
-            #expect(replacementLease.wake.highWatermark == 5)
-            #expect(replacementLease.revision == 2)
-            try await wakeStore.markPublished(replacementLease)
-            #expect(try await count("im_v2.group_event_wake_outbox", on: sql) == 0)
-
             try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
@@ -1548,7 +1413,6 @@ private struct PlainHybridGroupBatchArtifacts: Decodable {
     let messages: Int64
     let events: Int64
     let messageStates: Int64
-    let wakeRows: Int64
     let shardCommands: Int64
     let roomCommands: Int64
     let readableMessageStates: Int64
@@ -1556,7 +1420,6 @@ private struct PlainHybridGroupBatchArtifacts: Decodable {
     enum CodingKeys: String, CodingKey {
         case messages, events
         case messageStates = "message_states"
-        case wakeRows = "wake_rows"
         case shardCommands = "shard_commands"
         case roomCommands = "room_commands"
         case readableMessageStates = "readable_message_states"
@@ -1589,9 +1452,6 @@ private struct RepeatedHybridGroupStateRow: Decodable {
     let shardCommands: Int64
     let events: Int64
     let messageStates: Int64
-    let wakeRows: Int64
-    let wakeTargetSequence: Int64
-    let wakeRevision: Int64
 
     enum CodingKeys: String, CodingKey {
         case roomSequence = "room_sequence"
@@ -1600,23 +1460,9 @@ private struct RepeatedHybridGroupStateRow: Decodable {
         case shardCommands = "shard_commands"
         case events
         case messageStates = "message_states"
-        case wakeRows = "wake_rows"
-        case wakeTargetSequence = "wake_target_sequence"
-        case wakeRevision = "wake_revision"
     }
 }
-private struct HybridGroupWakeStateRow: Decodable {
-    let roomSequence: Int64
-    let targetRoomSequence: Int64
-    let revision: Int64
-    let state: String
 
-    enum CodingKeys: String, CodingKey {
-        case roomSequence = "room_sequence"
-        case targetRoomSequence = "target_room_sequence"
-        case revision, state
-    }
-}
 private struct RoutedInvitationTestAuthenticator: V2GatewayAuthenticator {
     let user: UserID
     let device = DeviceID(uuid: UUID())

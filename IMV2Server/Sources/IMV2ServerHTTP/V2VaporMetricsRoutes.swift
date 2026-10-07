@@ -25,8 +25,23 @@ public enum V2VaporMetricsRoutes {
         connectionMetrics: (any V2ConnectionMetricsSource)? = nil,
         transportMetrics: (any V2GatewayTransportMetricsSource)? = nil,
         durableWorkMetrics: (any V2DurableWorkMetricsSource)? = nil,
-        runtimePressureMetrics: (any V2RuntimePressureMetricsSource)? = nil
+        runtimePressureMetrics: (any V2RuntimePressureMetricsSource)? = nil,
+        actorRealtimeMetrics: (any V2ActorRealtimeMetricsSource)? = nil,
+        recoverySchedulingMetrics: (@Sendable () -> V2RecoverySchedulingSnapshot)? = nil,
+        roomHeadDeliveryMetrics: (@Sendable () -> String)? = nil
     ) {
+        // This diagnostic path avoids the full scrape's cross-actor waits.
+        // Its source copies fixed-cardinality completed observations only.
+        if let recoverySchedulingMetrics {
+            app.get("metrics", "recovery-scheduling") { _ -> Response in
+                var response = Response(status: .ok)
+                response.headers[.contentType] = "text/plain; version=0.0.4; charset=utf-8"
+                response.headers[.cacheControl] = "no-store, no-cache"
+                response.body = .init(string: v2RenderPrometheusRecoverySchedulingMetrics(recoverySchedulingMetrics())
+                    + (roomHeadDeliveryMetrics?() ?? ""))
+                return response
+            }
+        }
         app.get("metrics") { _ async -> Response in
             var response = Response(status: .ok)
             response.headers[.contentType] = "text/plain; version=0.0.4; charset=utf-8"
@@ -46,6 +61,10 @@ public enum V2VaporMetricsRoutes {
                     await runtimePressureMetrics.runtimePressureMetricsSnapshot()
                 )
             }
+            if let actorRealtimeMetrics {
+                document += v2RenderPrometheusActorRealtimeMetrics(await actorRealtimeMetrics.actorRealtimeMetricsSnapshot())
+            }
+            document += roomHeadDeliveryMetrics?() ?? ""
             response.body = .init(string: document)
             return response
         }

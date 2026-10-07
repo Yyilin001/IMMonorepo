@@ -37,6 +37,10 @@ public actor V2RoomClusterClientNode {
     private let trust: V2ActorTrustStore
     private let authenticationLimits: V2ActorAuthenticationLimits
     private let runtimeConfiguration: V2RoomRuntimeConfiguration
+    private var acceptingRealtime = true
+    private var starting = false
+    private var realtime: V2RealtimeTransportHandle?
+    private var realtimeShards: V2RealtimeShardTransportHandle?
     private var system: ClusterSystem?
     private var client: V2RoomClusterClient?
     private var discovery: V2RoomClusterDiscovery?
@@ -52,8 +56,10 @@ public actor V2RoomClusterClientNode {
         self.runtimeConfiguration = runtimeConfiguration
     }
 
-    public func start(discovery discoveryConfiguration: V2RoomDiscoveryConfiguration) async throws -> V2RoomClusterClient {
-        guard system == nil else { throw V2ActorAuthenticationError.invalidConfiguration }
+    public func start(discovery discoveryConfiguration: V2RoomDiscoveryConfiguration? = nil) async throws -> V2RoomClusterClient {
+        guard system == nil, !starting, acceptingRealtime else { throw V2ActorAuthenticationError.invalidConfiguration }
+        starting = true
+        defer { starting = false }
         var settings = ClusterSystemSettings(name: configuration.name,
                                              host: configuration.host, port: configuration.port,
                                              tls: configuration.tls)
@@ -69,21 +75,58 @@ public actor V2RoomClusterClientNode {
             .custom(allowedTypes: [V2ActorAuthenticationError.self])
         let system = await ClusterSystem(configuration.name, settings: settings)
         self.system = system
+        guard acceptingRealtime else {
+            try await system.shutdown().wait()
+            self.system = nil
+            throw V2ActorAuthenticationError.invalidConfiguration
+        }
         let client = V2RoomClusterClient(system: system, signer: signer, trust: trust,
                                          limits: authenticationLimits,
                                          configuration: runtimeConfiguration)
         self.client = client
-        let discovery = V2RoomClusterDiscovery(system: system, client: client,
-                                                trust: trust, configuration: discoveryConfiguration)
-        self.discovery = discovery
-        await discovery.start()
+        if let discoveryConfiguration {
+            let discovery = V2RoomClusterDiscovery(system: system, client: client,
+                                                    trust: trust, configuration: discoveryConfiguration)
+            self.discovery = discovery
+            await discovery.start()
+        }
         return client
     }
 
     /// 传输就绪与当前宿主数量是两个不同状态。
     /// 缺失的宿主继续不可用，不会因此获得写入权限。
+    /// Owns one callback endpoint on the existing mTLS cluster, including caller-only nodes.
+    public func makeRealtimeShardTransport(identity: V2GatewayRealtimeIdentity,
+        serving: any V2RealtimeShardServing,
+        serviceOwnerAccess: [V2ActorServiceID: Set<String>],
+        discoveryPeers: [V2RealtimeShardDiscoveryPeer],
+        limits: V2RealtimeTransportLimits = .init(),
+        serviceQualification: V2ActorServiceQualification? = nil) async throws -> V2RealtimeShardTransportHandle {
+        guard let system, realtimeShards == nil, acceptingRealtime else { throw V2ActorAuthenticationError.invalidConfiguration }
+        let handle = try buildRealtimeShardTransport(system: system, identity: identity,
+            address: configuration.host, port: configuration.port, signer: signer, trust: trust,
+            serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification)
+        realtimeShards = handle
+        await handle.start()
+        if !acceptingRealtime { _ = await handle.stop(deadline: .now + .seconds(2)); throw V2ActorAuthenticationError.overloaded }
+        return handle
+    }
+
+    public func makeRealtimeTransport(identity: V2GatewayRealtimeIdentity,
+                                      ingress: any V2RealtimeIngress,
+                                      serviceOwnerAccess: [V2ActorServiceID: Set<String>],
+                                      limits: V2RealtimeTransportLimits = .init()) throws -> V2RealtimeTransportHandle {
+        guard let system, realtime == nil, acceptingRealtime else { throw V2ActorAuthenticationError.invalidConfiguration }
+        let handle = try buildRealtimeTransport(system: system, identity: identity,
+            address: configuration.host, port: configuration.port, signer: signer, trust: trust,
+            ingress: ingress, serviceOwnerAccess: serviceOwnerAccess, limits: limits)
+        realtime = handle
+        return handle
+    }
+
     public func readiness() async -> Bool {
-        guard system != nil, let discovery else { return false }
+        guard system != nil else { return false }
+        guard let discovery else { return true }
         return await discovery.snapshot().completedPolls > 0
     }
 
@@ -94,11 +137,22 @@ public actor V2RoomClusterClientNode {
     /// 不配合取消的原生或远程 RPC 仍在运行时返回 false。
     /// 此节点继续持有 ClusterSystem，供之后重试停止操作。
     public func stop(deadline: ContinuousClock.Instant) async throws -> Bool {
+        acceptingRealtime = false
+        while starting && ContinuousClock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(5)) } catch { break }
+        }
+        guard !starting else { return false }
         guard let system else { return true }
+        guard await realtimeShards?.stop(deadline: deadline) ?? true else {
+            throw V2ActorAuthenticationError.overloaded
+        }
+        guard await realtime?.stop(deadline: deadline) ?? true else { return false }
         await discovery?.stop()
         await client?.stop()
         guard await discovery?.quiesce(deadline: deadline) ?? true,
               await client?.quiesce(deadline: deadline) ?? true else { return false }
+        realtime = nil
+        realtimeShards = nil
         discovery = nil
         client = nil
         try await system.shutdown().wait()

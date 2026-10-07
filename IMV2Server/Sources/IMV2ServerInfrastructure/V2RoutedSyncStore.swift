@@ -143,7 +143,12 @@ public struct V2RoutedSyncStore: V2SyncStore, Sendable {
         for userID: UserID,
         _ operation: @escaping @Sendable (any V2SyncStore) async throws -> Result
     ) async throws -> Result {
-        try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
+        // Capture the trusted purpose before the route fence's first physical
+        // borrow. Detached EventLoop callbacks must not infer it later. The
+        // scope also covers an independent owner borrow in split deployments.
+        try await V2PhysicalDatabaseLoanScope.$purpose.withValue(.sync) {
+          try await V2DatabaseLoanObservationContext.$source.withValue(.sync) {
+          try await routeFence.withCurrentRoute(for: userID) { route, fencedDatabase in
             var location = try registry.location(for: route.bucket)
             // 同位置的分片必须使用栅栏事务的数据库句柄。当第一条连接持有
             // 路由锁时再打开第二条池连接，在单连接部署中可能发生自死锁，
@@ -154,7 +159,11 @@ public struct V2RoutedSyncStore: V2SyncStore, Sendable {
                     schema: location.schema
                 )
             }
-            return try await operation(makeStore(location))
+            return try await V2DatabaseLoanObservationContext.$source.withValue(.sync) {
+                try await operation(makeStore(location))
+            }
+          }
+          }
         }
     }
 }

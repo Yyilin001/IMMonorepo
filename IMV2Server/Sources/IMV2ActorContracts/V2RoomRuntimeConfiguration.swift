@@ -23,6 +23,9 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
     public let transactionTimeout: V2ActorMilliseconds
     public let callTimeout: V2ActorMilliseconds
     public let batchWait: V2ActorMilliseconds
+    /// Durable sends normally batch only work already queued. The windowed
+    /// mode remains available for controlled comparisons, without extra queues.
+    public let durableSendCollectionWindowEnabled: Bool
     public let idleTimeout: V2ActorMilliseconds
     public let drainTimeout: V2ActorMilliseconds
     public let reservationTimeout: V2ActorMilliseconds
@@ -50,6 +53,7 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
         transactionTimeoutMilliseconds: Int64 = 10_000,
         callTimeoutMilliseconds: Int64 = 30_000,
         batchWaitMilliseconds: Int64 = 2,
+        durableSendCollectionWindowEnabled: Bool = false,
         idleTimeoutMilliseconds: Int64 = 300_000,
         drainTimeoutMilliseconds: Int64 = 60_000,
         reservationTimeoutMilliseconds: Int64 = 15_000
@@ -127,6 +131,7 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
         self.transactionTimeout = transaction
         self.callTimeout = call
         self.batchWait = batch
+        self.durableSendCollectionWindowEnabled = durableSendCollectionWindowEnabled
         self.idleTimeout = idle
         self.drainTimeout = drain
         self.reservationTimeout = reservation

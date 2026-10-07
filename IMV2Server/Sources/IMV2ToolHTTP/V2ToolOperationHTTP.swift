@@ -8,14 +8,37 @@ import IMV2Core
 /// Tokens stay in headers; redirects are disabled and errors contain no payloads.
 public struct V2ToolOperationHTTP:Sendable {
     public enum Failure:Error { case invalidConfiguration,invalidResponse,incomplete,status(Int) }
+    /// Closed diagnostic codes; never formats an error or exposes response/request material.
+    /// Keep AsyncHTTPClient's concrete error type inside the HTTP tool module.
+    public static func clientFailureCode(_ error: any Error) -> String? {
+        guard let error = error as? HTTPClientError else { return nil }
+        switch error {
+        case .deadlineExceeded: return "HTTP_CLIENT_DEADLINE_EXCEEDED"
+        case .connectTimeout: return "HTTP_CLIENT_CONNECT_TIMEOUT"
+        case .readTimeout: return "HTTP_CLIENT_READ_TIMEOUT"
+        case .writeTimeout: return "HTTP_CLIENT_WRITE_TIMEOUT"
+        case .remoteConnectionClosed: return "HTTP_CLIENT_REMOTE_CONNECTION_CLOSED"
+        case .cancelled: return "HTTP_CLIENT_CANCELLED"
+        case .getConnectionFromPoolTimeout: return "HTTP_CLIENT_POOL_TIMEOUT"
+        case .tlsHandshakeTimeout: return "HTTP_CLIENT_TLS_HANDSHAKE_TIMEOUT"
+        case .httpProxyHandshakeTimeout: return "HTTP_CLIENT_PROXY_HANDSHAKE_TIMEOUT"
+        case .socksHandshakeTimeout: return "HTTP_CLIENT_SOCKS_HANDSHAKE_TIMEOUT"
+        case .alreadyShutdown: return "HTTP_CLIENT_ALREADY_SHUTDOWN"
+        case .uncleanShutdown: return "HTTP_CLIENT_UNCLEAN_SHUTDOWN"
+        case .bodyLengthMismatch: return "HTTP_CLIENT_BODY_LENGTH_MISMATCH"
+        case .requestStreamCancelled: return "HTTP_CLIENT_REQUEST_STREAM_CANCELLED"
+        default: return "HTTP_CLIENT_OTHER"
+        }
+    }
     private let baseURL:URL
     private let client:HTTPClient
-    public init(baseURL:URL,caPath:String) throws {
-        guard baseURL.scheme=="https",baseURL.host != nil,baseURL.user==nil,baseURL.password==nil,baseURL.query==nil,baseURL.fragment==nil else { throw Failure.invalidConfiguration }
+    public init(baseURL:URL,caPath:String,http1ConnectionsPerHostSoftLimit:Int = 8) throws {
+        guard (1...256).contains(http1ConnectionsPerHostSoftLimit),baseURL.scheme=="https",baseURL.host != nil,baseURL.user==nil,baseURL.password==nil,baseURL.query==nil,baseURL.fragment==nil else { throw Failure.invalidConfiguration }
         var tls=TLSConfiguration.makeClientConfiguration()
         tls.trustRoots = .certificates(try NIOSSLCertificate.fromPEMFile(caPath))
         self.baseURL=baseURL
-        self.client=HTTPClient(eventLoopGroupProvider:.singleton,configuration:.init(tlsConfiguration:tls,redirectConfiguration:.disallow))
+        self.client=HTTPClient(eventLoopGroupProvider:.singleton,configuration:.init(tlsConfiguration:tls,redirectConfiguration:.disallow,
+            connectionPool:.init(idleTimeout:.seconds(60),concurrentHTTP1ConnectionsPerHostSoftLimit:http1ConnectionsPerHostSoftLimit)))
     }
     public func shutdown() async throws { try await client.shutdown() }
     public func request<Response:Decodable & Sendable>(path:String,token:String,deviceID:String,body:Data?=nil,maximumBodyBytes:Int=8192,as:Response.Type) async throws -> Response {

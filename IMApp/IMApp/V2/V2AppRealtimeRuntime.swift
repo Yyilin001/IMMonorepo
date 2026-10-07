@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 import IMV2ClientKit
 import IMV2Core
 
@@ -825,33 +826,84 @@ actor V2RealtimeActiveHybridGroupSynchronizer: V2ActiveHybridGroupSynchronizing 
 
     func applyLiveEvent(_ wake: V2ActiveHybridGroupWake) async throws -> Bool {
         guard let roomID = try? RoomID(wake.roomID),
-              !wake.liveEvents.isEmpty,
-              wake.liveEvents.last?.roomSequence == wake.highWatermark,
-              zip(wake.liveEvents, wake.liveEvents.dropFirst()).allSatisfy({
-                  $1.roomSequence == $0.roomSequence + 1
-              }),
               let access = try await localStore.groupEventAccess(roomID: roomID),
               access.isAuthorized
         else { return false }
-        let cursor = try await localStore.groupEventCursor(roomID: roomID)
-        if wake.highWatermark <= cursor { return true }
-        let unapplied = wake.liveEvents.drop(while: { $0.roomSequence <= cursor })
-        guard unapplied.first?.roomSequence == cursor + 1,
-              unapplied.last?.roomSequence == wake.highWatermark
-        else { return false }
-        let page = try V2ClientGroupEventPage(
-            roomID: roomID,
-            events: Array(unapplied),
-            nextRoomSequence: wake.highWatermark,
-            hasMore: false
-        )
-        _ = try await localStore.applyGroupEventPage(page)
-        return true
+        return try await groupEventSync.applyOnlineEvents(.init(roomID: roomID,
+            highWatermark: wake.highWatermark, liveEvents: wake.liveEvents))
     }
 
     func unsubscribe(roomID: String) async {
         guard let parsedRoomID = try? RoomID(roomID) else { return }
         try? await subscriptionTransport.unsubscribeFromGroupEvents(roomID: parsedRoomID)
+    }
+}
+
+/// The account owns coverage presentation; socket authentication alone does
+/// not establish notification coverage. One loop owner per physical generation.
+@MainActor @Observable
+final class V2AppRealtimeCoverage {
+    enum State: Equatable { case disconnected, recovering, ready }
+    private(set) var state: State = .disconnected
+    private(set) var reason: V2RealtimeCoverageState.Reason?
+    private(set) var scopes: [V2RealtimeCoverageState.Scope: V2RealtimeCoverageState] = [:]
+    private var loopID: UUID?
+    private var connectionGeneration: UUID?
+    // These five bounded fences survive scope Ended. Removing a presentation
+    // snapshot must not allow a late Ready to resurrect the previous scope.
+    private var revisions: [V2RealtimeCoverageState.Scope: UInt64] = [:]
+    private var generations: [V2RealtimeCoverageState.Scope: UInt64] = [:]
+    private var endedScopes: Set<V2RealtimeCoverageState.Scope> = []
+
+    func begin(_ id: UUID) {
+        loopID = id; connectionGeneration = nil
+        scopes.removeAll(); revisions.removeAll(); generations.removeAll(); endedScopes.removeAll()
+        state = .recovering; reason = .installing
+    }
+
+    func receive(_ value: V2RealtimeCoverageState, loop: UUID, account: UserID) {
+        guard loopID == loop,
+              connectionGeneration == nil || connectionGeneration == value.connectionGeneration,
+              value.revision > (revisions[value.scope] ?? 0),
+              value.scopeGeneration >= (generations[value.scope] ?? 0),
+              !(value.status != .ended && endedScopes.contains(value.scope)
+                && value.scopeGeneration == generations[value.scope]) else { return }
+        if value.scope == .account || value.scope == .directory {
+            guard value.scopeID.lowercased() == account.rawValue.lowercased() else { return }
+        }
+        connectionGeneration = value.connectionGeneration
+        revisions[value.scope] = value.revision; generations[value.scope] = value.scopeGeneration
+        if value.status == .ended {
+            scopes.removeValue(forKey: value.scope); endedScopes.insert(value.scope)
+        } else {
+            scopes[value.scope] = value; endedScopes.remove(value.scope)
+        }
+        refreshPresentation()
+    }
+
+    private func refreshPresentation() {
+        guard loopID != nil else { state = .disconnected; reason = nil; return }
+        guard scopes[.account] != nil else {
+            state = endedScopes.contains(.account) ? .disconnected : .recovering
+            reason = endedScopes.contains(.account) ? .cancelled : .installing
+            return
+        }
+        // A received active scope is this physical connection's requested
+        // coverage. Unrequested kinds and Ended scopes are not prerequisites.
+        // Ready concerns notification coverage, never durable cursor catch-up.
+        let priority: [V2RealtimeCoverageState.Scope] = [.account, .room, .directory, .presence, .typing]
+        if let pending = priority.compactMap({ scopes[$0] }).first(where: { $0.status != .ready }) {
+            state = .recovering; reason = pending.reason
+        } else {
+            state = .ready; reason = .confirmed
+        }
+    }
+
+    func end(_ id: UUID) {
+        guard loopID == id else { return }
+        loopID = nil; connectionGeneration = nil
+        scopes.removeAll(); revisions.removeAll(); generations.removeAll(); endedScopes.removeAll()
+        state = .disconnected; reason = nil
     }
 }
 
@@ -861,6 +913,8 @@ struct V2AppRealtimeRuntime {
     let nameOperations: V2NameOperationService
     let resourceTransfers: V2ResourceTransferEngine
     let runtime: V2ClientRuntime
+    let lastTimedOutRealtimeCommand: @Sendable () async -> V2FrameCommand?
+    let realtimeCoverage: V2AppRealtimeCoverage
     let roomRecovery: V2RoomRecoveryRunner
     let backgroundSync: V2BackgroundSyncRunner
     let projectionChangeNotifier: V2ProjectionChangeNotifier
@@ -902,6 +956,7 @@ struct V2AppRealtimeRuntime {
     let profileRepository: V2ProfileRepository
     let profilePresentations: V2ProfilePresentationRepository
 
+    @MainActor
     init(
         configuration: V2AppConfiguration,
         actorUserID: UserID,
@@ -910,8 +965,14 @@ struct V2AppRealtimeRuntime {
         authEpoch: V2AuthSessionEpoch,
         localStore: GRDBV2LocalSyncStore,
         mediaCacheDirectory: URL,
-        mediaStagingDirectory: URL
+        mediaStagingDirectory: URL,
+        testRoomNotificationInterceptor: (@Sendable (String, UInt64, Int) -> Bool)? = nil,
+        testRoomProgressObserver: (@Sendable (RoomID, UInt64) async throws -> Void)? = nil,
+        testRoomRecoveryObserver: (@Sendable (V2RoomRecoveryObservation) -> Void)? = nil,
+        testConnectionObserver: (@Sendable (V2TLSFrameConnection) -> Void)? = nil
     ) throws {
+        let coverage = V2AppRealtimeCoverage()
+        realtimeCoverage = coverage
         let frameLimits = try V2FrameLimits(
             maximumPayloadBytes: 65_536,
             acceptedVersions: IMV2ProtocolVersion.supportedVersions.union([0])
@@ -919,21 +980,22 @@ struct V2AppRealtimeRuntime {
         let accountRuntime = V2AccountRuntime()
         self.accountRuntime = accountRuntime
         let connection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits,
-                                              supportsAuthorPresentationDelta: true, workScheduler: accountRuntime.scheduler,initialPresenceMode:{
-                                                  try await localStore.localPublicationPolicy().allowsOnlinePresence ? .allowWhenAuthorized:.suppressed
-                                              })
+                                              supportsAuthorPresentationDelta: true, workScheduler: accountRuntime.scheduler,
+                                              testRoomNotificationInterceptor: testRoomNotificationInterceptor)
+        testConnectionObserver?(connection)
+        lastTimedOutRealtimeCommand = { await connection.lastTimedOutCommand() }
         let transport = V2ProtobufSyncTransport(
             wire: connection,
-            protocolVersion: UInt8(IMV2ProtocolVersion.current)
+            protocolVersion: UInt8(IMV2ProtocolVersion.current),
+            durableRoomProgress: { roomID in try await localStore.roomProgressAppliedSequence(roomID: roomID) },
+            testRoomProgressObserver: testRoomProgressObserver
         )
         let accountHTTP = V2SessionHTTPAuthorization(session: authSession, epoch: authEpoch,
             transport: try V2RegisteredAccountHTTPTransport(executor: accountRuntime.httpExecutor,
                 allowedBases: [configuration.accountBaseURL, configuration.mediaEdgeEndpoint.deletingLastPathComponent().deletingLastPathComponent()],
                 scope: accountRuntime.queryScope(accountID: actorUserID.rawValue, authorizationDomain: "accountHTTP")), scheduler: accountRuntime.scheduler)
-        let messageHTTP = try V2HTTPMessageSendOperationClient(baseURL:configuration.accountBaseURL,credentials:accountHTTP,transport:accountHTTP)
         let messageClient = V2RoutedMessageSendOperationClient(accountID: actorUserID,
-            realtime: V2ProtobufMessageSendOperationClient(transport: transport, connection: connection),
-            http: messageHTTP, mode: configuration.messageSendTransportMode)
+            realtime: V2ProtobufMessageSendOperationClient(transport: transport, connection: connection))
         let messageSendOperations=V2MessageSendOperationService(accountID:actorUserID,store:localStore,client:messageClient)
         self.messageSendOperations=messageSendOperations
         let socialOperations=V2SocialOperationService(accountID:actorUserID,store:localStore,
@@ -996,12 +1058,15 @@ struct V2AppRealtimeRuntime {
         self.profileRepository = profileRepository
         let syncOwnership = V2SyncOperationGate()
         let syncEngine = V2SyncEngine(transport: transport, store: localStore, capabilityProfile: "base", operationGate: syncOwnership)
-        let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits, workScheduler: accountRuntime.scheduler, workService: "realtime-background",initialPresenceMode:{.suppressed})
+        let backgroundConnection = V2TLSFrameConnection(endpoint: configuration.realtimeEndpoint, frameLimits: frameLimits, workScheduler: accountRuntime.scheduler, workService: "realtime-background")
         let backgroundTransport = V2ProtobufSyncTransport(wire: backgroundConnection, protocolVersion: UInt8(IMV2ProtocolVersion.current))
         let backgroundPersonalSync = V2SyncEngine(transport: backgroundTransport, store: localStore, capabilityProfile: "base", maxRecords: 100, operationGate: syncOwnership)
         let backgroundRecovery = V2RoomRecoveryRunner(
             engine: V2RoomRecoveryEngine(transport: backgroundTransport, latestVisible: backgroundTransport, store: localStore,
-                groupEvents: V2GroupEventSyncEngine(transport: backgroundTransport, store: localStore, pageSize: 100)),
+                groupEvents: V2GroupEventSyncEngine(transport: backgroundTransport, store: localStore, pageSize: 100),
+                didPersistProgress: { room, cursor in
+                    try await backgroundTransport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: cursor)
+                }),
             source: backgroundConnection, personalSync: backgroundPersonalSync)
         backgroundSync = V2BackgroundSyncRunner(
             connection: V2RealtimeSessionCoordinator(authSession: authSession, connection: backgroundConnection, supportedCapabilityProfiles: ["base"]),
@@ -1009,7 +1074,9 @@ struct V2AppRealtimeRuntime {
             roomSync: { pages in
                 let credentials = try await authSession.realtimeCredentials()
                 try await authSession.requireAuthenticatedEpoch(authEpoch)
-                return try await backgroundRecovery.runBounded(userID: credentials.userID, maximumPages: pages)
+                let result = try await backgroundRecovery.runBounded(userID: credentials.userID, maximumPages: pages)
+                try await backgroundTransport.flushDeviceRoomProgressReports()
+                return result
             }
         )
         let groupEventSync = V2GroupEventSyncEngine(transport: transport, store: localStore)
@@ -1019,6 +1086,11 @@ struct V2AppRealtimeRuntime {
             subscriptionTransport: transport,
             wakeSource: connection
         )
+        let roomRecoveryEngine = V2RoomRecoveryEngine(transport: transport, latestVisible: transport, store: localStore, groupEvents: groupEventSync,
+            didPersistProgress: { room, cursor in
+                try await transport.enqueueDeviceRoomProgress(roomID: room, appliedThrough: cursor)
+            }, observe: testRoomRecoveryObserver)
+        let roomCatchUpWorker = V2RoomRecoveryRunner(engine: roomRecoveryEngine, source: connection, personalSync: syncEngine)
         let roomSubscriptions = V2RoomSubscriptionCoordinator(
             subscriptions: transport, activity: transport,
             groupEvents: connection, activityEvents: connection,
@@ -1030,6 +1102,20 @@ struct V2AppRealtimeRuntime {
                     throw V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: 0, currentRevision: nil)
                 }
                 return try await localStore.groupEventCursor(roomID: roomID)
+            }, receiveAccountEvent: { hint in
+                guard try await localStore.groupEventAccess(roomID: hint.roomID)?.isAuthorized == true else {
+                    // Retain the target before membership reconciliation. The recovery
+                    // worker checks authoritative room state before requesting content.
+                    try await roomCatchUpWorker.retainOnlineRoomHead(roomID: hint.roomID,
+                        highWatermark: hint.highWatermark, userID: actorUserID)
+                    return
+                }
+                if try await !groupEventSync.applyOnlineEvents(hint) {
+                    try await roomCatchUpWorker.retainOnlineRoomHead(roomID: hint.roomID,
+                        highWatermark: hint.highWatermark, userID: actorUserID)
+                }
+                let persisted = try await localStore.groupEventCursor(roomID: hint.roomID)
+                try await transport.enqueueDeviceRoomProgress(roomID: hint.roomID, appliedThrough: min(persisted, hint.highWatermark))
             }
         )
         self.roomSubscriptions = roomSubscriptions
@@ -1044,8 +1130,6 @@ struct V2AppRealtimeRuntime {
         )
         localStore.installNetworkDiagnostics(accountRuntime.networkDiagnostics)
         let projectionChangeNotifier = V2ProjectionChangeNotifier(localStore: localStore)
-        let roomRecoveryEngine = V2RoomRecoveryEngine(transport: transport, latestVisible: transport, store: localStore, groupEvents: groupEventSync)
-        let roomCatchUpWorker = V2RoomRecoveryRunner(engine: roomRecoveryEngine, source: connection, personalSync: syncEngine)
         self.roomRecovery = roomCatchUpWorker
         let activity = V2DefaultClientRuntimeActivity(
             syncEngine: syncEngine,
@@ -1084,11 +1168,21 @@ struct V2AppRealtimeRuntime {
                 try await withThrowingTaskGroup(of:Void.self) {group in
                     group.addTask {try await V2RolePolicyRecoveryRunner(store:localStore,transport:transport).run()}
                     group.addTask {
+                        let loop = UUID()
+                        await coverage.begin(loop)
+                        for await value in await connection.realtimeCoverageChanges() {
+                            guard !Task.isCancelled else { break }
+                            await coverage.receive(value, loop: loop, account: actorUserID)
+                        }
+                        await coverage.end(loop)
+                    }
+                    group.addTask {
                         for try await policy in localStore.publicationPolicyUpdates() {
                             try Task.checkCancellation()
                             try await transport.setPresencePublicationMode(policy.allowsOnlinePresence ? .allowWhenAuthorized:.suppressed)
                         }
                     }
+                    group.addTask { try await transport.runDeviceRoomProgressReports() }
                     try await group.waitForAll()
                 }
             }

@@ -2,40 +2,6 @@ import IMV2ServerContracts
 import Foundation
 import IMV2Core
 
-/// 通过认证的成员变更请求。
-public struct V2AuthenticatedMembershipChange: Sendable {
-    /// 目标房间。
-    public let roomID: RoomID
-    /// 发起变更的用户。
-    public let actorUserID: UserID
-    /// 本次变更的幂等操作标识。
-    public let operationID: MembershipOperationID
-    /// 变更目标用户。
-    public let targetUserID: UserID
-    /// 需要执行的动作。
-    public let action: V2RoomMembershipAction
-    /// 客户端观察到的成员修订，用于并发冲突检测。
-    public let expectedMembershipRevision: UInt64
-
-    /// 保存已认证的成员变更请求。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - actorUserID: 发起变更的用户。
-    ///   - operationID: 幂等操作标识。
-    ///   - targetUserID: 变更目标用户。
-    ///   - action: 需要执行的动作。
-    ///   - expectedMembershipRevision: 期望的成员修订。
-    public init(roomID: RoomID, actorUserID: UserID, operationID: MembershipOperationID, targetUserID: UserID, action: V2RoomMembershipAction, expectedMembershipRevision: UInt64) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.targetUserID = targetUserID
-        self.action = action
-        self.expectedMembershipRevision = expectedMembershipRevision
-    }
-}
-
 /// 成员变更的执行结果。
 public enum V2RoomMembershipChangeOutcome: Equatable, Sendable {
     /// 本次调用实际提交了变更。

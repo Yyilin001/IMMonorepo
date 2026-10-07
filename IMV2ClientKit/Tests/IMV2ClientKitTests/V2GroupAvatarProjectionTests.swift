@@ -10,6 +10,54 @@ struct V2GroupAvatarProjectionTests {
     private let user = UserID(uuid: UUID())
     private let binding = V2LocalInstallationBinding(value: UUID())
 
+    @Test("a failed room apply transaction reports its previous durable C and server C never promotes it")
+    func failedApplyAndServerProgressCannotAdvanceCursor() async throws {
+        let url = temporaryURL()
+        let store = try makeStore(url)
+        _ = try await store.applyGroupEventPage(.init(roomID: room, events: [], nextRoomSequence: 4, hasMore: false))
+        let valid = try fact(sequence: 1, revision: 1, roomSequence: 5)
+        var malformedPayload = try #require(JSONSerialization.jsonObject(with: valid.payload) as? [String: Any])
+        malformedPayload["room_sequence"] = 7
+        let invalid = try V2ClientSyncRecord(sequence: 2, sourceEventID: .init("invalid"),
+            projectionKind: valid.projectionKind, payload: JSONSerialization.data(withJSONObject: malformedPayload))
+        let failedPage = try V2ClientGroupEventPage(roomID: room, events: [
+            .init(sourceEventID: valid.sourceEventID, roomSequence: 5, projectionKind: valid.projectionKind, payload: valid.payload),
+            .init(sourceEventID: invalid.sourceEventID, roomSequence: 6, projectionKind: invalid.projectionKind, payload: invalid.payload)
+        ], nextRoomSequence: 6, hasMore: false)
+        await #expect(throws: V2ClientProjectionError.invalidMessagePayload) { _ = try await store.applyGroupEventPage(failedPage) }
+        #expect(try await store.groupAvatarRevision(roomID: room) == 0)
+        #expect(try await store.groupEventCursor(roomID: room) == 4)
+        let wire = RoomProgressHeartbeatWire(room: room, serverAccepted: 7)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: 1,
+            durableRoomProgress: { roomID in try await store.roomProgressAppliedSequence(roomID: roomID) })
+        try await transport.sendHeartbeat()
+        #expect(await wire.reportedApplied == 4)
+        #expect(await wire.receivedHead == 7)
+        #expect(try await store.roomProgressAppliedSequence(roomID: room) == 4)
+        try await store.close()
+        let reopened = try makeStore(url)
+        #expect(try await reopened.groupEventCursor(roomID: room) == 4)
+        #expect(try await reopened.groupAvatarRevision(roomID: room) == 0)
+        try await reopened.close()
+    }
+
+    @Test("room progress comes only from committed authorized page processing and excludes trimmed gaps")
+    func durableRoomProgressBoundary() async throws {
+        let store = try makeStore(temporaryURL())
+        let projected = try fact(sequence: 1, revision: 1, roomSequence: 20)
+        _ = try await store.apply(batch([projected]))
+        // Personal projection maxima do not prove that the room log was applied.
+        #expect(try await store.roomProgressAppliedSequence(roomID: room) == nil)
+        // A server-authorized empty filtered page can still be processed through.
+        _ = try await store.applyGroupEventPage(.init(roomID: room, events: [], nextRoomSequence: 20, hasMore: false))
+        #expect(try await store.roomProgressAppliedSequence(roomID: room) == 20)
+        _ = try await store.applyGroupEventPage(.init(roomID: room, events: [], nextRoomSequence: 30,
+            hasMore: false, logTrimmedThroughRoomSequence: 25))
+        #expect(try await store.groupEventCursor(roomID: room) == 30)
+        #expect(try await store.roomProgressAppliedSequence(roomID: room) == nil)
+        try await store.close()
+    }
+
     @Test("room log replay, out-of-order facts and restart never lower the invalidation floor")
     func replayAndOrdering() async throws {
         let url = temporaryURL()

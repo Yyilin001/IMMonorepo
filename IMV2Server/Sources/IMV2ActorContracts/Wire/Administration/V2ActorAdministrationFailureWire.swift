@@ -24,7 +24,7 @@ public enum V2ActorAdministrationInputFailureWire: String, Codable, Equatable, S
     case invalidReasonCode, invalidActionShape, invalidMuteExpiry, moderationNotAuthorized
     case invalidProfileView, invalidDisplayName
     case invalidPermissionList, invalidDate, invalidPageLimit, invalidRetryAfter
-    case trustedActionOnUserLane, unsupportedAuthenticatedRevision
+    case trustedActionOnUserLane
 }
 public enum V2ActorAdministrationFailureWire: Codable, Equatable, Sendable, Error {
     case invitation(V2ActorInvitationErrorWire)

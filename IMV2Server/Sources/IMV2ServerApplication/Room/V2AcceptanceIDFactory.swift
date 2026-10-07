@@ -162,24 +162,6 @@ package final class V2SecureProcessUUIDGenerator: @unchecked Sendable {
     }
 }
 
-/// 从连续十六字节构造设置了版本与变体位的 UUID。
-///
-/// 调用方必须提供从零起始、覆盖指定偏移的整数索引集合；可用字节不足时触发前置条件失败。
-private func v2UUIDv4<Bytes: RandomAccessCollection>(
-    _ bytes: Bytes,
-    offset: Int
-) -> UUID where Bytes.Element == UInt8, Bytes.Index == Int {
-    precondition(offset >= 0 && bytes.count >= offset + 16)
-    let version = (bytes[offset + 6] & 0x0f) | 0x40
-    let variant = (bytes[offset + 8] & 0x3f) | 0x80
-    return UUID(uuid: (
-        bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3],
-        bytes[offset + 4], bytes[offset + 5], version, bytes[offset + 7],
-        variant, bytes[offset + 9], bytes[offset + 10], bytes[offset + 11],
-        bytes[offset + 12], bytes[offset + 13], bytes[offset + 14], bytes[offset + 15]
-    ))
-}
-
 /// 用 48 位 Unix 毫秒前缀和十字节随机片段构造有序 UUID。
 ///
 /// - Parameters:

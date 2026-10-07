@@ -23,10 +23,15 @@ public struct V2RoomRefForwardPort: Sendable {
 
 public extension V2ActorForwardPairPort {
     init(coordinator: V2RoomReservationCoordinator,
-         executorsByShard: [String: V2ActorForwardPairDomainExecutor]) {
+         executorsByShard: [String: V2ActorForwardPairDomainExecutor],
+         expectedTarget: V2RoomActivationToken? = nil) {
         self.init { pair, deadline in
             try await coordinator.withReservations(source: pair.source.roomID,
                 target: pair.targetRoomID, deadline: deadline) { grants in
+                if let expectedTarget,
+                   grants.first(where: { $0.token.roomID == pair.targetRoomID })?.token != expectedTarget {
+                    return .rolledBack(.staleActivation)
+                }
                 guard let shard = grants.first?.token.owner.shardID,
                       let executor = executorsByShard[shard] else { return .rolledBack(.unavailable) }
                 do {
@@ -53,6 +58,7 @@ private func v2ActorForwardPairBusinessFailure(_ error: any Error) -> String? {
     case V2RoomWriteStoreError.roomNotFound: "NOT_FOUND"
     case V2RoomWriteStoreError.actorMuted: "ACTOR_MUTED"
     case V2RoomWriteStoreError.roomFrozen: "ROOM_FROZEN"
+    case V2RoomWriteStoreError.strangerMessageLimitReached: "RATE_LIMITED"
     case V2MediaStoreError.mediaUnavailable, V2MediaStoreError.mediaExpired,
          V2MediaStoreError.invalidStateTransition: "MEDIA_UNAVAILABLE"
     default: nil

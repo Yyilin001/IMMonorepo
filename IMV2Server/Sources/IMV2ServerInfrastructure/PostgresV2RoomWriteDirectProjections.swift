@@ -52,14 +52,22 @@ enum V2RoomWriteDirectProjectionPath {
                 count: appends.count
             )
         }
+        guard appends.count <= 256 else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        var producedCapabilities = Set<String>()
+        var producedProfiles = Set<String>()
         let inputs = try appends.enumerated().map { ordinal, append in
-            DirectPostAcceptanceProjectionInput(
+            let key = "\(append.roomID.uuidString)|\(append.senderID.uuidString)"
+            let visible = append.directContext.senderProfileVisibleToRecipient || producedProfiles.contains(key)
+            let capable = append.directContext.senderCanSend == true || producedCapabilities.contains(key)
+            producedProfiles.insert(key)
+            producedCapabilities.insert(key)
+            return DirectPostAcceptanceProjectionInput(
                 ordinal: ordinal,
                 roomID: append.roomID,
                 senderID: append.senderID,
                 recipientID: append.directContext.recipientID,
-                senderProfileVisibleToRecipient: append.directContext.senderProfileVisibleToRecipient,
-                senderCanSend: append.directContext.senderCanSend,
+                senderProfileVisibleToRecipient: visible,
+                senderCanSend: capable,
                 sourceEventID: append.input.eventID,
                 createdAtPostgresMicroseconds: try roomWritePostgresMicroseconds(append.now),
                 createdAtMilliseconds: try v2GatewayMilliseconds(roomWritePersistedDate(append.now)),
@@ -67,6 +75,25 @@ enum V2RoomWriteDirectProjectionPath {
             )
         }
         let inputJSON = try roomWriteJSON(inputs)
+        // A policy denial can clear can_send without hiding an established
+        // profile. Restoring that capability needs no descriptive profile
+        // facts and must not re-enter the account table on that path.
+        let profiles: SQLQueryString = inputs.contains(where: { !$0.senderProfileVisibleToRecipient }) ? """
+            SELECT needed.ordinal, profile.public_handle,
+                   profile.display_name, profile.account_kind,
+                   profile.revision, profile.updated_at
+            FROM needed
+            JOIN im_v2.public_user_profiles AS profile
+              ON profile.user_id = needed.sender_id
+             AND profile.state = 'active'
+             AND profile.revision > 0
+            WHERE NOT needed.sender_profile_visible_to_recipient
+            """ : """
+            SELECT NULL::integer AS ordinal, NULL::text AS public_handle,
+                   NULL::text AS display_name, NULL::text AS account_kind,
+                   NULL::bigint AS revision, NULL::timestamptz AS updated_at
+            WHERE FALSE
+            """
         let rows = try await sql.raw("""
             WITH input AS MATERIALIZED (
                 SELECT input.ordinal, input.room_id, input.sender_id,
@@ -96,14 +123,7 @@ enum V2RoomWriteDirectProjectionPath {
                 WHERE NOT sender_profile_visible_to_recipient
                    OR sender_can_send IS DISTINCT FROM TRUE
             ), profile AS MATERIALIZED (
-                SELECT needed.ordinal, profile.public_handle,
-                       profile.display_name, profile.account_kind,
-                       profile.revision, profile.updated_at
-                FROM needed
-                JOIN im_v2.public_user_profiles AS profile
-                  ON profile.user_id = needed.sender_id
-                 AND profile.state = 'active'
-                 AND profile.revision > 0
+                \(profiles)
             ), projection_events AS MATERIALIZED (
                 SELECT needed.ordinal, needed.room_id, needed.sender_id,
                        needed.recipient_id, needed.source_event_id,
@@ -149,29 +169,36 @@ enum V2RoomWriteDirectProjectionPath {
                 FROM projection_events AS event
                 ORDER BY event.user_id, event.ordinal, event.event_order
                 RETURNING user_id, source_event_id, projection_kind
+            ), pair_mutations AS MATERIALIZED (
+                SELECT room_id,array_agg(DISTINCT sender_id ORDER BY sender_id) AS sender_ids
+                FROM needed GROUP BY room_id
             ), pair_update AS (
                 UPDATE im_v2.direct_room_pairs AS pair
                 SET lower_profile_visible_to_higher = CASE
-                        WHEN pair.lower_user_id = needed.sender_id THEN TRUE
+                        WHEN pair.lower_user_id = ANY(mutation.sender_ids) THEN TRUE
                         ELSE pair.lower_profile_visible_to_higher
                     END,
                     higher_profile_visible_to_lower = CASE
-                        WHEN pair.higher_user_id = needed.sender_id THEN TRUE
+                        WHEN pair.higher_user_id = ANY(mutation.sender_ids) THEN TRUE
                         ELSE pair.higher_profile_visible_to_lower
                     END,
                     lower_can_send = CASE
-                        WHEN pair.lower_user_id = needed.sender_id THEN TRUE
+                        WHEN pair.lower_user_id = ANY(mutation.sender_ids) THEN TRUE
                         ELSE pair.lower_can_send
                     END,
                     higher_can_send = CASE
-                        WHEN pair.higher_user_id = needed.sender_id THEN TRUE
+                        WHEN pair.higher_user_id = ANY(mutation.sender_ids) THEN TRUE
                         ELSE pair.higher_can_send
                     END
-                FROM needed
-                WHERE pair.room_id = needed.room_id
-                  AND (SELECT count(*) FROM profile) = (SELECT count(*) FROM needed)
+                FROM pair_mutations AS mutation
+                WHERE pair.room_id = mutation.room_id
+                  AND cardinality(mutation.sender_ids) BETWEEN 1 AND 2
+                  AND mutation.sender_ids <@ ARRAY[pair.lower_user_id,pair.higher_user_id]
+                  AND (SELECT count(*) FROM profile) = (
+                      SELECT count(*) FROM needed WHERE NOT sender_profile_visible_to_recipient
+                  )
                   AND (SELECT count(*) FROM log_insert) = (SELECT count(*) FROM projection_events)
-                RETURNING needed.ordinal
+                RETURNING pair.room_id
             )
             SELECT input.ordinal,
                    EXISTS (
@@ -187,6 +214,7 @@ enum V2RoomWriteDirectProjectionPath {
                    CASE WHEN EXISTS (
                        SELECT 1 FROM needed
                        WHERE needed.ordinal = input.ordinal
+                         AND NOT needed.sender_profile_visible_to_recipient
                    ) THEN EXISTS (
                        SELECT 1 FROM profile
                        WHERE profile.ordinal = input.ordinal
@@ -196,8 +224,9 @@ enum V2RoomWriteDirectProjectionPath {
                        WHERE needed.ordinal = input.ordinal
                    ) THEN EXISTS (
                        SELECT 1 FROM pair_update
-                       WHERE pair_update.ordinal = input.ordinal
-                   ) ELSE TRUE END AS pair_updated,
+                       WHERE pair_update.room_id = input.room_id
+                   ) AND (SELECT count(*) FROM pair_update) = (SELECT count(*) FROM pair_mutations)
+                     ELSE TRUE END AS pair_updated,
                    (SELECT count(*)::bigint FROM projection_events) AS expected_event_count,
                    (SELECT count(*)::bigint FROM log_insert) AS inserted_event_count
             FROM input
@@ -239,13 +268,21 @@ extension V2RoomWriteDirectProjectionPath {
         guard !senderProfileVisibleToRecipient || senderCanSend != true else {
             return .init(senderCapabilityInserted: false, recipientProfileInserted: false)
         }
+        let profiles: SQLQueryString = senderProfileVisibleToRecipient ? """
+            SELECT NULL::text AS public_handle, NULL::text AS display_name,
+                   NULL::text AS account_kind, NULL::bigint AS revision,
+                   NULL::timestamptz AS updated_at
+            WHERE FALSE
+            """ : """
+            SELECT public_handle, display_name, account_kind, revision, updated_at
+            FROM im_v2.public_user_profiles
+            WHERE user_id = \(bind: senderID)
+              AND state = 'active'
+              AND revision > 0
+            """
         guard let mutation = try await sql.raw("""
             WITH profile AS MATERIALIZED (
-                SELECT public_handle, display_name, account_kind, revision, updated_at
-                FROM im_v2.public_user_profiles
-                WHERE user_id = \(bind: senderID)
-                  AND state = 'active'
-                  AND revision > 0
+                \(profiles)
             ), needed AS MATERIALIZED (
                 SELECT \(bind: senderID)::uuid AS user_id,
                        'direct_sending_capability'::text AS projection_kind,
@@ -308,7 +345,7 @@ extension V2RoomWriteDirectProjectionPath {
                    (SELECT count(*) FROM log_insert) AS inserted_count,
                    (SELECT count(*) FROM pair_update) AS pair_count
             """).first(decoding: DirectRoomProfileMutationRow.self),
-              mutation.profileExists,
+              senderProfileVisibleToRecipient || mutation.profileExists,
               mutation.insertedCount == mutation.neededCount,
               mutation.pairCount == 1,
               (0...2).contains(mutation.neededCount),

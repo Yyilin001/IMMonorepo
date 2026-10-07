@@ -26,7 +26,6 @@ public struct V2MessageReactionPending:Equatable,Sendable {
     public let preparationPaused:Bool
     public let expiredUnsubmitted:Bool
 }
-public enum V2MessageReactionPreparationError:Error,Sendable { case deferred }
 
 extension GRDBV2LocalSyncStore {
     static let messageReactionWorkSchemaSQL="""

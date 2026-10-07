@@ -10,6 +10,8 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     private let token: V2RoomActivationToken
     private let writes: PostgresV2RoomWriteStore
     private let sendOperations: PostgresV2MessageSendOperationStore?
+    private let sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?
+    private let directSendPreparation: V2RoomSendPreparation?
     private let mutations: PostgresV2MessageMutationOperationStore?
     private let reactionOperations: PostgresV2MessageReactionOperationStore?
     private let capacityProfile: V2CapacityProfile
@@ -22,11 +24,15 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
          maximumEditBytes: Int, now: @escaping @Sendable () -> Date,
          mutations: PostgresV2MessageMutationOperationStore?,
          sendOperations: PostgresV2MessageSendOperationStore?,
-         reactionOperations: PostgresV2MessageReactionOperationStore?) throws {
+         reactionOperations: PostgresV2MessageReactionOperationStore?,
+         sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?,
+         directSendPreparation: V2RoomSendPreparation?) throws {
         let scope = try V2RoomActivationWriteScope(tokens: [token])
         self.token = token
         self.writes = writes.usingActivationScope(scope)
         self.sendOperations = sendOperations
+        self.sendOperationOwnerBatcher = sendOperationOwnerBatcher
+        self.directSendPreparation = directSendPreparation
         self.mutations = mutations
         self.reactionOperations = reactionOperations
         self.capacityProfile = capacityProfile
@@ -82,6 +88,35 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
         } catch { throw v2NormalizeMessageOperationClosed(error) }
     }
 
+    func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
+                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
+        V2SendPathTrace.current?.mark("persistence_prepare_enter")
+        guard let sendOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        do {
+            let startedAt = ContinuousClock.now
+            let prepared: V2PreparedMessageSendBatch
+            if let prepare = directSendPreparation {
+                prepared = try await prepare(commands, token, deadline)
+            } else {
+                prepared = try await sendOperations.prepareSendBatch(commands, token: token,
+                    deadline: deadline, now: now)
+            }
+            V2SendPathTrace.current?.record("permission_preparation", from: startedAt)
+            let trace = V2SendPathTrace.current
+            return .init {
+                try await V2SendPathTrace.$current.withValue(trace) {
+                do {
+                    if let batcher = self.sendOperationOwnerBatcher {
+                        return try await batcher.execute(prepared)
+                    }
+                    return try await sendOperations.executePreparedSendBatch(prepared,
+                        capacityProfile: self.capacityProfile, identifiers: self.identifiers, now: self.now)
+                } catch { throw v2NormalizeMessageOperationClosed(error) }
+                }
+            }
+        } catch { throw v2NormalizeMessageOperationClosed(error) }
+    }
+
     func accept(_ request: V2RoomWriteRequest) async throws -> V2RoomMessagingResult {
         do {
             return .send(.init(try await writes.accept(command: request.command,
@@ -100,11 +135,15 @@ public extension V2RoomMessagingExecutor {
          now: @escaping @Sendable () -> Date = Date.init,
          mutations: PostgresV2MessageMutationOperationStore? = nil,
          sendOperations: PostgresV2MessageSendOperationStore? = nil,
+         sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher? = nil,
+         directSendPreparation: V2RoomSendPreparation? = nil,
          reactionOperations: PostgresV2MessageReactionOperationStore? = nil) throws {
         let adapter = try PostgresV2RoomMessagingAdapter(token: token, writes: writes,
             capacityProfile: capacityProfile, identifiers: identifiers,
             maximumEditBytes: maximumEditBytes, now: now, mutations: mutations,
-            sendOperations: sendOperations, reactionOperations: reactionOperations)
+            sendOperations: sendOperations, reactionOperations: reactionOperations,
+            sendOperationOwnerBatcher: sendOperationOwnerBatcher,
+            directSendPreparation: directSendPreparation)
         try self.init(token: token, persistence: adapter, capacityProfile: capacityProfile,
             limits: limits, maximumEditBytes: maximumEditBytes,
             identifiers: identifiers, now: now)

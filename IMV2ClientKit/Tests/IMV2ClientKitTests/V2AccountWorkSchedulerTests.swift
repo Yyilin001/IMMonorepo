@@ -290,6 +290,30 @@ final class V2AccountWorkSchedulerTests: XCTestCase, @unchecked Sendable {
         var bucket = V2NetworkRetryTokenBucket(now: 0)
         for _ in 0..<5 { XCTAssertTrue(bucket.consume(now: 0)) }; XCTAssertFalse(bucket.consume(now: 1)); XCTAssertTrue(bucket.consume(now: 2))
     }
+    func testServerCooldownRetainsJitterAndTotalBudget() {
+        let started = Date(timeIntervalSince1970: 100)
+        let policy = V2NetworkWorkPolicy.interactiveRead
+        let floor = started.addingTimeInterval(5)
+        let spread = [0.0, 0.5, 1.0].map {
+            policy.nextAttempt(now: started, startedAt: started, attemptsCompleted: 1,
+                randomUnit: $0, serverRetryNotBefore: floor)
+        }
+        XCTAssertEqual(spread, [floor, floor.addingTimeInterval(0.25), floor.addingTimeInterval(0.5)])
+        XCTAssertEqual(policy.nextAttempt(now: started, startedAt: started,
+            attemptsCompleted: 1, randomUnit: 0.5), started.addingTimeInterval(0.25))
+        let nearDeadline = started.addingTimeInterval(9.75)
+        XCTAssertEqual(policy.nextAttempt(now: started, startedAt: started,
+            attemptsCompleted: 1, randomUnit: 0.5, serverRetryNotBefore: nearDeadline),
+            started.addingTimeInterval(9.875))
+        XCTAssertNil(policy.nextAttempt(now: started, startedAt: started,
+            attemptsCompleted: 1, randomUnit: 1, serverRetryNotBefore: nearDeadline))
+        XCTAssertNil(policy.nextAttempt(now: started, startedAt: started,
+            attemptsCompleted: 1, randomUnit: 0, serverRetryNotBefore: started.addingTimeInterval(10)))
+        XCTAssertEqual(policy.nextAttempt(now: started, startedAt: started,
+            attemptsCompleted: 1, randomUnit: -.infinity, serverRetryNotBefore: floor), floor)
+        XCTAssertEqual(policy.nextAttempt(now: started, startedAt: started,
+            attemptsCompleted: 1, randomUnit: .infinity, serverRetryNotBefore: floor), floor.addingTimeInterval(0.5))
+    }
     func testQualitySeparatesServicesAndIgnoresCooldown() async {
         let observer = V2QualityObserver()
         for window in 0..<2 { for index in 0..<5 { _ = await observer.record(.timeout, service: "tcp", now: Double(window * 10 + index)) } }

@@ -38,12 +38,31 @@ struct PostgresV2DirectAuthorizationReceiptTests {
                     try await store.abort(changed, now: now, database: database)
                 }
             }
+            // Leave a gap: a missing exact generation must reject a future
+            // terminal attempt, while old exact proofs still take priority.
+            #expect(try await store.abort(copy(attempt, generation: 4), now: now, database: database) == aborted)
+            #expect(try await store.abort(attempt, now: now, database: database) == aborted)
+            for changed in [copy(attempt, generation: 3),
+                            copy(attempt, generation: 1, recipientID: UUID()),
+                            copy(attempt, generation: 1, ownerShardID: "other-owner"),
+                            copy(attempt, generation: 1, ownerEpoch: 1),
+                            copy(attempt, generation: 5, recipientID: UUID())] {
+                await #expect(throws: V2DirectAuthorizationReceiptError.identityConflict) {
+                    try await database.transaction { try await store.checkAttempt(changed, transaction: $0) }
+                }
+            }
+            // Prior proofs bind recipient/fingerprint, not the new route.
+            // The caller still performs the independent owner fence afterward.
+            try await database.transaction { transaction async throws -> Void in
+                let rerouted = copy(attempt, generation: 5, ownerShardID: "other-owner", ownerEpoch: 1)
+                #expect(try await store.checkAttempt(rerouted, transaction: transaction) == nil)
+            }
             for mutation in ["UPDATE \(schema).direct_authorization_receipts SET generation = 99",
                              "DELETE FROM \(schema).direct_authorization_receipts"] {
                 await #expect(throws: (any Error).self) { try await sql.raw("\(unsafeRaw: mutation)").run() }
             }
             let count = try #require(try await sql.raw("SELECT count(*) AS value FROM \(unsafeRaw: schema).direct_authorization_receipts").first(decoding: Count.self))
-            #expect(count.value == 2)
+            #expect(count.value == 3)
         }
     }
 
@@ -155,10 +174,12 @@ struct PostgresV2DirectAuthorizationReceiptTests {
         return attempt
     }
 
-    private func copy(_ attempt: V2DirectAuthorizationAttempt, generation: Int64, fingerprint: Data? = nil) -> V2DirectAuthorizationAttempt {
+    private func copy(_ attempt: V2DirectAuthorizationAttempt, generation: Int64, fingerprint: Data? = nil,
+                      recipientID: UUID? = nil, ownerShardID: String? = nil, ownerEpoch: Int64? = nil) -> V2DirectAuthorizationAttempt {
         .init(roomID: attempt.roomID, senderID: attempt.senderID, clientMessageID: attempt.clientMessageID,
-            generation: generation, recipientID: attempt.recipientID, ownerShardID: attempt.ownerShardID,
-            ownerEpoch: attempt.ownerEpoch, fingerprint: fingerprint ?? attempt.fingerprint)
+            generation: generation, recipientID: recipientID ?? attempt.recipientID,
+            ownerShardID: ownerShardID ?? attempt.ownerShardID,
+            ownerEpoch: ownerEpoch ?? attempt.ownerEpoch, fingerprint: fingerprint ?? attempt.fingerprint)
     }
 
     private func insertCompletion(_ attempt: V2DirectAuthorizationAttempt, eventID: UUID, sql: any SQLDatabase, schema: String) async throws {

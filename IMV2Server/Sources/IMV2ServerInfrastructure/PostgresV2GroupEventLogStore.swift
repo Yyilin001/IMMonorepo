@@ -79,208 +79,12 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
             }
         }
 
-        let acceptance = v2MessageAcceptanceFactQuery(
-            messageID: "CASE WHEN event.event_type IN ('message.edited', 'message.withdrawn', 'message.reaction_changed') THEN (event.payload->>'message_id')::uuid ELSE NULL END",
-            roomID: "event.room_id"
-        )
-        let rows = try await sql.raw("""
-            WITH room AS MATERIALIZED (
-                SELECT rooms.room_sequence, rooms.room_kind,
-                       rooms.log_trimmed_through_room_sequence,
-                       EXISTS (
-                           SELECT 1 FROM im_v2.room_memberships AS membership
-                           WHERE membership.room_id = rooms.room_id
-                             AND membership.user_id = \(bind: actorUUID)
-                             AND membership.joined_revision <= rooms.membership_revision
-                             AND (membership.left_revision IS NULL OR membership.left_revision > rooms.membership_revision)
-                       ) AS actor_is_active_member
-                FROM im_v2.rooms AS rooms
-                WHERE rooms.room_id = \(bind: roomUUID)
-            ), event_candidates AS MATERIALIZED (
-                SELECT event.event_id, event.room_id, event.room_sequence, event.event_type,
-                       event.payload, event.committed_membership_revision,
-                       NULL::uuid AS message_id, FALSE AS is_message_row
-                FROM im_v2.room_events AS event
-                WHERE event.room_id = \(bind: roomUUID)
-                  AND event.room_sequence > \(bind: cursor.signedValue)
-                ORDER BY event.room_sequence
-                LIMIT \(bind: pageSize + 1)
-            ), message_candidates AS MATERIALIZED (
-                SELECT message.accepted_event_id AS event_id, message.room_id, message.room_sequence,
-                       'message.accepted' AS event_type, NULL::jsonb AS payload,
-                       message.accepted_membership_revision AS committed_membership_revision,
-                       message.message_id, TRUE AS is_message_row
-                FROM im_v2.messages AS message
-                WHERE message.room_id = \(bind: roomUUID)
-                  AND message.accepted_event_storage = 'message_row'
-                  AND message.timeline_sequence > \(bind: cursor.signedValue)
-                ORDER BY message.timeline_sequence
-                LIMIT \(bind: pageSize + 1)
-            ), candidates AS MATERIALIZED (
-                SELECT * FROM event_candidates
-                UNION ALL
-                SELECT * FROM message_candidates
-                ORDER BY room_sequence
-                LIMIT \(bind: pageSize + 1)
-            ), scan_window AS MATERIALIZED (
-                -- The extra candidate proves there is more work; it is not
-                -- authorized, hydrated or consumed by this page.
-                SELECT * FROM candidates ORDER BY room_sequence LIMIT \(bind: pageSize)
-            ), scan_progress AS MATERIALIZED (
-                SELECT (SELECT count(*) FROM candidates) > \(bind: pageSize) AS has_more,
-                       (SELECT max(room_sequence) FROM scan_window) AS scanned_through
-            ), visible_events AS MATERIALIZED (
-                SELECT event.event_id, event.room_sequence, event.event_type,
-                       event.payload, event.message_id, event.is_message_row,
-                       (event.event_type NOT IN ('message.edited', 'message.withdrawn', 'message.reaction_changed')
-                        OR accepted.message_id IS NOT NULL) AS authority_complete
-                FROM room
-                JOIN scan_window AS event ON TRUE
-                LEFT JOIN LATERAL (\(acceptance)) AS accepted ON TRUE
-                WHERE room.room_kind IN ('group', 'direct')
-                  AND room.actor_is_active_member
-                  AND event.room_sequence > \(bind: cursor.signedValue)
-                  AND EXISTS (
-                      SELECT 1 FROM im_v2.room_memberships AS membership
-                      WHERE membership.room_id = event.room_id
-                        AND membership.user_id = \(bind: actorUUID)
-                        AND membership.joined_revision <= event.committed_membership_revision
-                        AND (membership.left_revision IS NULL OR membership.left_revision > event.committed_membership_revision)
-                  )
-                  AND (
-                      event.event_type NOT IN ('message.edited', 'message.withdrawn', 'message.reaction_changed')
-                      -- Keep unknown authority as an incomplete row: fail the
-                      -- page instead of silently skipping its cursor range.
-                      OR accepted.message_id IS NULL
-                      OR EXISTS (
-                          SELECT 1 FROM im_v2.room_memberships AS original_membership
-                          WHERE original_membership.room_id = event.room_id
-                            AND original_membership.user_id = \(bind: actorUUID)
-                            AND original_membership.joined_revision <= accepted.accepted_membership_revision
-                            AND (original_membership.left_revision IS NULL
-                                 OR original_membership.left_revision > accepted.accepted_membership_revision)
-                      )
-                  )
-                ORDER BY event.room_sequence
-            )
-            SELECT room.room_kind, room.actor_is_active_member,
-                   CASE WHEN scan_progress.has_more THEN scan_progress.scanned_through
-                        ELSE room.room_sequence END AS scanned_through_room_sequence,
-                   scan_progress.has_more AS has_more_candidates,
-                   room.log_trimmed_through_room_sequence AS trimmed_through_room_sequence,
-                   event.event_id, event.room_sequence, event.event_type,
-                   CASE
-                       WHEN event.is_message_row
-                       THEN jsonb_build_object(
-                           'event_type', 'message.accepted',
-                           'message_id', message.message_id::text,
-                           'room_id', message.room_id::text,
-                           'room_sequence', event.room_sequence,
-                           'timeline_sequence', message.timeline_sequence,
-                           'sender_user_id', message.sender_user_id::text,
-                           'text', COALESCE(snapshot.text_body, message.text_body),
-                           'media_ids', '[]'::jsonb,
-                           'media_presentations', '[]'::jsonb,
-                           'mention_user_ids', '[]'::jsonb,
-                           'mentions_everyone', FALSE,
-                           'entities', COALESCE(snapshot.rich_entities, message.rich_entities),
-                           'reply_to_message_id', message.reply_to_message_id::text,
-                           'forwarded_from_message_id', message.forwarded_from_message_id::text,
-                           'forwarded_from_user_id', message.forwarded_from_user_id::text,
-                           'message_revision', 1,
-                           'server_created_at_ms',
-                               floor(extract(epoch FROM message.created_at) * 1000)::bigint
-                       )
-                       WHEN event.event_type = 'message.accepted'
-                        AND event.payload->>'payload_storage' = 'message_reference_v1'
-                       THEN jsonb_build_object(
-                           'event_type', 'message.accepted',
-                           'message_id', message.message_id::text,
-                           'room_id', message.room_id::text,
-                           'room_sequence', event.room_sequence,
-                           'timeline_sequence', message.timeline_sequence,
-                           'sender_user_id', message.sender_user_id::text,
-                           'text', COALESCE(snapshot.text_body, message.text_body),
-                           'media_ids', '[]'::jsonb,
-                           'media_presentations', '[]'::jsonb,
-                           'mention_user_ids', '[]'::jsonb,
-                           'mentions_everyone', FALSE,
-                           'entities', COALESCE(snapshot.rich_entities, message.rich_entities),
-                           'reply_to_message_id', message.reply_to_message_id::text,
-                           'forwarded_from_message_id', message.forwarded_from_message_id::text,
-                           'forwarded_from_user_id', message.forwarded_from_user_id::text,
-                           'message_revision', (event.payload->>'message_revision')::bigint,
-                           'server_created_at_ms',
-                               (event.payload->>'server_created_at_ms')::bigint
-                       )
-                       ELSE event.payload
-                   END::text AS payload_json,
-                   (CASE
-                       WHEN event.is_message_row
-                       THEN message.message_id IS NOT NULL
-                            AND (snapshot.message_id IS NOT NULL
-                                 OR message.content_revision = 1)
-                       WHEN event.event_type = 'message.accepted'
-                        AND event.payload->>'payload_storage' = 'message_reference_v1'
-                       THEN message.message_id IS NOT NULL
-                            AND (
-                                snapshot.message_id IS NOT NULL
-                                OR message.content_revision = (event.payload->>'message_revision')::bigint
-                            )
-                       ELSE TRUE
-                   END) AND COALESCE(event.authority_complete, TRUE) AS payload_is_complete
-            FROM room
-            CROSS JOIN scan_progress
-            LEFT JOIN visible_events AS event ON TRUE
-            LEFT JOIN im_v2.messages AS message
-              ON message.message_id = COALESCE(
-                    event.message_id,
-                    (event.payload->>'message_id')::uuid
-                 )
-             AND message.room_id = \(bind: roomUUID)
-             AND message.room_sequence = event.room_sequence
-            LEFT JOIN im_v2.message_content_versions AS snapshot
-              ON snapshot.message_id = message.message_id
-             AND snapshot.message_revision = CASE
-                 WHEN event.is_message_row THEN 1
-                 ELSE (event.payload->>'message_revision')::bigint
-             END
-            ORDER BY event.room_sequence NULLS LAST
-            """).all(decoding: GroupEventLogRow.self)
-        guard let room = rows.first else { throw V2GroupEventLogError.roomNotFound }
-        guard room.roomKind == "group" || room.roomKind == "direct" else {
-            throw V2GroupEventLogError.roomNotFound
-        }
-        guard room.actorIsActiveMember else { throw V2GroupEventLogError.actorNotMember }
+        let rows = try await sql.raw(v2GroupEventPullQuery(room: "\(bind: roomUUID)",
+            viewer: "\(bind: actorUUID)", cursor: "\(bind: cursor.signedValue)",
+            pageLimit: "\(bind: pageSize)", candidateLimit: "\(bind: pageSize + 1)"))
+            .all(decoding: GroupEventLogRow.self)
 
-        let eventRows = rows.compactMap { $0.eventID == nil ? nil : $0 }
-        let hasMore = room.hasMoreCandidates
-        let entries: [V2GroupEventLogEntry] = try eventRows.map { row in
-            guard let eventID = row.eventID,
-                  let roomSequence = row.roomSequence,
-                  let eventType = row.eventType,
-                  let payloadJSON = row.payloadJSON,
-                  row.payloadIsComplete,
-                  let payload = payloadJSON.data(using: .utf8)
-            else { throw V2GroupEventLogError.corruptPersistenceState }
-            return try V2GroupEventLogEntry(
-                sourceEventID: try EventID(eventID.uuidString),
-                roomSequence: try groupEventUnsigned(roomSequence),
-                projectionKind: groupEventProjectionKind(for: eventType),
-                payload: payload
-            )
-        }
-        // Advance through the inspected candidate window, including invisible
-        // events. Only an exhausted pair of sources may advance to the room head.
-        let trimmedThrough = try groupEventUnsigned(room.trimmedThroughRoomSequence)
-        let next = max(afterRoomSequence, try groupEventUnsigned(room.scannedThroughRoomSequence))
-        return try V2GroupEventLogPage(
-            roomID: roomID,
-            events: entries,
-            nextRoomSequence: next,
-            hasMore: hasMore,
-            logTrimmedThroughRoomSequence: trimmedThrough
-        )
+        return try v2DecodeGroupEventPull(rows, roomID: roomID, afterRoomSequence: afterRoomSequence)
     }
 
     package func pullPrepared(
@@ -472,7 +276,7 @@ private struct DirectRoomCacheAccessRow: Decodable {
     }
 }
 
-private struct GroupEventLogRow: Decodable {
+struct GroupEventLogRow: Decodable {
     let hasMoreCandidates: Bool
     let scannedThroughRoomSequence: Int64
     let trimmedThroughRoomSequence: Int64
@@ -502,7 +306,7 @@ private func groupEventUnsigned(_ value: Int64) throws -> UInt64 {
     return UInt64(value)
 }
 
-private func groupEventProjectionKind(for eventType: String) -> String {
+func groupEventProjectionKind(for eventType: String) -> String {
     switch eventType {
     case "room.created": "room"
     case "membership_changed": "membership"
@@ -511,4 +315,43 @@ private func groupEventProjectionKind(for eventType: String) -> String {
     case "message.pinned_changed", "group.announcement_changed", "group.role_permissions_changed", "group.member_role_changed", "group.avatar_changed", "group.nickname_changed": "group_capability"
     default: "message"
     }
+}
+
+func v2DecodeGroupEventPull(_ rows: [GroupEventLogRow], roomID: RoomID,
+    afterRoomSequence: UInt64
+) throws -> V2GroupEventLogPage {
+        guard let room = rows.first else { throw V2GroupEventLogError.roomNotFound }
+        guard room.roomKind == "group" || room.roomKind == "direct" else {
+            throw V2GroupEventLogError.roomNotFound
+        }
+        guard room.actorIsActiveMember else { throw V2GroupEventLogError.actorNotMember }
+
+        let eventRows = rows.compactMap { $0.eventID == nil ? nil : $0 }
+        let hasMore = room.hasMoreCandidates
+        let entries: [V2GroupEventLogEntry] = try eventRows.map { row in
+            guard let eventID = row.eventID,
+                  let roomSequence = row.roomSequence,
+                  let eventType = row.eventType,
+                  let payloadJSON = row.payloadJSON,
+                  row.payloadIsComplete,
+                  let payload = payloadJSON.data(using: .utf8)
+            else { throw V2GroupEventLogError.corruptPersistenceState }
+            return try V2GroupEventLogEntry(
+                sourceEventID: try EventID(eventID.uuidString),
+                roomSequence: try groupEventUnsigned(roomSequence),
+                projectionKind: groupEventProjectionKind(for: eventType),
+                payload: payload
+            )
+        }
+        // Advance through the inspected candidate window, including invisible
+        // events. Only an exhausted pair of sources may advance to the room head.
+        let trimmedThrough = try groupEventUnsigned(room.trimmedThroughRoomSequence)
+        let next = max(afterRoomSequence, try groupEventUnsigned(room.scannedThroughRoomSequence))
+        return try V2GroupEventLogPage(
+            roomID: roomID,
+            events: entries,
+            nextRoomSequence: next,
+            hasMore: hasMore,
+            logTrimmedThroughRoomSequence: trimmedThrough
+        )
 }

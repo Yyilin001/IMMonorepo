@@ -51,6 +51,62 @@ struct V2HostDatabaseWorkAdmissionTests {
         await admission.release(.foregroundWrite)
     }
 
+    @Test("durable preparation settles before owner-write admission")
+    func durablePreparationDoesNotHoldOwnerWrite() async throws {
+        let preparation = controller(), owner = controller()
+        let prepareGate = HostPreparationGate(), executeGate = HostPreparationGate()
+        let task = Task {
+            try await withAdmittedPreparationAndExecution(
+                preparationAdmission: preparation, ownerAdmission: owner,
+                deadline: .now + .seconds(10)) {
+                await prepareGate.enter()
+                return .init {
+                    await executeGate.enter()
+                    return []
+                }
+            }
+        }
+        await prepareGate.waitUntilEntered()
+        #expect(await preparation.snapshot().sync.inFlight == 1)
+        #expect(await owner.snapshot().foregroundWrite.inFlight == 0)
+        await prepareGate.release()
+        await executeGate.waitUntilEntered()
+        #expect(await preparation.snapshot().sync.inFlight == 0)
+        #expect(await owner.snapshot().foregroundWrite.inFlight == 1)
+        await executeGate.release()
+        #expect(try await task.value.isEmpty)
+        #expect(await owner.snapshot().foregroundWrite.inFlight == 0)
+    }
+
+    @Test("cancelled preparation retains its permit until actual exit")
+    func cancelledPreparationWaitsForActualExit() async throws {
+        let preparation = controller(), owner = controller()
+        let gate = HostPreparationGate(), executed = HostSQLCounter()
+        let task = Task {
+            try await withAdmittedPreparationAndExecution(
+                preparationAdmission: preparation, ownerAdmission: owner,
+                deadline: .now + .seconds(10)) {
+                // Models a borrowed database task which cannot finish merely
+                // because its caller has been cancelled.
+                await gate.enter()
+                try Task.checkCancellation()
+                return .init {
+                    await executed.record()
+                    return []
+                }
+            }
+        }
+        await gate.waitUntilEntered()
+        task.cancel()
+        #expect(await preparation.snapshot().sync.inFlight == 1)
+        #expect(await owner.snapshot().foregroundWrite.admittedRequests == 0)
+        await gate.release()
+        await #expect(throws: CancellationError.self) { try await task.value }
+        #expect(await preparation.snapshot().sync.inFlight == 0)
+        #expect(await owner.snapshot().foregroundWrite.admittedRequests == 0)
+        #expect(await executed.count == 0)
+    }
+
     @Test("shorter admission policy timeout reports overload without SQL")
     func policyTimeoutDoesNotClaimCallerDeadlineExpired() async throws {
         let admission = controller(timeout: .milliseconds(20))
@@ -72,4 +128,50 @@ struct V2HostDatabaseWorkAdmissionTests {
 private actor HostSQLCounter {
     private(set) var count = 0
     func record() { count += 1 }
+}
+
+private actor HostPreparationGate {
+    private var entered = false
+    private var released = false
+    private var enteredWaiters: [CheckedContinuation<Void, Never>] = []
+    private var completion: CheckedContinuation<Void, Never>?
+
+    func enter() async {
+        entered = true
+        let waiters = enteredWaiters
+        enteredWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        if released { return }
+        await withCheckedContinuation { completion = $0 }
+    }
+
+    func waitUntilEntered() async {
+        if entered { return }
+        await withCheckedContinuation { enteredWaiters.append($0) }
+    }
+
+    func release() {
+        released = true
+        completion?.resume()
+        completion = nil
+    }
+}
+
+// Exercise structured admission cancellation independently of room sending.
+/// A room turn keeps ownership throughout both stages. Each admission permit
+/// follows its actual structured operation, including cancellation settlement.
+private func withAdmittedPreparationAndExecution(
+    preparationAdmission: V2DatabaseWorkAdmissionController?,
+    ownerAdmission: V2DatabaseWorkAdmissionController?,
+    deadline: ContinuousClock.Instant,
+    prepare: @Sendable () async throws -> V2PreparedRoomSendOperationBatch
+) async throws -> [V2RoomMessagingResult] {
+    V2SendPathTrace.current?.mark("prepared_batch_enter")
+    let prepared = try await v2WithAdmittedRoomDatabaseWork(preparationAdmission,
+        workClass: .sync, callerDeadline: deadline, operation: prepare)
+    V2SendPathTrace.current?.mark("prepared_batch_ready")
+    return try await v2WithAdmittedRoomDatabaseWork(ownerAdmission,
+        workClass: .foregroundWrite, callerDeadline: deadline) {
+        try await prepared.execute()
+    }
 }

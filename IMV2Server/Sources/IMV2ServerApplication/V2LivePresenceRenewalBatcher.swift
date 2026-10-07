@@ -44,15 +44,23 @@ public actor V2LivePresenceRenewalBatcher {
         var request: V2LivePresenceLeaseRenewalRequest
         /// 等待本次结果的多个续期。
         var continuations: [Generation: CheckedContinuation<V2LivePresenceLeaseRefresh, any Error>]
+        var completion: (@Sendable (Result<V2LivePresenceLeaseRefresh, any Error>) async -> Void)? = nil
     }
 
     private let leases: any V2LivePresenceLeaseManaging
     private let configuration: Configuration
     private var pending: [UUID: PendingRenewal] = [:]
+    private var order: [UUID] = []
+    private var orderOffset = 0
     private var scheduledFlushID: Generation?
     private var scheduledFlush: Task<Void, Never>?
     private var scheduledFlushIsImmediate = false
     private var nextGeneration: Generation = 0
+    private var active = false
+    private var closed = false
+    private var finishTask: Task<Void, Never>?
+    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+    private let maximumPendingConnections: Int
     private var submittedRequests: UInt64 = 0
     private var executedBatches: UInt64 = 0
     private var failedBatches: UInt64 = 0
@@ -65,8 +73,11 @@ public actor V2LivePresenceRenewalBatcher {
     ///   - configuration: 攒批配置。
     public init(
         leases: any V2LivePresenceLeaseManaging,
-        configuration: Configuration = .init()
+        configuration: Configuration = .init(),
+        maximumPendingConnections: Int = 100_000
     ) {
+        precondition(maximumPendingConnections > 0)
+        self.maximumPendingConnections = maximumPendingConnections
         self.leases = leases
         self.configuration = configuration
     }
@@ -91,6 +102,7 @@ public actor V2LivePresenceRenewalBatcher {
         now: Date
     ) async throws -> V2LivePresenceLeaseRefresh {
         try Task.checkCancellation()
+        guard !closed, pending[connectionID] != nil || pending.count < maximumPendingConnections else { throw CancellationError() }
         guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
         let continuationID = makeGeneration()
         return try await withTaskCancellationHandler {
@@ -106,14 +118,15 @@ public actor V2LivePresenceRenewalBatcher {
                     existing.continuations[continuationID] = continuation
                     pending[connectionID] = existing
                 } else {
+                    order.append(connectionID)
                     pending[connectionID] = .init(
                         request: request,
                         continuations: [continuationID: continuation]
                     )
                 }
-                if pending.count >= configuration.maximumBatchSize {
+                if !active && pending.count >= configuration.maximumBatchSize {
                     if !scheduledFlushIsImmediate { scheduleFlush(after: .zero) }
-                } else if scheduledFlush == nil {
+                } else if !active && scheduledFlush == nil {
                     scheduleFlush(after: configuration.maximumDelay)
                 }
             }
@@ -135,18 +148,49 @@ public actor V2LivePresenceRenewalBatcher {
         )
     }
 
-    /// 结束批处理并以取消错误结束全部等待者。
-    ///
-    /// 用于进程关闭：取消已安排的刷新任务，并把所有未完成的等待者全部唤醒为取消状态，
-    /// 避免关闭过程中出现悬挂的续租调用。
-    public func finish() {
-        scheduledFlush?.cancel()
-        scheduledFlush = nil
-        scheduledFlushID = nil
+    /// Enqueues one latest heartbeat per connection; no task or waiter per heartbeat.
+    public func enqueue(identity: V2AuthenticatedConnection, connectionID: UUID, now: Date,
+        completion: @escaping @Sendable (Result<V2LivePresenceLeaseRefresh, any Error>) async -> Void) -> Bool {
+        guard !closed, v2PostgresTimestampCanEncode(now),
+              pending[connectionID] != nil || pending.count < maximumPendingConnections else { return false }
+        submittedRequests &+= 1
+        if var item = pending[connectionID] {
+            if item.request.now <= now {
+                item.request = .init(identity: identity, connectionID: connectionID, now: now)
+                item.completion = completion
+            }
+            pending[connectionID] = item
+        } else {
+            order.append(connectionID)
+            pending[connectionID] = .init(request: .init(identity: identity, connectionID: connectionID, now: now),
+                continuations: [:], completion: completion)
+        }
+        if !active && scheduledFlush == nil { scheduleFlush(after: configuration.maximumDelay) }
+        if !active && pending.count >= configuration.maximumBatchSize && !scheduledFlushIsImmediate { scheduleFlush(after: .zero) }
+        return true
+    }
+
+    /// Closes admission and shares one drain through actual SQL and callbacks.
+    public func finish() async {
+        if let finishTask { await finishTask.value; return }
+        closed = true
+        let task = Task { await self.finishImpl() }
+        finishTask = task
+        await task.value
+    }
+
+    private func finishImpl() async {
+        closed = true
+        scheduledFlush?.cancel(); scheduledFlush = nil; scheduledFlushID = nil
         scheduledFlushIsImmediate = false
-        let remaining = pending.values.flatMap { $0.continuations.values }
-        pending.removeAll(keepingCapacity: false)
-        for continuation in remaining { continuation.resume(throwing: CancellationError()) }
+        let remaining = Array(pending.values)
+        pending.removeAll(); order.removeAll(); orderOffset = 0
+        for item in remaining {
+            for continuation in item.continuations.values { continuation.resume(throwing: CancellationError()) }
+            await item.completion?(.failure(CancellationError()))
+        }
+        guard active else { return }
+        await withCheckedContinuation { drainWaiters.append($0) }
     }
 
     /// 安排一次延迟或立即刷新。
@@ -173,18 +217,23 @@ public actor V2LivePresenceRenewalBatcher {
     ///
     /// - Parameter scheduledID: 触发本次刷新的代数标识。
     private func flush(scheduledID: Generation) async {
-        guard scheduledFlushID == scheduledID else { return }
+        guard !closed, !active, scheduledFlushID == scheduledID else { return }
         scheduledFlushID = nil
         scheduledFlush = nil
         scheduledFlushIsImmediate = false
-        let connectionIDs = Array(pending.keys.prefix(configuration.maximumBatchSize))
+        var connectionIDs: [UUID] = []
+        while orderOffset < order.count && connectionIDs.count < configuration.maximumBatchSize {
+            let id = order[orderOffset]; orderOffset += 1
+            if pending[id] != nil { connectionIDs.append(id) }
+        }
+        if orderOffset > 512 && orderOffset * 2 > order.count { order.removeFirst(orderOffset); orderOffset = 0 }
         var batch: [UUID: PendingRenewal] = [:]
         batch.reserveCapacity(connectionIDs.count)
         for connectionID in connectionIDs {
             batch[connectionID] = pending.removeValue(forKey: connectionID)
         }
-        if !pending.isEmpty { scheduleFlush(after: .zero) }
         guard !batch.isEmpty else { return }
+        active = true
 
         executedBatches &+= 1
         largestBatch = max(largestBatch, batch.count)
@@ -197,18 +246,21 @@ public actor V2LivePresenceRenewalBatcher {
                     outcome: .rejected,
                     allowsOnlinePresence: false
                 )
-                for continuation in item.continuations.values {
-                    continuation.resume(returning: refresh)
-                }
+                for continuation in item.continuations.values { continuation.resume(returning: refresh) }
+                await item.completion?(.success(refresh))
             }
         } catch {
             failedBatches &+= 1
             for item in batch.values {
-                for continuation in item.continuations.values {
-                    continuation.resume(throwing: error)
-                }
+                for continuation in item.continuations.values { continuation.resume(throwing: error) }
+                await item.completion?(.failure(error))
             }
         }
+        active = false
+        if closed {
+            let waiters = drainWaiters; drainWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        } else if !pending.isEmpty { scheduleFlush(after: .zero) }
     }
 
     /// 取消某个连接上的一次等待续期。

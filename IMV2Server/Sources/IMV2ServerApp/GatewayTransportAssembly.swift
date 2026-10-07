@@ -22,8 +22,7 @@ enum GatewayTransportAssembly {
         let connectionRegistry = prepared.frontdoor.connectionRegistry
         let transportMetrics = prepared.frontdoor.transportMetrics
         let gatewayEventLoopLagMetrics = prepared.frontdoor.gatewayEventLoopLagMetrics
-        let messageSendBudget = V2GatewayMessageSendBudget(
-            maximumBytes: configuration.messageSendMaximumInFlightBytesProcess)
+        let messageSendBudget = prepared.frontdoor.messageSendBudget
         let factory = V2GatewayConnectionFactory {
             let session = V2GatewaySession(
                 limits: configuration.connectionLimits,

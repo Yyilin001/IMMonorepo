@@ -1,9 +1,25 @@
+import IMV2ActorContracts
 import IMV2ServerApplication
 import IMV2ServerContracts
 import Foundation
 import IMV2Compression
 import IMV2Core
 import Synchronization
+
+public struct V2GatewayJournalUserControlInterest: Hashable, Sendable {
+    public let connectionID: UUID
+    public let userID: UserID
+    public let deviceID: DeviceID
+    public let lifecycle: UInt64
+    public init(connectionID: UUID, userID: UserID, deviceID: DeviceID, lifecycle: UInt64) {
+        self.connectionID = connectionID; self.userID = userID; self.deviceID = deviceID; self.lifecycle = lifecycle
+    }
+}
+
+public struct V2GatewayJournalUserControlApplied: Sendable {
+    public let source: V2RealtimeJournalSource
+    public let versions: [UserID: UInt64]
+}
 
 /// 已认证实时连接的进程本地索引。
 ///
@@ -14,6 +30,20 @@ public actor V2DeviceConnectionRegistry {
     /// 把它们的不可变路由快照放在注册表 actor 之外，
     /// 使无关房间不会排在连接生命周期与在线状态工作之后。
     private nonisolated let foregroundRoutes = V2ForegroundConnectionRoutes()
+    private nonisolated let journalUserBaseline = Mutex<V2CallbackBox<@Sendable (UserID) async throws -> V2GatewayJournalUserBaselineProof>?>(nil)
+    private var journalDeviceFloors: [V2RealtimeJournalSource: [V2RealtimeJournalDeviceKey: Int64]] = [:]
+    private var journalUserFloors: [V2RealtimeJournalSource: [UUID: V2RealtimeJournalUserControl]] = [:]
+    private nonisolated let journalInterestChanged = Mutex<V2CallbackBox<@Sendable () -> Void>?>(nil)
+    private nonisolated let journalReceiver = Mutex<V2GatewayJournalProjectionReceiver?>(nil)
+    private nonisolated let roomSubscriptionAuthority = Mutex<V2GatewayRoomSubscriptionAuthority?>(nil)
+    private nonisolated let roomSubscriptionHeadWorker = Mutex<V2GatewayRoomSubscriptionHeadWorker?>(nil)
+    private struct RoomSubscriptionConnection {
+        let lifecycle: UUID
+        var scopeGeneration: UInt64?
+        var reference: UUID?
+    }
+    private var roomSubscriptionConnections: [UUID: RoomSubscriptionConnection] = [:]
+    private var roomSubscriptionCoordinator: V2GatewayRoomSubscriptionCoordinator?
     /// 同一 Gateway 创建的每条流都使用这套进程级帧契约。
     ///
     /// 提供之后，前台广播只编码一次并共享不可变字节；
@@ -27,40 +57,94 @@ public actor V2DeviceConnectionRegistry {
     private nonisolated var authorPresentationIngress: V2AuthorPresentationIngress? { authorIngress.withLock { $0 } }
     private let connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy
     private let livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration
-    private var streamsByDevice: [DeviceID: [UUID: V2GatewayByteStream]] = [:]
-    private var streamsByUser: [UserID: [UUID: V2GatewayByteStream]] = [:]
-    private var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
+    private var directory = V2ConnectionDirectory()
+    private nonisolated let onlineRoomStreams = Mutex<[UUID: V2GatewayByteStream]>([:])
+    private var subscriptions = V2ConnectionSubscriptionState()
     private var hasStartedRegistrations = false
     private var accountChangeService: V2AccountRoomChangeService?
+    private var directoryGenerations: [UUID: UInt64] = [:]
+    private nonisolated let directoryDeliveryFences = Mutex<[UUID: UInt64]>([:])
+    private var accountCoverageInstallations: [UUID: UInt64] = [:]
     private var accountChangeTickets: [UUID: V2AccountRoomCoverageIndex.Ticket] = [:]
     /// 每次注册都会获得一个新令牌。
     ///
     /// actor 方法会在外部 await 之后重新校验它，
     /// 使较早的续体无法在注销之后、或同一连接 ID 再次注册之后复活状态。
     private typealias Generation = UInt64
-    private var lifecycleByConnection: [UUID: Generation] = [:]
+    // A physical connection ID cannot be rebound while an older database
+    // admit/renew/remove is still actually settling (including compensation).
+
     /// 前台群组观看关系刻意是进程本地的软状态。
     ///
     /// 在进程或连接失败之后，持久房间事件日志与常规的每用户同步仍是恢复来源。
-    private var streamsByForegroundGroup: [RoomID: [UUID: V2GatewayByteStream]] = [:]
-    private var foregroundGroupByConnection: [UUID: RoomID] = [:]
-    private var foregroundMutationByConnection: [UUID: Generation] = [:]
-    private var foregroundGroupInterestManager: (any V2GroupEventWakeInterestManaging)?
     private var livePresenceLeases: (any V2LivePresenceLeaseManaging)?
-    private var livePresenceRenewals: V2LivePresenceRenewalBatcher?
+    private var leaseController: V2ConnectionLeaseController?
+    private let maximumConnections: Int
+    private var deviceRoomProgressStore: (any V2DeviceRoomProgressStoring)?
+
+    public func installDeviceRoomProgressStore(_ store: any V2DeviceRoomProgressStoring) throws {
+        guard !hasStartedRegistrations, deviceRoomProgressStore == nil else {
+            throw V2ResourceProviderError.configurationInvalid
+        }
+        deviceRoomProgressStore = store
+    }
+
+    func handleDeviceRoomProgress(_ envelope: IMV2Envelope, connectionID: UUID,
+        identity: V2AuthenticatedConnection) async -> IMV2Envelope? {
+        guard case .deviceRoomProgressReport(let report) = envelope.body else { return nil }
+        var response = IMV2Envelope()
+        do {
+            guard !report.rooms.isEmpty, report.rooms.count <= 64,
+                  report.rooms.allSatisfy({ UUID(uuidString: $0.roomID) != nil && $0.appliedThrough <= UInt64(Int64.max) }) else {
+                throw V2RoomRecoveryReadError.invalidRequest
+            }
+            guard let store = deviceRoomProgressStore,
+                  let authority = roomSubscriptionAuthority.withLock({ $0 }),
+                  let lifecycle = directory.lifecycleByConnection[connectionID],
+                  directory.identityByConnection[connectionID]?.userID == identity.userID,
+                  directory.identityByConnection[connectionID]?.deviceID == identity.deviceID else {
+                throw V2RoomRecoveryReadError.invalidCursor
+            }
+            let progress = try await authority.validateDeviceProgress(connectionID: connectionID, userID: identity.userID,
+                reports: report.rooms.map { (try RoomID($0.roomID), $0.appliedThrough) })
+            try await store.record(userID: identity.userID, deviceID: identity.deviceID, progress: progress)
+            guard directory.lifecycleByConnection[connectionID] == lifecycle else { throw CancellationError() }
+            response.deviceRoomProgressRecorded = .init()
+            response.deviceRoomProgressRecorded.rooms = report.rooms
+        } catch {
+            response.error = .init()
+            switch error as? V2RoomRecoveryReadError {
+            case .invalidRequest: response.error.code = "INVALID_ARGUMENT"
+            case .invalidCursor: response.error.code = "FORBIDDEN"
+            default: response.error.code = "UNAVAILABLE"
+            }
+            response.error.retryable = response.error.code == "UNAVAILABLE"
+        }
+        return response
+    }
+    private var leaseRenewalsClosed = false
     private var liveActivityObservationAuthorizer: (any V2LiveActivityObservationAuthorizing)?
+    private var userSyncInterests: V2SharedGroupEventWakeInterests?
+    private var userSyncScopes: [UUID: UUID] = [:]
+    private typealias RecoveryKey = V2RealtimeRecoveryKey
+    private let recoveryCoordinator: V2RealtimeRecoveryCoordinator
+    private var recoveryPortsConfigured = false
+    private var realtimeRecoveryClosed = false
+    private var realtimeRecoveryShutdown: Task<Void, Never>?
+    private let lifecycleSupervisor: V2GatewayLifecycleSupervisor
+    private var dirtyPresence: [UserID: (Bool, Date)] = [:]
+    private var dirtyPresenceWorker: Task<Void, Never>?
+    private let maximumDirtyPresenceUsers = 1_024
+
+    private var brokerRoutesLocalActivity = false
     private var liveActivityBroker: (any V2LiveActivityInterestManaging & V2LiveActivityPublishing)?
-    private var publicationSuppressedByConnection:[UUID:Bool]=[:]
-    private var presenceByConnection: [UUID: (roomID: RoomID, targetUserID: UserID)] = [:]
-    private var presenceMutationByConnection: [UUID: Generation] = [:]
-    private var presenceWatchersByTarget: [UserID: [UUID: V2GatewayByteStream]] = [:]
-    private var typingRoomByConnection: [UUID: RoomID] = [:]
-    private var typingMutationByConnection: [UUID: Generation] = [:]
+    private typealias PresenceRefreshTarget = V2PresenceRefreshTarget
+    private var presenceRefreshCoordinator: V2PresenceRefreshCoordinator?
+
     /// 这些值是 actor 本地的可重入围栏，而不是公开身份或安全能力。
     ///
     /// 单调递增的代次已经够用，并可避免在连接频繁变动时打开平台随机源。
     private var nextGeneration: Generation = 0
-    private var typingWatchersByRoom: [RoomID: [UUID: V2GatewayByteStream]] = [:]
 
     public init(
         connectionAdmissionPolicy: V2AuthenticatedConnectionAdmissionPolicy = .init(
@@ -68,6 +152,7 @@ public actor V2DeviceConnectionRegistry {
             maximumConnectionsPerUser: 8
         ),
         livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration = .init(),
+        maximumConnections: Int = 100_000,
         foregroundFrameLimits: V2FrameLimits? = nil,
         foregroundFrameCompression: V2NegotiatedFrameCompression? = nil,
         foregroundMaximumUncompressedPayloadBytes: Int = V2ServerProtobufFrameCodec
@@ -83,6 +168,10 @@ public actor V2DeviceConnectionRegistry {
                 && foregroundCompressionThresholdBytes >= 0
                 && foregroundMaximumCompressionExpansionRatio > 0
         )
+        precondition(maximumConnections > 0)
+        self.maximumConnections = maximumConnections
+        self.lifecycleSupervisor = V2GatewayLifecycleSupervisor(maximumRetained: maximumConnections)
+        self.recoveryCoordinator = V2RealtimeRecoveryCoordinator(maximumConnections: maximumConnections)
         self.connectionAdmissionPolicy = connectionAdmissionPolicy
         authorIngress.withLock { $0 = authorPresentationIngress }
         self.livePresenceRenewalConfiguration = livePresenceRenewalConfiguration
@@ -106,62 +195,263 @@ public actor V2DeviceConnectionRegistry {
         }
     }
 
+    /// Composition opts in before sockets start. RPC ingress, local subscriber
+    /// selection and actual socket gates share this one room-local authority.
+    /// The old room Coordinator/Journal path is bypassed while configured.
+    public func configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority,
+        maximumRooms: Int = 256) throws -> V2GatewayRoomSubscriptionIngress {
+        guard !hasStartedRegistrations, !realtimeRecoveryClosed, foregroundFrameLimits != nil,
+              roomSubscriptionAuthority.withLock({ $0 == nil }), maximumRooms > 0 else {
+            throw V2ResourceProviderError.configurationInvalid
+        }
+        let worker = V2GatewayRoomSubscriptionHeadWorker(maximumRooms: maximumRooms) { [weak self] room, head in
+            await self?.publishRoomSubscriptionHead(roomID: room, highWatermark: head)
+        }
+        roomSubscriptionAuthority.withLock { $0 = authority }
+        roomSubscriptionHeadWorker.withLock { $0 = worker }
+        let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, maximumRooms: maximumRooms,
+            offerEvent: { [weak self] event, permits in self?.submitRoomSubscriptionEvent(event, permits: permits) },
+            offerHead: { [weak worker] room, head in _ = worker?.offer(roomID: room, highWatermark: head) })
+        worker.start()
+        return ingress
+    }
+
+    /// Inject closures backed by the signed RoomClient and trusted Directory.
+    /// This opts actual groupEventSubscribe commands into the room-local owner.
+    public func configureRoomSubscriptionPorts(_ ports: V2GatewayRoomSubscriptionPorts,
+        ingress: V2GatewayRoomSubscriptionIngress, maximumRelations: Int = 4096,
+        maximumConcurrentCalls: Int = 16,
+        onCleanupFailure: @escaping @Sendable (RoomID, UserID, any Error) -> Void = { _, _, _ in }) async throws {
+        guard !hasStartedRegistrations, !realtimeRecoveryClosed, roomSubscriptionCoordinator == nil,
+              roomSubscriptionAuthority.withLock({ $0 === ingress.authority }) else {
+            throw V2ResourceProviderError.configurationInvalid
+        }
+        let coordinator = try V2GatewayRoomSubscriptionCoordinator(ports: ports, ingress: ingress,
+            maximumRelations: maximumRelations, maximumReferences: max(maximumConnections, maximumRelations),
+            maximumConcurrentCalls: maximumConcurrentCalls, onCleanupFailure: onCleanupFailure)
+        roomSubscriptionCoordinator = coordinator
+        await coordinator.start()
+    }
+
+    public func acquireAccountRoomDelivery(userID: UserID, roomID: RoomID, reference: UUID) async throws {
+        guard !realtimeRecoveryClosed, let coordinator = roomSubscriptionCoordinator else {
+            throw V2GatewayRoomSubscriptionCoordinationError.closed
+        }
+        // Physical removal precedes the account ticket's asynchronous cleanup.
+        // That short gap is online unavailability, not a closed coordinator.
+        guard directory.streamsByUser[userID]?.isEmpty == false else {
+            throw V2GatewayRoomSubscriptionCoordinationError.refused(.unavailable)
+        }
+        _ = try await coordinator.acquire(roomID: roomID, userID: userID, reference: reference)
+        guard !realtimeRecoveryClosed, directory.streamsByUser[userID]?.isEmpty == false else {
+            await coordinator.release(reference: reference)
+            if realtimeRecoveryClosed { throw V2GatewayRoomSubscriptionCoordinationError.closed }
+            throw V2GatewayRoomSubscriptionCoordinationError.refused(.unavailable)
+        }
+        // A later device may reuse the existing account grant without a new
+        // Owner callback. Resignal its persisted baseline for unopened recovery.
+        await roomSubscriptionBaselineInstalled(roomID: roomID)
+    }
+
+    public func releaseAccountRoomDelivery(reference: UUID) async {
+        await roomSubscriptionCoordinator?.release(reference: reference)
+    }
+
+    /// The per-transport handler invokes this BEFORE the legacy Domain handler.
+    /// There is one signed authoritative subscribe, not an old database/Journal
+    /// barrier followed by another new room subscribe.
+    func handleRoomSubscriptionCommand(_ envelope: IMV2Envelope, connectionID: UUID,
+        identity: V2AuthenticatedConnection) async -> IMV2Envelope? {
+        guard roomSubscriptionCoordinator != nil else { return nil }
+        switch envelope.body {
+        case .groupEventSubscribe(let request):
+            guard let room = try? RoomID(request.roomID), directory.identityByConnection[connectionID] == identity,
+                  let stream = directory.streamsByUser[identity.userID]?[connectionID] else {
+                return v2GatewayErrorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+            }
+            do {
+                guard let grant = try await subscribeForegroundRoom(stream, connectionID: connectionID, roomID: room) else {
+                    return v2GatewayErrorEnvelope(code: "UNAVAILABLE", retryable: true)
+                }
+                var response = IMV2Envelope(); response.groupEventSubscribed = .init()
+                response.groupEventSubscribed.roomID = room.rawValue
+                response.groupEventSubscribed.highWatermark = grant.userBaselineSequence
+                response.groupEventSubscribed.membershipRevision = grant.memberRevision
+                return response
+            } catch V2GatewayRoomSubscriptionCoordinationError.refused(.unauthorized) {
+                return v2GatewayErrorEnvelope(code: "FORBIDDEN", retryable: false)
+            } catch { return v2GatewayErrorEnvelope(code: "UNAVAILABLE", retryable: true) }
+        case .groupEventUnsubscribe(let request):
+            guard let room = try? RoomID(request.roomID), directory.identityByConnection[connectionID] == identity else {
+                return v2GatewayErrorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
+            }
+            await unsubscribeForegroundGroup(connectionID: connectionID, roomID: room)
+            return v2GatewaySuccessEnvelope()
+        default: return nil
+        }
+    }
+
+    /// Baseline/lease refresh composition can resignal local scopes without
+    /// manufacturing a Ready from H or from an old partition confirmation.
+    public nonisolated func roomSubscriptionBaselineInstalled(roomID: RoomID) async {
+        guard let authority = roomSubscriptionAuthority.withLock({ $0 }),
+              let highWatermark = await authority.recoveryHighWatermark(roomID: roomID) else { return }
+        roomSubscriptionHeadWorker.withLock { $0 }?.offer(roomID: roomID, highWatermark: highWatermark)
+    }
+    nonisolated func roomSubscriptionProgressSnapshot(connectionID: UUID) async
+        -> (authorization: V2GatewayRoomSubscriptionAuthority.Permit, highWatermark: UInt64)? {
+        await roomSubscriptionAuthority.withLock { $0 }?.progressSnapshot(connectionID: connectionID)
+    }
+
+    private func requestRoomSubscriptionRepair(roomID: RoomID) async {
+        await roomSubscriptionCoordinator?.requestBaselineIfRequired(roomID: roomID)
+    }
+
+    private nonisolated func publishRoomSubscriptionHead(roomID: RoomID, highWatermark: UInt64) async {
+        await requestRoomSubscriptionRepair(roomID: roomID)
+        guard let authority = roomSubscriptionAuthority.withLock({ $0 }) else { return }
+        // Authority owns durable progress across publishes and stale local offers.
+        let highWatermark = max(highWatermark, await authority.recoveryHighWatermark(roomID: roomID) ?? 0)
+        let detailPermits = Dictionary(uniqueKeysWithValues: (await authority.capturePermits(roomID: roomID)).map { ($0.connectionID, $0) })
+        var backgroundPermits: [V2GatewayRoomSubscriptionAuthority.Permit] = []
+        for authorization in await authority.captureOnlinePermits(roomID: roomID) {
+            guard let target = foregroundRoutes.target(roomID: roomID, connectionID: authorization.connectionID),
+                  target.userID == authorization.userID, let detail = detailPermits[authorization.connectionID] else {
+                // Installation H does not prove this device has persisted it.
+                // A nonempty baseline must also wake unopened-room recovery.
+                if highWatermark > 0 { backgroundPermits.append(authorization) }
+                continue
+            }
+            _ = await target.stream.offerRoomSubscriptionHead(detail, highWatermark: highWatermark,
+                permit: { enqueue in authority.enqueueIfCurrent(detail, enqueue: enqueue) })
+        }
+        guard !backgroundPermits.isEmpty, let foregroundFrameLimits,
+              let prepared = V2PreparedGatewayGroupEventAvailable(roomID: roomID,
+                highWatermark: highWatermark, directEvent: nil,
+                frameLimits: foregroundFrameLimits, compression: foregroundFrameCompression,
+                maximumUncompressedPayloadBytes: foregroundMaximumUncompressedPayloadBytes,
+                compressionThresholdBytes: foregroundCompressionThresholdBytes,
+                maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio) else { return }
+        submitRoomSubscriptionFrame(prepared, permits: backgroundPermits, authority: authority)
+    }
+    private nonisolated func submitRoomSubscriptionEvent(_ event: V2RealtimeRoomEvent,
+        permits: [V2GatewayRoomSubscriptionAuthority.Permit]) {
+        guard let authority = roomSubscriptionAuthority.withLock({ $0 }), let foregroundFrameLimits,
+              let prepared = V2PreparedGatewayGroupEventAvailable(roomID: event.roomID,
+                highWatermark: event.highWatermark, directEvent: event.localEvent,
+                frameLimits: foregroundFrameLimits, compression: foregroundFrameCompression,
+                maximumUncompressedPayloadBytes: foregroundMaximumUncompressedPayloadBytes,
+                compressionThresholdBytes: foregroundCompressionThresholdBytes,
+                maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio) else { return }
+        submitRoomSubscriptionFrame(prepared, permits: permits, authority: authority,
+            hints: authorPresentationIngress.flatMap { _ in
+                event.groupMembershipRevision == nil
+                    ? V2AuthorPresentationHints(directEvent: event.localEvent)
+                    : V2AuthorPresentationHints(events: [event.localEvent])
+            })
+    }
+    private nonisolated func submitRoomSubscriptionFrame(_ prepared: V2PreparedGatewayGroupEventAvailable,
+        permits: [V2GatewayRoomSubscriptionAuthority.Permit], authority: V2GatewayRoomSubscriptionAuthority,
+        hints: V2AuthorPresentationHints? = nil) {
+        var submissions: [V2NIOGatewayForegroundWriteSubmission] = []
+        var supplementTargets: [V2GatewayByteStream] = []
+        for authorization in permits {
+            guard let stream = onlineRoomStreams.withLock({ $0[authorization.connectionID] }) else { continue }
+            let permit: @Sendable (@Sendable () -> Void) -> Bool = { enqueue in
+                authority.enqueueIfCurrent(authorization, enqueue: enqueue)
+            }
+            if let submission = stream.prepareNIOGroupEventAvailable(prepared, enqueueIfCurrent: permit) {
+                submissions.append(submission)
+                if hints != nil { supplementTargets.append(stream) }
+            } else if stream.submitGroupEventAvailable(prepared, enqueueIfCurrent: permit),
+                      let hints, let ingress = authorPresentationIngress {
+                stream.offerAuthorPresentation(hints, to: ingress)
+            }
+        }
+        // Channel owners retain their existing bounded best-effort budgets;
+        // every delayed NIO submission checks the exact local room nonce again.
+        V2NIOGatewayForegroundWriter.submitBatch(submissions)
+        if let hints, let ingress = authorPresentationIngress {
+            for stream in supplementTargets { stream.offerAuthorPresentation(hints, to: ingress) }
+        }
+    }
+    @discardableResult
+    private func removeRoomSubscriptionConnection(_ connectionID: UUID) -> UUID? {
+        _ = onlineRoomStreams.withLock { $0.removeValue(forKey: connectionID) }
+        guard let connection = roomSubscriptionConnections.removeValue(forKey: connectionID) else { return nil }
+        roomSubscriptionAuthority.withLock { $0 }?.removeConnection(connectionID, lifecycle: connection.lifecycle)
+        return connection.reference
+    }
+
     @discardableResult
     public func register(_ stream: V2GatewayByteStream, connectionID: UUID, identity: V2AuthenticatedConnection, publicationSuppressed:Bool) async throws -> Bool {
         hasStartedRegistrations = true
         // 连接 ID 是单次生命周期的令牌，不是幂等键。
         // 首次注册挂起期间若接受重复 ID，另一条流就可能继承其身份和租约。
-        if identityByConnection[connectionID] != nil { return false }
-        guard (streamsByDevice[identity.deviceID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerDevice,
-              (streamsByUser[identity.userID]?.count ?? 0) < connectionAdmissionPolicy.maximumConnectionsPerUser
-        else { return false }
         let lifecycle = makeGeneration()
-        lifecycleByConnection[connectionID] = lifecycle
-        identityByConnection[connectionID] = identity
-        publicationSuppressedByConnection[connectionID] = publicationSuppressed
-        streamsByDevice[identity.deviceID, default: [:]][connectionID] = stream
-        streamsByUser[identity.userID, default: [:]][connectionID] = stream
-        guard let livePresenceLeases else { return true }
-        let lease: V2AuthenticatedConnectionLeaseOutcome
+        guard !realtimeRecoveryClosed, !leaseRenewalsClosed, identity.credentialControlVersion >= 0,
+              directory.reserve(stream, connectionID: connectionID, identity: identity,
+                lifecycle: lifecycle, maximumConnections: maximumConnections,
+                policy: connectionAdmissionPolicy) else { return false }
+        defer { directory.endOperation(connectionID) }
+        if let authority = roomSubscriptionAuthority.withLock({ $0 }) {
+            let localLifecycle = UUID()
+            guard authority.registerConnection(connectionID, userID: identity.userID, lifecycle: localLifecycle) else {
+                _ = directory.remove(connectionID, lifecycle: lifecycle); return false
+            }
+            if let gate = await stream.roomSubscriptionSocketGate {
+                await authority.bindSocket(connectionID, lifecycle: localLifecycle, gate: gate)
+            }
+            guard !realtimeRecoveryClosed, directory.lifecycleByConnection[connectionID] == lifecycle else {
+                authority.removeConnection(connectionID, lifecycle: localLifecycle)
+                _ = directory.remove(connectionID, lifecycle: lifecycle)
+                return false
+            }
+            roomSubscriptionConnections[connectionID] = .init(lifecycle: localLifecycle)
+            onlineRoomStreams.withLock { $0[connectionID] = stream }
+            stream.configureRoomSubscriptionConnectionRevocation {
+                authority.removeConnection(connectionID, lifecycle: localLifecycle)
+            }
+        }
+        journalInterestChanged.withLock { $0?.callback }?()
+        if journalUserBaseline.withLock({ $0 != nil }) {
+            stream.configureLiveStatePrimaryAuthentication { [weak self] enqueue in
+                guard let self, let receiver = self.journalReceiver.withLock({ $0 }),
+                      let binding = receiver.authenticationBinding(userID: identity.userID) else { return false }
+                return receiver.enqueueUserAuthorized(userID: identity.userID, expectedSource: binding.source,
+                    expectedFence: binding.fence, enqueue: enqueue)
+            }
+        }
+        if userSyncInterests != nil { userSyncScopes[connectionID] = UUID() }
+        recoveryCoordinator.installConnection(.init(handle: directory.handle(connectionID)!,
+            accountScope: userSyncScopes[connectionID], registeredAt: directory.registrationTimes[connectionID]!))
+        configureRecoveryPortsIfNeeded()
+        guard directory.lifecycleByConnection[connectionID] == lifecycle else { return false }
+        guard let leaseController else { return true }
+        let lease: V2LivePresenceLeaseRefresh?
         do {
-            lease = try await livePresenceLeases.admitConnection(
-                identity: identity,
-                connectionID: connectionID,
-                publicationSuppressed:publicationSuppressed,
-                policy: connectionAdmissionPolicy,
-                now: Date()
-            )
+            lease = try await leaseController.admit(connectionID: connectionID,
+                identity: identity, lifecycle: lifecycle, publicationSuppressed: publicationSuppressed,
+                policy: connectionAdmissionPolicy)
         } catch {
-            rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
+            await rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
             // 存储或连接池故障并非连接数限制决策。
             // 保留原始错误，让传输遥测能够定位故障依赖，
             // 而不是错误报告配额已满。
             throw error
         }
-        guard lifecycleByConnection[connectionID] == lifecycle else {
+        guard directory.lifecycleByConnection[connectionID] == lifecycle else {
+            await leaseController.revoke(connectionID: connectionID, lifecycle: lifecycle)
             await compensateStalePresence(connectionID: connectionID, identity: identity)
             return false
         }
-        guard case .accepted(let expiresAt) = lease else {
-            rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
+        guard let lease, case .accepted(let expiresAt) = lease.outcome else {
+            await rollbackRegistration(connectionID: connectionID, identity: identity, lifecycle: lifecycle)
             return false
         }
-        let allowsOnlinePresence = (
-            try? await livePresenceLeases.allowsOnlinePresence(userID: identity.userID)
-        ) == true
-        guard lifecycleByConnection[connectionID] == lifecycle else {
-            await compensateStalePresence(connectionID: connectionID, identity: identity)
-            return false
-        }
-        guard allowsOnlinePresence && !publicationSuppressed else {
-            // 持久化记录也是跨副本的已认证连接准入租约。
-            // 在线状态隐私只控制该租约是否可见，不控制它是否存在。
-            // 若在此删除租约，隐藏在线状态的用户就能绕过全局的
-            // 单用户和单设备连接数限制。
-            return true
-        }
+        guard !publicationSuppressed else { return true }
         await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
-        if lifecycleByConnection[connectionID] != lifecycle {
+        if directory.lifecycleByConnection[connectionID] != lifecycle {
             await compensateStalePresence(connectionID: connectionID, identity: identity)
             return false
         }
@@ -170,107 +460,138 @@ public actor V2DeviceConnectionRegistry {
 
     public func setPresencePublication(connectionID:UUID,identity:V2AuthenticatedConnection,
         mode:V2PresencePublicationMode) async throws {
-        guard identityByConnection[connectionID]==identity,let lifecycle=lifecycleByConnection[connectionID],let leases=livePresenceLeases else {throw V2GatewaySessionError.unsupportedCommand}
+        guard directory.identityByConnection[connectionID]==identity,let lifecycle=directory.lifecycleByConnection[connectionID],let controller=leaseController else {throw V2GatewaySessionError.unsupportedCommand}
         let suppressed=mode == .suppressed
         // The durable lease flag precedes the acknowledgement. All account,
         // device and connection fields are matched in the persistence boundary.
-        let observation=try await leases.setPresencePublication(identity:identity,connectionID:connectionID,suppressed:suppressed,now:Date())
-        guard lifecycleByConnection[connectionID]==lifecycle,identityByConnection[connectionID]==identity else {throw V2GatewaySessionError.unsupportedCommand}
-        publicationSuppressedByConnection[connectionID]=suppressed
+        guard let observation=try await controller.setPresencePublication(connectionID:connectionID,
+            lifecycle:lifecycle,identity:identity,suppressed:suppressed) else {throw V2GatewaySessionError.unsupportedCommand}
+        guard directory.lifecycleByConnection[connectionID]==lifecycle,directory.identityByConnection[connectionID]==identity else {throw V2GatewaySessionError.unsupportedCommand}
         await routePresence(targetUserID:identity.userID,isOnline:observation.isOnline,expiresAt:observation.expiresAt)
     }
 
     public func unregister(connectionID: UUID) async {
-        guard let identity = identityByConnection.removeValue(forKey: connectionID) else { return }
-        publicationSuppressedByConnection.removeValue(forKey:connectionID)
-        lifecycleByConnection.removeValue(forKey: connectionID)
-        streamsByDevice[identity.deviceID]?.removeValue(forKey: connectionID)
-        if streamsByDevice[identity.deviceID]?.isEmpty == true { streamsByDevice.removeValue(forKey: identity.deviceID) }
-        streamsByUser[identity.userID]?.removeValue(forKey: connectionID)
-        if streamsByUser[identity.userID]?.isEmpty == true { streamsByUser.removeValue(forKey: identity.userID) }
+        guard let removed = directory.remove(connectionID) else { return }
+        let roomReference = removeRoomSubscriptionConnection(connectionID)
+        journalInterestChanged.withLock { $0?.callback }?()
+        removed.stream.invalidateForegroundAuthorization()
+        removed.stream.revokeRecoveryWorkImmediately()
+        directory.beginRetirementOperation(connectionID, lifecycle: removed.lifecycle)
+        lifecycleSupervisor.retain(connectionID: connectionID, lifecycle: removed.lifecycle, stream: removed.stream) { id, lifecycle in
+            await self.completeRetiredRecoveryWork(connectionID: id, lifecycle: lifecycle)
+        }
+        let identity = removed.identity, revokedLifecycle = removed.lifecycle
+        defer { directory.endOperation(connectionID) }
+        let syncScope = userSyncScopes.removeValue(forKey: connectionID)
+        // Admission ownership ends with the physical connection. Room release
+        // and recovery-task joins must not keep a closed socket in the durable
+        // connection quota while its replacement authenticates.
+        await leaseController?.revoke(connectionID: connectionID, lifecycle: revokedLifecycle)
+        let remainsOnline = await removePresenceLease(identity: identity, connectionID: connectionID)
+        if let roomReference { await roomSubscriptionCoordinator?.release(reference: roomReference) }
+        let revokedScopes = recoveryCoordinator.revokeConnection(connectionID, lifecycle: revokedLifecycle)
+        directoryGenerations.removeValue(forKey: connectionID)
+        directoryDeliveryFences.withLock { $0.removeValue(forKey: connectionID) }
+        await presenceRefreshCoordinator?.revoke(connection: connectionID, lifecycle: revokedLifecycle)
+        await recoveryCoordinator.detachConnection(connectionID, revokedScopes: revokedScopes)
+        if let scope = syncScope {
+            await deactivateUserSyncInterest(userID: identity.userID, scope: scope)
+        }
         if let ticket = accountChangeTickets.removeValue(forKey: connectionID), let accountChangeService {
             await accountChangeService.stop(ticket)
         }
-        guard lifecycleByConnection[connectionID] == nil else { return }
+        guard directory.lifecycleByConnection[connectionID] == nil else { return }
         do {
             let mutation = makeGeneration()
-            foregroundMutationByConnection[connectionID] = mutation
+            subscriptions.foregroundMutationByConnection[connectionID] = mutation
             defer {
-                if foregroundMutationByConnection[connectionID] == mutation {
-                    foregroundMutationByConnection.removeValue(forKey: connectionID)
+                if subscriptions.foregroundMutationByConnection[connectionID] == mutation {
+                    subscriptions.foregroundMutationByConnection.removeValue(forKey: connectionID)
                 }
             }
             await removeForegroundGroupSubscription(connectionID: connectionID)
         }
-        guard lifecycleByConnection[connectionID] == nil else { return }
+        guard directory.lifecycleByConnection[connectionID] == nil else { return }
         do {
             let mutation = makeGeneration()
-            presenceMutationByConnection[connectionID] = mutation
+            subscriptions.presenceMutationByConnection[connectionID] = mutation
             defer {
-                if presenceMutationByConnection[connectionID] == mutation {
-                    presenceMutationByConnection.removeValue(forKey: connectionID)
+                if subscriptions.presenceMutationByConnection[connectionID] == mutation {
+                    subscriptions.presenceMutationByConnection.removeValue(forKey: connectionID)
                 }
             }
             await removePresenceSubscription(connectionID: connectionID)
         }
-        guard lifecycleByConnection[connectionID] == nil else { return }
+        guard directory.lifecycleByConnection[connectionID] == nil else { return }
         do {
             let mutation = makeGeneration()
-            typingMutationByConnection[connectionID] = mutation
+            subscriptions.typingMutationByConnection[connectionID] = mutation
             defer {
-                if typingMutationByConnection[connectionID] == mutation {
-                    typingMutationByConnection.removeValue(forKey: connectionID)
+                if subscriptions.typingMutationByConnection[connectionID] == mutation {
+                    subscriptions.typingMutationByConnection.removeValue(forKey: connectionID)
                 }
             }
             await removeTypingSubscription(connectionID: connectionID)
         }
         // 消息代理拆除等待期间，后续注册可能复用了该 ID。
         // 旧续体不能删除新注册的租约。
-        guard lifecycleByConnection[connectionID] == nil else { return }
-        guard let remainsOnline = await removePresenceLease(
-            identity: identity,
-            connectionID: connectionID
-        ) else {
+        guard directory.lifecycleByConnection[connectionID] == nil else { return }
+        guard let remainsOnline else {
             // 跨副本查询失败不能证明用户离线。
             // 短期数据库租约会自行收敛，无须在故障期间发出误导性的全局状态转换。
             return
         }
-        if !remainsOnline, lifecycleByConnection[connectionID] == nil {
+        if !remainsOnline, directory.lifecycleByConnection[connectionID] == nil {
             await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
         }
     }
 
+    private func completeRetiredRecoveryWork(connectionID: UUID, lifecycle: UInt64) {
+        lifecycleSupervisor.settle(connectionID: connectionID, lifecycle: lifecycle)
+        directory.endRetirementOperation(connectionID, lifecycle: lifecycle)
+    }
+
     public func revoke(deviceID: DeviceID) async {
-        let connections = streamsByDevice[deviceID].map { Array($0) } ?? []
+        let connections = directory.streamsByDevice[deviceID].map { Array($0) } ?? []
         // Invalidate every queued foreground write before any cleanup can suspend.
         // A slow lease or broker teardown must not leave another socket authorized.
-        for (_, stream) in connections { stream.invalidateForegroundAuthorization() }
-
-        // The stream waits for its transport's close promise before returning.
-        // Keep the worker's durable cursor behind all local socket closures, while
-        // allowing one slow cleanup to make progress alongside the other sockets.
-        await withTaskGroup(of: Void.self) { group in
-            var nextIndex = 0
-            let maximumConcurrency = min(16, connections.count)
-            for index in 0..<maximumConcurrency {
-                let (connectionID, stream) = connections[index]
-                group.addTask {
-                    await stream.revokeDevice()
-                    await self.unregisterRevokedConnection(connectionID: connectionID, deviceID: deviceID, stream: stream)
-                }
-                nextIndex += 1
-            }
-            while await group.next() != nil {
-                if nextIndex < connections.count {
-                    let (connectionID, stream) = connections[nextIndex]
+        var roomReferences: [UUID] = []
+        for (connectionID, stream) in connections {
+            if let reference = removeRoomSubscriptionConnection(connectionID) { roomReferences.append(reference) }
+            stream.invalidateForegroundAuthorization()
+        }
+        func visitConnections(_ operation: @escaping @Sendable (UUID, V2GatewayByteStream) async -> Void) async {
+            await withTaskGroup(of: Void.self) { group in
+                var nextIndex = 0
+                let maximumConcurrency = min(16, connections.count)
+                for index in 0..<maximumConcurrency {
+                    let (connectionID, stream) = connections[index]
                     group.addTask {
-                        await stream.revokeDevice()
-                        await self.unregisterRevokedConnection(connectionID: connectionID, deviceID: deviceID, stream: stream)
+                        await operation(connectionID, stream)
                     }
                     nextIndex += 1
                 }
+                while await group.next() != nil {
+                    if nextIndex < connections.count {
+                        let (connectionID, stream) = connections[nextIndex]
+                        group.addTask {
+                            await operation(connectionID, stream)
+                        }
+                        nextIndex += 1
+                    }
+                }
             }
         }
+        // All physical closures finish before cleanup can occupy worker slots.
+        // The durable control cursor still waits for both owned phases.
+        await visitConnections { _, stream in await stream.closeTransportForDeviceRevocation() }
+        await visitConnections { connectionID, stream in
+            await stream.revokeDevice()
+            await self.unregisterRevokedConnection(connectionID: connectionID, deviceID: deviceID, stream: stream)
+        }
+        // Remote room cleanup must not delay physical credential revocation.
+        // These exact references were detached before any suspension above.
+        for reference in roomReferences { await roomSubscriptionCoordinator?.release(reference: reference) }
     }
 
     private func unregisterRevokedConnection(
@@ -280,487 +601,681 @@ public actor V2DeviceConnectionRegistry {
     ) async {
         // An old close continuation must not remove a new registration using
         // the same connection ID after this revocation snapshot was taken.
-        guard streamsByDevice[deviceID]?[connectionID] === stream else { return }
+        guard directory.streamsByDevice[deviceID]?[connectionID] === stream else { return }
         await unregister(connectionID: connectionID)
     }
 
-    public func notifySyncAvailable(userID: UserID, eventID: UInt64, highWatermark: UInt64) async {
-        let streams = streamsByUser[userID].map { Array($0.values) } ?? []
-        for stream in streams { await stream.sendSyncAvailable(eventID: eventID, highWatermark: highWatermark) }
+    private func deactivateUserSyncInterest(userID: UserID, scope: UUID) async {
+        guard let room = try? RoomID(userID.rawValue), let interests = userSyncInterests else { return }
+        await interests.manager(for: .account(scope)).deactivate(roomID: room)
     }
 
-    /// 配置前台群组兴趣管理器。
-    ///
-    /// 调用前领域处理器已校验过群组成员关系。一个前台连接只能观看一个详情房间；
-    /// 切换房间会原子地拆除此前的本地兴趣。
-    ///
-    /// - Parameter manager: 群事件唤醒兴趣管理器。
-    public func configureForegroundGroupInterestManager(_ manager: any V2GroupEventWakeInterestManaging) async {
-        foregroundGroupInterestManager = manager
-        for roomID in Array(streamsByForegroundGroup.keys) {
-            try? await manager.activate(roomID: roomID)
-            if streamsByForegroundGroup[roomID] == nil {
-                await manager.deactivate(roomID: roomID)
+    /// Called only after the authenticated response has actually been written.
+    public func authenticationResponseWritten(connectionID: UUID) async {
+        guard let lifecycle = directory.lifecycleByConnection[connectionID] else { return }
+        await recoveryCoordinator.authenticationResponseWritten(connectionID: connectionID, lifecycle: lifecycle)
+    }
+
+    private func beginScopeRecovery(connection: UUID, kind: V2RealtimeTopicKind, id: String) async {
+        guard let lifecycle = directory.lifecycleByConnection[connection] else { return }
+        let key = RecoveryKey(connection: connection, kind: kind, id: id)
+        guard let generation = recoveryCoordinator.requestScope(key, lifecycle: lifecycle) else { return }
+        await recoveryCoordinator.beginScopeRecovery(connection: connection, kind: kind, id: id,
+            scopeGeneration: generation, lifecycle: lifecycle)
+    }
+
+    private func endScope(connection: UUID, kind: V2RealtimeTopicKind, id: String, stream: V2GatewayByteStream?) async {
+        let key = RecoveryKey(connection: connection, kind: kind, id: id)
+        guard let generation = recoveryCoordinator.generation(for: key),
+              recoveryCoordinator.revokeScope(key, generation: generation) else { return }
+        if kind == .userPresence {
+            await presenceRefreshCoordinator?.revoke(connection: connection,
+                lifecycle: directory.lifecycleByConnection[connection], generation: generation)
+        }
+        await recoveryCoordinator.endScope(connection: connection, kind: kind, id: id, stream: stream,
+            expectedGeneration: generation)
+    }
+
+    /// Transfer a selected scope to the connection-owned bounded writer. The
+    /// caller's actual scheduling slot ends after offer, while this exact ticket
+    /// keeps the scope fenced and its work capacity reserved until settlement.
+
+    private func compensateStaleScope(key: RecoveryKey, lifecycle: UInt64, accountScope: UUID?, user: UserID) async {
+        switch key.kind {
+        case .userSync:
+            if let scope = accountScope { await deactivateUserSyncInterest(userID: user, scope: scope) }
+        case .roomEvents, .userPresence, .roomTyping:
+            break // Exact recovery ticket release belongs to the Coordinator.
+
+        }
+    }
+
+    private nonisolated func directoryWritePermit(_ connection: UUID, generation: UInt64)
+        -> @Sendable (@Sendable () -> Void) -> Bool {
+        return { enqueue in
+            self.directoryDeliveryFences.withLock { current in
+                guard current[connection] == generation else { return false }
+                enqueue(); return true
             }
         }
     }
 
-    public func detachForegroundGroupInterestManager() {
-        foregroundGroupInterestManager = nil
+    public nonisolated func recoverySchedulingMetricsSnapshot() -> V2RecoverySchedulingSnapshot {
+        recoveryCoordinator.schedulingTelemetrySnapshot()
+    }
+
+    public func registryRecoveryMetricsSnapshot() async -> V2RegistryRecoveryMetricsSnapshot {
+        var snapshot = await recoveryCoordinator.registryRecoveryMetricsSnapshot()
+        snapshot.presenceObservationStages = await presenceRefreshCoordinator?.metricsSnapshot() ?? [:]
+        snapshot.retiredRecoveryWriterStages = lifecycleSupervisor.metricsSnapshot()
+        return snapshot
+    }
+
+    func realtimeRecoverySnapshot() async -> (desired: Int, queued: Int, actual: Int, closed: Bool, control: Int, positions: Int, interest: Int, queryRoots: Int) {
+        return await recoveryCoordinator.realtimeRecoverySnapshot()
+    }
+
+    public func shutdownRealtimeRecovery() async {
+        if let shutdown = realtimeRecoveryShutdown { await shutdown.value; return }
+        realtimeRecoveryClosed = true
+        recoveryCoordinator.revokeAllWrites()
+        await roomSubscriptionAuthority.withLock { $0 }?.shutdown()
+        onlineRoomStreams.withLock { $0.removeAll() }
+        let localHeads = roomSubscriptionHeadWorker.withLock { $0 }
+        let localSubscriptions = roomSubscriptionCoordinator
+        roomSubscriptionConnections.removeAll()
+        var streams: [V2GatewayByteStream] = []
+        var seen: Set<ObjectIdentifier> = []
+        for bucket in directory.streamsByUser.values {
+            for stream in bucket.values where seen.insert(ObjectIdentifier(stream)).inserted {
+                stream.revokeRecoveryWorkImmediately()
+                streams.append(stream)
+            }
+        }
+        let drainingStreams = streams
+        // Revoke actual enqueue permits before awaiting submitted work. Late
+        // handoffs cannot advertise Ready while shutdown drains their ownership.
+        dirtyPresence.removeAll()
+        let presence = dirtyPresenceWorker
+        let observations = presenceRefreshCoordinator
+        // Both owners close admission and join actual query/write responsibility.
+        let shutdown = Task.detached {
+            let nextStream = Mutex(0)
+            await withTaskGroup(of: Void.self) { group in
+                group.addTask { await observations?.finish() }
+                group.addTask { await self.recoveryCoordinator.shutdown() }
+                group.addTask { await self.lifecycleSupervisor.finish() }
+                for _ in 0..<min(16, drainingStreams.count) {
+                    group.addTask {
+                        while true {
+                            let index = nextStream.withLock { next -> Int? in
+                                guard next < drainingStreams.count else { return nil }
+                                defer { next += 1 }
+                                return next
+                            }
+                            guard let index else { return }
+                            await drainingStreams[index].drainRecoveryWork()
+                        }
+                    }
+                }
+                await group.waitForAll()
+            }
+            // Concurrent unregisters can transfer a snapshotted active stream
+            // while those physical roots drain. Join their final callbacks too.
+            await self.lifecycleSupervisor.finish()
+            await presence?.value
+            await localHeads?.shutdown()
+            await localSubscriptions?.shutdown()
+            await self.clearRealtimeScopes()
+        }
+        realtimeRecoveryShutdown = shutdown
+        await shutdown.value
+    }
+
+    private func clearRealtimeScopes() async {
+        liveActivityBroker = nil
+        brokerRoutesLocalActivity = false
+        let scopes = userSyncScopes.compactMap { connection, scope -> (UserID, UUID)? in
+            directory.identityByConnection[connection].map { ($0.userID, scope) }
+        }
+        let tickets = Array(accountChangeTickets.values)
+        userSyncScopes.removeAll()
+        accountChangeTickets.removeAll(); directoryGenerations.removeAll(); directoryDeliveryFences.withLock { $0.removeAll() }
+        for (user, scope) in scopes { await deactivateUserSyncInterest(userID: user, scope: scope) }
+        if let service = accountChangeService { for ticket in tickets { await service.stop(ticket) } }
+    }
+
+    public func configureRealtimeCoverageValidation(
+        current: @escaping @Sendable (V2RealtimeTopicKind, String) -> V2RealtimeCoverageConfirmation?,
+        confirms: @escaping @Sendable (V2RealtimeTopicKind, String, V2RealtimeCoverageConfirmation) -> Bool) async {
+        precondition(!hasStartedRegistrations)
+        await recoveryCoordinator.configureCoverage(current: current, confirms: confirms)
+    }
+
+    public func configureUserSyncInterests(_ interests: V2SharedGroupEventWakeInterests) async {
+        precondition(!hasStartedRegistrations)
+        userSyncInterests = interests
+        await recoveryCoordinator.configureUserSync(interests)
+    }
+
+    /// Accepted durable RPC work transfers its responsibility to current local
+    /// scopes before attempting sockets. Receipts prove enqueue, never delivery.
+    public func retainDurableRealtimeDelivery(_ delivery: V2RealtimeDelivery,
+        isCurrent: @escaping @Sendable () -> Bool) async {
+        await recoveryCoordinator.retainDurableRealtimeDelivery(delivery, isCurrent: isCurrent)
+    }
+
+    /// The ingress submits already-authorized live bodies before this control
+    /// handoff. Until a continuous authorization projection is installed, use
+    /// the existing permission-fenced recovery path for watermarks; an interest
+    /// or a journal position alone is not a viewer authorization grant.
+    public func applySharedRealtimeDelivery(_ delivery: V2RealtimeDelivery,
+        isCurrent: @escaping @Sendable () -> Bool) async {
+        switch delivery.payload {
+        case .roomWake, .roomEvents, .userSync:
+            await recoveryCoordinator.retainDurableRealtimeDelivery(delivery, isCurrent: isCurrent)
+        case .presence, .typing:
+            break
+        }
+    }
+
+    /// Production Journal owns account/session/device control only. Room-local
+    /// subscriptions and account durable reads retain separate authority.
+    public func configureJournalUserControlReceiver(_ receiver: V2GatewayJournalProjectionReceiver) {
+        precondition(!hasStartedRegistrations)
+        journalReceiver.withLock { $0 = receiver }
+    }
+
+    /// Install the trusted cold worker before accepting authenticated sockets.
+    public func configureJournalUserBaselineBarrier(
+        _ barrier: @escaping @Sendable (UserID) async throws -> V2GatewayJournalUserBaselineProof
+    ) async {
+        precondition(!hasStartedRegistrations)
+        journalUserBaseline.withLock { $0 = V2CallbackBox(barrier) }
+        await recoveryCoordinator.configureJournalUserBaseline { [weak self] user in
+            guard let self else { throw CancellationError() }
+            return try await self.authorizeJournalUserBaseline(user)
+        }
+    }
+
+    private nonisolated func authorizeJournalUserBaseline(_ user: UserID) async throws -> V2GatewayJournalReadyAuthorization {
+        guard let barrier = journalUserBaseline.withLock({ $0?.callback }), let receiver = journalReceiver.withLock({ $0 }) else {
+            throw V2RealtimePublicationBackpressure.receiverQueue
+        }
+        let proof = try await barrier(user)
+        guard proof.userID == user, let binding = receiver.authenticationBinding(userID: user),
+              binding.source == proof.source, binding.fence.sameGeneration(as: proof.fence),
+              binding.controlVersion >= proof.controlVersion else { throw V2RealtimePublicationBackpressure.receiverQueue }
+        return .init(highWatermark: 0, permit: { enqueue in
+            receiver.enqueueUserAuthorized(userID: user, expectedSource: proof.source,
+                expectedFence: proof.fence, enqueue: enqueue)
+        })
+    }
+
+    /// Runtime owns coalescing and cold snapshot tasks; subscription changes
+    /// only signal that owner and never create an independent background task.
+    public func configureJournalInterestChanges(_ changed: @escaping @Sendable () -> Void) async {
+        journalInterestChanged.withLock { $0 = V2CallbackBox(changed) }
+    }
+
+    /// Capture lifecycle tickets before the authority read. A snapshot cannot
+    /// close a later connection that reused the same account/device identity.
+    public func journalUserControlInterests() -> Set<V2GatewayJournalUserControlInterest> {
+        Set(directory.identityByConnection.compactMap { id, identity in
+            guard let lifecycle = directory.lifecycleByConnection[id] else { return nil }
+            return .init(connectionID: id, userID: identity.userID, deviceID: identity.deviceID, lifecycle: lifecycle)
+        })
+    }
+
+    /// This port is called only by the trusted source-DB cold reader. The remote
+    /// control stream supplies hints, never this snapshot or its current witness.
+    public func applyAuthoritativeUserControl(
+        _ snapshot: V2RealtimeJournalUserSnapshot,
+        source: V2RealtimeJournalSource,
+        expectedIdentity: V2RealtimeJournalSourceIdentity,
+        isAuthenticationSource: Bool,
+        minimumControlVersions: [UserID: UInt64],
+        credentialChangedDeviceKeys: Set<V2RealtimeJournalDeviceKey>,
+        membershipChangedRooms: [UserID: Set<RoomID>] = [:],
+        membershipChangeVersions: [UserID: UInt64] = [:],
+        requested: Set<V2GatewayJournalUserControlInterest>,
+        requestedAt: ContinuousClock.Instant,
+        deadline: ContinuousClock.Instant,
+        isCurrent: @escaping @Sendable () -> Bool
+    ) async -> V2GatewayJournalUserControlApplied? {
+        let requestedUsers = Set(requested.compactMap { $0.userID.uuidValue })
+        let requestedDevices = Set(requested.compactMap { interest -> V2RealtimeJournalDeviceKey? in
+            guard let user = interest.userID.uuidValue, let device = interest.deviceID.uuidValue else { return nil }
+            return .init(userID: user, deviceID: device)
+        })
+        guard deadline > .now, isCurrent(), snapshot.identity == expectedIdentity,
+              source.incarnationID == expectedIdentity.databaseIncarnation,
+              requestedUsers.count <= 128, requestedDevices.count <= 128,
+              Set(snapshot.requestedUserIDs) == requestedUsers, snapshot.requestedUserIDs.count == requestedUsers.count,
+              Set(snapshot.requestedDeviceKeys) == requestedDevices, snapshot.requestedDeviceKeys.count == requestedDevices.count,
+              Set(snapshot.users.map(\.userID)) == requestedUsers, snapshot.users.count == requestedUsers.count,
+              Set(snapshot.devices.map { V2RealtimeJournalDeviceKey(userID: $0.userID, deviceID: $0.deviceID) }) == requestedDevices,
+              snapshot.devices.count == requestedDevices.count,
+              snapshot.cuts.count <= 128, Set(snapshot.cuts.map(\.partitionID)).count == snapshot.cuts.count,
+              snapshot.cuts.allSatisfy({ $0.partitionID >= 0 && $0.publishedThrough >= 0 && $0.trimmedThrough >= 0 && $0.trimmedThrough <= $0.publishedThrough }),
+              snapshot.cuts.contains(where: { $0.partitionID == source.partitionID && $0.publishedThrough >= 0 && $0.trimmedThrough >= 0 && $0.trimmedThrough <= $0.publishedThrough }),
+              snapshot.users.allSatisfy({ $0.controlVersion >= 0 && $0.membershipDiscoveryVersion >= 0 && $0.sessionControlVersion >= 0 && $0.membershipDiscoveryVersion <= $0.controlVersion && $0.sessionControlVersion <= $0.controlVersion }),
+              journalUserFloors[source] != nil || journalUserFloors.count < 256 else { return nil }
+        let userControls = Dictionary(uniqueKeysWithValues: snapshot.users.map { (UserID(uuid: $0.userID), $0) })
+        guard credentialChangedDeviceKeys.isSubset(of: requestedDevices), minimumControlVersions.allSatisfy({ user, version in
+            guard let control = userControls[user] else { return false }
+            return UInt64(control.controlVersion) >= version
+        }) else { return nil }
+        let oldDevices = journalDeviceFloors[source] ?? [:]
+        guard snapshot.devices.allSatisfy({ state in
+            state.latestChangeVersion >= 0 && state.latestChangeVersion <= (userControls[UserID(uuid: state.userID)]?.controlVersion ?? -1) && state.latestChangeVersion >= (oldDevices[.init(userID: state.userID, deviceID: state.deviceID)] ?? 0)
+        }) else { return nil }
+        let old = journalUserFloors[source] ?? [:]
+        guard snapshot.users.allSatisfy({ user in
+            guard let floor = old[user.userID] else { return true }
+            return user.controlVersion >= floor.controlVersion && user.membershipDiscoveryVersion >= floor.membershipDiscoveryVersion && user.sessionControlVersion >= floor.sessionControlVersion
+        }) else { return nil }
+        let devices = Dictionary(uniqueKeysWithValues: snapshot.devices.map { (V2RealtimeJournalDeviceKey(userID: $0.userID, deviceID: $0.deviceID), $0) })
+        var revoked: [(V2GatewayJournalUserControlInterest, V2GatewayByteStream)] = []
+        for interest in requested {
+            guard directory.lifecycleByConnection[interest.connectionID] == interest.lifecycle,
+                  directory.identityByConnection[interest.connectionID]?.userID == interest.userID,
+                  directory.identityByConnection[interest.connectionID]?.deviceID == interest.deviceID,
+                  let stream = directory.streamsByUser[interest.userID]?[interest.connectionID],
+                  let user = interest.userID.uuidValue, let device = interest.deviceID.uuidValue,
+                  let state = devices[.init(userID: user, deviceID: device)], userControls[interest.userID] != nil,
+                  let authenticated = directory.identityByConnection[interest.connectionID] else { continue }
+            let deviceKey = V2RealtimeJournalDeviceKey(userID: user, deviceID: device)
+            // A first baseline also detects revocation between authentication
+            // and control subscription. A reauthenticated successor carries its
+            // own newer cut and must not be closed by a replayed older hint.
+            let credentialChanged = state.latestChangeVersion > authenticated.credentialControlVersion
+            if isAuthenticationSource && credentialChanged {
+                // Every selected socket loses actual write authority before any
+                // lease, recovery, or close cleanup can suspend.
+                stream.invalidateForegroundAuthorization()
+                stream.revokeRecoveryWorkImmediately()
+                revoked.append((interest, stream))
+            }
+        }
+        var membershipUsers: Set<UserID> = []
+        for control in snapshot.users {
+            // A satisfied control floor is not a new membership change. Replayed
+            // cuts and session-only changes must reuse the account's coverage.
+            let advanced = control.membershipDiscoveryVersion > (old[control.userID]?.membershipDiscoveryVersion ?? 0)
+            if advanced {
+                membershipUsers.insert(UserID(uuid: control.userID))
+            }
+        }
+        for (interest, stream) in revoked {
+            await stream.closeForAccountRecovery()
+            if directory.lifecycleByConnection[interest.connectionID] == interest.lifecycle { await unregister(connectionID: interest.connectionID) }
+        }
+        guard deadline > .now, isCurrent(), snapshot.users.allSatisfy({ user in
+            guard let floor = journalUserFloors[source]?[user.userID] else { return true }
+            return user.controlVersion >= floor.controlVersion && user.membershipDiscoveryVersion >= floor.membershipDiscoveryVersion && user.sessionControlVersion >= floor.sessionControlVersion
+        }), snapshot.devices.allSatisfy({ state in
+            state.latestChangeVersion >= (journalDeviceFloors[source]?[.init(userID: state.userID, deviceID: state.deviceID)] ?? 0)
+        }) else { return nil }
+        // Preserve floors for still-local users only; each source stores at most
+        // one shared control record per viewer, never one record per device.
+        let localUsers = Set(directory.identityByConnection.values.compactMap { $0.userID.uuidValue })
+        var installed = (journalUserFloors[source] ?? [:]).filter { localUsers.contains($0.key) }
+        for control in snapshot.users where localUsers.contains(control.userID) { installed[control.userID] = control }
+        journalUserFloors[source] = installed
+        if isAuthenticationSource {
+            let localDevices = Set(directory.identityByConnection.values.compactMap { identity -> V2RealtimeJournalDeviceKey? in
+                guard let user = identity.userID.uuidValue, let device = identity.deviceID.uuidValue else { return nil }
+                return .init(userID: user, deviceID: device)
+            })
+            var installedDevices = (journalDeviceFloors[source] ?? [:]).filter { localDevices.contains($0.key) }
+            for state in snapshot.devices {
+                let key = V2RealtimeJournalDeviceKey(userID: state.userID, deviceID: state.deviceID)
+                if localDevices.contains(key) { installedDevices[key] = state.latestChangeVersion }
+            }
+            journalDeviceFloors[source] = installedDevices
+        }
+        for user in membershipUsers {
+            let version = userControls[user]?.membershipDiscoveryVersion
+            let exact = version.flatMap { UInt64(exactly: $0) } == membershipChangeVersions[user]
+            await accountChangeService?.requestServerMembershipRefresh(userID: user,
+                rooms: exact ? membershipChangedRooms[user] : nil)
+        }
+        return .init(source: source, versions: Dictionary(uniqueKeysWithValues: snapshot.users.map { (UserID(uuid: $0.userID), UInt64($0.controlVersion)) }))
+    }
+
+    /// Old delivery authority cannot migrate across a new owner/session. It can
+    /// only request a fresh authoritative head for scopes still requested now.
+    public func invalidateDurableRealtimeDelivery(_ delivery: V2RealtimeDelivery) async {
+        await recoveryCoordinator.invalidateDurableRealtimeDelivery(delivery)
+    }
+
+    /// Lost routing coverage changes only acceleration state. Authentication,
+    /// durable cursors and local desired scopes remain available for recovery.
+    public func invalidateRealtimeCoverage(topics: Set<V2RealtimeTopic>, registeredThrough cutoff: ContinuousClock.Instant) async {
+        await recoveryCoordinator.invalidateRealtimeCoverage(topics: topics, registeredThrough: cutoff)
+    }
+
+    /// The caller supplies an exact, current coordinator confirmation. No Ready
+    /// is inferred from head delivery or an idempotent desired-interest activate.
+    public func realtimeCoverageReady(confirmations: [V2RealtimeTopic: V2RealtimeCoverageConfirmation],
+        confirms: @escaping @Sendable (V2RealtimeTopic, V2RealtimeCoverageConfirmation) -> Bool) async {
+        await recoveryCoordinator.realtimeCoverageReady(confirmations: confirmations, confirms: confirms)
+    }
+
+    public func configurePresenceReader(_ reader: any V2LiveActivityStore) async {
+        guard !realtimeRecoveryClosed else { return }
+        if let coordinator = presenceRefreshCoordinator { await coordinator.configure(reader: reader) }
+        else {
+            presenceRefreshCoordinator = .init(reader: reader, recoveryCoordinator: recoveryCoordinator,
+                isCurrent: { [weak self] target in await self?.presenceTargetIsCurrent(target) ?? false })
+        }
+    }
+
+    private func presenceRefreshTargets(targetUsers: Set<UserID>? = nil) -> [PresenceRefreshTarget] {
+        var targets: [PresenceRefreshTarget] = []
+        for (user, watchers) in subscriptions.presenceWatchersByTarget {
+            if let targetUsers, !targetUsers.contains(user) { continue }
+            for (connection, stream) in watchers {
+                let key = RecoveryKey(connection: connection, kind: .userPresence, id: user.rawValue)
+                guard let watch = subscriptions.presenceByConnection[connection], watch.targetUserID == user,
+                      let identity = directory.identityByConnection[connection], let lifecycle = directory.lifecycleByConnection[connection],
+                      let scopeGeneration = recoveryCoordinator.generation(for: key) else { continue }
+                targets.append(.init(connection: connection, lifecycle: lifecycle, scopeGeneration: scopeGeneration,
+                    request: .init(roomID: watch.roomID, viewerUserID: identity.userID, targetUserID: user), stream: stream))
+            }
+        }
+        return targets
+    }
+
+    public func refreshObservedPresence(targetUserID: UserID) async {
+        try? await refreshPresence(presenceRefreshTargets(targetUsers: [targetUserID]), strict: false)
+    }
+
+    private func refreshPresence(_ targets: [PresenceRefreshTarget], strict: Bool) async throws {
+        guard let coordinator = presenceRefreshCoordinator else { throw V2PresenceRefreshCoordinator.Failure.closed }
+        try await coordinator.refresh(targets, strict: strict)
+    }
+
+    private func presenceTargetIsCurrent(_ target: PresenceRefreshTarget) -> Bool {
+        let request = target.request
+        let key = RecoveryKey(connection: target.connection, kind: .userPresence, id: request.targetUserID.rawValue)
+        return directory.lifecycleByConnection[target.connection] == target.lifecycle && recoveryCoordinator.generation(for: key) == target.scopeGeneration
+            && directory.identityByConnection[target.connection]?.userID == request.viewerUserID
+            && subscriptions.presenceByConnection[target.connection]?.roomID == request.roomID
+            && subscriptions.presenceByConnection[target.connection]?.targetUserID == request.targetUserID
+            && subscriptions.presenceWatchersByTarget[request.targetUserID]?[target.connection] === target.stream
+    }
+
+    /// Confirming global interest coverage schedules bounded local recovery.
+    /// Every connection independently proves its actual hint/state handoff before
+    /// Ready; one slow socket never holds this partition's head barrier open.
+    public func arrangeRealtimeRecoveryHeads(_ heads: [V2RealtimeTopic: UInt64]) async throws -> Set<V2RealtimeTopic> {
+        return try await recoveryCoordinator.arrangeRealtimeRecoveryHeads(heads)
+    }
+
+    public func refreshAllObservedPresence() async {
+        try? await refreshPresence(presenceRefreshTargets(), strict: false)
+    }
+
+    public func notifySyncAvailable(userID: UserID, eventID: UInt64, highWatermark: UInt64) async {
+        let streams = directory.streamsByUser[userID].map { Array($0.values) } ?? []
+        for stream in streams { await stream.sendSyncAvailable(eventID: eventID, highWatermark: highWatermark) }
     }
 
     public func subscribeForegroundGroup(
+        _ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID, membershipRevision: UInt64 = 0
+    ) async {
+        _ = try? await subscribeForegroundRoom(stream, connectionID: connectionID,
+            roomID: roomID, membershipRevision: membershipRevision)
+    }
+
+    @discardableResult
+    public func subscribeForegroundRoom(
         _ stream: V2GatewayByteStream,
         connectionID: UUID,
         roomID: RoomID,
         membershipRevision: UInt64 = 0
-    ) async {
-        guard let identity = identityByConnection[connectionID],
-              let lifecycle = lifecycleByConnection[connectionID]
-        else { return }
+    ) async throws -> V2RoomSubscriptionGrant? {
+        guard let identity = directory.identityByConnection[connectionID],
+              let lifecycle = directory.lifecycleByConnection[connectionID]
+        else { return nil }
+        if roomSubscriptionAuthority.withLock({ $0 != nil }) {
+            guard directory.streamsByUser[identity.userID]?[connectionID] === stream,
+                  roomSubscriptionConnections[connectionID]?.lifecycle != nil else { return nil }
+        }
+        if let coordinator = roomSubscriptionCoordinator, subscriptions.foregroundGroupByConnection[connectionID] == roomID,
+           let reference = roomSubscriptionConnections[connectionID]?.reference {
+            let grant = try await coordinator.acquire(roomID: roomID, userID: identity.userID, reference: reference)
+            guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                  roomSubscriptionConnections[connectionID]?.reference == reference,
+                  subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
+                await coordinator.release(reference: reference)
+                throw V2GatewayRoomSubscriptionCoordinationError.superseded
+            }
+            return grant
+        }
         let mutation = makeGeneration()
-        foregroundMutationByConnection[connectionID] = mutation
+        subscriptions.foregroundMutationByConnection[connectionID] = mutation
         defer {
-            if foregroundMutationByConnection[connectionID] == mutation {
-                foregroundMutationByConnection.removeValue(forKey: connectionID)
+            if subscriptions.foregroundMutationByConnection[connectionID] == mutation {
+                subscriptions.foregroundMutationByConnection.removeValue(forKey: connectionID)
             }
         }
-        if foregroundGroupByConnection[connectionID] == roomID {
-            streamsByForegroundGroup[roomID, default: [:]][connectionID] = stream
-            foregroundRoutes.upsert(
-                connectionID: connectionID,
-                roomID: roomID,
-                userID: identity.userID,
-                membershipRevision: membershipRevision,
-                stream: stream
-            )
-            return
+        if subscriptions.foregroundGroupByConnection[connectionID] != roomID {
+            await removeForegroundGroupSubscription(connectionID: connectionID)
+            guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                  subscriptions.foregroundMutationByConnection[connectionID] == mutation else { return nil }
+            subscriptions.foregroundGroupByConnection[connectionID] = roomID
         }
-        await removeForegroundGroupSubscription(connectionID: connectionID)
-        guard lifecycleByConnection[connectionID] == lifecycle,
-              foregroundMutationByConnection[connectionID] == mutation
-        else { return }
-        foregroundGroupByConnection[connectionID] = roomID
-        let wasInactive = streamsByForegroundGroup[roomID] == nil
-        streamsByForegroundGroup[roomID, default: [:]][connectionID] = stream
         foregroundRoutes.upsert(
             connectionID: connectionID,
             roomID: roomID,
             userID: identity.userID,
-            membershipRevision: membershipRevision,
             stream: stream
         )
-        if wasInactive, let foregroundGroupInterestManager {
-            try? await foregroundGroupInterestManager.activate(roomID: roomID)
-            if streamsByForegroundGroup[roomID] == nil {
-                await foregroundGroupInterestManager.deactivate(roomID: roomID)
+        if let authority = roomSubscriptionAuthority.withLock({ $0 }), let localLifecycle = roomSubscriptionConnections[connectionID]?.lifecycle {
+            guard directory.streamsByUser[identity.userID]?[connectionID] === stream,
+                  await authority.registerRoomInterest(connectionID: connectionID, lifecycle: localLifecycle,
+                    roomID: roomID, scopeGeneration: mutation) else {
+                _ = subscriptions.detachForeground(connectionID: connectionID)
+                foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
+                return nil
             }
+            roomSubscriptionConnections[connectionID]?.scopeGeneration = mutation
+            let interestPermit = authority.interestPermit(connectionID: connectionID, lifecycle: localLifecycle,
+                roomID: roomID, generation: mutation)
+            await stream.beginRoomSubscription(roomID: roomID, scopeGeneration: mutation, permit: interestPermit)
+            guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                  roomSubscriptionConnections[connectionID]?.lifecycle == localLifecycle,
+                  roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation,
+                  subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
+                throw V2GatewayRoomSubscriptionCoordinationError.superseded
+            }
+            if let coordinator = roomSubscriptionCoordinator {
+                let reference = UUID(); roomSubscriptionConnections[connectionID]?.reference = reference
+                do {
+                    let grant = try await coordinator.acquire(roomID: roomID, userID: identity.userID, reference: reference)
+                    guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                          roomSubscriptionConnections[connectionID]?.reference == reference,
+                          roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation,
+                          subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
+                        await coordinator.release(reference: reference)
+                        throw V2GatewayRoomSubscriptionCoordinationError.superseded
+                    }
+                    await roomSubscriptionBaselineInstalled(roomID: roomID)
+                    return grant
+                } catch {
+                    if roomSubscriptionConnections[connectionID]?.reference == reference {
+                        await removeForegroundGroupSubscription(connectionID: connectionID)
+                    }
+                    await coordinator.release(reference: reference)
+                    throw error
+                }
+            }
+            await roomSubscriptionBaselineInstalled(roomID: roomID)
+            return nil
         }
+        return nil
     }
 
     public func unsubscribeForegroundGroup(connectionID: UUID, roomID: RoomID) async {
-        guard foregroundGroupByConnection[connectionID] == roomID else { return }
+        guard subscriptions.foregroundGroupByConnection[connectionID] == roomID else { return }
         let mutation = makeGeneration()
-        foregroundMutationByConnection[connectionID] = mutation
+        subscriptions.foregroundMutationByConnection[connectionID] = mutation
         defer {
-            if foregroundMutationByConnection[connectionID] == mutation {
-                foregroundMutationByConnection.removeValue(forKey: connectionID)
+            if subscriptions.foregroundMutationByConnection[connectionID] == mutation {
+                subscriptions.foregroundMutationByConnection.removeValue(forKey: connectionID)
             }
         }
         await removeForegroundGroupSubscription(connectionID: connectionID)
     }
 
-    /// 通知前台群组可用性。
-    ///
-    /// 核心路由允许重复或丢失该提示。
-    /// 每条流只会收到一个房间水位线，必须自行游标拉取持久事件。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间标识。
-    ///   - highWatermark: 该房间当前的高水位。
-    public nonisolated func notifyForegroundGroupAvailable(
-        roomID: RoomID,
-        highWatermark: UInt64
-    ) async {
-        await notifyAccountRoomAvailable(roomID: roomID)
-        let streams = foregroundRoutes.streams(roomID: roomID)
-        let prepared = foregroundFrameLimits.flatMap {
-            V2PreparedGatewayGroupEventAvailable(
-                roomID: roomID,
-                highWatermark: highWatermark,
-                directEvent: nil,
-                frameLimits: $0,
-                compression: foregroundFrameCompression,
-                maximumUncompressedPayloadBytes:
-                    foregroundMaximumUncompressedPayloadBytes,
-                compressionThresholdBytes: foregroundCompressionThresholdBytes,
-                maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
-            )
-        }
-        await Self.publishForeground(
-            streams,
-            roomID: roomID,
-            highWatermark: highWatermark,
-            prepared: prepared
-        )
-    }
-
-    /// 只把私聊事件加速载荷路由到这样的前台流：
-    /// 其已认证身份属于提交事务所捕获的成员集合。
-    ///
-    /// 单单一条订阅永远不构成权威。
-    ///
-    /// - Parameter event: 待路由的私聊实时事件。
-    public nonisolated func notifyForegroundDirectEvent(
-        _ event: V2DirectRoomLiveEvent
-    ) async {
-        await notifyAccountRoomAvailable(roomID: event.roomID)
-        let streams = foregroundRoutes.streams(for: event)
-        let prepared = foregroundFrameLimits.flatMap {
-            V2PreparedGatewayGroupEventAvailable(
-                roomID: event.roomID,
-                highWatermark: event.highWatermark,
-                directEvent: event,
-                frameLimits: $0,
-                compression: foregroundFrameCompression,
-                maximumUncompressedPayloadBytes:
-                    foregroundMaximumUncompressedPayloadBytes,
-                compressionThresholdBytes: foregroundCompressionThresholdBytes,
-                maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
-            )
-        }
-        await Self.publishForeground(
-            streams,
-            roomID: event.roomID,
-            highWatermark: event.highWatermark,
-            directEvent: event,
-            prepared: prepared,
-            hints: authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(directEvent: event) },
-            ingress: authorPresentationIngress
-        )
-    }
-
-    /// 在不新建 Swift 子任务、也不穿越该注册表 actor 的前提下，
-    /// 完成生产环境的纯本地私聊事件路由。
-    ///
-    /// 不可变帧只编码一次，每个受众成员仍由已认证路由快照选出，
-    /// 且每条流的传输栅栏会再次校验认证与生命周期。
-    ///
-    /// 若该注册表创建时没有进程级帧契约，则在发布之前返回 `false`。
-    /// 一旦发布开始，部分传输生命周期未命中也会返回 `false`；投递器随后改走兼容路径。
-    /// 在已入队流上出现重复显式安全，因为前台事件是幂等加速器，而房间日志游标仍是权威。
-    ///
-    /// - Parameter event: 待提交的私聊实时事件。
-    /// - Returns: 是否已通过快速路径完成本地路由。
-    nonisolated func submitForegroundDirectEvent(
-        _ event: V2DirectRoomLiveEvent
-    ) -> Bool {
-        guard let foregroundFrameLimits,
-              let prepared = V2PreparedGatewayGroupEventAvailable(
-                  roomID: event.roomID,
-                  highWatermark: event.highWatermark,
-                  directEvent: event,
-                  frameLimits: foregroundFrameLimits,
-                  compression: foregroundFrameCompression,
-                  maximumUncompressedPayloadBytes:
-                      foregroundMaximumUncompressedPayloadBytes,
-                  compressionThresholdBytes: foregroundCompressionThresholdBytes,
-                  maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
-              )
-        else { return false }
-        let streams = foregroundRoutes.streams(for: event)
-        let hints = authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(directEvent: event) }
-        return Self.submitPreparedForeground(prepared, to: streams, hints: hints, ingress: authorPresentationIngress)
-    }
-
-    /// 私聊事件快速路径在有序混合群组微批上的对应实现。
-    ///
-    /// 以首个事件的成员任期选出受众，每个条目都由已准备帧构造器重新校验，
-    /// 所有套接字收到同一份共享不可变帧，而不是每个事件一帧。
-    ///
-    /// - Parameter events: 本批有序群组实时事件。
-    /// - Returns: 是否已通过快速路径提交。
-    nonisolated func submitForegroundGroupEvents(
-        _ events: [V2DirectRoomLiveEvent]
-    ) -> Bool {
-        guard let first = events.first,
-              first.groupMembershipRevision != nil,
-              let foregroundFrameLimits,
-              let prepared = V2PreparedGatewayGroupEventAvailable(
-                  groupEvents: events,
-                  frameLimits: foregroundFrameLimits,
-                  compression: foregroundFrameCompression,
-                  maximumUncompressedPayloadBytes:
-                      foregroundMaximumUncompressedPayloadBytes,
-                  compressionThresholdBytes: foregroundCompressionThresholdBytes,
-                  maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
-              )
-        else { return false }
-        let streams = foregroundRoutes.streams(for: first)
-        let hints = authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(events: events) }
-        return Self.submitPreparedForeground(prepared, to: streams, hints: hints, ingress: authorPresentationIngress)
-    }
-
-    /// 在保留逐流认证/生命周期栅栏的同时，
-    /// 把进程级调度器交接从「每个接收者一次锁」降为「每个 EventLoop 一批」。
-    /// 基于回调的测试与替代传输仍沿用既有的即时提交路径。
-    ///
-    /// - Parameters:
-    ///   - prepared: 已准备的群事件帧。
-    ///   - streams: 本次投递的已授权目标流。
-    /// - Returns: 是否已通过快速路径完成提交。
-    private nonisolated static func submitPreparedForeground(
-        _ prepared: V2PreparedGatewayGroupEventAvailable,
-        to streams: [V2GatewayByteStream],
-        hints: V2AuthorPresentationHints? = nil,
-        ingress: V2AuthorPresentationIngress? = nil
-    ) -> Bool {
-        var completed = true
-        var nioSubmissions: [V2NIOGatewayForegroundWriteSubmission] = []
-        var supplementTargets: [V2GatewayByteStream] = []
-        nioSubmissions.reserveCapacity(streams.count)
-        for stream in streams {
-            if let submission = stream.prepareNIOGroupEventAvailable(prepared) {
-                nioSubmissions.append(submission)
-                if hints != nil { supplementTargets.append(stream) }
-            } else if !stream.submitGroupEventAvailable(prepared) {
-                completed = false
-            } else if let hints, let ingress {
-                stream.offerAuthorPresentation(hints, to: ingress)
-            }
-        }
-        V2NIOGatewayForegroundWriter.submitBatch(nioSubmissions)
-        if let hints, let ingress {
-            for stream in supplementTargets { stream.offerAuthorPresentation(hints, to: ingress) }
-        }
-        return completed
-    }
-
-    /// 由 actor 支撑的兼容路径，供测试、替代传输，
-    /// 以及任何无法使用 NIO 同步写者的流使用。
-    ///
-    /// - Parameter events: 本批有序群组实时事件。
-    public nonisolated func notifyForegroundGroupEvents(
-        _ events: [V2DirectRoomLiveEvent]
-    ) async {
-        if let roomID = events.first?.roomID { await notifyAccountRoomAvailable(roomID: roomID) }
-        guard let first = events.first,
-              first.groupMembershipRevision != nil,
-              let foregroundFrameLimits,
-              let prepared = V2PreparedGatewayGroupEventAvailable(
-                  groupEvents: events,
-                  frameLimits: foregroundFrameLimits,
-                  compression: foregroundFrameCompression,
-                  maximumUncompressedPayloadBytes:
-                      foregroundMaximumUncompressedPayloadBytes,
-                  compressionThresholdBytes: foregroundCompressionThresholdBytes,
-                  maximumExpansionRatio: foregroundMaximumCompressionExpansionRatio
-              )
-        else { return }
-        let streams = foregroundRoutes.streams(for: first)
-        let hints = authorPresentationIngress.flatMap { _ in V2AuthorPresentationHints(events: events) }
-        var nioSubmissions: [V2NIOGatewayForegroundWriteSubmission] = []
-        var supplementTargets: [V2GatewayByteStream] = []
-        nioSubmissions.reserveCapacity(streams.count)
-        var actorFallbacks: [V2GatewayByteStream] = []
-        for stream in streams {
-            if let submission = stream.prepareNIOGroupEventAvailable(prepared) {
-                nioSubmissions.append(submission)
-                if hints != nil { supplementTargets.append(stream) }
-            } else if !stream.submitGroupEventAvailable(prepared) {
-                actorFallbacks.append(stream)
-            } else if let hints, let authorPresentationIngress {
-                stream.offerAuthorPresentation(hints, to: authorPresentationIngress)
-            }
-        }
-        V2NIOGatewayForegroundWriter.submitBatch(nioSubmissions)
-        if let hints, let authorPresentationIngress {
-            for stream in supplementTargets { stream.offerAuthorPresentation(hints, to: authorPresentationIngress) }
-        }
-        for stream in actorFallbacks {
-            let submitted = await stream.sendGroupEventAvailable(prepared)
-            if submitted, let hints, let authorPresentationIngress {
-                stream.offerAuthorPresentation(hints, to: authorPresentationIngress)
-            }
-        }
-    }
-
-    public func connectionCount(for deviceID: DeviceID) -> Int { streamsByDevice[deviceID]?.count ?? 0 }
+    public func connectionCount(for deviceID: DeviceID) -> Int { directory.streamsByDevice[deviceID]?.count ?? 0 }
 
     public func connectionMetricsSnapshot() -> V2ConnectionMetricsSnapshot {
-        .init(activeDevices: streamsByDevice.count, activeConnections: identityByConnection.count)
+        .init(activeDevices: directory.streamsByDevice.count, activeConnections: directory.identityByConnection.count)
     }
 
     public func activeForegroundGroupMetrics() -> (rooms: Int, viewers: Int) {
-        (streamsByForegroundGroup.count, foregroundGroupByConnection.count)
+        (Set(subscriptions.foregroundGroupByConnection.values).count, subscriptions.foregroundGroupByConnection.count)
     }
 
     public func configureLivePresenceLeases(_ leases: any V2LivePresenceLeaseManaging) {
+        precondition(!hasStartedRegistrations, "lease controller must be installed before connections")
         livePresenceLeases = leases
-        livePresenceRenewals = .init(
-            leases: leases,
-            configuration: livePresenceRenewalConfiguration
-        )
+        leaseController = .init(leases: leases, configuration: livePresenceRenewalConfiguration,
+            maximumConnections: maximumConnections, onRemoved: { [weak self] connection, identity, remainsOnline in
+                await self?.presenceLeaseCleanupCompleted(connectionID: connection, identity: identity,
+                    remainsOnline: remainsOnline)
+            })
     }
 
     public func livePresenceRenewalMetrics() async -> V2LivePresenceRenewalBatcherSnapshot? {
-        await livePresenceRenewals?.snapshot()
+        await leaseController?.metrics()
     }
 
     public func finishLivePresenceRenewals() async {
-        await livePresenceRenewals?.finish()
-        livePresenceRenewals = nil
+        leaseRenewalsClosed = true
+        await leaseController?.finish()
     }
 
     public func configureLiveActivityObservationAuthorizer(_ authorizer: any V2LiveActivityObservationAuthorizing) {
         liveActivityObservationAuthorizer = authorizer
     }
 
-    public func configureLiveActivityBroker(_ broker: any V2LiveActivityInterestManaging & V2LiveActivityPublishing) async {
+    public func configureLiveActivityBroker(_ broker: any V2LiveActivityInterestManaging & V2LiveActivityPublishing, routesLocalActivity: Bool = false) async {
+        precondition(!hasStartedRegistrations && !realtimeRecoveryClosed && liveActivityBroker == nil)
         liveActivityBroker = broker
-        for userID in Array(presenceWatchersByTarget.keys) {
-            try? await broker.activatePresence(targetUserID: userID)
-            if presenceWatchersByTarget[userID] == nil { await broker.deactivatePresence(targetUserID: userID) }
-        }
-        for roomID in Array(typingWatchersByRoom.keys) {
-            try? await broker.activateTyping(roomID: roomID)
-            if typingWatchersByRoom[roomID] == nil { await broker.deactivateTyping(roomID: roomID) }
-        }
+        await recoveryCoordinator.configureLiveActivity(broker)
+        brokerRoutesLocalActivity = routesLocalActivity
+
     }
 
-    public func detachLiveActivityBroker() {
-        liveActivityBroker = nil
+    func presenceLeaseSnapshot(connectionID: UUID) async -> (deadline: ContinuousClock.Instant?, renewing: Bool, renewAt: ContinuousClock.Instant?) {
+        guard let leaseController else { return (nil, false, nil) }
+        return await leaseController.snapshot(connectionID: connectionID)
+    }
+
+    /// Local heartbeats only update liveness; the controller owns SQL renewal.
+    @discardableResult
+    public func refreshLivePresence(connectionID: UUID) async -> Bool {
+        guard !leaseRenewalsClosed, directory.identityByConnection[connectionID] != nil,
+              let lifecycle = directory.lifecycleByConnection[connectionID] else { return false }
+        guard let leaseController else { return true }
+        let accepted = await leaseController.heartbeat(connectionID: connectionID, lifecycle: lifecycle)
+        return accepted && directory.lifecycleByConnection[connectionID] == lifecycle
+    }
+
+    private func presenceLeaseCleanupCompleted(connectionID: UUID, identity: V2AuthenticatedConnection,
+        remainsOnline: Bool) async {
+        guard !remainsOnline, directory.lifecycleByConnection[connectionID] == nil,
+              directory.streamsByUser[identity.userID] == nil else { return }
+        await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
     }
 
     @discardableResult
-    public func refreshLivePresence(connectionID: UUID) async -> Bool {
-        guard let identity = identityByConnection[connectionID],
-              let lifecycle = lifecycleByConnection[connectionID]
-        else { return false }
-        guard let livePresenceLeases else { return true }
-        let refresh: V2LivePresenceLeaseRefresh
-        do {
-            if let livePresenceRenewals {
-                refresh = try await livePresenceRenewals.renew(
-                    identity: identity,
-                    connectionID: connectionID,
-                    now: Date()
-                )
-            } else {
-                let now = Date()
-                let outcome = try await livePresenceLeases.renewConnection(
-                    identity: identity,
-                    connectionID: connectionID,
-                    now: now
-                )
-                refresh = .init(
-                    outcome: outcome,
-                    allowsOnlinePresence: try await livePresenceLeases.allowsOnlinePresence(
-                        userID: identity.userID
-                    )
-                )
-            }
-        } catch {
-            await unregister(connectionID: connectionID)
-            return false
-        }
-        guard lifecycleByConnection[connectionID] == lifecycle else {
-            await compensateStalePresence(connectionID: connectionID, identity: identity)
-            return false
-        }
-        guard case .accepted(let expiresAt) = refresh.outcome else {
-            await unregister(connectionID: connectionID)
-            return false
-        }
-        if refresh.allowsOnlinePresence, publicationSuppressedByConnection[connectionID] == false,
-           lifecycleByConnection[connectionID] == lifecycle {
-            await routePresence(targetUserID: identity.userID, isOnline: true, expiresAt: expiresAt)
-        }
-        if lifecycleByConnection[connectionID] != lifecycle {
-            await compensateStalePresence(connectionID: connectionID, identity: identity)
-            return false
-        }
-        return true
+    private func refreshPersistedPresence(connectionID: UUID) async -> Bool {
+        guard directory.identityByConnection[connectionID] != nil, let lifecycle = directory.lifecycleByConnection[connectionID],
+              !leaseRenewalsClosed else { return false }
+        guard let leaseController else { return true }
+        let accepted = await leaseController.refreshProjection(connectionID: connectionID, lifecycle: lifecycle)
+        return accepted && directory.lifecycleByConnection[connectionID] == lifecycle
     }
 
     public func subscribePresence(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID, targetUserID: UserID) async {
-        guard identityByConnection[connectionID] != nil,
-              let lifecycle = lifecycleByConnection[connectionID]
+        guard directory.identityByConnection[connectionID] != nil,
+              let lifecycle = directory.lifecycleByConnection[connectionID]
         else { return }
         let mutation = makeGeneration()
-        presenceMutationByConnection[connectionID] = mutation
+        subscriptions.presenceMutationByConnection[connectionID] = mutation
         defer {
-            if presenceMutationByConnection[connectionID] == mutation {
-                presenceMutationByConnection.removeValue(forKey: connectionID)
+            if subscriptions.presenceMutationByConnection[connectionID] == mutation {
+                subscriptions.presenceMutationByConnection.removeValue(forKey: connectionID)
             }
         }
         await removePresenceSubscription(connectionID: connectionID)
-        guard lifecycleByConnection[connectionID] == lifecycle,
-              presenceMutationByConnection[connectionID] == mutation
+        guard directory.lifecycleByConnection[connectionID] == lifecycle,
+              subscriptions.presenceMutationByConnection[connectionID] == mutation
         else { return }
-        presenceByConnection[connectionID] = (roomID, targetUserID)
-        presenceWatchersByTarget[targetUserID, default: [:]][connectionID] = stream
-        if presenceWatchersByTarget[targetUserID]?.count == 1, let liveActivityBroker {
-            try? await liveActivityBroker.activatePresence(targetUserID: targetUserID)
-            if presenceWatchersByTarget[targetUserID] == nil {
-                await liveActivityBroker.deactivatePresence(targetUserID: targetUserID)
-            }
-        }
+        subscriptions.presenceByConnection[connectionID] = (roomID, targetUserID)
+        subscriptions.presenceWatchersByTarget[targetUserID, default: [:]][connectionID] = stream
+        await beginScopeRecovery(connection: connectionID, kind: .userPresence, id: targetUserID.rawValue)
     }
 
     public func unsubscribePresence(connectionID: UUID, roomID: RoomID) async {
-        guard presenceByConnection[connectionID]?.roomID == roomID else { return }
+        guard subscriptions.presenceByConnection[connectionID]?.roomID == roomID else { return }
         let mutation = makeGeneration()
-        presenceMutationByConnection[connectionID] = mutation
+        subscriptions.presenceMutationByConnection[connectionID] = mutation
         defer {
-            if presenceMutationByConnection[connectionID] == mutation {
-                presenceMutationByConnection.removeValue(forKey: connectionID)
+            if subscriptions.presenceMutationByConnection[connectionID] == mutation {
+                subscriptions.presenceMutationByConnection.removeValue(forKey: connectionID)
             }
         }
         await removePresenceSubscription(connectionID: connectionID)
     }
 
     public func subscribeTyping(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
-        guard identityByConnection[connectionID] != nil,
-              let lifecycle = lifecycleByConnection[connectionID]
+        guard directory.identityByConnection[connectionID] != nil,
+              let lifecycle = directory.lifecycleByConnection[connectionID]
         else { return }
         let mutation = makeGeneration()
-        typingMutationByConnection[connectionID] = mutation
+        subscriptions.typingMutationByConnection[connectionID] = mutation
         defer {
-            if typingMutationByConnection[connectionID] == mutation {
-                typingMutationByConnection.removeValue(forKey: connectionID)
+            if subscriptions.typingMutationByConnection[connectionID] == mutation {
+                subscriptions.typingMutationByConnection.removeValue(forKey: connectionID)
             }
         }
         await removeTypingSubscription(connectionID: connectionID)
-        guard lifecycleByConnection[connectionID] == lifecycle,
-              typingMutationByConnection[connectionID] == mutation
+        guard directory.lifecycleByConnection[connectionID] == lifecycle,
+              subscriptions.typingMutationByConnection[connectionID] == mutation
         else { return }
-        typingRoomByConnection[connectionID] = roomID
-        typingWatchersByRoom[roomID, default: [:]][connectionID] = stream
-        if typingWatchersByRoom[roomID]?.count == 1, let liveActivityBroker {
-            try? await liveActivityBroker.activateTyping(roomID: roomID)
-            if typingWatchersByRoom[roomID] == nil {
-                await liveActivityBroker.deactivateTyping(roomID: roomID)
-            }
-        }
+        subscriptions.typingRoomByConnection[connectionID] = roomID
+        subscriptions.typingWatchersByRoom[roomID, default: [:]][connectionID] = stream
+        await beginScopeRecovery(connection: connectionID, kind: .roomTyping, id: roomID.rawValue)
     }
 
     public func unsubscribeTyping(connectionID: UUID, roomID: RoomID) async {
-        guard typingRoomByConnection[connectionID] == roomID else { return }
+        guard subscriptions.typingRoomByConnection[connectionID] == roomID else { return }
         let mutation = makeGeneration()
-        typingMutationByConnection[connectionID] = mutation
+        subscriptions.typingMutationByConnection[connectionID] = mutation
         defer {
-            if typingMutationByConnection[connectionID] == mutation {
-                typingMutationByConnection.removeValue(forKey: connectionID)
+            if subscriptions.typingMutationByConnection[connectionID] == mutation {
+                subscriptions.typingMutationByConnection.removeValue(forKey: connectionID)
             }
         }
         await removeTypingSubscription(connectionID: connectionID)
     }
 
-    public func notifyTyping(roomID: RoomID, actorUserID: UserID, isTyping: Bool, expiresAt: Date) async {
+    public func notifyTyping(roomID: RoomID, actorUserID: UserID, isTyping: Bool, expiresAt: Date, sourceConnectionID: UUID? = nil) async {
         let state = V2TypingState(roomID: roomID, userID: actorUserID, isTyping: isTyping, expiresAt: expiresAt)
-        await notifyTypingWatchers(state)
-        await liveActivityBroker?.publishTyping(state)
+        if let publisher = liveActivityBroker as? any V2LifecycleTypingPublishing, let sourceConnectionID {
+            guard directory.identityByConnection[sourceConnectionID]?.userID == actorUserID else { return }
+            await publisher.publishTyping(state, sourceConnectionID: sourceConnectionID)
+        } else {
+            await notifyTypingWatchers(state)
+            await liveActivityBroker?.publishTyping(state)
+        }
     }
 
     public func receivePresence(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
@@ -773,48 +1288,75 @@ public actor V2DeviceConnectionRegistry {
 
     @discardableResult
     public func applyLiveActivityPreferences(connectionID: UUID, allowsOnlinePresence: Bool) async -> Bool {
-        guard let identity = identityByConnection[connectionID],
-              let lifecycle = lifecycleByConnection[connectionID]
+        guard let identity = directory.identityByConnection[connectionID],
+              let lifecycle = directory.lifecycleByConnection[connectionID]
         else { return false }
         if allowsOnlinePresence {
-            return await refreshLivePresence(connectionID: connectionID)
+            return await refreshPersistedPresence(connectionID: connectionID)
         } else {
             // 保持每份连接准入租约有效。数据库读取与刷新广播
             // 都会应用隐私偏好，因此租约虽不可见，仍可在网关副本间限制连接数。
-            guard lifecycleByConnection[connectionID] == lifecycle else { return false }
+            guard directory.lifecycleByConnection[connectionID] == lifecycle else { return false }
             await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
-            return lifecycleByConnection[connectionID] == lifecycle
+            return directory.lifecycleByConnection[connectionID] == lifecycle
         }
     }
 
     private func notifyTypingWatchers(_ state: V2TypingState) async {
-        let streams = typingWatchersByRoom[state.roomID].map { Array($0) } ?? []
+        let streams = subscriptions.typingWatchersByRoom[state.roomID].map { Array($0) } ?? []
         let candidates = streams.compactMap { connectionID, stream -> (V2LiveObservationKey, V2GatewayByteStream)? in
-            guard let observer = identityByConnection[connectionID]?.userID, observer != state.userID else { return nil }
+            guard let observer = directory.identityByConnection[connectionID]?.userID, observer != state.userID else { return nil }
             return (.init(roomID: state.roomID, observerUserID: observer, subjectUserID: state.userID), stream)
         }
         let authorized = await authorizedObservationKeys(Set(candidates.map(\.0)))
         for (key, stream) in candidates where authorized.contains(key) {
-            guard typingWatchersByRoom[state.roomID]?.values.contains(where: { $0 === stream }) == true else { continue }
+            guard subscriptions.typingWatchersByRoom[state.roomID]?.values.contains(where: { $0 === stream }) == true else { continue }
             await stream.sendTypingState(state)
         }
     }
 
     private func routePresence(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
-        await notifyPresenceWatchers(targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt)
-        await liveActivityBroker?.publishPresence(targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt)
+        guard !realtimeRecoveryClosed else { return }
+        // Payload is only an invalidation hint; a departing local connection
+        // never establishes global offline state. The observer reads authority.
+        if dirtyPresence[targetUserID] == nil, dirtyPresence.count >= maximumDirtyPresenceUsers {
+            // Transient invalidations are bounded; visible targets also refresh
+            // authority periodically, independently of this coalescing queue.
+            return
+        }
+        dirtyPresence[targetUserID] = (isOnline, expiresAt)
+        if dirtyPresenceWorker == nil {
+            // This coalesced lifecycle worker has no caller authorization/SQL context.
+            dirtyPresenceWorker = Task.detached { await self.drainDirtyPresence() }
+        }
+    }
+
+    private func drainDirtyPresence() async {
+        while !realtimeRecoveryClosed, let user = dirtyPresence.keys.first,
+              let state = dirtyPresence.removeValue(forKey: user) {
+            if !brokerRoutesLocalActivity {
+                if presenceRefreshCoordinator != nil { await refreshObservedPresence(targetUserID: user) }
+                else {
+                    let allowed = (try? await livePresenceLeases?.allowsOnlinePresence(userID: user)) == true
+                    let visible = state.0 && allowed
+                    await notifyPresenceWatchers(targetUserID: user, isOnline: visible, expiresAt: state.1)
+                }
+            }
+            await liveActivityBroker?.publishPresence(targetUserID: user, isOnline: state.0, expiresAt: state.1)
+        }
+        dirtyPresenceWorker = nil
     }
 
     private func compensateStalePresence(connectionID: UUID, identity: V2AuthenticatedConnection) async {
         // 较新的生命周期可能有意复用此 UUID，并已拥有数据库记录。
         // 过期续体不能删除它。
-        guard lifecycleByConnection[connectionID] == nil else { return }
+        guard directory.lifecycleByConnection[connectionID] == nil else { return }
         guard let remainsOnline = await removePresenceLease(
             identity: identity,
             connectionID: connectionID
         ) else { return }
         guard !remainsOnline,
-              identityByConnection[connectionID] == nil
+              directory.identityByConnection[connectionID] == nil
         else { return }
         await routePresence(targetUserID: identity.userID, isOnline: false, expiresAt: Date())
     }
@@ -823,28 +1365,22 @@ public actor V2DeviceConnectionRegistry {
         identity: V2AuthenticatedConnection,
         connectionID: UUID
     ) async -> Bool? {
-        guard let livePresenceLeases else {
-            return streamsByUser[identity.userID] != nil
-        }
-        return try? await livePresenceLeases.removePresence(
-            identity: identity,
-            connectionID: connectionID,
-            now: Date()
-        )
+        guard let leaseController else { return directory.streamsByUser[identity.userID] != nil }
+        return await leaseController.removePresence(identity: identity, connectionID: connectionID)
     }
 
     private func notifyPresenceWatchers(targetUserID: UserID, isOnline: Bool, expiresAt: Date) async {
-        let streams = presenceWatchersByTarget[targetUserID].map { Array($0) } ?? []
+        let streams = subscriptions.presenceWatchersByTarget[targetUserID].map { Array($0) } ?? []
         let candidates = streams.compactMap { connectionID, stream -> (V2LiveObservationKey, V2GatewayByteStream)? in
-            guard let watch = presenceByConnection[connectionID],
-                  let observer = identityByConnection[connectionID]?.userID,
+            guard let watch = subscriptions.presenceByConnection[connectionID],
+                  let observer = directory.identityByConnection[connectionID]?.userID,
                   watch.targetUserID == targetUserID
             else { return nil }
             return (.init(roomID: watch.roomID, observerUserID: observer, subjectUserID: targetUserID), stream)
         }
         let authorized = await authorizedObservationKeys(Set(candidates.map(\.0)))
         for (key, stream) in candidates where authorized.contains(key) {
-            guard presenceWatchersByTarget[targetUserID]?.values.contains(where: { $0 === stream }) == true else { continue }
+            guard subscriptions.presenceWatchersByTarget[targetUserID]?.values.contains(where: { $0 === stream }) == true else { continue }
             await stream.sendPresenceState(.init(roomID: key.roomID, targetUserID: targetUserID, isOnline: isOnline, expiresAt: expiresAt))
         }
     }
@@ -901,138 +1437,56 @@ public actor V2DeviceConnectionRegistry {
     }
 
     private func removePresenceSubscription(connectionID: UUID) async {
-        guard let previous = presenceByConnection.removeValue(forKey: connectionID) else { return }
-        presenceWatchersByTarget[previous.targetUserID]?.removeValue(forKey: connectionID)
-        if presenceWatchersByTarget[previous.targetUserID]?.isEmpty == true {
-            presenceWatchersByTarget.removeValue(forKey: previous.targetUserID)
-            if let liveActivityBroker {
-                await liveActivityBroker.deactivatePresence(targetUserID: previous.targetUserID)
-                if presenceWatchersByTarget[previous.targetUserID] != nil {
-                    try? await liveActivityBroker.activatePresence(targetUserID: previous.targetUserID)
-                }
-            }
-        }
+        guard let previous = subscriptions.detachPresence(connectionID: connectionID) else { return }
+        await endScope(connection: connectionID, kind: .userPresence,
+            id: previous.targetUserID.rawValue, stream: previous.stream)
     }
 
     private func removeTypingSubscription(connectionID: UUID) async {
-        guard let roomID = typingRoomByConnection.removeValue(forKey: connectionID) else { return }
-        typingWatchersByRoom[roomID]?.removeValue(forKey: connectionID)
-        if typingWatchersByRoom[roomID]?.isEmpty == true {
-            typingWatchersByRoom.removeValue(forKey: roomID)
-            if let liveActivityBroker {
-                await liveActivityBroker.deactivateTyping(roomID: roomID)
-                if typingWatchersByRoom[roomID] != nil {
-                    try? await liveActivityBroker.activateTyping(roomID: roomID)
-                }
-            }
-        }
+        guard let previous = subscriptions.detachTyping(connectionID: connectionID) else { return }
+        await endScope(connection: connectionID, kind: .roomTyping,
+            id: previous.roomID.rawValue, stream: previous.stream)
     }
 
     private func removeForegroundGroupSubscription(connectionID: UUID) async {
-        guard let roomID = foregroundGroupByConnection.removeValue(forKey: connectionID) else { return }
-        foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
-        streamsByForegroundGroup[roomID]?.removeValue(forKey: connectionID)
-        if streamsByForegroundGroup[roomID]?.isEmpty == true {
-            streamsByForegroundGroup.removeValue(forKey: roomID)
-            if let foregroundGroupInterestManager {
-                await foregroundGroupInterestManager.deactivate(roomID: roomID)
-                if streamsByForegroundGroup[roomID] != nil {
-                    try? await foregroundGroupInterestManager.activate(roomID: roomID)
-                }
+        guard let roomID = subscriptions.detachForeground(connectionID: connectionID) else { return }
+        let stream = foregroundRoutes.target(roomID: roomID, connectionID: connectionID)?.stream
+        if let authority = roomSubscriptionAuthority.withLock({ $0 }) {
+            if let lifecycle = roomSubscriptionConnections[connectionID]?.lifecycle {
+                await authority.removeRoomInterest(connectionID: connectionID, lifecycle: lifecycle, roomID: roomID)
             }
-        }
-    }
-
-    /// 一旦捕获到已授权的流快照，各套接字 actor 便彼此独立。
-    ///
-    /// 单聊房间通常只有一两条本地流；为每条消息都建任务组，
-    /// 其开销高于那几个顺序 actor 跳转，还会在高消息速率下造成调度压力。
-    /// 更大的群组仍以有界波次发布，
-    /// 使一条慢流无法串行化整个房间，网关也不会制造无界的任务突发。
-    ///
-    /// - Parameters:
-    ///   - streams: 目标流列表。
-    ///   - roomID: 目标房间标识。
-    ///   - highWatermark: 当前高水位。
-    ///   - directEvent: 可选的私聊实时事件。
-    ///   - prepared: 可选的已准备群事件帧。
-    private nonisolated static func publishForeground(
-        _ streams: [V2GatewayByteStream],
-        roomID: RoomID,
-        highWatermark: UInt64,
-        directEvent: V2DirectRoomLiveEvent? = nil,
-        prepared: V2PreparedGatewayGroupEventAvailable? = nil,
-        hints: V2AuthorPresentationHints? = nil,
-        ingress: V2AuthorPresentationIngress? = nil
-    ) async {
-        let sequentialWriteLimit = 4
-        if streams.count <= sequentialWriteLimit {
-            for stream in streams {
-                if Task.isCancelled { return }
-                let submitted: Bool
-                if let prepared, stream.submitGroupEventAvailable(prepared) {
-                    submitted = true
-                } else if let prepared {
-                    submitted = await stream.sendGroupEventAvailable(prepared)
-                } else {
-                    submitted = await stream.sendGroupEventAvailable(
-                        roomID: roomID,
-                        highWatermark: highWatermark,
-                        directEvent: directEvent
-                    )
-                }
-                if submitted, let hints, let ingress { stream.offerAuthorPresentation(hints, to: ingress) }
+            foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
+            let generation = roomSubscriptionConnections[connectionID]?.scopeGeneration
+            roomSubscriptionConnections[connectionID]?.scopeGeneration = nil
+            if let reference = roomSubscriptionConnections[connectionID]?.reference {
+                roomSubscriptionConnections[connectionID]?.reference = nil
+                await roomSubscriptionCoordinator?.release(reference: reference)
+            }
+            if let generation {
+                await stream?.endRoomSubscription(roomID: roomID, scopeGeneration: generation)
             }
             return
         }
-
-        let maximumConcurrentWrites = 16
-        var lowerBound = 0
-        while lowerBound < streams.count {
-            if Task.isCancelled { return }
-            let upperBound = min(lowerBound + maximumConcurrentWrites, streams.count)
-            await withTaskGroup(of: Void.self) { group in
-                for stream in streams[lowerBound..<upperBound] {
-                    group.addTask {
-                        guard !Task.isCancelled else { return }
-                        let submitted: Bool
-                        if let prepared, stream.submitGroupEventAvailable(prepared) {
-                            submitted = true
-                        } else if let prepared {
-                            submitted = await stream.sendGroupEventAvailable(prepared)
-                        } else {
-                            submitted = await stream.sendGroupEventAvailable(
-                                roomID: roomID,
-                                highWatermark: highWatermark,
-                                directEvent: directEvent
-                            )
-                        }
-                        if submitted, let hints, let ingress { stream.offerAuthorPresentation(hints, to: ingress) }
-                    }
-                }
-            }
-            lowerBound = upperBound
-        }
+        foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
     }
 
     private func rollbackRegistration(
         connectionID: UUID,
         identity: V2AuthenticatedConnection,
         lifecycle: Generation
-    ) {
-        guard lifecycleByConnection[connectionID] == lifecycle,
-              identityByConnection[connectionID] == identity
-        else { return }
-        publicationSuppressedByConnection.removeValue(forKey:connectionID)
-        lifecycleByConnection.removeValue(forKey: connectionID)
-        identityByConnection.removeValue(forKey: connectionID)
-        streamsByDevice[identity.deviceID]?.removeValue(forKey: connectionID)
-        if streamsByDevice[identity.deviceID]?.isEmpty == true {
-            streamsByDevice.removeValue(forKey: identity.deviceID)
-        }
-        streamsByUser[identity.userID]?.removeValue(forKey: connectionID)
-        if streamsByUser[identity.userID]?.isEmpty == true {
-            streamsByUser.removeValue(forKey: identity.userID)
+    ) async {
+        guard directory.identityByConnection[connectionID] == identity,
+              directory.remove(connectionID, lifecycle: lifecycle) != nil else { return }
+        let roomReference = removeRoomSubscriptionConnection(connectionID)
+        if let roomReference { await roomSubscriptionCoordinator?.release(reference: roomReference) }
+        journalInterestChanged.withLock { $0?.callback }?()
+        defer { directory.endOperation(connectionID) }
+        let scope = userSyncScopes.removeValue(forKey: connectionID)
+        let revokedScopes = recoveryCoordinator.revokeConnection(connectionID, lifecycle: lifecycle)
+        await recoveryCoordinator.detachConnection(connectionID, revokedScopes: revokedScopes)
+        await leaseController?.revoke(connectionID: connectionID, lifecycle: lifecycle)
+        if let scope {
+            await deactivateUserSyncInterest(userID: identity.userID, scope: scope)
         }
     }
 
@@ -1042,9 +1496,28 @@ public actor V2DeviceConnectionRegistry {
     ///
     /// - Returns: 当前暂存的可重入围栏数量。
     func transientMutationTokenCount() -> Int {
-        foregroundMutationByConnection.count
-            + presenceMutationByConnection.count
-            + typingMutationByConnection.count
+        subscriptions.foregroundMutationByConnection.count
+            + subscriptions.presenceMutationByConnection.count
+            + subscriptions.typingMutationByConnection.count
+    }
+
+    private func configureRecoveryPortsIfNeeded() {
+        guard !recoveryPortsConfigured else { return }
+        recoveryPortsConfigured = true
+        recoveryCoordinator.configurePorts(.init(preparePresence: { [weak self] key, lifecycle, generation in
+            guard let self else { throw CancellationError() }
+            return try await self.prepareRecoveryPresence(key, lifecycle: lifecycle, generation: generation)
+        }, compensateScope: { [weak self] key, lifecycle, scope, user in
+            await self?.compensateStaleScope(key: key, lifecycle: lifecycle, accountScope: scope, user: user)
+        }))
+    }
+
+    private func prepareRecoveryPresence(_ key: RecoveryKey, lifecycle: UInt64, generation: UInt64) async throws -> V2PreparedPresenceHandoff {
+        guard let coordinator = presenceRefreshCoordinator,
+              let target = presenceRefreshTargets(targetUsers: [try UserID(key.id)]).first(where: {
+                  $0.connection == key.connection && $0.lifecycle == lifecycle && $0.scopeGeneration == generation
+              }) else { throw V2RealtimePublicationBackpressure.receiverQueue }
+        return try await coordinator.prepare(target)
     }
 
     private func makeGeneration() -> Generation {
@@ -1057,30 +1530,21 @@ public actor V2DeviceConnectionRegistry {
 
 /// 分片的、基于锁的前台路由快照。
 ///
-/// 订阅权威仍由 `V2DeviceConnectionRegistry` 确立；
-/// 这里的条目只包含为私聊实时载荷建立围栏所需的已认证用户身份，
-/// 以及用于尽力而为提示的进程本地流引用。
+/// 这里只索引详情兴趣对应的连接和本地流。
+/// 成员任期与实际写入许可由房间订阅 Authority 持有。
 private final class V2ForegroundConnectionRoutes: Sendable {
+    struct Target: Sendable {
+        let connectionID: UUID
+        let userID: UserID
+        let stream: V2GatewayByteStream
+    }
     private struct Entry: Sendable {
         let userID: UserID
-        let membershipRevision: UInt64
         let stream: V2GatewayByteStream
     }
 
     private struct State: Sendable {
         var entriesByRoom: [RoomID: [UUID: Entry]] = [:]
-        /// 群组发布的频率远高于订阅变更。
-        ///
-        /// 在变更时构建受修订围栏保护的不可变数组，
-        /// 使热房间无需为每个前台批次重新分配并保留全部流。
-        /// 查找时复制一个数组值只保留其写时复制存储；并发变更会发布一份新快照。
-        var groupStreamsByRoomRevision:
-            [RoomID: [UInt64: [V2GatewayByteStream]]] = [:]
-        /// 一次大规模重连潮可能在首个实时事件之前加入大量观看者。
-        ///
-        /// 在这波之后惰性重建一次，
-        /// 而不是把 N 次订阅变成 O(N²) 次快照复制。
-        var dirtyGroupStreamRooms: Set<RoomID> = []
     }
 
     private final class Shard: Sendable {
@@ -1098,16 +1562,13 @@ private final class V2ForegroundConnectionRoutes: Sendable {
         connectionID: UUID,
         roomID: RoomID,
         userID: UserID,
-        membershipRevision: UInt64,
         stream: V2GatewayByteStream
     ) {
         shard(for: roomID).state.withLock { state in
             state.entriesByRoom[roomID, default: [:]][connectionID] = .init(
                 userID: userID,
-                membershipRevision: membershipRevision,
                 stream: stream
             )
-            state.dirtyGroupStreamRooms.insert(roomID)
         }
     }
 
@@ -1116,85 +1577,16 @@ private final class V2ForegroundConnectionRoutes: Sendable {
             state.entriesByRoom[roomID]?.removeValue(forKey: connectionID)
             if state.entriesByRoom[roomID]?.isEmpty == true {
                 state.entriesByRoom.removeValue(forKey: roomID)
-                state.groupStreamsByRoomRevision.removeValue(forKey: roomID)
-                state.dirtyGroupStreamRooms.remove(roomID)
-            } else {
-                state.dirtyGroupStreamRooms.insert(roomID)
             }
         }
     }
 
-    func streams(roomID: RoomID) -> [V2GatewayByteStream] {
-        shard(for: roomID).state.withLock {
-            $0.entriesByRoom[roomID].map { Array($0.values.map(\.stream)) } ?? []
+    func target(roomID: RoomID, connectionID: UUID) -> Target? {
+        shard(for: roomID).state.withLock { value in
+            guard let entry = value.entriesByRoom[roomID]?[connectionID] else { return nil }
+            return Target(connectionID: connectionID, userID: entry.userID,
+                stream: entry.stream)
         }
-    }
-
-    func streams(
-        roomID: RoomID,
-        recipientUserIDs: Set<UserID>,
-        excludingConnectionID: UUID? = nil
-    ) -> [V2GatewayByteStream] {
-        shard(for: roomID).state.withLock { state in
-            guard let entries = state.entriesByRoom[roomID] else { return [] }
-            return entries.compactMap { connectionID, entry in
-                guard connectionID != excludingConnectionID,
-                      recipientUserIDs.contains(entry.userID)
-                else { return nil }
-                return entry.stream
-            }
-        }
-    }
-
-    /// 从不可变的、已认证的订阅状态中选出受众。
-    ///
-    /// 群组事件绝不只凭房间兴趣就下判断：
-    /// 订阅与提交事务必须指向同一个持久成员任期。
-    ///
-    /// - Parameter event: 待路由的实时事件。
-    /// - Returns: 匹配该事件的已授权流。
-    func streams(for event: V2DirectRoomLiveEvent) -> [V2GatewayByteStream] {
-        shard(for: event.roomID).state.withLock { state in
-            if let membershipRevision = event.groupMembershipRevision {
-                guard event.recipientUserIDs.isEmpty else { return [] }
-                if event.excludedConnectionID == nil {
-                    if state.dirtyGroupStreamRooms.remove(event.roomID) != nil {
-                        Self.rebuildGroupStreams(roomID: event.roomID, state: &state)
-                    }
-                    return (
-                        state.groupStreamsByRoomRevision[event.roomID]?[membershipRevision]
-                    ) ?? []
-                }
-                guard let entries = state.entriesByRoom[event.roomID] else { return [] }
-                return entries.compactMap { connectionID, entry in
-                    guard connectionID != event.excludedConnectionID,
-                          entry.membershipRevision == membershipRevision
-                    else { return nil }
-                    return entry.stream
-                }
-            }
-            guard let entries = state.entriesByRoom[event.roomID] else { return [] }
-            guard !event.recipientUserIDs.isEmpty else { return [] }
-            return entries.compactMap { connectionID, entry in
-                guard connectionID != event.excludedConnectionID,
-                      event.recipientUserIDs.contains(entry.userID)
-                else { return nil }
-                return entry.stream
-            }
-        }
-    }
-
-    private static func rebuildGroupStreams(roomID: RoomID, state: inout State) {
-        guard let entries = state.entriesByRoom[roomID], !entries.isEmpty else {
-            state.groupStreamsByRoomRevision.removeValue(forKey: roomID)
-            return
-        }
-        var streamsByRevision: [UInt64: [V2GatewayByteStream]] = [:]
-        streamsByRevision.reserveCapacity(min(entries.count, 4))
-        for entry in entries.values {
-            streamsByRevision[entry.membershipRevision, default: []].append(entry.stream)
-        }
-        state.groupStreamsByRoomRevision[roomID] = streamsByRevision
     }
 
     private func shard(for roomID: RoomID) -> Shard {
@@ -1222,73 +1614,132 @@ extension V2DeviceConnectionRegistry: V2AccountRoomChangesStarting {
         await accountChangeService?.invalidateCoverage()
     }
 
-    public func configureAccountRoomChanges(_ service: V2AccountRoomChangeService) {
+    public func configureAccountRoomChanges(_ service: V2AccountRoomChangeService) async {
         precondition(accountChangeService == nil)
         accountChangeService = service
     }
 
     public func startAccountRoomChanges(connectionID: UUID, userID: UserID) async throws -> String {
+        try await startAccountRoomChanges(connectionID: connectionID, userID: userID, requiresReady: true)
+    }
+
+    private func startAccountRoomChanges(connectionID: UUID, userID: UserID, requiresReady: Bool) async throws -> String {
+        if let ticket = accountChangeTickets[connectionID], ticket.userID == userID,
+           directory.identityByConnection[connectionID]?.userID == userID, let service = accountChangeService {
+            try await service.bootstrap(ticket, waitForCompletion: false)
+            if requiresReady { try await service.requireBootstrapReady(ticket) }
+            guard accountChangeTickets[connectionID]?.epoch == ticket.epoch,
+                  directory.identityByConnection[connectionID]?.userID == userID else {
+                throw V2AccountRoomChangeService.Failure.staleConnection
+            }
+            if requiresReady { try await service.reserveReadyResponse(ticket) }
+            return ticket.epoch.uuidString.lowercased()
+        }
         guard let service = accountChangeService,
-              let identity = identityByConnection[connectionID], identity.userID == userID,
-              let lifecycle = lifecycleByConnection[connectionID],
-              let stream = streamsByUser[userID]?[connectionID],
+              let identity = directory.identityByConnection[connectionID], identity.userID == userID,
+              let lifecycle = directory.lifecycleByConnection[connectionID],
+              let stream = directory.streamsByUser[userID]?[connectionID],
               accountChangeTickets[connectionID] == nil else {
             throw V2AccountRoomChangeService.Failure.staleConnection
         }
-        guard await stream.supportsRequiredNotifications(), lifecycleByConnection[connectionID] == lifecycle else {
+        guard accountCoverageInstallations[connectionID] != lifecycle else {
+            throw V2RealtimePublicationBackpressure.receiverQueue
+        }
+        accountCoverageInstallations[connectionID] = lifecycle
+        defer {
+            if accountCoverageInstallations[connectionID] == lifecycle {
+                accountCoverageInstallations.removeValue(forKey: connectionID)
+            }
+        }
+        guard await stream.supportsRequiredNotifications(), directory.lifecycleByConnection[connectionID] == lifecycle else {
             throw V2AccountRoomChangeService.Failure.staleConnection
         }
+        let directoryGeneration = makeGeneration()
+        directoryGenerations[connectionID] = directoryGeneration
+        directoryDeliveryFences.withLock { $0[connectionID] = directoryGeneration }
+        await stream.sendRealtimeCoverage(scope: .directory, scopeID: userID.rawValue,
+            scopeGeneration: directoryGeneration, ready: false, reason: .installing,
+            scopePermit: directoryWritePermit(connectionID, generation: directoryGeneration))
         let ticket = try await service.begin(userID: userID, connectionID: connectionID,
-            send: { [weak stream] notification in
-                guard let stream else { return false }
-                return await stream.sendAccountRoomNotification(notification)
-            }, close: { [weak stream] in await stream?.closeForAccountRecovery() })
-        guard lifecycleByConnection[connectionID] == lifecycle else {
+            send: { [weak self, weak stream] notification in
+                guard let self, let stream else { return false }
+                let directoryPermit = self.directoryWritePermit(connectionID, generation: directoryGeneration)
+                return await stream.sendAccountRoomNotification(notification, enqueueIfCurrent: directoryPermit)
+            }, close: { [weak self] in
+                await self?.accountRoomCoverageLost(connectionID: connectionID, lifecycle: lifecycle,
+                    directoryGeneration: directoryGeneration)
+            })
+        guard directory.lifecycleByConnection[connectionID] == lifecycle else {
             await service.stop(ticket)
             throw V2AccountRoomChangeService.Failure.staleConnection
         }
         accountChangeTickets[connectionID] = ticket
+        do {
+            try await service.bootstrap(ticket, waitForCompletion: false)
+            guard accountChangeTickets[connectionID]?.epoch == ticket.epoch,
+                  directory.lifecycleByConnection[connectionID] == lifecycle else {
+                throw V2AccountRoomChangeService.Failure.staleConnection
+            }
+        } catch {
+            if accountChangeTickets[connectionID]?.epoch == ticket.epoch {
+                accountChangeTickets.removeValue(forKey: connectionID)
+            }
+            await service.stop(ticket)
+            throw error
+        }
+        if requiresReady { try await service.requireBootstrapReady(ticket) }
+        if requiresReady { try await service.reserveReadyResponse(ticket) }
         return ticket.epoch.uuidString.lowercased()
+    }
+
+    /// Authentication establishes message coverage even before the client starts
+    /// consuming directory changes. That consumer's Ready still gates its notifications.
+    func installAuthenticatedAccountCoverage(connectionID: UUID) async throws {
+        guard accountChangeService != nil,
+              let identity = directory.identityByConnection[connectionID] else { return }
+        do {
+            _ = try await startAccountRoomChanges(connectionID: connectionID, userID: identity.userID, requiresReady: false)
+        } catch V2RealtimePublicationBackpressure.receiverQueue {
+            // A concurrent listener already owns installation for this lifecycle.
+            // Its owned bootstrap continues independently of the auth callback.
+        }
     }
 
     func accountRoomChangesReadyWritten(connectionID: UUID, epoch: String) async throws {
         guard let ticket = accountChangeTickets[connectionID], UUID(uuidString: epoch) == ticket.epoch,
-              let service = accountChangeService else { throw V2AccountRoomChangeService.Failure.staleConnection }
+              accountChangeService != nil else { throw V2AccountRoomChangeService.Failure.staleConnection }
+        guard accountChangeTickets[connectionID]?.epoch == ticket.epoch,
+              let generation = directoryGenerations[connectionID],
+              let stream = directory.streamsByUser[ticket.userID]?[connectionID] else { return }
+        let scopePermit = directoryWritePermit(connectionID, generation: generation)
+        await stream.sendRealtimeCoverage(scope: .directory, scopeID: ticket.userID.rawValue,
+            scopeGeneration: generation, connectionEpoch: epoch, ready: true, reason: .unspecified,
+            confirms: { true }, scopePermit: scopePermit, onReadyAdmitted: { [weak self] in
+                await self?.resumeAccountRoomChangesAfterReady(ticket, generation: generation)
+            })
+    }
+
+    private func resumeAccountRoomChangesAfterReady(_ ticket: V2AccountRoomChangeService.Ticket,
+                                                   generation: UInt64) async {
+        guard accountChangeTickets[ticket.connectionID]?.epoch == ticket.epoch,
+              directoryGenerations[ticket.connectionID] == generation,
+              let service = accountChangeService else { return }
         await service.resume(ticket)
     }
 
-    func installAccountRoomDirectory(connectionID: UUID, page: IMV2UserRoomDirectoryPage) async throws {
-        guard let ticket = accountChangeTickets[connectionID], let service = accountChangeService else {
-            throw V2AccountRoomChangeService.Failure.staleConnection
-        }
-        let entries = try page.rooms.map { room -> V2UserRoomDirectoryEntry in
-            guard let kind = V2RoomKind(rawValue: room.roomKind) else { throw V2RoomRecoveryReadError.corruptPersistence }
-            return try .init(roomID: RoomID(room.roomID), roomKind: kind,
-                viewerMembershipRevision: room.viewerMembershipRevision, ownerEpoch: room.ownerEpoch)
-        }
-        try await service.install(entries, ticket: ticket)
+    private func accountRoomCoverageLost(connectionID: UUID, lifecycle: UInt64, directoryGeneration: UInt64) async {
+        guard directory.lifecycleByConnection[connectionID] == lifecycle,
+              directoryGenerations[connectionID] == directoryGeneration,
+              let identity = directory.identityByConnection[connectionID],
+              let stream = directory.streamsByUser[identity.userID]?[connectionID] else { return }
+        accountChangeTickets.removeValue(forKey: connectionID)
+        let next = makeGeneration(); directoryGenerations[connectionID] = next
+        directoryDeliveryFences.withLock { $0[connectionID] = next }
+        await stream.sendRealtimeCoverage(scope: .directory, scopeID: identity.userID.rawValue,
+            scopeGeneration: next, ready: false, reason: .coverageLost,
+            scopePermit: directoryWritePermit(connectionID, generation: next))
+        // Coverage retirement does not revoke the authenticated transport.
+        // The next account listener request establishes a new coverage epoch.
     }
 
-    func refreshAccountRoomMemberships(connectionID: UUID, batch: IMV2SyncBatch) async throws {
-        // 尚未开始账号覆盖的连接保留普通个人同步行为。
-        // 一旦开始，发现结果会先于响应安装。
-        guard let ticket = accountChangeTickets[connectionID], let service = accountChangeService else { return }
-        let changes = try batch.records.compactMap { try V2AccountRoomMembershipChange.decode($0, userID: ticket.userID) }
-        for start in stride(from: 0, to: changes.count, by: 100) {
-            try await service.refreshMemberships(Array(changes[start..<min(start + 100, changes.count)]), ticket: ticket)
-        }
-    }
-
-    func refreshAccountRoomSnapshotMemberships(connectionID: UUID, page: IMV2SnapshotPage) async throws {
-        guard let ticket = accountChangeTickets[connectionID], let service = accountChangeService else { return }
-        let decoded = try V2SnapshotProjectionV3Codec.decode(page.payload)
-        let changes = try decoded.items.compactMap { try V2AccountRoomMembershipChange.decode($0, userID: ticket.userID) }
-        for start in stride(from: 0, to: changes.count, by: 100) {
-            try await service.refreshMemberships(Array(changes[start..<min(start + 100, changes.count)]), ticket: ticket)
-        }
-    }
-
-    func notifyAccountRoomAvailable(roomID: RoomID) async {
-        await accountChangeService?.notify(roomID: roomID)
-    }
 }

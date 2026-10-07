@@ -24,6 +24,7 @@ public enum V2ActorRoomRecoveryItemResult: Codable, Equatable, Sendable {
 /// 封闭的能力集合。新增领域须明确决定协议版本并增加执行器分支；
 /// 未知分支不能落入成功的空响应。协调器和用户目录另行处理。
 public enum V2RoomRequest: Codable, Equatable, Sendable {
+    case roomSubscription(V2RoomSubscriptionCommand)
     case messaging(V2RoomMessagingCommand)
     case administration(V2RoomAdministrationCommand)
     case administrationQuery(V2RoomAdministrationQuery)
@@ -40,6 +41,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
 
     public var roomID: RoomID {
         switch self {
+        case .roomSubscription(let value): value.roomID
         case .messaging(let value): value.roomID
         case .administration(let value): value.roomID
         case .administrationQuery(let value): value.roomID
@@ -60,6 +62,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
     /// 不虚构用户身份。
     public var actorUserID: UserID? {
         switch self {
+        case .roomSubscription(let value): value.actorUserID
         case .messaging(let value): value.actorUserID
         case .administration(let value): value.actorUserID
         case .administrationQuery(let value): value.actorUserID
@@ -81,7 +84,9 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: .readOnly
         case .invitationQuery, .mediaAuthorization: .readOnly
         case .forward: .durableIdempotent
-        case .maintenance: .noAutomaticRetry
+        // Shared room membership is retryable explicitly, but has no durable
+        // operation receipt. Transport must not invent idempotent replay.
+        case .maintenance, .roomSubscription: .noAutomaticRetry
         }
     }
 
@@ -90,6 +95,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
         case .messaging, .administration, .receipt, .specialAccountAudit: true
         case .administrationQuery, .receiptQuery, .roomLog, .directory, .recovery: false
         case .invitationQuery, .maintenance, .mediaAuthorization: false
+        case .roomSubscription: false
         case .forward: true
         }
     }
@@ -113,6 +119,7 @@ public enum V2RoomRequest: Codable, Equatable, Sendable {
 }
 
 public enum V2RoomResponse: Codable, Equatable, Sendable {
+    case roomSubscription(V2RoomSubscriptionResult)
     case messaging(V2RoomMessagingResult)
     case administration(V2RoomAdministrationResult)
     case receipt(V2RoomReceiptResult)

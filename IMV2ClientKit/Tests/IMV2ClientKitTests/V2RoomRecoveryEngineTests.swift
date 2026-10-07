@@ -7,6 +7,156 @@ import Synchronization
 
 @Suite("Room recovery budget driver", .timeLimit(.minutes(1)))
 struct V2RoomRecoveryEngineTests {
+    @Test("covered account and Owner heads do not recreate work or replace a newer responsibility", arguments: [false, true])
+    func coveredWatermarkDoesNotRestartRecovery(ownerHint: Bool) async throws {
+        let (store, wire, engine, user) = try await fixture()
+        defer { Task { await engine.stop(); try? await store.close() } }
+        await wire.setHead(0)
+        _ = try await engine.runBudget(userID: user, maximumDirectoryPages: 2, maximumRooms: 2)
+        let room = wire.rooms[0]
+        try await store.databasePool.write { db in
+            try db.execute(sql: "INSERT INTO v2_direct_room_identities(room_id,target_user_id,public_handle,display_name,account_kind,updated_at,room_created_at) VALUES(?,?,'fixture_user','Fixture','regular',1,1)", arguments: [room.rawValue, user.rawValue])
+        }
+        try #require(try await store.groupEventAccess(roomID: room)?.isAuthorized == true)
+        try await store.databasePool.write { db in
+            try db.execute(sql: "INSERT INTO v2_group_event_cursors(room_id,applied_room_sequence) VALUES(?,2) ON CONFLICT(room_id) DO UPDATE SET applied_room_sequence=2", arguments: [room.rawValue])
+            // Model completed C=2 with no remaining responsibility for this room.
+            try db.execute(sql: "DELETE FROM v2_room_recovery_work WHERE room_id = ?", arguments: [room.rawValue])
+        }
+        let scope = try await store.beginRoomRecoveryScan(userID: user)
+        func enqueue(_ head: UInt64) async throws {
+            if ownerHint { try await engine.retainOnlineRoomHead(roomID: room, highWatermark: head, userID: user) }
+            else { try await store.enqueueRoomRecovery(roomID: room, targetHead: head, priority: 1, scope: scope, now: .now) }
+        }
+        try await enqueue(2)
+        #expect(try await store.roomRecoveryWork(scope: scope, limit: 20, oldestFirst: false, now: .distantFuture).filter { $0.roomID == room }.isEmpty)
+        try await enqueue(5)
+        let newer = try await store.roomRecoveryWork(scope: scope, limit: 20, oldestFirst: false, now: .distantFuture)
+        try await enqueue(1)
+        #expect(try await store.roomRecoveryWork(scope: scope, limit: 20, oldestFirst: false, now: .distantFuture).map(\.requestRevision) == newer.map(\.requestRevision))
+        try await store.databasePool.write { try $0.execute(sql: "DELETE FROM v2_room_recovery_work") }
+        try await enqueue(0)
+        #expect(try await store.roomRecoveryWork(scope: scope, limit: 20, oldestFirst: false, now: .distantFuture).count == 1)
+        try await store.databasePool.write { db in
+            try db.execute(sql: "DELETE FROM v2_room_recovery_work; DELETE FROM v2_direct_room_identities")
+        }
+        #expect(try await store.groupEventAccess(roomID: room) == nil)
+        try await enqueue(2)
+        #expect(try await store.roomRecoveryWork(scope: scope, limit: 20, oldestFirst: false, now: .distantFuture).count == 1)
+
+    }
+
+    @Test("account and Owner watermarks recover an unopened room after SQLite is reopened", arguments: [false, true])
+    func unopenedRoomWatermarkAfterStoreRestart(ownerHint: Bool) async throws {
+        let user = UserID(uuid: UUID()), binding = V2LocalInstallationBinding(value: UUID())
+        let directory = FileManager.default.temporaryDirectory.appending(path: "account-recovery-\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appending(path: "client.sqlite")
+        let wire = RecoveryDriverWire()
+        await wire.setHead(0)
+        let initial = try GRDBV2LocalSyncStore(databaseURL: path, installationBinding: binding, userID: user)
+        try await initial.databasePool.write { try $0.execute(sql: "INSERT INTO v2_sync_cursor(singleton,state,generation,applied_sequence,server_acknowledged_sequence,sync_token) VALUES(1,'ready',1,0,0,'initial')") }
+        let first = V2RoomRecoveryEngine(transport: wire, latestVisible: wire, store: initial,
+            groupEvents: V2GroupEventSyncEngine(transport: wire, store: initial))
+        _ = try await first.runBudget(userID: user, maximumDirectoryPages: 2, maximumRooms: 2)
+        await first.stop()
+        try await initial.close()
+        let room = wire.rooms[0], message = MessageID(uuid: UUID())
+        await wire.setRoomHead(1, room: room)
+        await wire.setEvents([try .init(sourceEventID: .init(uuid: UUID()), roomSequence: 1, projectionKind: "message",
+            payload: JSONSerialization.data(withJSONObject: ["event_type": "message.accepted", "room_id": room.rawValue,
+                "room_sequence": 1, "message_id": message.rawValue, "message_revision": 1,
+                "sender_user_id": user.rawValue, "text": "recovered unopened room", "server_created_at_ms": 1_750_000_000_000]))], room: room)
+        let reopened = try GRDBV2LocalSyncStore(databaseURL: path, installationBinding: binding, userID: user)
+        let confirmed = Mutex<[UInt64]>([])
+        let groupEvents = V2GroupEventSyncEngine(transport: wire, store: reopened)
+        let engine = V2RoomRecoveryEngine(transport: wire, latestVisible: wire, store: reopened,
+            groupEvents: groupEvents, didPersistProgress: { id, cursor in
+                if id == room {
+                    let persisted = try await reopened.groupEventCursor(roomID: id)
+                    #expect(persisted == cursor)
+                    confirmed.withLock { $0.append(cursor) }
+                }
+            })
+        do {
+            if ownerHint {
+                // A room notification can precede the personal membership projection.
+                // Recovery must retain it without requiring that projection first.
+                try await reopened.databasePool.write { db in
+                    try db.execute(sql: "DELETE FROM v2_room_profile_projections WHERE room_id = ?", arguments: [room.rawValue])
+                    try db.execute(sql: "DELETE FROM v2_direct_room_profile_projections WHERE room_id = ?", arguments: [room.rawValue])
+                    try db.execute(sql: "DELETE FROM v2_direct_room_identities WHERE room_id = ?", arguments: [room.rawValue])
+                }
+                #expect(try await reopened.groupEventAccess(roomID: room) == nil)
+                let hint = try V2GroupEventAvailabilityHint(roomID: room, highWatermark: 1, liveEvents: [])
+                #expect(try await !groupEvents.applyOnlineEvents(hint))
+                #expect(try await reopened.groupEventCursor(roomID: room) == 0)
+                do {
+                    try await engine.retainOnlineRoomHead(roomID: room, highWatermark: 99, userID: .init(uuid: UUID()))
+                    Issue.record("A different account must not retain recovery work")
+                } catch V2RoomRecoveryPersistenceError.staleScope {}
+                try await engine.retainOnlineRoomHead(roomID: room, highWatermark: hint.highWatermark, userID: user)
+                try await engine.retainOnlineRoomHead(roomID: room, highWatermark: 0, userID: user)
+                let target = try await reopened.databasePool.read {
+                    try Int64.fetchOne($0, sql: "SELECT target_head FROM v2_room_recovery_work WHERE room_id = ?", arguments: [room.rawValue])
+                }
+                #expect(target == 1)
+                #expect(try await reopened.groupEventCursor(roomID: room) == 0)
+            } else {
+                try await engine.prepare(userID: user)
+                try await engine.retainOnlineRoomHead(roomID: room, highWatermark: 1, userID: user)
+            }
+            let result = try await engine.runBudget(userID: user, maximumDirectoryPages: 2, maximumRooms: 2)
+            let catchUp = try await engine.runBudget(userID: user, maximumDirectoryPages: 0, maximumRooms: 2)
+            #expect(result.appliedEventCount + catchUp.appliedEventCount == 1)
+            #expect(try await reopened.messages(in: room).map(\.messageID) == [message])
+            #expect(try await reopened.groupEventCursor(roomID: room) == 1)
+            #expect(confirmed.withLock { $0.contains(1) })
+            await engine.stop()
+            try await reopened.close()
+        } catch { await engine.stop(); try? await reopened.close(); throw error }
+    }
+
+    @Test("initial member revision zero reaches durable recovery and room summaries")
+    func zeroMembershipDirectoryRecovery() async throws {
+        let (store, wire, engine, user) = try await fixture()
+        for room in wire.rooms { await wire.setMembershipRevision(0, room: room) }
+        _ = try await engine.runBudget(userID: user, maximumDirectoryPages: 2, maximumRooms: 2)
+        for room in wire.rooms {
+            #expect(try await store.groupEventCursor(roomID: room) == 5)
+            let state = try await store.databasePool.read {
+                guard let row = try Row.fetchOne($0, sql: "SELECT membership_revision, head FROM v2_room_sync_states WHERE room_id = ?", arguments: [room.rawValue]) else { return nil as [Int64]? }
+                return [row["membership_revision"], row["head"]]
+            }
+            let persistedState = try #require(state)
+            #expect(persistedState == [0, 5])
+            let revision = try await store.databasePool.read {
+                try Int64.fetchOne($0, sql: "SELECT membership_revision FROM v2_room_latest_visible WHERE room_id = ?", arguments: [room.rawValue])
+            }
+            #expect(revision == 0)
+        }
+        await engine.stop()
+    }
+    @Test("reconnect reconstructs confirmation work from durable room cursors without opening rooms")
+    func reconnectRebuildsDeviceConfirmations() async throws {
+        let (store, wire, engine, user) = try await fixture()
+        _ = try await engine.runBudget(userID: user, maximumDirectoryPages: 1, maximumRooms: 1)
+        _ = try await engine.runBudget(userID: user, maximumDirectoryPages: 1, maximumRooms: 1)
+        await engine.stop()
+        let confirmed = Mutex<[RoomID: UInt64]>([:])
+        let reconnect = V2RoomRecoveryEngine(transport: wire, latestVisible: wire, store: store,
+            groupEvents: V2GroupEventSyncEngine(transport: wire, store: store),
+            now: { .init(timeIntervalSince1970: 10) }, didPersistProgress: { room, cursor in
+                let persisted = try await store.groupEventCursor(roomID: room)
+                #expect(cursor == persisted)
+                confirmed.withLock { $0[room] = cursor }
+            })
+        _ = try await reconnect.runBudget(userID: user, maximumDirectoryPages: 2, maximumRooms: 2)
+        #expect(confirmed.withLock { $0 } == Dictionary(uniqueKeysWithValues: wire.rooms.map { ($0, UInt64(5)) }))
+        await reconnect.stop()
+    }
+
     @Test(arguments: ["state", "content"], [false, true])
     func rejoinPreservesNewWorkWhenOldRecoveryResponseArrives(stage: String, nonempty: Bool) async throws {
         let (store, wire, engine, user) = try await fixture()
@@ -283,7 +433,7 @@ struct V2RoomRecoveryEngineTests {
         for round in 1...40 {
             let head = UInt64(100 + round)
             await wire.setRoomHead(head, room: hot)
-            try await engine.accept(.changed(epoch: wire.epoch, roomID: hot, highWatermark: head))
+            try await engine.retainOnlineRoomHead(roomID: hot, highWatermark: head, userID: user)
             let result = try await engine.runBudget(userID: user, maximumDirectoryPages: 0, maximumRooms: 1)
             #expect(result.processedRooms <= 1)
             if try await store.groupEventCursor(roomID: cold) == 5, coldFinishedAt == nil {
@@ -462,13 +612,41 @@ struct V2RoomRecoveryEngineTests {
         #expect(try await store.groupEventCursor(roomID: wire.rooms[1]) == 7)
         #expect(try await engine.progress().pendingRoomCount == 0)
         await wire.setHead(8)
-        changeWriter.yield(.changed(epoch: wire.epoch, roomID: wire.rooms[0], highWatermark: 8))
+        try await runner.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 8, userID: user)
         _ = await completions.next()
         #expect(try await store.groupEventCursor(roomID: wire.rooms[0]) == 8)
         run.cancel()
         await #expect(throws: CancellationError.self) { try await run.value }
         #expect(await engine.phase == .idle)
         changeWriter.finish(); completionWriter.finish()
+    }
+
+    @Test func runnerRebuildsCoverageWithoutEndingItsConnectionLoop() async throws {
+        let (store, wire, engine, user) = try await fixture()
+        try await store.databasePool.write { try $0.execute(sql: """
+            INSERT OR REPLACE INTO v2_sync_cursor (singleton, state, generation, applied_sequence, server_acknowledged_sequence, sync_token)
+            VALUES (1, 'ready', 1, 7, 7, 'checkpoint')
+            """) }
+        let (changes, writer) = AsyncThrowingStream<V2AccountRoomChange, Error>.makeStream()
+        let (completed, completionWriter) = AsyncStream<Void>.makeStream()
+        let runner = V2RoomRecoveryRunner(engine: engine, source: RecoveryRunnerSource(stream: changes),
+            personalSync: RecoveryCompletionDriver { completionWriter.yield(()) })
+        let run = Task { try await runner.run(userID: user) }
+        var completions = completed.makeAsyncIterator()
+        _ = await completions.next()
+        #expect(await wire.starts == 1)
+        writer.yield(.resyncRequired(epoch: wire.epoch))
+        _ = await completions.next()
+        #expect(await wire.starts == 2)
+        #expect(await wire.directoryCursors == [nil, "next", nil, "next"])
+        await wire.setHead(8)
+        try await runner.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 8, userID: user)
+        _ = await completions.next()
+        #expect(try await store.groupEventCursor(roomID: wire.rooms[0]) == 8)
+        run.cancel()
+        await #expect(throws: CancellationError.self) { try await run.value }
+        #expect(await engine.phase == .idle)
+        writer.finish(); completionWriter.finish()
     }
 
     @Test(arguments: [false, true])
@@ -496,7 +674,7 @@ struct V2RoomRecoveryEngineTests {
     @Test func preparingListenerDoesNotDelayConsumptionWithDirectoryOrOldWork() async throws {
         let (store, wire, engine, user) = try await fixture()
         try await engine.prepare(userID: user)
-        try await engine.accept(.changed(epoch: wire.epoch, roomID: wire.rooms[0], highWatermark: 5))
+        try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 5, userID: user)
         try await engine.prepare(userID: user)
         #expect(await wire.starts == 1)
         #expect(await wire.directoryCursors.isEmpty)
@@ -536,7 +714,7 @@ struct V2RoomRecoveryEngineTests {
         #expect(await wire.starts == 1)
         #expect(try await store.groupEventCursor(roomID: wire.rooms[0]) == 5)
         await wire.setHead(8)
-        try await engine.accept(.changed(epoch: wire.epoch, roomID: wire.rooms[0], highWatermark: 8))
+        try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 8, userID: user)
         _ = try await engine.runBudget(userID: user)
         // Invalidation creates a new request; the captured state read cannot finish it.
         _ = try await engine.runBudget(userID: user)
@@ -551,7 +729,7 @@ struct V2RoomRecoveryEngineTests {
         await wire.setPageAdvance(1)
         _ = try await engine.runBudget(userID: user, maximumRooms: 1)
         for _ in 0..<3 {
-            try await engine.accept(.changed(epoch: wire.epoch, roomID: wire.rooms[0], highWatermark: 100))
+            try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 100, userID: user)
             _ = try await engine.runBudget(userID: user, maximumRooms: 1)
         }
         #expect(try await store.groupEventCursor(roomID: wire.rooms[0]) == 3)
@@ -559,9 +737,13 @@ struct V2RoomRecoveryEngineTests {
         await engine.stop()
     }
 
-    @Test func unavailableEndsWorkWithoutPullingContent() async throws {
+    @Test(arguments: [false, true])
+    func unavailableEndsWorkWithoutPullingContent(onlineHint: Bool) async throws {
         let (store, wire, engine, user) = try await fixture()
         await wire.setUnavailable()
+        if onlineHint {
+            try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 100, userID: user)
+        }
         let result = try await engine.runBudget(userID: user)
         #expect(result.processedRooms == 0)
         #expect(await wire.contentPulls == 0)
@@ -604,6 +786,9 @@ struct V2RoomRecoveryEngineTests {
         _ = try await engine.runBudget(userID: user)
         await #expect(throws: V2RoomRecoveryEngineError.coverageLost) { try await engine.accept(.resyncRequired(epoch: wire.epoch)) }
         await #expect(throws: V2RoomRecoveryEngineError.coverageLost) { try await engine.runBudget(userID: user) }
+        await #expect(throws: V2RoomRecoveryEngineError.coverageLost) {
+            try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 8, userID: user)
+        }
         await engine.stop()
     }
 
@@ -619,13 +804,14 @@ struct V2RoomRecoveryEngineTests {
             if change == 1 {
                 try await store.databasePool.write { try $0.execute(sql: "UPDATE v2_sync_cursor SET generation = 2") }
             } else if change == 2 {
-                try await engine.accept(.changed(epoch: wire.epoch, roomID: wire.rooms[0], highWatermark: 8))
+                try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 8, userID: user)
+
             }
         }
         #expect(try await engine.completeIfCaughtUp(using: driver) == (change == 0))
         if change == 0 {
             #expect(await engine.phase == .live)
-            try await engine.accept(.changed(epoch: wire.epoch, roomID: wire.rooms[0], highWatermark: 8))
+            try await engine.retainOnlineRoomHead(roomID: wire.rooms[0], highWatermark: 8, userID: user)
             #expect(await engine.phase == .catchingUp)
             #expect(try await !engine.completeIfCaughtUp(using: driver))
         } else if change == 1 {

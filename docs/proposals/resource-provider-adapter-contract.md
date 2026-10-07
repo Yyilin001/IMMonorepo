@@ -87,7 +87,7 @@ flowchart LR
 
 显式导入的 active hold 已纳入上述检查。hold 保存精确引用、字节数、摘要和媒体类型，恢复读取原快照，不重新跟随逻辑资源的当前位置；只有新操作解析新位置。持久快照从创建时完整保存，不依赖旧记录回填。
 
-同 home 的[迁移服务](../../IMV2Server/Sources/IMV2ServerApplication/Resources/Application/V2ResourceMigrationService.swift)也只调用 storage 协议：预分配身份先经[owner 存储](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)入库，再复制并核验精确事实；未知写入结果先 inspect 原目标，不能另开对象。claim、源 generation 和完整引用均参与发布检查，迁移不改变 MediaID、逻辑 VariantID 或业务 home。维护调用者须注入并在事务内执行 operator/owner 授权，不能将该接口直接作为用户上传 API。
+同 home 的[测试中的迁移包装](../../IMV2Server/Tests/IMV2ServerTests/V2PersistentStoreServiceFixtures.swift)也只调用 storage 协议：预分配身份先经[owner 存储](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/PostgresV2ResourceMigrationStore.swift)入库，再复制并核验精确事实；未知写入结果先 inspect 原目标，不能另开对象。claim、源 generation 和完整引用均参与发布检查，迁移不改变 MediaID、逻辑 VariantID 或业务 home。维护调用者须注入并在事务内执行 operator/owner 授权，不能将该接口直接作为用户上传 API。
 
 当前迁移内核保留所有尚未释放的源/目标引用，readiness 和 GC 已接入这份保护。没有部署入口、定时恢复装配或旧位置释放 API；`switched` 不代表退役完成。旧适配器删除、迁移取消后的输出清理、晚签发/在途读取排空及生产维护验收仍须补齐，不能通过手动写入 `source_released_at` 绕过这些证明。
 

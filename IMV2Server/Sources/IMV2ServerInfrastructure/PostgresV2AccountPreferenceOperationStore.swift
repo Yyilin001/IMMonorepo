@@ -8,9 +8,13 @@ import SQLKit
 /// Account preference effects, their durable propagation intents, and original proof commit together.
 public struct PostgresV2AccountPreferenceOperationStore:Sendable {
     private let database:any Database
+    private var policyOwners: (any V2PolicyMutationExecuting)? = nil
     private let delivery:any V2UserShardProjectionDelivering
     private let authorization:V2DirectAuthorizationCoordinator
     public init(database:any Database,projectionDelivery:any V2UserShardProjectionDelivering,authorizationCoordinator:V2DirectAuthorizationCoordinator) { self.database=database;self.delivery=projectionDelivery;self.authorization=authorizationCoordinator }
+    package func usingPolicyOwners(_ owners: any V2PolicyMutationExecuting) -> Self {
+        var copy = self; copy.policyOwners = owners; return copy
+    }
     public func snapshot(ownerUserID:UserID,kind:V2OperationKind) async throws -> V2AccountPreferenceSnapshot {
         try await v2WithPostgresTransactionRetry(database:database) { transaction in
             guard let sql=transaction as? any SQLDatabase,let owner=ownerUserID.uuidValue else { throw V2AccountPreferenceValidationError.invalidSnapshot }
@@ -20,8 +24,34 @@ public struct PostgresV2AccountPreferenceOperationStore:Sendable {
         }
     }
     public func submit(_ command:V2AccountPreferenceCommand,now:Date) async throws -> V2AccountPreferenceRecoveryResult {
-        let started=ContinuousClock.now
-        let result:V2AccountPreferenceRecoveryResult=try await v2WithPostgresTransactionRetry(database:database) { transaction in
+        let result: V2AccountPreferenceRecoveryResult
+        if let policyOwners, command.identity.kind == .strangerMessagePreference {
+            do {
+                guard case .preference(let value) = try await policyOwners.change(.strangerPreference(command)) else {
+                    throw V2AccountPreferenceValidationError.invalidReceipt
+                }
+                result = value
+            } catch V2PolicyAuthorizationLifecycleError.identityConflict { result = .fingerprintConflict }
+        } else {
+            let started = ContinuousClock.now
+            result = try await v2WithPostgresTransactionRetry(database: database) { transaction in
+                try await applyPreference(command, now: now, started: started, transaction: transaction, policyMutation: nil)
+            }
+        }
+        try await deliver(result,identity:command.identity)
+        return result
+    }
+    package func applyPolicyOperation(_ command: V2AccountPreferenceCommand, now: Date,
+                                      context: V2PolicyMutationContext) async throws -> V2AccountPreferenceRecoveryResult {
+        guard command.identity.kind == .strangerMessagePreference else { throw V2AccountPreferenceValidationError.invalidCommand }
+        let mutation = V2DurablePolicyMutation.strangerPreference(command)
+        try context.require(scope: mutation.scope, operationKey: mutation.operationKey, fingerprint: mutation.fingerprint)
+        return try await applyPreference(command, now: now, started: .now,
+            transaction: context.transaction, policyMutation: context)
+    }
+
+    private func applyPreference(_ command: V2AccountPreferenceCommand, now: Date, started: ContinuousClock.Instant,
+        transaction: any Database, policyMutation: V2PolicyMutationContext?) async throws -> V2AccountPreferenceRecoveryResult {
             guard let sql=transaction as? any SQLDatabase else { throw V2AccountPreferenceValidationError.invalidCommand }
             try await operationLock(command.identity,sql:sql)
             if let prior=try await original(command.identity,fingerprint:command.fingerprint,sql:sql) { return prior }
@@ -44,7 +74,7 @@ public struct PostgresV2AccountPreferenceOperationStore:Sendable {
                     switch command.value {
                     case .strangerMessage(let permission):
                         let store=PostgresV2DirectMessagingStore(database:transaction,identityReader:PostgresV2DirectRoomIdentityReader(database:database),projectionDelivery:delivery,authorizationCoordinator:authorization)
-                        guard case .updated=try await store.applyStrangerMessagePermission(command:.init(actorUserID:command.identity.accountID,operationID:.init(uuid:operation),permission:permission),transaction:transaction,now:clock) else { throw V2AccountPreferenceValidationError.invalidReceipt }
+                        guard case .updated=try await store.applyStrangerMessagePermission(command:.init(actorUserID:command.identity.accountID,operationID:.init(uuid:operation),permission:permission),transaction:transaction,now:clock,policyMutation:policyMutation) else { throw V2AccountPreferenceValidationError.invalidReceipt }
                         try await advance(owner,kind:command.identity.kind,sql:sql)
                     case .userAdd(let permission):
                         let store=PostgresV2DirectMessagingStore(database:transaction,identityReader:PostgresV2DirectRoomIdentityReader(database:database),projectionDelivery:delivery,authorizationCoordinator:authorization)
@@ -69,10 +99,8 @@ public struct PostgresV2AccountPreferenceOperationStore:Sendable {
             let receipt=try await persist(command.identity,command.fingerprint,outcome,at:UInt64(ms),sql:sql)
             guard receipt.validates(command:command) else { throw V2AccountPreferenceValidationError.invalidReceipt }
             return .receipt(receipt)
-        }
-        try await deliver(result,identity:command.identity)
-        return result
     }
+
     public func recover(_ request:V2AccountPreferenceRecoveryRequest,now:Date) async throws -> V2AccountPreferenceRecoveryResult {
         let result:V2AccountPreferenceRecoveryResult=try await v2WithPostgresTransactionRetry(database:database) { transaction in
             guard let sql=transaction as? any SQLDatabase else { throw V2AccountPreferenceValidationError.invalidCommand }
@@ -129,12 +157,12 @@ public struct PostgresV2AccountPreferenceOperationStore:Sendable {
     private func advance(_ owner:UUID,kind:V2OperationKind,sql:any SQLDatabase) async throws { try await sql.raw("INSERT INTO im_v2.account_preference_revisions(user_id,kind,revision) VALUES(\(bind:owner),\(bind:kind.rawValue),1) ON CONFLICT(user_id,kind) DO UPDATE SET revision=im_v2.account_preference_revisions.revision+1").run() }
     private func original(_ identity:V2OperationIdentity,fingerprint:V2OperationFingerprint,sql:any SQLDatabase) async throws -> V2AccountPreferenceRecoveryResult? {
         guard let row=try await sql.raw("SELECT receipt::text AS payload FROM im_v2.account_preference_receipts WHERE actor_user_id=\(bind:identity.accountID.uuidValue!) AND operation_id=\(bind:UUID(uuidString:identity.operation.rawOperationID)!) AND kind=\(bind:identity.kind.rawValue)").first(decoding:PreferenceReceiptRow.self) else { return nil }
-        let receipt=try JSONDecoder().decode(V2AccountPreferenceReceipt.self,from:Data(row.payload.utf8))
+        let receipt=try v2DecodePersistenceJSON(V2AccountPreferenceReceipt.self, from: row.payload)
         guard receipt.identity==identity,receipt.fingerprint==fingerprint else { return .fingerprintConflict };return .receipt(receipt)
     }
     private func persist(_ identity:V2OperationIdentity,_ fingerprint:V2OperationFingerprint,_ outcome:V2AccountPreferenceTerminalOutcome,at:UInt64,sql:any SQLDatabase) async throws -> V2AccountPreferenceReceipt {
         let receipt=try V2AccountPreferenceReceipt(identity:identity,fingerprint:fingerprint,outcome:outcome,resolvedAtMilliseconds:at)
-        let json=String(decoding:try JSONEncoder().encode(receipt),as:UTF8.self)
+        let json=try v2EncodePersistenceJSON(receipt)
         try await sql.raw("INSERT INTO im_v2.account_preference_receipts(actor_user_id,operation_id,kind,receipt) VALUES(\(bind:identity.accountID.uuidValue!),\(bind:UUID(uuidString:identity.operation.rawOperationID)!),\(bind:identity.kind.rawValue),\(bind:json)::jsonb)").run();return receipt
     }
 }

@@ -9,6 +9,309 @@ import Testing
 
 @Suite("Room Cluster bridge authenticates native distributed exchanges", .serialized)
 struct V2RoomClusterBridgeTests {
+    @Test("concurrent discovery and suspension publish the actual Peer state")
+    func concurrentDirectoryPublication() async throws {
+        let fixture = try await Fixture()
+        let directory = V2RoomClusterDirectory()
+        let budget = V2RoomClusterBudget(configuration: fixture.configuration, maximumSessions: fixture.limits.maximumSessions)
+        let references = V2RoomClusterReferenceCache(capacity: fixture.configuration.maximumCachedLocations)
+        let control = V2RoomClusterDirectoryControl(directory: directory, maximumPeers: fixture.limits.maximumSessions,
+            join: { _ in }, factory: { hostID in
+                V2RoomClusterPeer(system: fixture.system, signer: fixture.coordinator, trust: fixture.trust,
+                    limits: fixture.limits, configuration: fixture.configuration, callerIncarnation: UUID(),
+                    localPort: nil, stableHostID: hostID, budget: budget, references: references)
+            })
+        do {
+            let descriptor = try V2RoomClusterHostDescriptor(identity: fixture.identity,
+                endpointID: fixture.endpoint.id, address: "127.0.0.1", port: fixture.port,
+                accessibleShardIDs: ["allowed"], availableRooms: 2, isHealthy: true)
+            try await control.install(descriptor, join: false)
+            let peer = try #require(directory.inspectionPeer(for: fixture.identity.hostID))
+            for _ in 0..<200 {
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask { try await control.install(descriptor, join: false) }
+                    group.addTask { _ = await control.suspend(fixture.identity) }
+                    try await group.waitForAll()
+                }
+                let actual = await peer.directorySuspended(fixture.identity)
+                #expect(directory.routingSnapshot().suspended.contains(fixture.identity) == actual)
+            }
+        } catch {
+            await control.stop()
+            try await fixture.system.shutdown().wait()
+            throw error
+        }
+        await control.stop()
+        try await fixture.system.shutdown().wait()
+    }
+    @Test("published routing snapshots retain their version across restart and suspension")
+    func routingSnapshotVersions() async throws {
+        let fixture = try await Fixture()
+        let caller = V2RoomClusterClient(system: fixture.system, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        do {
+            func descriptor(_ identity: V2ActorHostIdentity) throws -> V2RoomClusterHostDescriptor {
+                try .init(identity: identity, endpointID: fixture.endpoint.id, address: "127.0.0.1",
+                    port: fixture.port, accessibleShardIDs: ["allowed"], availableRooms: 2, isHealthy: true)
+            }
+            try await caller.installDiscovered(descriptor(fixture.identity))
+            let old = caller.routingSnapshot()
+            let replacement = V2ActorHostIdentity(hostID: fixture.identity.hostID, incarnationID: UUID())
+            try await caller.installDiscovered(descriptor(replacement))
+            #expect(try old.resolvePolicyHost(hostID: replacement.hostID, endpoint: "allowed") == fixture.identity)
+            #expect(try caller.resolvePolicyHost(hostID: replacement.hostID, endpoint: "allowed") == replacement)
+            _ = await caller.suspendUnreachableHost(replacement)
+            #expect(throws: V2RoomCallFailure.notAccepted(.unavailable)) {
+                try caller.resolvePolicyHost(hostID: replacement.hostID, endpoint: "allowed")
+            }
+            await caller.stop()
+            #expect(throws: V2RoomCallFailure.notAccepted(.retired)) {
+                try caller.resolvePolicyHost(hostID: replacement.hostID, endpoint: "allowed")
+            }
+        } catch {
+            await caller.stop()
+            try await fixture.system.shutdown().wait()
+            throw error
+        }
+        try await fixture.system.shutdown().wait()
+    }
+    @Test("saturated recovery does not reject bounded renewal batches from six authenticated peers")
+    func renewalAdmissionIsIndependentOfRecovery() throws {
+        var admission = V2RoomBatchAdmission(maximumRenewalBatches: 12)
+        func check(_ kind: V2RoomBatchAdmission.Kind, _ peer: String, accepted: Bool = true) throws {
+            let result = admission.acquire(kind, peer: try V2ActorServiceID(peer))
+            #expect(result == accepted)
+        }
+        for peer in ["gateway-0", "gateway-1"] {
+            try check(.recovery, peer)
+            try check(.recovery, peer)
+        }
+        try check(.recovery, "gateway-2", accepted: false)
+        for index in 0..<6 {
+            let peer = "gateway-\(index)"
+            try check(.renewal, peer)
+            try check(.renewal, peer)
+            try check(.renewal, peer, accepted: false)
+        }
+        try check(.renewal, "gateway-6", accepted: false)
+        admission.release(.renewal, peer: try V2ActorServiceID("gateway-0"))
+        try check(.renewal, "gateway-0")
+        admission.release(.recovery, peer: try V2ActorServiceID("gateway-0"))
+        try check(.recovery, "gateway-2")
+    }
+    @Test("signed recovery batches enforce request bytes before caller dispatch and after host authentication")
+    func signedRecoveryBatchRequestByteBoundary() async throws {
+        let gate = RecoveryBatchGate()
+        // The owner contract has no byte limit. All 100 room/viewer pairs are
+        // legal; repeated owner metadata makes this packet exceed the batch cap.
+        let shard = "allowed-" + String(repeating: "s", count: 1_024)
+        let fixture = try await Fixture(coordinatorUserCalls: true, recoveryBatchGate: gate,
+            ownerShardID: shard)
+        var settings = ClusterSystemSettings(name: "v2-recovery-byte-caller", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remoteSystem = await ClusterSystem("v2-recovery-byte-caller", settings: settings)
+        let caller = V2RoomClusterClient(system: remoteSystem, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var failure: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: [shard],
+                availableRooms: 2, isHealthy: true))
+            guard case .ready(let token) = try await caller.activate(on: fixture.identity,
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(2)) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let end = ContinuousClock.now + .seconds(2)
+            let items = (0..<100).map { _ in
+                V2RoomRecoveryBatchCallItem(token: token,
+                    query: .init(roomID: token.roomID, actorUserID: .init(uuid: UUID()), kind: .state),
+                    deadline: end)
+            }
+            _ = try await caller.invokeRecoveryBatch(on: fixture.identity,
+                items: [items[0]], deadline: end)
+            #expect(await gate.executedItemCounts == [1])
+            let before = await caller.callMetricsSnapshot()
+            let beforeDispatch = try #require(before.recoveryStages[.actualDispatch])
+            #expect(beforeDispatch.started == 1 && beforeDispatch.completed == 1 && beforeDispatch.active == 0)
+            await #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
+                _ = try await caller.invokeRecoveryBatch(on: fixture.identity, items: items, deadline: end)
+            }
+            let after = await caller.callMetricsSnapshot()
+            let afterDispatch = try #require(after.recoveryStages[.actualDispatch])
+            #expect(afterDispatch.started == beforeDispatch.started && afterDispatch.completed == beforeDispatch.completed)
+            #expect(afterDispatch.active == 0)
+            #expect(await caller.dispatchedCallCount() == 0)
+            #expect(await gate.executedItemCounts == [1])
+
+            // Bypass the caller's 64 KiB encoder using the existing generic
+            // signing limit. The actual remote endpoint must authenticate this
+            // trusted principal and reject its bytes before business admission.
+            let endpoint = try V2RoomHostEndpoint.resolve(id: fixture.endpoint.id, using: remoteSystem)
+            let hello = V2ActorSessionHello(serviceID: fixture.coordinator.serviceID,
+                callerIncarnation: UUID(), recipient: fixture.identity, handshakeID: UUID())
+            let signedGrant = try await endpoint.openSession(fixture.coordinator.sign(hello, maximumBytes: 16_384))
+            let grant = try fixture.trust.verifySessionGrant(signedGrant, for: hello, maximumBytes: 16_384)
+            let call = V2ActorAuthenticatedCall(serviceID: fixture.coordinator.serviceID,
+                callerIncarnation: grant.callerIncarnation, recipient: fixture.identity,
+                sessionID: grant.sessionID, sequence: 1, attemptID: UUID(), traceID: UUID(),
+                remainingBudget: try .init(2_000), principal: .service,
+                request: .recoveryBatch(items.map { .init(token: $0.token, query: $0.query) }))
+            let packet = try fixture.coordinator.sign(call, maximumBytes: fixture.limits.maximumRequestBytes)
+            #expect(packet.body.count > 65_536)
+            await expectAuthentication(.oversized) { _ = try await endpoint.exchange(packet) }
+            #expect(await gate.executedItemCounts == [1])
+            #expect(await fixture.inbound.inFlightRequestCount() == 0)
+        } catch { failure = error }
+        #expect(await caller.quiesce(deadline: .now + .seconds(2)))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        await fixture.inbound.stop()
+        try await remoteSystem.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
+    @Test("a signed two-node recovery batch binds viewers and retains cancelled actual calls")
+    func signedRecoveryBatchViewerBindingAndActualDrain() async throws {
+        let gate = RecoveryBatchGate()
+        let fixture = try await Fixture(maximumInboundRequests: 8, maximumActiveRooms: 3,
+            coordinatorUserCalls: true, recoveryBatchGate: gate,
+            maximumActivationWaitersPerHost: 16, maximumConcurrentReservations: 3)
+        var settings = ClusterSystemSettings(name: "v2-recovery-batch-caller", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remoteSystem = await ClusterSystem("v2-recovery-batch-caller", settings: settings)
+        let caller = V2RoomClusterClient(system: remoteSystem, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var running: [Task<[V2RoomRecoveryBatchCallOutcome], any Error>] = []
+        var failure: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: ["allowed"],
+                availableRooms: 3, isHealthy: true))
+            guard case .ready(let first) = try await caller.activate(on: fixture.identity,
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(2)),
+                  case .ready(let second) = try await caller.activate(on: fixture.identity,
+                roomID: .init(uuid: UUID()), owner: fixture.owner, deadline: .now + .seconds(2)) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let viewers = [UserID(uuid: UUID()), UserID(uuid: UUID())]
+            let missing = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: fixture.owner,
+                activationEpoch: try .init(1), host: fixture.identity)
+            let end = ContinuousClock.now + .seconds(2)
+            func item(_ token: V2RoomActivationToken, _ user: UserID) -> V2RoomRecoveryBatchCallItem {
+                .init(token: token, query: .init(roomID: token.roomID, actorUserID: user, kind: .state), deadline: end)
+            }
+            let mixed = [item(first, viewers[0]), item(first, viewers[1]), item(missing, viewers[0])]
+            let answers = try await caller.invokeRecoveryBatch(on: fixture.identity, items: mixed, deadline: end)
+            #expect(answers.count == 3)
+            for index in 0..<2 {
+                #expect(answers[index].token == first && answers[index].query.actorUserID == viewers[index])
+                guard case .result(.recovery(.state(.state(let state)))) = answers[index].outcome else {
+                    throw V2ActorAuthenticationError.invalidRequest
+                }
+                #expect(state.roomID == first.roomID && state.head == 7)
+            }
+            guard case .failure = answers[2].outcome else { throw V2ActorAuthenticationError.invalidRequest }
+            #expect(await gate.executedItemCounts == [2]) // Missing room never enters the business callback.
+
+            let endpoint = try V2RoomHostEndpoint.resolve(id: fixture.endpoint.id, using: remoteSystem)
+            // Both packets are validly signed. A user principal cannot forward
+            // a second viewer; a user-only service cannot use service forwarding.
+            for (signer, principal) in [(fixture.coordinator, V2ActorCallPrincipal.user(viewers[0])),
+                                         (fixture.client, V2ActorCallPrincipal.service)] {
+                let hello = V2ActorSessionHello(serviceID: signer.serviceID, callerIncarnation: UUID(),
+                    recipient: fixture.identity, handshakeID: UUID())
+                let signedGrant = try await endpoint.openSession(signer.sign(hello, maximumBytes: 16_384))
+                let grant = try fixture.trust.verifySessionGrant(signedGrant, for: hello, maximumBytes: 16_384)
+                let call = V2ActorAuthenticatedCall(serviceID: signer.serviceID, callerIncarnation: grant.callerIncarnation,
+                    recipient: fixture.identity, sessionID: grant.sessionID, sequence: 1,
+                    attemptID: UUID(), traceID: UUID(), remainingBudget: try .init(2_000), principal: principal,
+                    request: .recoveryBatch(mixed.prefix(2).map { .init(token: $0.token, query: $0.query) }))
+                await expectAuthentication(.forbidden) {
+                    _ = try await endpoint.exchange(signer.sign(call, maximumBytes: 65_536))
+                }
+            }
+            await gate.hold()
+            let heldEnd = ContinuousClock.now + .seconds(2)
+            for token in [first, second] {
+                let held = V2RoomRecoveryBatchCallItem(token: token,
+                    query: .init(roomID: token.roomID, actorUserID: viewers[0], kind: .state), deadline: heldEnd)
+                running.append(Task { try await caller.invokeRecoveryBatch(on: fixture.identity,
+                    items: [held], deadline: heldEnd) })
+            }
+            try await waitUntil { await gate.heldCount == 2 }
+            #expect(await caller.dispatchedCallCount() == 2)
+            running[0].cancel()
+            do { _ = try await running[0].value; Issue.record("cancelled batch waiter unexpectedly succeeded") }
+            catch { #expect(error as? V2RoomCallFailure == .outcomeUnknown) }
+            #expect(await caller.dispatchedCallCount() == 2)
+            let cancelledMetrics = await caller.callMetricsSnapshot()
+            let heldStage = try #require(cancelledMetrics.recoveryStages[.actualDispatch])
+            #expect(heldStage.active == 2 && heldStage.started == 3 && heldStage.completed == 1)
+            #expect(heldStage.itemsStarted == 5 && heldStage.oldestMilliseconds >= 0)
+            #expect(cancelledMetrics.batchCallerCancellations == 1)
+            await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
+                _ = try await caller.invokeRecoveryBatch(on: fixture.identity,
+                    items: [.init(token: first, query: mixed[0].query, deadline: heldEnd)], deadline: heldEnd)
+            }
+            #expect((await caller.callMetricsSnapshot()).batchRejectedPeer == 1)
+            #expect(!(await caller.quiesce(deadline: .now + .milliseconds(20))))
+            #expect(!(await fixture.inbound.quiesce(deadline: .now + .milliseconds(20))))
+        } catch { failure = error }
+        await gate.release()
+        for task in running { _ = await task.result }
+        try await waitUntil { await caller.dispatchedCallCount() == 0 }
+        let drainedMetrics = await caller.callMetricsSnapshot()
+        #expect(drainedMetrics.recoveryStages[.actualDispatch]?.active == 0)
+        #expect(drainedMetrics.recoveryStages[.actualDispatch]?.started == 3)
+        #expect(drainedMetrics.recoveryStages[.actualDispatch]?.completed == 3)
+        #expect(drainedMetrics.recoveryStages[.sessionCallerWait]?.active == 0)
+        #expect(await caller.quiesce(deadline: .now + .seconds(2)))
+        #expect(await fixture.inbound.quiesce(deadline: .now + .seconds(2)))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        await fixture.inbound.stop()
+        try await remoteSystem.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
+    @Test("same-token reconstruction survives cleanup of the previous physical installation")
+    func physicalInstallationCleanup() async throws {
+        let fixture = try await Fixture()
+        guard case .ready(let token) = try await fixture.host.activate(
+            roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(2)) else {
+            Issue.record("expected ready"); return
+        }
+        let original = try await fixture.inbound.physicalReference(for: token)
+        let originalID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: original)
+        #expect(await fixture.inbound.removePhysicalReference(for: token, actorID: originalID))
+        let replacement = try await fixture.inbound.physicalReference(for: token)
+        let replacementID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: replacement)
+        #expect(originalID != replacementID)
+        #expect(!(await fixture.inbound.removePhysicalReference(for: token, actorID: originalID)))
+        let retained = try await fixture.inbound.physicalReference(for: token)
+        let retainedID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: retained)
+        #expect(retainedID == replacementID)
+        #expect(await fixture.inbound.actorCount() == 1)
+        #expect(await fixture.host.isReady(token: token))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        do {
+            _ = try await fixture.inbound.physicalReference(for: token)
+            Issue.record("retired activation published a reference")
+        } catch {
+            #expect(error as? V2RoomCallFailure == .notAccepted(.staleActivation))
+        }
+        await fixture.inbound.reconcileActors()
+        #expect(await fixture.inbound.actorCount() == 0)
+        await fixture.inbound.stop()
+        try await fixture.system.shutdown().wait()
+    }
+
     @Test("node-local exchange uses the signed hello then the same replay, shard and bound-token gate")
     func localExchangeChecks() async throws {
         let fixture = try await Fixture()
@@ -307,6 +610,120 @@ struct V2RoomClusterBridgeTests {
         try await fixture.system.shutdown().wait()
     }
 
+    @Test("a failed Host activation coalesces recovery while its actual restore remains owned")
+    func sharedHostRecoveryAfterNativeTimeout() async throws {
+        let probeStarted = ContinuousClock.now
+        let firstLookupDeadline = probeStarted + .milliseconds(300)
+        #expect(V2RoomClusterClient.recoveryProbeDeadline(for: firstLookupDeadline, now: probeStarted)
+                == firstLookupDeadline)
+        #expect(V2RoomClusterClient.recoveryProbeDeadline(for: probeStarted + .seconds(30), now: probeStarted)
+                == probeStarted + .seconds(3))
+        let gate = RestoreGate()
+        let blockedRoom = RoomID(uuid: UUID())
+        let fixture = try await Fixture(restoreGate: gate, maximumActiveRooms: 3, restoreGateRoom: blockedRoom)
+        let caller = V2RoomClusterClient(system: fixture.system, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var testError: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: ["allowed"],
+                availableRooms: 2, isHealthy: true))
+            guard case .ready(let first) = try await caller.activate(on: fixture.identity,
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(3)),
+                  case .ready(let second) = try await caller.activate(on: fixture.identity,
+                roomID: .init(uuid: UUID()), owner: fixture.owner, deadline: .now + .seconds(3)) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let timedOut = Task {
+                try await caller.activate(on: fixture.identity, roomID: blockedRoom,
+                    owner: fixture.owner, deadline: .now + .milliseconds(100))
+            }
+            try await gate.waitForEntry()
+            do { _ = try await timedOut.value; Issue.record("gated activation unexpectedly completed") }
+            catch {
+                let failure = error as? V2RoomCallFailure
+                #expect(failure == .notAccepted(.deadlineExceeded) || failure == .outcomeUnknown)
+            }
+            // Recovery backoff is a monotonic availability delay, never a lease expiry shortcut.
+            try await Task.sleep(for: .milliseconds(120))
+            let recovered = try await withThrowingTaskGroup(of: Bool.self) { group in
+                for token in [first, second] {
+                    group.addTask { try await caller.lookup(token, deadline: .now + .seconds(3)) }
+                }
+                var values: [Bool] = []
+                for try await value in group { values.append(value) }
+                return values
+            }
+            #expect(recovered.count == 2 && recovered.allSatisfy { $0 })
+            let metrics = await caller.callMetricsSnapshot()
+            #expect(metrics.hostRecoveryProbes == 1)
+            #expect(metrics.activeHostRecoveries == 0)
+            #expect(await caller.physicalReferenceCount() == 2)
+            // Activation's caller has timed out, but the actual restore is still owned by Host.
+            #expect(!(await fixture.host.drain(deadline: .now + .milliseconds(30))).completed)
+        } catch { testError = error }
+        await gate.open()
+        try await waitUntil { await caller.dispatchedCallCount() == 0 }
+        #expect(await caller.quiesce(deadline: .now + .seconds(2)))
+        #expect((await caller.callMetricsSnapshot()).activeHostRecoveries == 0)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
+        await fixture.inbound.stop()
+        try await fixture.system.shutdown().wait()
+        if let testError { throw testError }
+    }
+
+    @Test("a room RPC transport failure preserves a healthy second room cache on the same host")
+    func failedRoomDoesNotSuspendHealthyRoom() async throws {
+        let gate = RestoreGate()
+        let fixture = try await Fixture(invalidationGate: gate, coordinatorUserCalls: true)
+        let caller = V2RoomClusterClient(system: fixture.system, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var testError: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: ["allowed"],
+                availableRooms: 2, isHealthy: true))
+            guard case .ready(let first) = try await caller.activate(on: fixture.identity,
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(3)),
+                  case .ready(let second) = try await caller.activate(on: fixture.identity,
+                roomID: .init(uuid: UUID()), owner: fixture.owner, deadline: .now + .seconds(3)) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let grant = try await caller.reserve(first, requestID: UUID(), deadline: .now + .seconds(3))
+            try await caller.markDispatched(grant, deadline: .now + .seconds(3))
+            let timedOut = Task {
+                await caller.finish(grant, completion: .committed, deadline: .now + .milliseconds(100))
+            }
+            try await gate.waitForEntry()
+            #expect(!(await timedOut.value))
+            #expect(await caller.dispatchedCallCount() == 1)
+            let before = await caller.callMetricsSnapshot()
+            let user = UserID(uuid: UUID())
+            let request = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
+                roomID: second.roomID, senderUserID: user, clientMessageID: .init(uuid: UUID()),
+                text: "healthy-peer-room", media: [], mentions: [], entities: [], replyTo: nil,
+                limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
+            let result = try await caller.tryInvokeCached(second, request: request,
+                principal: .user(user), deadline: .now + .seconds(3))
+            guard case .response(let response) = result else { throw V2ActorAuthenticationError.invalidConfiguration }
+            #expect(response == .recovery(.failure(.invalidRequest)))
+            let after = await caller.callMetricsSnapshot()
+            #expect(after.roomLookups == before.roomLookups)
+            #expect(after.roomInvocations == before.roomInvocations + 1)
+            #expect(after.hostRecoveryProbes == 0)
+            #expect(await caller.physicalReferenceCount() == 1) // only the failed room was evicted
+            #expect(await caller.dispatchedCallCount() == 1)
+            #expect(!(await caller.quiesce(deadline: .now + .milliseconds(30))))
+        } catch { testError = error }
+        await gate.open()
+        try await waitUntil { await caller.dispatchedCallCount() == 0 }
+        #expect(await caller.quiesce(deadline: .now + .seconds(2)))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
+        await fixture.inbound.stop()
+        try await fixture.system.shutdown().wait()
+        if let testError { throw testError }
+    }
+
     @Test("cancelled caller leaves a dispatched inbound operation tracked through late completion")
     func cancelledDispatchedCallFinishesPhysically() async throws {
         let gate = RestoreGate()
@@ -454,8 +871,12 @@ struct V2RoomClusterBridgeTests {
         init(restoreGate: RestoreGate? = nil, executeGate: RestoreGate? = nil,
              invalidationGate: RestoreGate? = nil,
              maximumInboundRequests: Int = 2,
-             maximumResolveAttempts: Int = 3) async throws {
-            owner = try .init(shardID: "allowed", epoch: 0)
+             maximumResolveAttempts: Int = 3,
+             maximumActiveRooms: Int = 2, restoreGateRoom: RoomID? = nil,
+             coordinatorUserCalls: Bool = false, recoveryBatchGate: RecoveryBatchGate? = nil,
+             maximumActivationWaitersPerHost: Int = 2, maximumConcurrentReservations: Int = 1,
+             ownerShardID: String = "allowed") async throws {
+            owner = try .init(shardID: ownerShardID, epoch: 0)
             identity = .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             let clientKey = Curve25519.Signing.PrivateKey()
             let coordinatorKey = Curve25519.Signing.PrivateKey()
@@ -471,15 +892,15 @@ struct V2RoomClusterBridgeTests {
                       permissions: [.userRoomCalls]),
                 .init(serviceID: coordinator.serviceID,
                       publicKey: coordinatorKey.publicKey.rawRepresentation,
-                      permissions: [.roomCoordination]),
+                      permissions: coordinatorUserCalls ? [.roomCoordination, .userRoomCalls] : [.roomCoordination]),
                 .init(serviceID: signer.serviceID, publicKey: hostKey.publicKey.rawRepresentation,
                       permissions: [], hostedIDs: [identity.hostID]),
             ])
             configuration = try V2RoomRuntimeConfiguration(
-                maximumActiveRooms: 2, maximumConcurrentRestores: 1,
+                maximumActiveRooms: maximumActiveRooms, maximumConcurrentRestores: 1,
                 maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 2,
-                maximumActivationWaitersPerHost: 2, maximumConcurrentResolutions: 1,
-                maximumConcurrentReservations: 1,
+                maximumActivationWaitersPerHost: maximumActivationWaitersPerHost, maximumConcurrentResolutions: 1,
+                maximumConcurrentReservations: maximumConcurrentReservations,
                 maximumResolveAttempts: maximumResolveAttempts
             )
             let count = ExecutionCount()
@@ -487,8 +908,20 @@ struct V2RoomClusterBridgeTests {
             host = .init(
                 identity: identity, leaseStore: LeaseStore(), configuration: configuration,
                 budget: V2RoomCommandBudget(configuration: configuration), classify: { _ in .barrier },
-                factory: .init { _ in
-                    .init(restore: { _ in if let restoreGate { await restoreGate.wait() } },
+                factory: .init(recoveryBatch: { items in
+                    if let recoveryBatchGate { await recoveryBatchGate.execute(items.count) }
+                    return .committed(items.map { item in
+                        .init(token: item.token, query: item.query,
+                            outcome: .result(.recovery(.state(.state(.init(roomID: item.query.roomID,
+                                ownerEpoch: UInt64(item.token.owner.epoch), viewerMembershipRevision: 1,
+                                head: 7, trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0))))))
+                    })
+                }) { token in
+                    .init(restore: { _ in
+                        if let restoreGate, restoreGateRoom == nil || restoreGateRoom == token.roomID {
+                            await restoreGate.wait()
+                        }
+                    },
                           execute: { turn in
                               if let executeGate { await executeGate.wait() }
                               await count.record()
@@ -510,9 +943,9 @@ struct V2RoomClusterBridgeTests {
             inbound = try .init(
                 identity: identity, host: host,
                 authenticator: .init(host: identity, trust: trust, limits: limits), signer: signer,
-                limits: limits, allowedShards: ["allowed"],
-                serviceShardAccess: [client.serviceID: ["allowed"],
-                                     coordinator.serviceID: ["allowed"]],
+                limits: limits, allowedShards: [owner.shardID],
+                serviceShardAccess: [client.serviceID: [owner.shardID],
+                                     coordinator.serviceID: [owner.shardID]],
                 maximumInboundRequests: maximumInboundRequests,
                 localGeneration: generation, actorSystem: system
             )
@@ -572,6 +1005,23 @@ struct V2RoomClusterBridgeTests {
             let observed = Date(timeIntervalSince1970: 1_000)
             return try .init(token: token, databaseObservedAt: observed,
                              expiresAt: observed.addingTimeInterval(Double(duration.rawValue) / 1_000))
+        }
+    }
+
+    private actor RecoveryBatchGate {
+        private var blocked = false
+        private var held: [CheckedContinuation<Void, Never>] = []
+        private(set) var executedItemCounts: [Int] = []
+        var heldCount: Int { held.count }
+        func hold() { blocked = true }
+        func execute(_ count: Int) async {
+            executedItemCounts.append(count)
+            if blocked { await withCheckedContinuation { held.append($0) } }
+        }
+        func release() {
+            blocked = false
+            let old = held; held.removeAll()
+            for continuation in old { continuation.resume() }
         }
     }
 

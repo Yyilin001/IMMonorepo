@@ -6,6 +6,138 @@ import Testing
 
 @Suite("Room activation host owns restore, lease and retirement")
 struct V2RoomActivationHostTests {
+    @Test("ready calls execute while the shared lifecycle actor is held")
+    func executionHandleBypassesHeldHost() async throws {
+        let fixture = try Fixture()
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else { throw TestFailure.restore }
+        let entered = DispatchSemaphore(value: 0), release = DispatchSemaphore(value: 0)
+        let held = Task.detached { await fixture.host.holdLifecycleForTest(entered: entered, release: release) }
+        let didEnter = await Task.detached { hostTestWaitForEntered(entered) }.value
+            #expect(didEnter)
+        do {
+            #expect(try await fixture.host.invoke(token: token,
+                encodedRequest: JSONEncoder().encode(Command(value: 1)), deadline: .now + .milliseconds(200)) == 1)
+            release.signal(); await held.value
+            #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        } catch {
+            release.signal(); await held.value
+            _ = await fixture.host.drain(deadline: .now + .seconds(2)); throw error
+        }
+    }
+
+    @Test("a cached execution handle observes proof revocation before Host notification")
+    func executionHandleSeesRevocationSynchronously() async throws {
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
+        _ = qualification.update(witnesses: ["b": .now + .seconds(5)])
+        let fixture = try Fixture(qualification: qualification)
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else { throw TestFailure.restore }
+        let handle = try fixture.host.executionHandle(token: token)
+        qualification.revoke()
+        await #expect(throws: V2RoomCallFailure.notAccepted(.leaseLost)) {
+            try await handle.invoke(encodedRequest: JSONEncoder().encode(Command(value: 1)), deadline: .now + .seconds(1))
+        }
+        await fixture.host.qualificationDidChange()
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
+    @Test("last queued waiter disposes an unstarted activation while actual restore stays owned", arguments: [false, true])
+    func queuedActivationDisposesLastWaiter(expires: Bool) async throws {
+        let gate = Gate()
+        let fixture = try Fixture(restoreGate: gate)
+        await fixture.host.start()
+        let active = fixture.activate()
+        try await gate.waitForEntries(1)
+        let room = RoomID(uuid: UUID())
+        let queued = fixture.activate(roomID: room,
+            deadline: .now + (expires ? .milliseconds(80) : .seconds(2)))
+        try await waitUntil { await fixture.host.snapshot().activationWaiters == 2 }
+        if !expires { queued.cancel() }
+        await expectFailure(.notAccepted(expires ? .deadlineExceeded : .cancelled), queued)
+        #expect(await fixture.host.snapshot().pendingRooms == 1)
+        #expect(await fixture.host.snapshot().restoringRooms == 1)
+        #expect(await fixture.store.acquireCount == 1)
+        let successor = fixture.activate(roomID: room)
+        try await waitUntil { await fixture.host.snapshot().activationWaiters == 2 }
+        await gate.open()
+        guard case .ready = try await active.value, case .ready = try await successor.value else {
+            Issue.record("actual and successor activation must become ready"); return
+        }
+        #expect(await fixture.store.acquireCount == 2)
+        #expect(await fixture.host.snapshot().pendingRooms == 0)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
+    @Test("qualification revocation owns late lease SQL and a new proof cannot revive its old entry", arguments: [false, true])
+    func qualificationFencesLateLeaseSQL(renewal: Bool) async throws {
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
+        let firstProof = try #require(qualification.update(witnesses: ["b": .now + .seconds(5)]))
+        let gate = Gate()
+        let fixture = try Fixture(renewGate: renewal ? gate : nil, acquireGate: renewal ? nil : gate,
+            qualification: qualification)
+        await fixture.host.start()
+        let activation = fixture.activate()
+        var oldToken: V2RoomActivationToken?
+        do {
+            if renewal {
+                guard case .ready(let token) = try await activation.value else {
+                    Issue.record("expected qualified activation"); throw TestFailure.restore
+                }
+                oldToken = token
+            }
+            try await gate.waitForEntries(1)
+            qualification.revoke()
+            await fixture.host.qualificationDidChange()
+            #expect(!(await fixture.host.snapshot().accepting))
+            #expect(await fixture.store.releaseCount == 0)
+            if !renewal { await expectFailure(.notAccepted(.leaseLost), activation) }
+            if let token = oldToken { #expect(!(await fixture.host.isReady(token: token))) }
+            let replacement = try #require(qualification.update(witnesses: ["b": .now + .seconds(5)]))
+            #expect(replacement.generation != firstProof.generation)
+            await fixture.host.qualificationDidChange()
+            // The shared SQL still owns the old entry even after eligibility returns.
+            await expectFailure(.notAccepted(.leaseLost), fixture.activate())
+            await gate.open()
+            try await waitUntil { await fixture.host.snapshot().retiringRooms == 0 }
+            #expect(await fixture.store.releaseCount == 1)
+            guard case .ready(let token) = try await fixture.activate().value else {
+                Issue.record("expected a fresh qualified entry"); throw TestFailure.restore
+            }
+            if let oldToken { #expect(token.activationEpoch > oldToken.activationEpoch) }
+            #expect(await fixture.store.acquireCount == 2)
+            // Operator stop is terminal even if the shared eligibility proof is refreshed.
+            await fixture.host.beginDrain()
+            qualification.revoke()
+            _ = qualification.update(witnesses: ["b": .now + .seconds(5)])
+            await fixture.host.qualificationDidChange()
+            await expectFailure(.notAccepted(.retired), fixture.activate(roomID: RoomID(uuid: UUID())))
+            #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        } catch {
+            await gate.open()
+            _ = await fixture.host.drain(deadline: .now + .seconds(2))
+            throw error
+        }
+    }
+
+    @Test("qualification deadline stops service without depending on membership callbacks")
+    func qualificationWatchdogExpires() async throws {
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
+        _ = qualification.update(witnesses: ["b": .now + .milliseconds(150)])
+        let fixture = try Fixture(qualification: qualification)
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else {
+            Issue.record("expected initially qualified activation")
+            _ = await fixture.host.drain(deadline: .now + .seconds(2)); return
+        }
+        do { try await waitUntil { await fixture.store.releaseCount == 1 } }
+        catch { _ = await fixture.host.drain(deadline: .now + .seconds(2)); throw error }
+        #expect(!(await fixture.host.isReady(token: token)))
+        #expect(!(await fixture.host.snapshot().accepting))
+        #expect(await fixture.host.readyTokens().isEmpty)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
     @Test("shared restore survives one cancelled waiter and renews before ready")
     func sharedRestore() async throws {
         let gate = Gate()
@@ -159,11 +291,68 @@ struct V2RoomActivationHostTests {
             Issue.record("expected ready"); return
         }
         try await gate.waitForEntries(1)
-        try await waitUntil { await fixture.store.releaseCount == 1 }
-        await expectFailure(.notAccepted(.staleActivation), fixture.invoke(token: token))
+        try await waitUntil { await fixture.host.snapshot().retiringRooms == 1 }
+        #expect(!(await fixture.host.isReady(token: token)))
+        #expect(await fixture.store.releaseCount == 0)
+        await expectFailure(.notAccepted(.retired), fixture.invoke(token: token))
         await gate.open()
-        try await Task.sleep(for: .milliseconds(30))
+        try await waitUntil { await fixture.store.releaseCount == 1 }
         #expect(await fixture.host.snapshot().activeRooms == 0)
+    }
+
+    @Test("confirmed deferred renewal can recover without retiring a safe activation")
+    func deferredRenewalThenSuccess() async throws {
+        let fixture = try Fixture(shortLease: true, renewFailures: [.renewalDeferred])
+        let startedAt = ContinuousClock.now
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else {
+            Issue.record("expected ready"); return
+        }
+        try await waitUntil { await fixture.store.successfulRenewCount > 0 }
+        #expect(await fixture.store.renewCount >= 2)
+        #expect(await fixture.store.releaseCount == 0)
+        #expect(await fixture.host.isReady(token: token))
+        // Cross the original 150ms safety window. Only an actual successful
+        // renewal may keep readiness beyond that initial watchdog deadline.
+        try await ContinuousClock().sleep(until: startedAt + .milliseconds(250))
+        #expect(await fixture.host.isReady(token: token))
+        #expect(await fixture.store.releaseCount == 0)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
+    @Test("consecutive deferred renewals never move the original safety deadline")
+    func deferredRenewalsExpireAtOriginalWatchdog() async throws {
+        let fixture = try Fixture(shortLease: true, repeatedRenewFailure: .renewalDeferred)
+        let startedAt = ContinuousClock.now
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else {
+            Issue.record("expected ready"); return
+        }
+        try await waitUntil { await fixture.store.renewCount >= 2 }
+        #expect(await fixture.host.isReady(token: token))
+        try await ContinuousClock().sleep(until: startedAt + .milliseconds(250))
+        #expect(!(await fixture.host.isReady(token: token)))
+        try await waitUntil { await fixture.store.releaseCount == 1 }
+        #expect(await fixture.store.successfulRenewCount == 0)
+        #expect(await fixture.probe.closeCount == 1)
+        await expectFailure(.notAccepted(.staleActivation), fixture.invoke(token: token))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
+    @Test("unknown renewal outcome retires immediately without deferred retry")
+    func unknownRenewalDoesNotDeferRetirement() async throws {
+        let fixture = try Fixture(renewFailures: [.outcomeUnknown])
+        let retirementBudget = ContinuousClock.now + .milliseconds(500)
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else {
+            Issue.record("expected ready"); return
+        }
+        try await waitUntil(deadline: retirementBudget) { await fixture.store.releaseCount == 1 }
+        #expect(await fixture.store.renewCount == 1)
+        #expect(await fixture.store.successfulRenewCount == 0)
+        #expect(!(await fixture.host.isReady(token: token)))
+        #expect(await fixture.probe.closeCount == 1)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
     }
 
     @Test("drain blocks new admission but leaves an executing transaction alive")
@@ -238,6 +427,52 @@ struct V2RoomActivationHostTests {
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
     }
 
+    @Test("an old completed lane cannot clear its already admitted successor reservation")
+    func reservationFinishPreservesSuccessor() async throws {
+        let fixture = try Fixture()
+        let gate = Gate()
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else {
+            Issue.record("expected ready"); return
+        }
+        let first = try await fixture.host.reserve(token: token, requestID: UUID(), deadline: .now + .seconds(1))
+        try await fixture.host.markReservationDispatched(first)
+        await fixture.host.observeReservationFinish { grant in
+            if grant == first { await gate.wait() }
+        }
+        let finish = Task { await fixture.host.finishReservation(first, completion: .committed) }
+        do {
+            try await gate.waitForEntries(1)
+            // This gate is after the actual old permit release. A fresh real
+            // reserve/dispatch completes while the old Host continuation waits.
+            #expect(await fixture.budget.snapshot().reservationCount == 0)
+            let successor = try await fixture.host.reserve(token: token, requestID: UUID(),
+                deadline: .now + .seconds(1))
+            try await fixture.host.markReservationDispatched(successor)
+            #expect(await fixture.budget.snapshot().reservationCount == 1)
+            // A different old finishing owner must not force the current
+            // caller to retry settlement after its actual SQL completed.
+            #expect(await fixture.host.finishReservation(successor, completion: .committed))
+            #expect(!(await fixture.host.finishReservation(successor, completion: .committed)))
+            #expect(await fixture.budget.snapshot().reservationCount == 0)
+            let third = try await fixture.host.reserve(token: token, requestID: UUID(),
+                deadline: .now + .seconds(1))
+            try await fixture.host.markReservationDispatched(third)
+            await gate.open()
+            #expect(await finish.value)
+            // Neither the old held cleanup nor its finishing-owner defer may
+            // clear the real third capability admitted before it resumed.
+            #expect(await fixture.budget.snapshot().reservationCount == 1)
+            #expect(await fixture.host.finishReservation(third, completion: .committed))
+            #expect(await fixture.budget.snapshot().reservationCount == 0)
+            #expect(await fixture.probe.invalidations == 3)
+            #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+        } catch {
+            await gate.open(); _ = await finish.value
+            _ = await fixture.host.stop(deadline: .now + .seconds(2)); throw error
+        }
+    }
+
     @Test("an accepted reservation may dispatch and finish during drain")
     func reservationDuringDrain() async throws {
         let fixture = try Fixture()
@@ -293,6 +528,8 @@ struct V2RoomActivationHostTests {
             Issue.record("expected second ready"); return
         }
         #expect(second.activationEpoch > first.activationEpoch)
+        #expect(!(await fixture.host.isReady(token: first)))
+        #expect(await fixture.host.isReady(token: second))
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
     }
 
@@ -302,16 +539,207 @@ struct V2RoomActivationHostTests {
         await fixture.host.start()
         let stream = await fixture.host.changes()
         var iterator = stream.makeAsyncIterator()
-        #expect(await iterator.next() == 0)
+        let initialRevision = try #require(await iterator.next())
         guard case .ready(let token) = try await fixture.activate().value else {
             Issue.record("expected ready"); return
         }
-        #expect(await iterator.next() == 1)
+        let readyRevision = try #require(await iterator.next())
+        #expect(readyRevision > initialRevision)
         #expect(await fixture.host.readyTokens() == [token])
+        #expect(await fixture.host.isReady(token: token))
         await fixture.host.beginDrain()
-        #expect(await iterator.next() == 2)
+        let drainingRevision = try #require(await iterator.next())
+        #expect(drainingRevision > readyRevision)
+        #expect(!(await fixture.host.isReady(token: token)))
         #expect(await fixture.host.readyTokens().isEmpty)
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
+    @Test("snapshot recovery bypasses a held command lane and pins lifecycle until actual settlement", arguments: [false, true])
+    func recoveryBatchOwnsAdmittedRooms(qualificationLost: Bool) async throws {
+        let owner = try V2RoomDataOwner(shardID: "batch", epoch: 0)
+        let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let config = try V2RoomRuntimeConfiguration(maximumActiveRooms: 4,
+            maximumConcurrentRestores: 2, maximumPendingActivations: 4,
+            maximumConcurrentReservations: 4)
+        let store = FakeLeaseStore(renewGate: nil, acquireGate: nil, releaseFailures: 0,
+            missingRoom: false, occupiedByOther: false, unknownAcquire: false,
+            renewFailures: [], repeatedRenewFailure: nil)
+        let budget = V2RoomCommandBudget(configuration: config)
+        let gate = Gate()
+        let invalidations = ReadInvalidationProbe()
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
+        _ = qualification.update(witnesses: ["b": .now + .seconds(10)])
+        let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
+            leaseStore: store, configuration: config, budget: budget,
+            classify: { $0.turnSchedulingClass }, factory: .init(recoveryBatch: { items in
+                #expect(items.count == 3)
+                #expect(Set(items.map { $0.token.roomID }).count == 2)
+                #expect(Set(items.map { $0.query.actorUserID }).count == 2)
+                await gate.wait()
+                return .committed(items.map { .init(token: $0.token, query: $0.query,
+                    outcome: .result(.recovery(.state(.unavailable)))) })
+            }) { _ in
+                .init(restore: { _ in }, execute: { turn in
+                    .committed(turn.items.map { _ in .recovery(.state(.unavailable)) })
+                }, invalidateReservation: { _ in await invalidations.record() }, close: {})
+            }, qualification: qualification)
+        await host.start()
+        let roomA = RoomID(uuid: UUID()), roomB = RoomID(uuid: UUID())
+        guard case .ready(let a) = try await host.activate(roomID: roomA, owner: owner, deadline: .now + .seconds(2)),
+              case .ready(let b) = try await host.activate(roomID: roomB, owner: owner, deadline: .now + .seconds(2)) else {
+            Issue.record("expected two ready activations"); _ = await host.stop(deadline: .now + .seconds(2)); return
+        }
+        let viewerA = UserID(uuid: UUID()), viewerB = UserID(uuid: UUID())
+        let missing = V2RoomActivationToken(roomID: RoomID(uuid: UUID()), owner: owner,
+            activationEpoch: try .init(1), host: identity)
+        let end = ContinuousClock.now + .seconds(3)
+        let items: [V2RoomRecoveryBatchCallItem] = [(a, viewerA), (a, viewerB), (b, viewerA), (missing, viewerA)].map {
+            .init(token: $0.0, query: .init(roomID: $0.0.roomID, actorUserID: $0.1, kind: .state), deadline: end)
+        }
+        let heldWrite = try await host.reserve(token: a, requestID: UUID(), deadline: end)
+        try await host.markReservationDispatched(heldWrite)
+        let work = Task { await host.invokeRecoveryBatch(items: items, deadline: end) }
+        let siblings = (0..<3).map { _ in Task { await host.invokeRecoveryBatch(items: items, deadline: end) } }
+        do {
+            try await gate.waitForEntries(4)
+            let overflow = await host.invokeRecoveryBatch(items: items, deadline: end)
+            #expect(overflow.allSatisfy { $0.outcome == .failure(.notAccepted(.overloaded)) })
+            #expect(await budget.snapshot().reservationCount == 1)
+            #expect(await invalidations.count == 0)
+            #expect(await host.finishReservation(heldWrite, completion: .committed))
+            #expect(await invalidations.count == 1)
+            if qualificationLost {
+                qualification.revoke()
+                await host.qualificationDidChange()
+            } else { work.cancel() }
+            await host.beginDrain()
+            #expect(!(await host.drain(deadline: .now + .milliseconds(30))).completed)
+            #expect(await store.releaseCount == 0)
+            #expect(await budget.snapshot().reservationCount == 0)
+            await gate.open()
+            let values = await work.value
+            for sibling in siblings { _ = await sibling.value }
+            #expect(values.count == 4)
+            #expect(values[3].outcome == .failure(.notAccepted(.staleActivation)))
+            if qualificationLost {
+                #expect(values.prefix(3).allSatisfy { $0.outcome == .failure(.notAccepted(.leaseLost)) })
+            }
+            #expect(await invalidations.count == 1)
+            #expect((await host.stop(deadline: .now + .seconds(2))).completed)
+            #expect(await budget.snapshot().reservationCount == 0)
+        } catch {
+            await gate.open(); _ = await work.value
+            for sibling in siblings { _ = await sibling.value }
+            _ = await host.finishReservation(heldWrite, completion: .rolledBack)
+            _ = await host.stop(deadline: .now + .seconds(2)); throw error
+        }
+    }
+
+    @Test("pure room-log pulls retain bounded read pins without retiring the write lane")
+    func pureRoomLogPullOwnsBudgetAndLifecycle() async throws {
+        let owner = try V2RoomDataOwner(shardID: "pull", epoch: 0)
+        let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let configuration = try V2RoomRuntimeConfiguration(maximumActiveRooms: 2,
+            maximumConcurrentRestores: 1, maximumPendingActivations: 2,
+            maximumQueuedCommandsPerRoom: 3, maximumQueuedCommandsPerHost: 4,
+            maximumCommandsPerTurn: 3, maximumConcurrentReservations: 2)
+        let store = FakeLeaseStore(renewGate: nil, acquireGate: nil, releaseFailures: 0,
+            missingRoom: false, occupiedByOther: false, unknownAcquire: false,
+            renewFailures: [], repeatedRenewFailure: nil)
+        let budget = V2RoomCommandBudget(configuration: configuration)
+        let readGate = Gate(), lateGate = Gate()
+        let laneExecutions = ReadInvalidationProbe(), invalidations = ReadInvalidationProbe()
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
+        _ = qualification.update(witnesses: ["b": .now + .seconds(10)])
+        let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
+            leaseStore: store, configuration: configuration, budget: budget,
+            classify: { $0.turnSchedulingClass }, factory: .init(pureRoomLogPull: { token, request, _ in
+                guard case .roomLog(.pull(let pull)) = request, pull.roomID == token.roomID else {
+                    return .rolledBack(.invalidRequest)
+                }
+                if pull.afterRoomSequence == 0 { await readGate.wait() }
+                else { await lateGate.wait() }
+                if pull.pageSize == 1 { return .outcomeUnknown }
+                return .committed(.recovery(.state(.unavailable)))
+            }) { _ in
+                .init(restore: { _ in }, execute: { turn in
+                    await laneExecutions.record()
+                    return .committed(turn.items.map { _ in .recovery(.state(.unavailable)) })
+                }, invalidateReservation: { _ in await invalidations.record() }, close: {})
+            }, qualification: qualification)
+        await host.start()
+        let room = RoomID(uuid: UUID()), viewer = UserID(uuid: UUID())
+        guard case .ready(let token) = try await host.activate(roomID: room, owner: owner, deadline: .now + .seconds(2)) else {
+            _ = await host.stop(deadline: .now + .seconds(2)); throw TestFailure.restore
+        }
+        let end = ContinuousClock.now + .seconds(5)
+        let request = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
+            afterRoomSequence: 0, pageSize: 1)))
+        let bytes = try JSONEncoder().encode(request)
+        let heldWrite = try await host.reserve(token: token, requestID: UUID(), deadline: end)
+        let successfulRead = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
+            afterRoomSequence: 0, pageSize: 2)))
+        let successfulBytes = try JSONEncoder().encode(successfulRead)
+        let reads = [successfulBytes, bytes].map { body in
+            Task { try await host.invoke(token: token, encodedRequest: body, deadline: end) }
+        }
+        var late: Task<V2RoomResponse, any Error>?
+        var lateKnown: Task<V2RoomResponse, any Error>?
+        do {
+            try await readGate.waitForEntries(2)
+            #expect(await laneExecutions.count == 0)
+            #expect(await budget.snapshot().commandCount == 3)
+            reads[0].cancel()
+            #expect(await budget.snapshot().commandCount == 3)
+            await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
+                _ = try await host.invoke(token: token, encodedRequest: bytes, deadline: end)
+            }
+            await readGate.open()
+            await expectFailure(.notAccepted(.cancelled), reads[0])
+            await expectFailure(.outcomeUnknown, reads[1])
+            #expect(await host.isReady(token: token))
+            #expect(await budget.snapshot().commandCount == 1)
+            #expect(await invalidations.count == 0)
+            #expect(await host.abortReservation(heldWrite))
+            let subscribe = V2RoomRequest.roomLog(.subscribe(.init(roomID: room, actorUserID: viewer)))
+            _ = try await host.invoke(token: token, encodedRequest: JSONEncoder().encode(subscribe), deadline: end)
+            #expect(await laneExecutions.count == 1) // Subscribe retains the original lane.
+            let second = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
+                afterRoomSequence: 1, pageSize: 1)))
+            let secondBytes = try JSONEncoder().encode(second)
+            late = Task { try await host.invoke(token: token, encodedRequest: secondBytes, deadline: end) }
+            let known = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
+                afterRoomSequence: 1, pageSize: 2)))
+            let knownBytes = try JSONEncoder().encode(known)
+            lateKnown = Task { try await host.invoke(token: token, encodedRequest: knownBytes, deadline: end) }
+            try await lateGate.waitForEntries(2)
+            qualification.revoke()
+            await host.qualificationDidChange()
+            #expect(!(await host.drain(deadline: .now + .milliseconds(20))).completed)
+            #expect(await budget.snapshot().commandCount == 2)
+            await lateGate.open()
+            if let late { await expectFailure(.outcomeUnknown, late) }
+            if let lateKnown {
+                do { _ = try await lateKnown.value; Issue.record("old-proof read unexpectedly succeeded") }
+                catch { #expect(error as? V2RoomCallFailure == .notAccepted(.staleActivation) ||
+                    error as? V2RoomCallFailure == .notAccepted(.leaseLost)) }
+            }
+            #expect(await budget.snapshot().commandCount == 0)
+        } catch {
+            await readGate.open(); await lateGate.open()
+            for read in reads { _ = await read.result }
+            if let late { _ = await late.result }
+            if let lateKnown { _ = await lateKnown.result }
+            _ = await host.abortReservation(heldWrite)
+            _ = await host.stop(deadline: .now + .seconds(2)); throw error
+        }
+        #expect((await host.stop(deadline: .now + .seconds(2))).completed)
+    }
+
+    private actor ReadInvalidationProbe {
+        var count = 0
+        func record() { count += 1 }
     }
 
     private func expectFailure<T: Sendable>(_ expected: V2RoomCallFailure,
@@ -320,8 +748,8 @@ struct V2RoomActivationHostTests {
         catch { #expect(error as? V2RoomCallFailure == expected) }
     }
 
-    private func waitUntil(_ condition: @escaping @Sendable () async -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(2)
+    private func waitUntil(deadline: ContinuousClock.Instant = .now + .seconds(2),
+                           _ condition: @escaping @Sendable () async -> Bool) async throws {
         while !(await condition()) {
             guard ContinuousClock.now < deadline else { throw TestFailure.timeout }
             try await Task.sleep(for: .milliseconds(2))
@@ -346,7 +774,10 @@ struct V2RoomActivationHostTests {
              invalidationGate: Gate? = nil, releaseFailures: Int = 0,
              idleMilliseconds: Int64 = 2_000, failRestore: Bool = false,
              unknownCompletion: Bool = false, missingRoom: Bool = false,
-             occupiedByOther: Bool = false, unknownAcquire: Bool = false) throws {
+             occupiedByOther: Bool = false, unknownAcquire: Bool = false,
+             renewFailures: [V2RoomActivationLeaseError] = [],
+             repeatedRenewFailure: V2RoomActivationLeaseError? = nil,
+             qualification: V2ActorServiceQualification = .standalone()) throws {
             owner = try .init(shardID: "test", epoch: 0)
             let config = try V2RoomRuntimeConfiguration(
                 maximumActiveRooms: maximumActiveRooms, maximumConcurrentRestores: 1,
@@ -366,7 +797,8 @@ struct V2RoomActivationHostTests {
             let identity = V2ActorHostIdentity(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             store = FakeLeaseStore(renewGate: renewGate, acquireGate: acquireGate,
                                    releaseFailures: releaseFailures, missingRoom: missingRoom,
-                                   occupiedByOther: occupiedByOther, unknownAcquire: unknownAcquire)
+                                   occupiedByOther: occupiedByOther, unknownAcquire: unknownAcquire,
+                                   renewFailures: renewFailures, repeatedRenewFailure: repeatedRenewFailure)
             probe = Probe(restoreGate: restoreGate, executeGate: executeGate,
                           invalidationGate: invalidationGate,
                           failRestore: failRestore, unknownCompletion: unknownCompletion)
@@ -380,7 +812,7 @@ struct V2RoomActivationHostTests {
                           execute: { await probe.execute($0) },
                           invalidateReservation: { _ in await probe.invalidate() },
                           close: { await probe.close() })
-                }
+                }, qualification: qualification
             )
         }
 
@@ -408,18 +840,24 @@ struct V2RoomActivationHostTests {
         private let missingRoom: Bool
         private let occupiedByOther: Bool
         private var unknownAcquire: Bool
+        private var renewFailures: [V2RoomActivationLeaseError]
+        private let repeatedRenewFailure: V2RoomActivationLeaseError?
         var acquireCount = 0
         var renewCount = 0
+        var successfulRenewCount = 0
         var releaseCount = 0
 
         init(renewGate: Gate?, acquireGate: Gate?, releaseFailures: Int,
-             missingRoom: Bool, occupiedByOther: Bool, unknownAcquire: Bool) {
+             missingRoom: Bool, occupiedByOther: Bool, unknownAcquire: Bool,
+             renewFailures: [V2RoomActivationLeaseError], repeatedRenewFailure: V2RoomActivationLeaseError?) {
             self.renewGate = renewGate
             self.acquireGate = acquireGate
             self.releaseFailures = releaseFailures
             self.missingRoom = missingRoom
             self.occupiedByOther = occupiedByOther
             self.unknownAcquire = unknownAcquire
+            self.renewFailures = renewFailures
+            self.repeatedRenewFailure = repeatedRenewFailure
         }
 
         func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
@@ -452,10 +890,13 @@ struct V2RoomActivationHostTests {
                    duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
             renewCount += 1
             if let renewGate { await renewGate.wait() }
+            if !renewFailures.isEmpty { throw renewFailures.removeFirst() }
+            if let repeatedRenewFailure { throw repeatedRenewFailure }
             guard current[token.roomID]?.token == token else {
                 throw V2RoomActivationLeaseError.activationChanged
             }
             let lease = try makeLease(token, duration: duration)
+            successfulRenewCount += 1
             current[token.roomID] = lease
             return lease
         }
@@ -505,6 +946,7 @@ struct V2RoomActivationHostTests {
         }
 
         func execute(_ turn: V2RoomTurn<Command>) async -> V2RoomTransactionCompletion<[Int]> {
+            #expect(turn.context.activationValidUntil.map { $0 > .now } == true)
             if let executeGate { await executeGate.wait() }
             if unknownCompletion { return .outcomeUnknown }
             return .committed(turn.items.map(\.request.value))
@@ -543,4 +985,17 @@ struct V2RoomActivationHostTests {
             }
         }
     }
+}
+
+// Deliberately holds one lifecycle executor turn; bounded to avoid hanging the suite.
+private extension V2RoomActivationHost {
+    func holdLifecycleForTest(entered: DispatchSemaphore, release: DispatchSemaphore) {
+        entered.signal()
+        _ = release.wait(timeout: .now() + 2)
+    }
+}
+
+// A bounded synchronous test barrier, never part of production scheduling.
+private func hostTestWaitForEntered(_ semaphore: DispatchSemaphore) -> Bool {
+    semaphore.wait(timeout: .now() + 2) == .success
 }

@@ -65,6 +65,9 @@ public actor V2RoomClusterNode {
     private let trust: V2ActorTrustStore
     private let authenticationLimits: V2ActorAuthenticationLimits
     private let runtimeConfiguration: V2RoomRuntimeConfiguration
+    private var starting = false
+    private var realtime: V2RealtimeTransportHandle?
+    private var realtimeShards: V2RealtimeShardTransportHandle?
     private var system: ClusterSystem?
     private var inbound: V2RoomClusterInboundService?
     private var endpoint: V2RoomHostEndpoint?
@@ -75,12 +78,20 @@ public actor V2RoomClusterNode {
     private var acceptingDiscoveries = true
     private var clients: [V2RoomClusterClient] = []
     private var localGeneration: UUID?
+    private let policyRevocations: (any V2RoomPolicyRevocationServing)?
+    private let policyMutations: (any V2PolicyMutationServing)?
+    private let policyOwnership: (any V2PolicyOwnershipServing)?
+    private let forwardPairs: (any V2RoomForwardPairServing)?
 
     public init(configuration: V2RoomClusterNodeConfiguration, identity: V2ActorHostIdentity,
                 host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,
                 signer: V2ActorSigningIdentity, trust: V2ActorTrustStore,
                 authenticationLimits: V2ActorAuthenticationLimits,
-                runtimeConfiguration: V2RoomRuntimeConfiguration) {
+                runtimeConfiguration: V2RoomRuntimeConfiguration,
+                policyRevocations: (any V2RoomPolicyRevocationServing)? = nil,
+                policyOwnership: (any V2PolicyOwnershipServing)? = nil,
+                policyMutations: (any V2PolicyMutationServing)? = nil,
+                forwardPairs: (any V2RoomForwardPairServing)? = nil) {
         self.configuration = configuration
         self.identity = identity
         self.host = host
@@ -88,11 +99,16 @@ public actor V2RoomClusterNode {
         self.trust = trust
         self.authenticationLimits = authenticationLimits
         self.runtimeConfiguration = runtimeConfiguration
+        self.policyRevocations = policyRevocations
+        self.policyOwnership = policyOwnership
+        self.policyMutations = policyMutations
+        self.forwardPairs = forwardPairs
     }
 
     public func start() async throws -> V2RoomClusterHostDescriptor {
-        guard system == nil else { throw V2ActorAuthenticationError.invalidConfiguration }
-        acceptingDiscoveries = true
+        guard system == nil, !starting, acceptingDiscoveries else { throw V2ActorAuthenticationError.invalidConfiguration }
+        starting = true
+        defer { starting = false }
         var settings = ClusterSystemSettings(name: configuration.name, host: configuration.host,
                                              port: configuration.port, tls: configuration.tls)
         settings.threadPoolSize = configuration.threadPoolSize
@@ -111,6 +127,11 @@ public actor V2RoomClusterNode {
         settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
         let system = await ClusterSystem(configuration.name, settings: settings)
         self.system = system
+        guard acceptingDiscoveries else {
+            try await system.shutdown().wait()
+            self.system = nil
+            throw V2ActorAuthenticationError.invalidConfiguration
+        }
         let auth = V2ActorSessionAuthenticator(host: identity, trust: trust,
                                                 limits: authenticationLimits)
         let generation = UUID()
@@ -120,7 +141,8 @@ public actor V2RoomClusterNode {
             serviceShardAccess: configuration.serviceShardAccess,
             maximumInboundRequests: runtimeConfiguration.maximumActivationWaitersPerHost,
             localGeneration: generation,
-            actorSystem: system
+            actorSystem: system, policyRevocations: policyRevocations, policyOwnership: policyOwnership, policyMutations: policyMutations,
+            forwardPairs: forwardPairs
         )
         self.inbound = inbound
         self.localGeneration = generation
@@ -179,6 +201,35 @@ public actor V2RoomClusterNode {
         return discovery
     }
 
+    /// Owns one callback endpoint on the existing mTLS cluster, including caller-only nodes.
+    public func makeRealtimeShardTransport(identity: V2GatewayRealtimeIdentity,
+        serving: any V2RealtimeShardServing,
+        serviceOwnerAccess: [V2ActorServiceID: Set<String>],
+        discoveryPeers: [V2RealtimeShardDiscoveryPeer],
+        limits: V2RealtimeTransportLimits = .init(),
+        serviceQualification: V2ActorServiceQualification? = nil) async throws -> V2RealtimeShardTransportHandle {
+        guard let system, realtimeShards == nil, acceptingDiscoveries else { throw V2ActorAuthenticationError.invalidConfiguration }
+        let handle = try buildRealtimeShardTransport(system: system, identity: identity,
+            address: configuration.host, port: configuration.port, signer: signer, trust: trust,
+            serving: serving, serviceOwnerAccess: serviceOwnerAccess, discoveryPeers: discoveryPeers, limits: limits, serviceQualification: serviceQualification)
+        realtimeShards = handle
+        await handle.start()
+        if !acceptingDiscoveries { _ = await handle.stop(deadline: .now + .seconds(2)); throw V2ActorAuthenticationError.overloaded }
+        return handle
+    }
+
+    public func makeRealtimeTransport(identity: V2GatewayRealtimeIdentity,
+                                      ingress: any V2RealtimeIngress,
+                                      serviceOwnerAccess: [V2ActorServiceID: Set<String>],
+                                      limits: V2RealtimeTransportLimits = .init()) throws -> V2RealtimeTransportHandle {
+        guard let system, realtime == nil, acceptingDiscoveries else { throw V2ActorAuthenticationError.invalidConfiguration }
+        let handle = try buildRealtimeTransport(system: system, identity: identity,
+            address: configuration.host, port: configuration.port, signer: signer, trust: trust,
+            ingress: ingress, serviceOwnerAccess: serviceOwnerAccess, limits: limits)
+        realtime = handle
+        return handle
+    }
+
     public func readiness() async -> Bool {
         guard system != nil, inbound != nil, endpoint != nil, discoveryBeacon != nil else { return false }
         return await host.snapshot().accepting
@@ -196,6 +247,17 @@ public actor V2RoomClusterNode {
     /// 排空未完成时保留 Cluster 和数据库访问。
     /// 正在执行的 SQL 或恢复操作实际结束后，调用方可重试停止。
     public func stop(deadline: ContinuousClock.Instant) async throws -> V2RoomActivationDrainResult {
+        acceptingDiscoveries = false
+        while starting && ContinuousClock.now < deadline {
+            do { try await Task.sleep(for: .milliseconds(5)) } catch { break }
+        }
+        guard !starting else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+        guard await realtimeShards?.stop(deadline: deadline) ?? true else {
+            throw V2ActorAuthenticationError.overloaded
+        }
+        guard await realtime?.stop(deadline: deadline) ?? true else {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
         let result = await drain(deadline: deadline)
         guard result.completed else { return result }
         for discovery in discoveries {
@@ -211,6 +273,8 @@ public actor V2RoomClusterNode {
                 throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
             }
         }
+        realtime = nil
+        realtimeShards = nil
         clients.removeAll()
         discoveries.removeAll()
         discoveryClientIDs.removeAll()

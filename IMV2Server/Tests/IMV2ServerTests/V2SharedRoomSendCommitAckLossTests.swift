@@ -8,22 +8,24 @@ import IMV2Core
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 import SQLKit
+import Synchronization
 import Testing
 
-@Suite("Two-room send transaction successful COMMIT ACK loss", .serialized, .timeLimit(.minutes(3)))
+@Suite("Independent room transaction successful COMMIT ACK loss", .serialized, .timeLimit(.minutes(3)))
 struct V2SharedRoomSendCommitAckLossTests {
-    @Test("one committed batch becomes unknown for both turns and replays exactly once",
+    @Test("a lost commit acknowledgement affects one room and both rooms recover exactly once",
           .enabled(if: ProcessInfo.processInfo.environment[
             "IMV2_SHARED_SEND_ACK_LOSS_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
-    func committedTwoRoomBatchWithLostAck() async throws {
+    func independentRoomsWithLostAck() async throws {
         let directURL = try #require(ProcessInfo.processInfo.environment[
             "IMV2_SHARED_SEND_ACK_LOSS_DATABASE_URL"])
         let components = try #require(URLComponents(string: directURL))
         let proxy = try await V2PostgresCommitAckLossProxy.start(
-            backendHost: try #require(components.host), backendPort: components.port ?? 5432)
+            backendHost: try #require(components.host), backendPort: components.port ?? 5432, initiallyArmed: false)
         let direct = makeV2DatabaseTestResources()
         let proxied = makeV2DatabaseTestResources()
         var schemaInstalled = false
+        var ownerExecutor: V2DurableSendOperationOwnerBatcher?
         do {
             direct.databases.use(try .postgres(url: directURL, maxConnectionsPerEventLoop: 3),
                 as: .psql, isDefault: true)
@@ -60,42 +62,36 @@ struct V2SharedRoomSendCommitAckLossTests {
             let first = try preparedSend(token: firstToken, text: "first", profile: profile, now: now)
             let second = try preparedSend(token: secondToken, text: "second", profile: profile, now: now)
 
-            // Credit reservations use the direct connection. The only COMMIT
-            // passing through the one-shot proxy is the shared message write.
-            let writer = try PostgresV2RoomWriteStore(database: proxied.database(.psql),
-                strangerMessagePolicy: .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(database: database, batchSize: 4))
-            let batcher = V2SendMessageAdmissionBatcher(store: writer,
-                configuration: .init(maximumBatchSize: 2, maximumDelay: .seconds(2),
-                    maximumPendingRequests: 4), actorGrantedStore: writer)
-            let adapter = V2ActorGrantedSendBatchAdapter(batcher: batcher)
+            let writer = PostgresV2RoomWriteStore(database: proxied.database(.psql),
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
+                contentReviewMode: .disabled)
+            let operations = PostgresV2MessageSendOperationStore(database: proxied.database(.psql),
+                writes: writer, clock: { now }, initializationDatabase: database)
+                .observingOwnerTransactions { _, scalar, _ in if scalar { proxy.arm() } }
             let deadline = ContinuousClock.now + .seconds(30)
-            let firstTask = Task {
-                try await adapter.execute([first], batchDeadline: deadline,
-                    callDeadline: deadline)
-            }
-            // Phase barrier: the first granted turn is pending, so the second
-            // fills this exact batch instead of racing two scalar transactions.
-            let enqueueDeadline = ContinuousClock.now + .seconds(1)
-            while await batcher.snapshot().pendingRequests != 1 {
-                try #require(ContinuousClock.now < enqueueDeadline)
-                await Task.yield()
-            }
-            let secondTask = Task {
-                try await adapter.execute([second], batchDeadline: deadline,
-                    callDeadline: deadline)
-            }
-            await #expect(throws: V2RoomCallFailure.outcomeUnknown) { try await firstTask.value }
-            await #expect(throws: V2RoomCallFailure.outcomeUnknown) { try await secondTask.value }
+            let firstCommand = try V2MessageSendOperationCommand(command: first.request.command,
+                firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+            let secondCommand = try V2MessageSendOperationCommand(command: second.request.command,
+                firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+            let firstHandle = try await operations.prepareSendBatch([firstCommand], token: firstToken,
+                deadline: deadline, now: { now })
+            let secondHandle = try await operations.prepareSendBatch([secondCommand], token: secondToken,
+                deadline: deadline, now: { now })
+            let identifiers = Mutex(try [first, second].flatMap { send in
+                [try #require(send.request.identifiers.messageID.uuidValue),
+                 try #require(send.request.identifiers.eventID.uuidValue)]
+            })
+            let dispatcher = V2DurableSendOperationOwnerBatcher(store: operations, capacityProfile: profile,
+                identifiers: .init(makeUUID: { identifiers.withLock { $0.removeFirst() } }),
+                now: { now }, configuration: .init(maximumPendingRequests: 4, fallbackConnectionCapacity: 1),
+                maximumRetainedBytes: 16_384)
+            ownerExecutor = dispatcher
+            await #expect(throws: V2RoomTransactionOutcomeUnknown.self) { try await dispatcher.execute(firstHandle) }
             #expect(proxy.observedSuccessfulCommit)
-            let snapshot = await batcher.snapshot()
-            #expect(snapshot.atomicBatchAttempts == 1)
-            #expect(snapshot.atomicBatchCommitted == 0)
-            #expect(snapshot.atomicBatchFallbacks == 0)
-            #expect(snapshot.singletonDispatches == 0)
-            #expect(snapshot.completedBatches == 1)
-            #expect(snapshot.pendingRequests == 0)
+            // The same dispatcher can execute another room after returning the failed connection.
+            let secondResults = try await dispatcher.execute(secondHandle)
+            guard case .sendOperation(.receipt(let receipt))? = secondResults.first,
+                  case .accepted = receipt.outcome else { throw V2SharedAckLossTestError.replayNotIdempotent }
 
             for send in [first, second] {
                 let operationID = try #require(send.request.command.clientMessageID.uuidValue)
@@ -104,52 +100,38 @@ struct V2SharedRoomSendCommitAckLossTests {
                     sql: sql) == 1)
                 #expect(try await rowCount("message_send_completions", room: room,
                     operation: operationID, sql: sql) == 1)
-                #expect(try await compactEventCount(for: send, sql: sql) == 1)
+                #expect(try await acceptedEventCount(for: send, sql: sql) == 1)
             }
-            // Large-group plain sends use the message row as their immutable
-            // accepted event, rather than inserting a separate room_events row.
-            #expect(try await fixture.count("im_v2.room_events", on: sql) == 0)
+            // The complex-message owner path persists one canonical event for each committed message.
+            #expect(try await fixture.count("im_v2.room_events", on: sql) == 2)
 
-            // Quarantine precedes any successor SQL, even though PostgreSQL
-            // really committed both writes. A separate client can recover the
-            // exact durable result with the original operation identities.
-            for token in [firstToken, secondToken] {
-                let late = try preparedSend(token: token, text: "late", profile: profile, now: now)
-                await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
-                    try await adapter.execute([late], batchDeadline: deadline,
-                        callDeadline: deadline)
-                }
-            }
-            #expect(await batcher.snapshot().completedBatches == 1)
-            #expect(try await fixture.count("im_v2.messages", on: sql) == 2)
-            let replayStore = try PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled).usingActivationScope(
-                    .init(tokens: [firstToken, secondToken]))
-            for send in [first, second] {
-                let replay = try await replayStore.accept(command: send.request.command,
-                    capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()),
-                        eventID: .init(uuid: UUID())), now: now.addingTimeInterval(1))
-                guard case .idempotent(let recovered) = replay else {
+            // Recover the exact durable result using the original identities on a fresh connection.
+            let replayStore = PostgresV2MessageSendOperationStore(database: database,
+                writes: PostgresV2RoomWriteStore(database: database), clock: { now })
+            for (send, command) in zip([first, second], [firstCommand, secondCommand]) {
+                let recovery = try await replayStore.recover(.init(identity: command.identity,
+                    fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query), token: send.token)
+                guard case .receipt(let recovered) = recovery,
+                      case .accepted(let message) = recovered.outcome else {
                     throw V2SharedAckLossTestError.replayNotIdempotent
                 }
-                #expect(recovered.messageID == send.request.identifiers.messageID)
+                #expect(message.messageID == send.request.identifiers.messageID)
             }
             #expect(try await fixture.count("im_v2.messages", on: sql) == 2)
             #expect(try await fixture.count("im_v2.message_send_completions", on: sql) == 2)
-            #expect(try await fixture.count("im_v2.room_events", on: sql) == 0)
-            await adapter.retire(firstToken)
-            await adapter.retire(secondToken)
+            #expect(try await fixture.count("im_v2.room_events", on: sql) == 2)
             #expect(try await leases.release(token: firstToken))
             #expect(try await leases.release(token: secondToken))
 
+            await dispatcher.shutdown()
+            ownerExecutor = nil
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             schemaInstalled = false
             try await proxied.shutdown()
             try await direct.shutdown()
             try await proxy.shutdown()
         } catch {
+            await ownerExecutor?.shutdown()
             if schemaInstalled, let sql = direct.database(.psql) as? any SQLDatabase {
                 try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
             }
@@ -174,6 +156,7 @@ struct V2SharedRoomSendCommitAckLossTests {
                               profile: V2CapacityProfile, now: Date) throws -> V2PreparedActorSend {
         let command = try V2SendMessageCommand(roomID: token.roomID, senderUserID: senderID,
             clientMessageID: .init(uuid: UUID()), text: text,
+            mentions: [.user(.init(uuid: memberTwoUUID))],
             limits: .init(maxUTF8Bytes: 64))
         let request = V2RoomWriteRequest(command: command, capacityProfile: profile,
             identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())),
@@ -190,18 +173,14 @@ struct V2SharedRoomSendCommitAckLossTests {
             """).first(decoding: CountRow.self)).value
     }
 
-    private func compactEventCount(for send: V2PreparedActorSend,
+    private func acceptedEventCount(for send: V2PreparedActorSend,
                                    sql: any SQLDatabase) async throws -> Int64 {
         let room = try #require(send.token.roomID.uuidValue)
-        let operation = try #require(send.request.command.clientMessageID.uuidValue)
         let event = try #require(send.request.identifiers.eventID.uuidValue)
         return try #require(try await sql.raw("""
-            SELECT COUNT(*)::bigint AS value FROM im_v2.messages
-            WHERE room_id = \(bind: room) AND sender_user_id = \(bind: senderUUID)
-              AND client_message_id = \(bind: operation)
-              AND accepted_event_storage = 'message_row'
-              AND accepted_event_id = \(bind: event)
-              AND room_sequence = 1 AND timeline_sequence = 1
+            SELECT COUNT(*)::bigint AS value FROM im_v2.room_events
+            WHERE room_id = \(bind: room) AND event_id = \(bind: event)
+              AND room_sequence = 1
             """).first(decoding: CountRow.self)).value
     }
 

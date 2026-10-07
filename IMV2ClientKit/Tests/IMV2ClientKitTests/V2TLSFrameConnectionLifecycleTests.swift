@@ -8,6 +8,126 @@ import Testing
 
 @Suite("TLS request and generation lifecycle", .timeLimit(.minutes(1)))
 struct V2TLSFrameConnectionLifecycleTests {
+    @Test("temporary bootstrap errors retain server classification instead of ending authentication",
+        arguments: ["SERVER_BUSY", "UNAVAILABLE", "FORBIDDEN", "UNAUTHENTICATED"])
+    func bootstrapErrorClassification(code: String) async throws {
+        let retryable = code == "SERVER_BUSY" || code == "UNAVAILABLE"
+        let peer = TLSTestPeer(bootstrapRejection: (code, retryable))
+        let connection = try makeConnection([peer])
+        if code == "UNAUTHENTICATED" {
+            await #expect(throws: V2TLSFrameConnectionError.authenticationFailed) {
+                _ = try await authenticate(connection)
+            }
+        } else {
+            await #expect(throws: V2RealtimeTransportError.server(code: code, retryable: retryable,
+                retryAfterSeconds: 1, currentRevision: nil)) {
+                _ = try await authenticate(connection)
+            }
+        }
+        #expect(await connection.authenticatedConnectionID() == nil)
+        await connection.disconnect()
+    }
+
+    @Test("scoped Sync deadlines reach actual admission and response timers", arguments: [false, true])
+    func syncDeadlineReachesWire(expiredBeforeDispatch: Bool) async throws {
+        let peer = TLSTestPeer()
+        let scheduler = V2AccountWorkScheduler(configuration: .init(ordinaryLimit: 1))
+        let connection = try makeConnection([peer], timeout: .seconds(10), scheduler: scheduler)
+        try await authenticate(connection)
+        let deadline = ContinuousClock.now + (expiredBeforeDispatch ? .milliseconds(-1) : .milliseconds(80))
+        var envelope = IMV2Envelope(); envelope.requestID = 79
+        envelope.protocolVersion = IMV2ProtocolVersion.current; envelope.syncPull.maxRecords = 100
+        let frame = try V2ProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current))
+        let call = Task {
+            try await V2SyncRequestScope.$deadline.withValue(deadline) {
+                try await connection.request(frame)
+            }
+        }
+        if !expiredBeforeDispatch { await peer.waitForRequest(79) }
+        await #expect(throws: V2TLSFrameConnectionError.requestTimedOut) { _ = try await call.value }
+        await connection.disconnect()
+        #expect(await scheduler.snapshot().active == 0)
+        await scheduler.closeAndDrain()
+    }
+
+    @Test("coverage is scoped to a physical generation and ignores older Ready revisions")
+    func coverageRevisionAndConnectionGeneration() async throws {
+        let old = TLSTestPeer(), new = TLSTestPeer()
+        let connection = try makeConnection([old, new])
+        let first = try await authenticate(connection)
+        let barrier = Task { try await connection.request(request(71)) }
+        await old.waitForRequest(71)
+        try await old.coverageBeforeReply(revisions: [(2, true), (3, false), (2, true)], requestID: 71)
+        _ = try await barrier.value
+        var updates = await connection.realtimeCoverageChanges().makeAsyncIterator()
+        let recovering = try #require(await updates.next())
+        #expect(recovering.revision == 3 && recovering.status == .recovering)
+        #expect(recovering.connectionGeneration == first.connectionID)
+        let endedBarrier = Task { try await connection.request(request(73)) }
+        await old.waitForRequest(73)
+        try await old.coverageTransitionsBeforeReply([
+            (4, 2, .ended), (5, 1, .ready), (6, 2, .recovering), (7, 2, .ready),
+            (8, 3, .recovering), (9, 3, .ready)
+        ], requestID: 73)
+        _ = try await endedBarrier.value
+        let ended = try #require(await updates.next())
+        let reinstalling = try #require(await updates.next())
+        let reinstalled = try #require(await updates.next())
+        #expect(ended.status == .ended && ended.scopeGeneration == 2)
+        #expect(reinstalling.status == .recovering && reinstalling.scopeGeneration == 3 && reinstalling.revision == 8)
+        #expect(reinstalled.status == .ready && reinstalled.revision == 9 && reinstalled.highWatermark == 7)
+        #expect(reinstalled.subscriptionInstalled && reinstalled.baselineHead == 7)
+        #expect(!reinstalled.isCaughtUp(appliedThrough: 6))
+        #expect(reinstalled.isCaughtUp(appliedThrough: 7))
+        await connection.disconnect()
+        #expect(await updates.next() == nil)
+        let second = try await authenticate(connection)
+        let successor = Task { try await connection.request(request(72)) }
+        await new.waitForRequest(72)
+        try await new.coverageBeforeReply(revisions: [(1, true)], requestID: 72)
+        _ = try await successor.value
+        var fresh = await connection.realtimeCoverageChanges().makeAsyncIterator()
+        let ready = try #require(await fresh.next())
+        #expect(ready.revision == 1 && ready.status == .ready)
+        #expect(ready.connectionGeneration == second.connectionID && second.connectionID != first.connectionID)
+        await connection.disconnect()
+    }
+
+    @Test("late heartbeat heads cannot cross a room scope or physical connection generation")
+    func roomProgressHeadsRejectReplacementScopes() async throws {
+        let old = TLSTestPeer(), new = TLSTestPeer()
+        let connection = try makeConnection([old, new])
+        let first = try await authenticate(connection)
+        let firstID = try #require(first.connectionID)
+        let room = "00000000-0000-0000-0000-000000000001"
+        let install = Task { try await connection.request(request(171)) }
+        await old.waitForRequest(171)
+        try await old.coverageTransitionsBeforeReply([(1, 1, .ready)], requestID: 171, scope: .room)
+        _ = try await install.value
+        #expect(await connection.roomProgressScope()?.scopeGeneration == 1)
+        // The heartbeat's old room scope is replaced before its H arrives.
+        let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: UInt8(IMV2ProtocolVersion.current),
+            durableRoomProgress: { _ in 4 })
+        let heartbeat = Task { try await transport.sendHeartbeat() }
+        await old.waitForRequest(1)
+        try await old.roomProgressReplyAfterReplacement(requestID: 1)
+        try await heartbeat.value
+        try await connection.acceptRoomProgressHead(roomID: room, scopeGeneration: 2, highWatermark: 8, connectionID: firstID)
+        #expect(try await connection.nextGroupEventAvailabilityHint().highWatermark == 8)
+        // Matching room and scope nonce still cannot reuse the retired socket.
+        await connection.disconnect()
+        let second = try await authenticate(connection)
+        let secondID = try #require(second.connectionID)
+        let successor = Task { try await connection.request(request(173)) }
+        await new.waitForRequest(173)
+        try await new.coverageTransitionsBeforeReply([(1, 2, .ready)], requestID: 173, scope: .room)
+        _ = try await successor.value
+        try await connection.acceptRoomProgressHead(roomID: room, scopeGeneration: 2, highWatermark: 100, connectionID: firstID)
+        try await connection.acceptRoomProgressHead(roomID: room, scopeGeneration: 2, highWatermark: 9, connectionID: secondID)
+        #expect(try await connection.nextGroupEventAvailabilityHint().highWatermark == 9)
+        await connection.disconnect()
+    }
+
     @Test("a delayed old-generation operation cannot be registered on a new socket")
     func oldRequestScopeCannotReachNewSocket() async throws {
         let old = TLSTestPeer()
@@ -205,6 +325,8 @@ struct V2TLSFrameConnectionLifecycleTests {
         _ = await a.result
         let hint = Task { try await connection.nextAvailabilityHint() }
         await #expect(throws: V2TLSFrameConnectionError.requestTimedOut) { _ = try await hint.value }
+        let expectedCommand = try request(30).command
+        #expect(await connection.lastTimedOutCommand() == expectedCommand)
         await #expect(throws: V2TLSFrameConnectionError.notConnected) {
             _ = try await connection.request(request(31))
         }
@@ -266,12 +388,12 @@ struct V2TLSFrameConnectionLifecycleTests {
         await connection.disconnect()
     }
 
-    @Test("Ready and the first account notification share a read; a subsequent gap closes the generation")
+    @Test("Ready and recovery boundary share a read; a wrong epoch closes the generation")
     func accountReadyAndGap() async throws {
         let peer = TLSTestPeer()
         let connection = try makeConnection([peer])
         try await authenticate(connection)
-        let epoch = UUID(), room = UUID()
+        let epoch = UUID()
         var start = IMV2Envelope()
         start.protocolVersion = IMV2ProtocolVersion.current
         start.requestID = 95
@@ -285,10 +407,7 @@ struct V2TLSFrameConnectionLifecycleTests {
         ready.accountRoomChangesReady.connectionEpoch = epoch.uuidString
         var notification = IMV2Envelope()
         notification.protocolVersion = IMV2ProtocolVersion.current
-        notification.accountRoomChanged.connectionEpoch = epoch.uuidString
-        notification.accountRoomChanged.roomID = room.uuidString
-        notification.accountRoomChanged.notificationSequence = 1
-        notification.accountRoomChanged.highWatermark = 7
+        notification.accountRoomResyncRequired.connectionEpoch = epoch.uuidString
         func encode(_ envelope: IMV2Envelope) throws -> Data {
             try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits())
         }
@@ -296,8 +415,8 @@ struct V2TLSFrameConnectionLifecycleTests {
         bytes.append(try encode(notification))
         await peer.push(bytes)
         _ = try await starting.value
-        #expect(try await connection.nextAccountRoomChange() == .changed(epoch: epoch, roomID: .init(uuid: room), highWatermark: 7))
-        notification.accountRoomChanged.notificationSequence = 3
+        #expect(try await connection.nextAccountRoomChange() == .resyncRequired(epoch: epoch))
+        notification.accountRoomResyncRequired.connectionEpoch = UUID().uuidString
         await peer.push(try encode(notification))
         await #expect(throws: V2TLSFrameConnectionError.self) { try await connection.nextAccountRoomChange() }
         await connection.disconnect()
@@ -324,6 +443,47 @@ struct V2TLSFrameConnectionLifecycleTests {
         await peer.push(try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(ready, frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))
         await peer.waitForCancellation()
         await #expect(throws: V2TLSFrameConnectionError.notConnected) { try await connection.nextAccountRoomChange() }
+        await connection.disconnect()
+    }
+
+    @Test("account coverage replaces its epoch on the same authenticated frame connection")
+    func accountCoverageReplacementPreservesAuthenticatedConnection() async throws {
+        let old = UUID(), next = UUID()
+        let starts = Mutex(0)
+        let peer = TLSTestPeer(commandResponder: { request in
+            var response = IMV2Envelope()
+            response.requestID = request.requestID
+            response.protocolVersion = IMV2ProtocolVersion.current
+            response.accountRoomChangesReady.connectionEpoch = starts.withLock { count in
+                count += 1
+                return (count == 1 ? old : next).uuidString
+            }
+            return response
+        })
+        let connection = try makeConnection([peer])
+        let session = try await authenticate(connection)
+        let identity = try #require(session.connectionID)
+        let wire: any V2AuthenticatedFrameTransport = connection
+        #expect(await wire.authenticatedConnectionID() == identity)
+        #expect(await wire.negotiatedProtocolVersion() == session.protocolVersion)
+        #expect(await connection.negotiatedProtocolVersion() == session.protocolVersion)
+        let transport = V2ProtobufSyncTransport(wire: connection, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        #expect(try await transport.startAccountRoomChanges() == old)
+        var reset = IMV2Envelope(); reset.protocolVersion = IMV2ProtocolVersion.current
+        reset.accountRoomResyncRequired.connectionEpoch = old.uuidString
+        try await peer.push(V2FrameCodec.encode(V2ProtobufFrameCodec.encode(reset,
+            frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))
+        #expect(try await connection.nextAccountRoomChange() == .resyncRequired(epoch: old))
+        #expect(try await transport.startAccountRoomChanges() == next)
+        var notification = IMV2Envelope(); notification.protocolVersion = IMV2ProtocolVersion.current
+        notification.accountRoomResyncRequired.connectionEpoch = next.uuidString
+        try await peer.push(V2FrameCodec.encode(V2ProtobufFrameCodec.encode(notification,
+            frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))
+        #expect(try await connection.nextAccountRoomChange() == .resyncRequired(epoch: next))
+        #expect(await connection.authenticatedConnectionID() == identity)
+        #expect(await wire.authenticatedConnectionID() == identity)
+        #expect(await wire.negotiatedProtocolVersion() == session.protocolVersion)
+        #expect(starts.withLock { $0 } == 2)
         await connection.disconnect()
     }
 
@@ -377,8 +537,11 @@ actor TLSTestPeer {
     private var cancelled = false
     private var cancellationObservers: [CheckedContinuation<Void, Never>] = []
     private let commandResponder: (@Sendable (IMV2Envelope) async throws -> IMV2Envelope)?
+    private let bootstrapRejection: (code: String, retryable: Bool)?
     init(ignoreCancellation: Bool = false, blockedSend: UInt64? = nil,
-         commandResponder: (@Sendable (IMV2Envelope) async throws -> IMV2Envelope)? = nil) {
+         commandResponder: (@Sendable (IMV2Envelope) async throws -> IMV2Envelope)? = nil,
+         bootstrapRejection: (code: String, retryable: Bool)? = nil) {
+        self.bootstrapRejection = bootstrapRejection
         self.ignoreCancellation = ignoreCancellation
         self.blockedSend = blockedSend
         self.commandResponder = commandResponder
@@ -396,6 +559,12 @@ actor TLSTestPeer {
             response.serverHello.selectedProtocolVersion = IMV2ProtocolVersion.current
             response.serverHello.selectedCapabilityProfile = "base"
         case .authenticate(let auth):
+            if let rejection = bootstrapRejection {
+                response.error.code = rejection.code
+                response.error.retryable = rejection.retryable
+                response.error.retryAfterSeconds = 1
+                break
+            }
             response.protocolVersion = IMV2ProtocolVersion.current
             response.authenticated = .init()
             response.authenticated.userID = "fixture-user"
@@ -447,6 +616,50 @@ actor TLSTestPeer {
         }
         push(bytes)
     }
+    func coverageBeforeReply(revisions: [(UInt64, Bool)], requestID: UInt64) throws {
+        try coverageTransitionsBeforeReply(revisions.map { ($0.0, 1, $0.1 ? .ready : .recovering) }, requestID: requestID)
+    }
+    func coverageTransitionsBeforeReply(_ transitions: [(UInt64, UInt64, IMV2RealtimeCoverage.State)], requestID: UInt64, scope: IMV2RealtimeCoverage.Scope = .account) throws {
+        var bytes = Data()
+        for (revision, generation, state) in transitions {
+            var envelope = IMV2Envelope(); envelope.protocolVersion = IMV2ProtocolVersion.current
+            envelope.realtimeCoverage.scope = scope
+            envelope.realtimeCoverage.scopeID = "00000000-0000-0000-0000-000000000001"
+            envelope.realtimeCoverage.revision = revision
+            envelope.realtimeCoverage.scopeGeneration = generation
+            envelope.realtimeCoverage.highWatermark = 7
+            envelope.realtimeCoverage.state = state
+            envelope.realtimeCoverage.reason = state == .ready ? .unspecified : state == .ended ? .cancelled : .coverageLost
+            bytes.append(try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(envelope,
+                frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))
+        }
+        bytes.append(try wireResponse(requestID)); push(bytes)
+    }
+
+    func roomProgressReplyAfterReplacement(requestID: UInt64) throws {
+        var bytes = Data()
+        let room = "00000000-0000-0000-0000-000000000001"
+        for (revision, generation, state) in [(UInt64(2), UInt64(1), IMV2RealtimeCoverage.State.ended), (3, 2, .ready)] {
+            var envelope = IMV2Envelope(); envelope.protocolVersion = IMV2ProtocolVersion.current
+            envelope.realtimeCoverage.scope = .room
+            envelope.realtimeCoverage.scopeID = room
+            envelope.realtimeCoverage.revision = revision
+            envelope.realtimeCoverage.scopeGeneration = generation
+            envelope.realtimeCoverage.highWatermark = 7
+            envelope.realtimeCoverage.state = state
+            envelope.realtimeCoverage.reason = state == .ended ? .cancelled : .unspecified
+            bytes.append(try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(envelope,
+                frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))
+        }
+        var stale = IMV2GroupEventProgressState()
+        stale.roomID = room; stale.scopeGeneration = 1; stale.highWatermark = 99; stale.ready = true
+        var reply = IMV2Envelope(); reply.protocolVersion = IMV2ProtocolVersion.current; reply.requestID = requestID
+        reply.heartbeatAck.roomSubscriptionStates = [stale]
+        bytes.append(try V2FrameCodec.encode(V2ProtobufFrameCodec.encode(reply,
+            frameVersion: UInt8(IMV2ProtocolVersion.current)), limits: limits()))
+        push(bytes)
+    }
+
     func hintBeforeReply(kind: String, requestID: UInt64) throws {
         var hint = IMV2Envelope()
         hint.protocolVersion = IMV2ProtocolVersion.current

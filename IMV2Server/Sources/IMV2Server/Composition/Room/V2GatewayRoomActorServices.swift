@@ -1,5 +1,6 @@
 import IMV2ServerInfrastructure
 import IMV2ServerApplication
+import IMV2Core
 import IMV2ServerContracts
 import Foundation
 import IMV2ActorContracts
@@ -18,9 +19,10 @@ public struct V2GatewayRoomActorServices: Sendable {
                 readReceiptControlStore: any V2ReadReceiptControlStore,
                 databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
                 directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
+                sendRecoveryQuery: (@Sendable (V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult)? = nil,
                 maximumConcurrentRecoveryRooms: Int = 8,
                 now: @escaping @Sendable () -> Date = Date.init) {
-        messaging = .init(directory: directory, callTimeout: callTimeout)
+        messaging = .init(directory: directory, callTimeout: callTimeout, recoveryQuery: sendRecoveryQuery)
         administration = .init(directory: directory, callTimeout: callTimeout.duration)
         let queries = V2RoomRefQueryClient(directory: directory,
             callTimeout: callTimeout.duration,

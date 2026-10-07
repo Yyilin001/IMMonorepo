@@ -19,7 +19,12 @@ public struct PostgresV2RoomRecoveryStore: V2RoomStateReading, V2UserRoomDirecto
     }
 
     public func states(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomStateReadResult] {
-        guard !roomIDs.isEmpty, roomIDs.count <= 100, let actor = actorUserID.uuidValue,
+        guard roomIDs.count <= 100 else { throw V2RoomRecoveryReadError.invalidRequest }
+        return try await readStates(roomIDs: roomIDs, actorUserID: actorUserID)
+    }
+
+    private func readStates(roomIDs: [RoomID], actorUserID: UserID) async throws -> [RoomID: V2RoomStateReadResult] {
+        guard !roomIDs.isEmpty, let actor = actorUserID.uuidValue,
               roomIDs.allSatisfy({ $0.uuidValue != nil }) else { throw V2RoomRecoveryReadError.invalidRequest }
         guard let sql = database as? any SQLDatabase else { throw V2RoomRecoveryReadError.corruptPersistence }
         let ids = Array(Set(roomIDs.compactMap(\.uuidValue)))
@@ -65,6 +70,65 @@ public struct PostgresV2RoomRecoveryStore: V2RoomStateReading, V2UserRoomDirecto
         return result
     }
 
+    /// Exactly one authoritative statement for different room/viewer pairs.
+    /// Activation fencing is performed by the admitted owner executor first.
+    func states(keys: [V2RoomStateReadKey]) async throws -> [V2RoomStateReadKey: V2RoomStateReadResult] {
+        guard !keys.isEmpty, keys.count <= 100, Set(keys).count == keys.count,
+              let sql = database as? any SQLDatabase else { throw V2RoomRecoveryReadError.invalidRequest }
+        let inputs = try keys.map { key -> RecoveryPairInput in
+            guard let room = key.roomID.uuidValue, let viewer = key.viewerUserID.uuidValue else {
+                throw V2RoomRecoveryReadError.invalidRequest
+            }
+            return .init(roomID: room, viewerID: viewer)
+        }
+        let encoded = String(decoding: try JSONEncoder().encode(inputs), as: UTF8.self)
+        let rows = try await sql.raw("""
+            WITH requested AS MATERIALIZED (
+                SELECT ordinality::bigint AS ordinal, (value->>'room_id')::uuid AS room_id,
+                       (value->>'viewer_user_id')::uuid AS viewer_user_id
+                FROM jsonb_array_elements(\(bind: encoded)::jsonb) WITH ORDINALITY
+            )
+            SELECT request.ordinal, request.room_id, room.owner_epoch, member.joined_revision,
+                   room.room_sequence AS head, room.log_trimmed_through_room_sequence AS trimmed,
+                   COALESCE(receipt.read_through_room_sequence, 0) AS read_through,
+                   COALESCE(own.room_sequence, 0) AS own_sequence
+            FROM requested AS request
+            LEFT JOIN \(unsafeRaw: schema).rooms AS room ON room.room_id = request.room_id
+            LEFT JOIN LATERAL (
+                SELECT member.joined_revision FROM \(unsafeRaw: schema).room_memberships AS member
+                WHERE member.room_id = request.room_id AND member.user_id = request.viewer_user_id
+                  AND member.left_revision IS NULL AND member.joined_revision <= room.membership_revision
+                OFFSET 0
+            ) AS member ON TRUE
+            LEFT JOIN \(unsafeRaw: schema).room_read_receipts AS receipt
+              ON receipt.room_id = request.room_id AND receipt.user_id = request.viewer_user_id
+            LEFT JOIN LATERAL (
+                SELECT message.room_sequence FROM \(unsafeRaw: schema).messages AS message
+                WHERE message.room_id = request.room_id AND message.sender_user_id = request.viewer_user_id
+                ORDER BY message.room_sequence DESC LIMIT 1
+            ) AS own ON TRUE
+            ORDER BY request.ordinal
+            """).all(decoding: RecoveryPairStateRow.self)
+        guard rows.count == keys.count else { throw V2RoomRecoveryReadError.corruptPersistence }
+        var result: [V2RoomStateReadKey: V2RoomStateReadResult] = [:]
+        for row in rows {
+            guard row.ordinal > 0, row.ordinal <= Int64(keys.count) else { throw V2RoomRecoveryReadError.corruptPersistence }
+            let key = keys[Int(row.ordinal)-1]
+            guard key.roomID.uuidValue == row.roomID, result[key] == nil else { throw V2RoomRecoveryReadError.corruptPersistence }
+            guard let epoch = row.ownerEpoch, let membership = row.joinedRevision,
+                  let head = row.head, let trimmed = row.trimmed else {
+                result[key] = .unavailable; continue
+            }
+            guard [epoch, membership, head, trimmed, row.readThrough, row.ownSequence].allSatisfy({ $0 >= 0 }) else {
+                throw V2RoomRecoveryReadError.corruptPersistence
+            }
+            result[key] = .state(try .init(roomID: key.roomID, ownerEpoch: UInt64(epoch),
+                viewerMembershipRevision: UInt64(membership), head: UInt64(head), trimmedThrough: UInt64(trimmed),
+                readThrough: UInt64(row.readThrough), latestOwnMessageSequence: UInt64(row.ownSequence)))
+        }
+        return result
+    }
+
     public func rooms(actorUserID: UserID, after: RoomID?, limit: Int) async throws -> V2UserRoomDirectorySlice {
         guard limit > 0, limit <= 100, let actor = actorUserID.uuidValue,
               after == nil || after?.uuidValue != nil else { throw V2RoomRecoveryReadError.invalidRequest }
@@ -93,7 +157,7 @@ public struct PostgresV2RoomRecoveryStore: V2RoomStateReading, V2UserRoomDirecto
         for row in scanned {
             guard seen.insert(row.roomID).inserted else { throw V2RoomRecoveryReadError.corruptPersistence }
             guard let kind = row.roomKind, let epoch = row.ownerEpoch, let revision = row.membershipRevision else { continue }
-            guard let kind = V2RoomKind(rawValue: kind), epoch >= 0, row.joinedRevision > 0 else {
+            guard let kind = V2RoomKind(rawValue: kind), epoch >= 0, row.joinedRevision >= 0 else {
                 throw V2RoomRecoveryReadError.corruptPersistence
             }
             guard row.joinedRevision <= revision else { continue }
@@ -127,5 +191,19 @@ private struct RecoveryDirectoryRow: Decodable {
     enum CodingKeys: String, CodingKey {
         case roomID = "room_id", joinedRevision = "joined_revision", roomKind = "room_kind"
         case ownerEpoch = "owner_epoch", membershipRevision = "membership_revision"
+    }
+}
+
+private struct RecoveryPairInput: Encodable {
+    let roomID: UUID, viewerID: UUID
+    enum CodingKeys: String, CodingKey { case roomID = "room_id", viewerID = "viewer_user_id" }
+}
+private struct RecoveryPairStateRow: Decodable {
+    let ordinal: Int64, roomID: UUID
+    let ownerEpoch: Int64?, joinedRevision: Int64?, head: Int64?, trimmed: Int64?
+    let readThrough: Int64, ownSequence: Int64
+    enum CodingKeys: String, CodingKey {
+        case ordinal, roomID = "room_id", ownerEpoch = "owner_epoch", joinedRevision = "joined_revision"
+        case head, trimmed, readThrough = "read_through", ownSequence = "own_sequence"
     }
 }

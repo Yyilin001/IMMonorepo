@@ -19,7 +19,6 @@ import Testing
 import Vapor
 import VaporTesting
 
-
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("Account disable validates required revision changes without suppressing inactive-profile results",
           arguments: ["policy", "profile", "visibility", "suspended", "deleted", "absent"])
@@ -182,136 +181,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Admission credit clocks reject partial reservations and retire expired tokens", arguments: [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12])
-    func admissionCreditClockBounds(seconds: Double) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let bad = Date(timeIntervalSince1970: seconds)
-            let expiry = base.addingTimeInterval(100)
-            func state(until: Date = expiry, id: UUID = leaseUUID, generation: UInt64 = 1) throws -> ShardAdmissionState {
-                try .init(lease: .init(id: .init(id.uuidString), generation: generation, validUntil: until, commandWindow: .init(limit: 10)))
-            }
-            let valid = try state()
-            let invalid = try state(until: bad)
-            let shard = V2ShardAdmissionCommandCreditPool(database: database, batchSize: 5)
-            let room = V2RoomAdmissionCommandCreditPool(database: database, batchSize: 5)
-            func shardRequest(_ now: Date, _ value: ShardAdmissionState = valid) -> V2ShardAdmissionCommandCreditPool.BatchRequest {
-                .init(roomShardID: "room-a", capacityProfileID: "standard", shardState: value, now: now)
-            }
-            func roomRequest(_ now: Date, _ value: ShardAdmissionState = valid) -> V2RoomAdmissionCommandCreditPool.BatchRequest {
-                .init(roomID: roomUUID, shardState: value, now: now)
-            }
-            func durableSnapshot() async throws -> String {
-                try #require(try await sql.raw("""
-                    SELECT jsonb_build_object(
-                        'shard', (SELECT to_jsonb(r) FROM im_v2.shard_admission_pools r WHERE room_shard_id = 'room-a'),
-                        'room', (SELECT to_jsonb(r) FROM im_v2.room_admission r WHERE room_id = \(bind: roomUUID))
-                    )::text AS value
-                    """).first(decoding: StringValueRow.self)).value
-            }
-            func rejectClocksWithoutMutation() async throws {
-                let shardBefore = await shard.snapshot()
-                let roomBefore = await room.snapshot()
-                let databaseBefore = try await durableSnapshot()
-                await #expect(throws: V2ShardAdmissionCommandCreditError.self) {
-                    _ = try await shard.acquire(roomShardID: "room-a", capacityProfileID: "standard", shardState: valid, now: bad)
-                }
-                await #expect(throws: V2RoomAdmissionCommandCreditError.self) {
-                    _ = try await room.acquire(roomID: roomUUID, shardState: valid, now: bad)
-                }
-                await #expect(throws: V2ShardAdmissionCommandCreditError.self) {
-                    _ = try await shard.acquire(roomShardID: "room-a", capacityProfileID: "standard", shardState: invalid, now: base)
-                }
-                await #expect(throws: V2RoomAdmissionCommandCreditError.self) {
-                    _ = try await room.acquire(roomID: roomUUID, shardState: invalid, now: base)
-                }
-                for batch in [[shardRequest(base), shardRequest(bad)], [shardRequest(bad), shardRequest(base)], [shardRequest(base), shardRequest(base, invalid)]] {
-                    await #expect(throws: V2ShardAdmissionCommandCreditError.self) { _ = try await shard.acquire(batch) }
-                }
-                for batch in [[roomRequest(base), roomRequest(bad)], [roomRequest(bad), roomRequest(base)], [roomRequest(base), roomRequest(base, invalid)]] {
-                    await #expect(throws: V2RoomAdmissionCommandCreditError.self) { _ = try await room.acquire(batch) }
-                }
-                #expect(await shard.snapshot() == shardBefore)
-                #expect(await room.snapshot() == roomBefore)
-                #expect(try await durableSnapshot() == databaseBefore)
-            }
-            func acquireBoth(at now: Date, using value: ShardAdmissionState = valid) async throws -> (V2ShardAdmissionCommandCreditPool.Token, V2RoomAdmissionCommandCreditPool.Token) {
-                guard case .granted(let shardToken, _) = try await shard.acquire(roomShardID: "room-a", capacityProfileID: "standard", shardState: value, now: now),
-                      case .granted(let roomToken) = try await room.acquire(roomID: roomUUID, shardState: value, now: now)
-                else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                return (shardToken, roomToken)
-            }
-            // Invalid prefixes and suffixes must neither precharge PostgreSQL
-            // nor discard credits that belong to another in-flight message.
-            try await rejectClocksWithoutMutation()
-            let first = try await acquireBoth(at: base)
-            let second = try await acquireBoth(at: base)
-            try await rejectClocksWithoutMutation()
-            let reserved = try await durableSnapshot()
-            await shard.release(first.0, now: bad)
-            await room.release(first.1, now: bad)
-            let afterInvalidShard = await shard.snapshot()
-            let afterInvalidRoom = await room.snapshot()
-            #expect(afterInvalidShard.activeCredits == 3 && afterInvalidShard.inFlightCredits == 1 && afterInvalidShard.expiredCreditsDiscarded == 1)
-            #expect(afterInvalidRoom.activeCredits == 3 && afterInvalidRoom.inFlightCredits == 1 && afterInvalidRoom.expiredCreditsDiscarded == 1)
-            await shard.release(first.0, now: base)
-            await room.release(first.1, now: base)
-            #expect(await shard.snapshot() == afterInvalidShard)
-            #expect(await room.snapshot() == afterInvalidRoom)
-            await shard.commit(second.0)
-            await room.commit(second.1)
-            // A representable clock rollback can still reuse an already paid
-            // credit in the same lease. Returning it never refunds PostgreSQL.
-            let rolledBack = try await acquireBoth(at: base.addingTimeInterval(-1))
-            await shard.release(rolledBack.0, now: base)
-            await room.release(rolledBack.1, now: base)
-            let shardBatch = try await shard.acquire([shardRequest(base), shardRequest(base)])
-            let roomBatch = try await room.acquire([roomRequest(base), roomRequest(base)])
-            let shardTokens = shardBatch.compactMap { result -> V2ShardAdmissionCommandCreditPool.Token? in
-                guard case .granted(let token, _) = result else { return nil }; return token
-            }
-            let roomTokens = roomBatch.compactMap { result -> V2RoomAdmissionCommandCreditPool.Token? in
-                guard case .granted(let token) = result else { return nil }; return token
-            }
-            try #require(shardTokens.count == 2 && roomTokens.count == 2)
-            #expect(try await durableSnapshot() == reserved)
-            // One remaining available credit and both outstanding tokens
-            // expire together. Late acknowledgements must stay harmless.
-            await shard.release(shardTokens[0], now: expiry)
-            await room.release(roomTokens[0], now: expiry)
-            let expiredShard = await shard.snapshot()
-            let expiredRoom = await room.snapshot()
-            #expect(expiredShard == .init(activeCredits: 0, inFlightCredits: 0, batchReservations: 1, databaseCreditsReserved: 5, committedCredits: 1, returnedCredits: 1, expiredCreditsDiscarded: 4, capacityRejections: 0))
-            #expect(expiredRoom == .init(activeCredits: 0, inFlightCredits: 0, batchReservations: 1, databaseCreditsReserved: 5, committedCredits: 1, returnedCredits: 1, expiredCreditsDiscarded: 4, capacityRejections: 0, promotedHotRooms: 0))
-            await shard.commit(shardTokens[1])
-            await room.commit(roomTokens[1])
-            await shard.release(shardTokens[1], now: base)
-            await room.release(roomTokens[1], now: base)
-            #expect(await shard.snapshot() == expiredShard)
-            #expect(await room.snapshot() == expiredRoom)
-            guard case .unavailable(.expiredShardLease) = try await shard.acquire(roomShardID: "room-a", capacityProfileID: "standard", shardState: valid, now: expiry),
-                  case .unavailable(.expiredShardLease) = try await room.acquire(roomID: roomUUID, shardState: valid, now: expiry)
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            #expect(try await durableSnapshot() == reserved)
-            // Advance the owned fixture to the next lease generation. Old
-            // token completion cannot consume or return the new lease's credit.
-            let nextID = UUID()
-            let nextExpiry = expiry.addingTimeInterval(100)
-            try await sql.raw("UPDATE im_v2.shard_admission_pools SET lease_id = \(bind: nextID), generation = 2, valid_until = \(bind: nextExpiry), command_window_used = 0 WHERE room_shard_id = 'room-a'").run()
-            try await sql.raw("UPDATE im_v2.room_admission SET shard_lease_id = \(bind: nextID), shard_lease_generation = 2, command_window_used = 0 WHERE room_id = \(bind: roomUUID)").run()
-            let next = try await acquireBoth(at: expiry, using: state(until: nextExpiry, id: nextID, generation: 2))
-            await shard.commit(next.0)
-            await room.commit(next.1)
-            let nextShard = await shard.snapshot()
-            let nextRoom = await room.snapshot()
-            #expect(nextShard.activeCredits == 4 && nextShard.inFlightCredits == 0 && nextShard.committedCredits == 2 && nextShard.databaseCreditsReserved == 10)
-            #expect(nextRoom.activeCredits == 4 && nextRoom.inFlightCredits == 0 && nextRoom.committedCredits == 2 && nextRoom.databaseCreditsReserved == 10)
-            await shard.release(shardTokens, now: expiry)
-            await room.release(roomTokens.map { (token: $0, now: expiry) })
-            #expect(await shard.snapshot() == nextShard)
-            #expect(await room.snapshot() == nextRoom)
-        }
-    }
+
 
     #if os(macOS)
     @Test("authorization survives SIGKILL before and after both durable commits", .timeLimit(.minutes(3)),
@@ -448,8 +318,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let now = mode == "recover" ? initial.addingTimeInterval(32) : initial
             let writer = PostgresV2RoomWriteStore(database: owner,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2))
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                 .usingControlDatabase(resources.database(reservationID), authorizationResolutionDatabase: control)
             let profile = try forwardImportTestProfile()
             if spec.kind == "forward" {
@@ -582,8 +451,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil)
+                contentReviewMode: .disabled)
                 .usingControlDatabase(reservation, authorizationResolutionDatabase: control)
             let service = V2SendMessageService(store: writer, capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { now })
@@ -706,7 +574,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
     }
     #endif
-
 
     @Test("owner writes complete with separate one-connection control and owner pools",
           .timeLimit(.minutes(1)), arguments: [false, true])
@@ -906,7 +773,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("automatic authorization ACK failure retains committed messages and consumed credits", arguments: [false, true])
+    @Test("automatic authorization ACK failure retains committed messages and allows recovery", arguments: [false, true])
     func directAutomaticAuthorizationAcknowledgementFailure(warm: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
@@ -915,12 +782,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
             let room = try await direct.openedIdentity(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let credits = V2ShardAdmissionCommandCreditPool(database: owner, batchSize: 2)
             let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
                 contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache, shardAdmissionCommandCreditPool: credits)
+                directRoomLogFastAppendCache: cache)
                 .usingControlDatabase(control, authorizationResolutionDatabase: control)
             func command(_ id: ClientMessageID = .init(uuid: UUID()), text: String = "automatic grant") throws -> V2SendMessageCommand {
                 try .init(roomID: room.roomID, senderUserID: senderID, clientMessageID: id, text: text, limits: .init(maxUTF8Bytes: 64))
@@ -931,30 +797,22 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if warm { for _ in 0..<2 { guard case .accepted = try await send(command()) else { throw CancellationError() } } }
             @Sendable func consumed() async throws -> Int64 {
                 let used = try #require(try await ownerSQL.raw("SELECT command_window_used AS value FROM im_v2.shard_admission_pools WHERE room_shard_id = 'room-b'").first(decoding: CountRow.self)).value
-                let local = await credits.snapshot()
-                return used - Int64(local.activeCredits) - Int64(local.inFlightCredits)
+                return used
             }
-            let input = try command(), before = await credits.snapshot(), cacheBefore = await cache.snapshot()
+            let input = try command(), cacheBefore = await cache.snapshot()
             let consumedBefore = try await consumed()
             try await sql.raw("ALTER TABLE im_v2.direct_authorization_intents ADD CONSTRAINT test_reject_ack CHECK (disposition IS NULL) NOT VALID").run()
             await #expect(throws: V2DirectAuthorizationCoordinationError.ownerUnavailable) { try await send(input) }
-            let after = await credits.snapshot()
-            #expect(after.committedCredits == before.committedCredits + (warm ? 1 : 0))
-            #expect(try await consumed() == consumedBefore + 1)
-            #expect(after.inFlightCredits == 0)
-            if warm { #expect(await cache.snapshot().committedAppends == cacheBefore.committedAppends + 1) }
+            #expect(try await consumed() == consumedBefore)
+            if warm { #expect(await cache.snapshot().committedAppends == cacheBefore.committedAppends) }
             #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.messages WHERE client_message_id = \(bind: input.clientMessageID.uuidValue!)").first(decoding: CountRow.self)?.value == 1)
             #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.direct_authorization_intents WHERE disposition IS NULL").first(decoding: CountRow.self)?.value == 1)
             try await sql.raw("ALTER TABLE im_v2.direct_authorization_intents DROP CONSTRAINT test_reject_ack").run()
             guard case .idempotent = try await send(input) else { throw CancellationError() }
-            #expect(await credits.snapshot().committedCredits == after.committedCredits)
-            #expect(await credits.snapshot().inFlightCredits == 0)
-            #expect(try await consumed() == consumedBefore + 1)
+            #expect(try await consumed() == consumedBefore)
             #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.direct_authorization_intents WHERE disposition IS NULL").first(decoding: CountRow.self)?.value == 0)
             guard case .idempotencyConflict = try await send(command(input.clientMessageID, text: "changed")) else { throw CancellationError() }
-            #expect(await credits.snapshot().committedCredits == after.committedCredits)
-            #expect(await credits.snapshot().inFlightCredits == 0)
-            #expect(try await consumed() == consumedBefore + 1)
+            #expect(try await consumed() == consumedBefore)
         }
     }
 
@@ -972,8 +830,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let base = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
                 contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache,
-                shardAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil)
+                directRoomLogFastAppendCache: cache)
                 .usingControlDatabase(control)
             func command() throws -> V2SendMessageCommand {
                 try .init(roomID: room.roomID, senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
@@ -1026,7 +883,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } else {
                 guard case .accepted = result else { throw CancellationError() }
                 #expect(try await count("im_v2.messages", on: ownerSQL) == before + 1)
-                if warm { #expect(await cache.snapshot().committedAppends > 0) }
+                if warm { #expect(await cache.snapshot().committedAppends == 0) }
             }
             let disposition = try await ownerSQL.raw("SELECT disposition AS value FROM im_v2.direct_authorization_receipts WHERE client_message_id = \(bind: input.clientMessageID.uuidValue!)")
                 .first(decoding: StringValueRow.self)?.value
@@ -1049,8 +906,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let cache = V2DirectRoomLogFastAppendCache()
             let base = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400), contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache,
-                shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2)).usingControlDatabase(control)
+                directRoomLogFastAppendCache: cache).usingControlDatabase(control)
             var requests: [V2RoomWriteRequest] = [], grants: [V2DirectAuthorizationGrant] = []
             for recipient in recipients {
                 let room = try await direct.openedIdentity(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
@@ -1078,7 +934,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(outcomes.count == 2 && outcomes.allSatisfy { if case .accepted = $0 { true } else { false } })
             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 2)
             #expect(try await count("im_v2.direct_authorization_receipts", on: ownerSQL) == 5)
-            #expect(await cache.snapshot().committedAppends == 2)
+            #expect(await cache.snapshot().committedAppends == 0)
         }
     }
 
@@ -1195,31 +1051,31 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 return
             }
-            if scenario == "admission" || scenario == "revoked" {
+            if scenario == "admission" {
+                // An exhausted command quota must not defer a legitimate forward.
                 try await ownerSQL.raw("UPDATE im_v2.room_admission SET command_window_used = command_window_limit WHERE room_id = \(bind: room.roomID.uuidValue!)").run()
-                #expect(try await deliver() == .pending(.admission))
-                #expect(try await count("im_v2.direct_authorization_receipts", on: ownerSQL) == 0)
-                #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.direct_authorization_intents WHERE disposition IS NULL").first(decoding: CountRow.self)?.value == 1)
-                if scenario == "revoked" {
-                    let grant = try #require(try await PostgresV2DirectAuthorizationIntentStore(database: control)
-                        .existing(roomID: room.roomID.uuidValue!, senderID: actor.uuidValue!, clientMessageID: export.intent.targetClientMessageID))
-                    _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
-                        authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
-                        .executeSocialFixture(actorUserID: recipient, targetUserID: actor, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now:  now)
-                    try #require(try await sql.raw("SELECT disposition AS value FROM im_v2.direct_authorization_intents").first(decoding: StringValueRow.self)?.value == "aborted")
-                    try #require(try await count("im_v2.user_blocks", on: sql) == 1)
-                    // The block drain records its post-lock clock; a subsequent user retry must not go backwards.
-                    transferClock.set([now.addingTimeInterval(1)])
-                    try await ownerSQL.raw("UPDATE im_v2.room_admission SET command_window_used = 0 WHERE room_id = \(bind: room.roomID.uuidValue!)").run()
-                    let stale = try writer.usingAuthorizationGrants([grant], now: transferClock.now())
-                    await #expect(throws: V2DirectAuthorizationReceiptError.attemptAborted) {
-                        try await stale.importForwardExport(export, capacityProfile: profile, limits: limits,
-                            identifiers: V2AcceptanceIDFactory().make(at: transferClock.now()), now: transferClock.now())
-                    }
-                    #expect(try await count("im_v2.messages", on: ownerSQL) == 0)
-                    #expect(try await count("im_v2.message_media_references", on: ownerSQL) == 0)
+            }
+            if scenario == "revoked" {
+                try await PostgresV2ForwardInboxStore(database: owner).receive(export, now: now)
+                let targetCommand = try await owner.transaction { transaction in
+                    let sql = try #require(transaction as? any SQLDatabase)
+                    let row = try await v2LockForwardInbox(exportID: export.intent.exportID, sql: sql)
+                    let authority = try #require(try await v2ForwardInboxAuthorization(row, sql: sql))
+                    return try authority.command(limits: limits)
                 }
-                try await ownerSQL.raw("UPDATE im_v2.room_admission SET command_window_used = 0 WHERE room_id = \(bind: room.roomID.uuidValue!)").run()
+                let grant = try await directAuthorizationGrant(targetCommand, recipient: recipient, control: control, now: now)
+                _ = try await PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
+                    authorizationCoordinator: .init(controlDatabase: control, ownerDatabases: ["room-b": owner]))
+                    .executeSocialFixture(actorUserID: recipient, targetUserID: actor, operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: now)
+                try #require(try await sql.raw("SELECT disposition AS value FROM im_v2.direct_authorization_intents").first(decoding: StringValueRow.self)?.value == "aborted")
+                transferClock.set([now.addingTimeInterval(1)])
+                let stale = try writer.usingAuthorizationGrants([grant], now: transferClock.now())
+                await #expect(throws: V2DirectAuthorizationReceiptError.attemptAborted) {
+                    try await stale.importForwardExport(export, capacityProfile: profile, limits: limits,
+                        identifiers: V2AcceptanceIDFactory().make(at: transferClock.now()), now: transferClock.now())
+                }
+                #expect(try await count("im_v2.messages", on: ownerSQL) == 0)
+                #expect(try await count("im_v2.message_media_references", on: ownerSQL) == 0)
             }
             if scenario == "finalization" {
                 try await ownerSQL.raw("ALTER TABLE im_v2.message_forward_inbox ADD CONSTRAINT test_reject_completion CHECK (state <> 'completed') NOT VALID").run()
@@ -1327,8 +1183,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400),
                 contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache,
-                shardAdmissionCommandCreditPool: .init(database: owner, batchSize: 2)).usingControlDatabase(control)
+                directRoomLogFastAppendCache: cache).usingControlDatabase(control)
             let roomIDs = rooms
             @Sendable func requests(reversed: Bool = false) throws -> [V2OwnerValidatedRoomWriteRequest] {
                 let ordered = reversed ? Array(roomIDs.reversed()) : roomIDs
@@ -1349,7 +1204,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let first = try await writer.acceptAtomicallyOwnerValidated(requests: requests())
             #expect(first.count == 2)
             #expect(first.allSatisfy { if case .accepted = $0 { true } else { false } })
-            #expect(await cache.snapshot().committedAppends == 2)
+            #expect(await cache.snapshot().committedAppends == 0)
             // Reverse arrival order across concurrent batches while sharing a sender.
             let forwardInputs = try requests(), reverseInputs = try requests(reversed: true)
             async let forward = writer.acceptAtomicallyOwnerValidated(requests: forwardInputs)
@@ -1420,9 +1275,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
                 contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache,
-                shardAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil,
-                roomAdmissionCommandCreditPool: warm ? .init(database: owner, batchSize: 2) : nil).usingControlDatabase(control)
+                directRoomLogFastAppendCache: cache).usingControlDatabase(control)
             func request() throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: room.roomID, senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "control authority",
@@ -1440,9 +1293,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 for _ in 0..<2 {
                     guard case .accepted = try await send(request()) else { Issue.record("warm send rejected"); return }
                 }
-                #expect(await cache.snapshot().committedAppends > 0)
-                let cached = try #require(await cache.value(for: .init(roomID: room.roomID.uuidValue!, senderID: senderUUID)))
-                #expect(cached.policy.allowsStrangers) // owner truth; control denies this in relationship case
+                #expect(await cache.snapshot().committedAppends == 0)
+                #expect(await cache.value(for: .init(roomID: room.roomID.uuidValue!, senderID: senderUUID)) == nil)
             }
             if kind == "concurrent-block" {
                 let gate = PostgreSQLTransactionGate()
@@ -1630,7 +1482,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
         }
     }
-
 
     @Test("Special-account audit clocks preserve message retries and concurrent recording", arguments: [V2AccountKind.system, .customerSupport])
     func specialAccountMessageClockBounds(kind: V2AccountKind) async throws {
@@ -1928,7 +1779,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.user_sync_log", on: targetSQL) == 2)
         }
     }
-
 
 }
 

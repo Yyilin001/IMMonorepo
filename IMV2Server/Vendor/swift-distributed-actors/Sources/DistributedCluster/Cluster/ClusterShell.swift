@@ -711,6 +711,7 @@ extension ClusterShell {
         // if an association exists for any Cluster.Node that this Node represents, we can use this and abort the handshake dance here
         if let existingAssociation = self.getAnyExistingAssociation(with: remoteNode) {
             state.log.debug("Association already allocated for remote: \(reflecting: remoteNode), existing association: [\(existingAssociation)]")
+            existingAssociation.prepareReconnectIfChannelClosed()
             switch existingAssociation.state {
             case .associating:
                 // continue, we may be the first beginHandshake (as associations may be ensured outside of actor context)
@@ -836,6 +837,7 @@ extension ClusterShell {
 
         // if there already is an existing association, we'll bail out and abort this "new" connection; there must only ever be one association
         let maybeExistingAssociation: Association? = self.getSpecificExistingAssociation(with: offer.originNode)
+        maybeExistingAssociation?.prepareReconnectIfChannelClosed()
 
         switch state.onIncomingHandshakeOffer(offer: offer, existingAssociation: maybeExistingAssociation, incomingChannel: inboundChannel) {
         case .negotiateIncoming(let hsm):

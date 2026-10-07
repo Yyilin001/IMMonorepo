@@ -110,6 +110,8 @@ enum VirtualActorBusinessProbe {
                 throw ProbeError.missingEnvironment("host|client mode")
             }
             switch mode {
+            case "realtime-receiver": try await RealtimeCallbackProbe.run(receiver: true)
+            case "realtime-sender": try await RealtimeCallbackProbe.run(receiver: false)
             case "host": try await host()
             case "client": try await client()
             case "multi-host": try await multiHost()
@@ -213,19 +215,17 @@ enum VirtualActorBusinessProbe {
 
     private static func host() async throws {
         let (resources, database, sql) = try databaseResources()
+        var startedApplication: V2RoomActorApplication?
+        do {
         guard try await sql.raw("SELECT 1 AS value").first(decoding: CountRow.self)?.value == 1 else {
             throw ProbeError.unexpectedResponse("PostgreSQL unavailable")
         }
         let writes = PostgresV2RoomWriteStore(database: database,
             strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
             contentReviewMode: .disabled)
-        let sends = V2SendMessageAdmissionBatcher(store: writes,
-            configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)),
-            actorGrantedStore: writes)
         let capacity = try V2CapacityProfile(id: "standard", limits: .init(
             maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 3))
         let owner = try V2RoomServerOwnerResources(database: database, writes: writes,
-            sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
             invitationSecretIssuer: try invitationSecretIssuer(),
@@ -237,7 +237,8 @@ enum VirtualActorBusinessProbe {
         let application = try await V2RoomActorApplication.start(
             configuration: configuration(hostsRooms: true),
             ownerRouter: V2PostgresRoomShardRouter(database: database),
-            roomDatabases: ["room-a": database], factory: factory)
+            roomDatabases: ["room-a": database], factory: factory, qualification: .standalone())
+        startedApplication = application
         guard await application.readiness() else {
             throw ProbeError.unexpectedResponse("host not ready")
         }
@@ -248,6 +249,11 @@ enum VirtualActorBusinessProbe {
         while true {
             try await Task.sleep(for: .seconds(1))
             withExtendedLifetime(resources) {}
+        }
+        } catch {
+            if let startedApplication { _ = try? await startedApplication.stop(deadline: .now + .seconds(10)) }
+            try? await resources.shutdown()
+            throw error
         }
     }
 
@@ -290,7 +296,19 @@ enum VirtualActorBusinessProbe {
             print("G4_SEND_AND_LOG_OK epoch=\(firstToken.activationEpoch.rawValue)")
 
             try await waitFor("continue-after-restart", seconds: 90)
-            let replay = try await callUntilAvailable(ref, request: request, seconds: 45)
+            // The Directory owns recovery after host replacement. One logical
+            // call must recover the original receipt without an outer retry loop.
+            let replayStarted = ContinuousClock.now
+            let replay: V2RoomResponse
+            do {
+                replay = try await ref.call(request, principal: .user(senderID),
+                    deadline: .now + .seconds(45))
+            } catch {
+                let metrics = await application.roomRuntimeMetricsSnapshot()
+                FileHandle.standardError.write(Data(
+                    "G4_REPLAY_FAILURE elapsed=\(ContinuousClock.now - replayStarted) directory=\(metrics.directoryCalls) transport=\(metrics.transportCalls)\n".utf8))
+                throw error
+            }
             guard case .messaging(.sendOperation(.receipt(let recoveredProof))) = replay, case .accepted(let recovered) = recoveredProof.outcome,
                   recovered.messageID == accepted.messageID else {
                 throw ProbeError.unexpectedResponse("same client ID did not recover original message")
@@ -366,13 +384,9 @@ enum VirtualActorBusinessProbe {
         let writes = PostgresV2RoomWriteStore(database: database,
             strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
             contentReviewMode: .disabled)
-        let sends = V2SendMessageAdmissionBatcher(store: writes,
-            configuration: .init(maximumBatchSize: 16, maximumDelay: .milliseconds(2)),
-            actorGrantedStore: writes)
         let capacity = try V2CapacityProfile(id: "standard", limits: .init(
             maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 3))
         let owner = try V2RoomServerOwnerResources(database: database, writes: writes,
-            sendBatcher: sends,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
             invitationSecretIssuer: try invitationSecretIssuer(),
@@ -385,7 +399,7 @@ enum VirtualActorBusinessProbe {
         let application = try await V2RoomActorApplication.start(
             configuration: hostConfiguration,
             ownerRouter: V2PostgresRoomShardRouter(database: database),
-            roomDatabases: ["room-a": database], factory: factory)
+            roomDatabases: ["room-a": database], factory: factory, qualification: .standalone())
         guard await application.readiness() else {
             throw ProbeError.unexpectedResponse("multi-host \(slot) not ready")
         }

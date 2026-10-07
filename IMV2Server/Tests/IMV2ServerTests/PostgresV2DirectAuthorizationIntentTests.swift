@@ -12,6 +12,81 @@ import Testing
 struct PostgresV2DirectAuthorizationIntentTests {
     private let now = Date(timeIntervalSince1970: 1_750_000_000)
 
+    @Test func setReservationKeepsFrozenAttemptsAndOnlyRestartsAbortedIdentities() async throws {
+        try await fixture { context in
+            let held = context.request(), aborted = context.request()
+            let initial = try await context.intents.reserve([held, aborted], now: now)
+            #expect(initial.count == 2)
+            let heldGrant = initial[0], abortedGrant = initial[1]
+            let proof = try await context.receipts.abort(abortedGrant.attempt, now: now, database: context.owner)
+            #expect(try await context.intents.resolve(abortedGrant.attempt, receipt: proof, now: now))
+            // Change the authoritative policy, but retain the already frozen
+            // held attempt. Its next reservation cannot silently retarget it.
+            try await context.withPairLock { transaction in try await context.block(on: transaction, now: now) }
+            let otherRoom = UUID(), otherRecipient = UUID()
+            try await context.controlSQL.raw("""
+                INSERT INTO \(unsafeRaw: context.controlSchema).public_user_profiles
+                  (user_id,public_handle,display_name,created_at,updated_at)
+                VALUES (\(bind: otherRecipient),\(bind: "batch_" + otherRecipient.uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(20)),'Batch',\(bind: now),\(bind: now))
+                """).run()
+            try await context.ownerSQL.raw("""
+                INSERT INTO \(unsafeRaw: context.ownerSchema).rooms(room_id,room_kind,room_shard_id,capacity_profile_id)
+                VALUES(\(bind: otherRoom),'direct','authorization-owner','standard')
+                """).run()
+            let otherPair = [context.sender, otherRecipient].sorted { $0.uuidString < $1.uuidString }
+            try await context.ownerSQL.raw("""
+                INSERT INTO \(unsafeRaw: context.ownerSchema).direct_room_pairs(lower_user_id,higher_user_id,room_id,created_at)
+                VALUES(\(bind: otherPair[0]),\(bind: otherPair[1]),\(bind: otherRoom),\(bind: now))
+                """).run()
+            try await context.controlSQL.raw("""
+                CREATE TABLE \(unsafeRaw: context.controlSchema).intent_batch_statement_counts(kind text PRIMARY KEY,value bigint NOT NULL)
+                """).run()
+            try await context.controlSQL.raw("""
+                CREATE FUNCTION \(unsafeRaw: context.controlSchema).count_intent_batch_statement() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN INSERT INTO \(unsafeRaw: context.controlSchema).intent_batch_statement_counts(kind,value) VALUES(TG_OP,1)
+                  ON CONFLICT(kind) DO UPDATE SET value=\(unsafeRaw: context.controlSchema).intent_batch_statement_counts.value+1;
+                  RETURN NULL; END $$
+                """).run()
+            try await context.controlSQL.raw("""
+                CREATE TRIGGER intent_batch_statement_counter AFTER INSERT OR UPDATE
+                  ON \(unsafeRaw: context.controlSchema).direct_authorization_intents
+                  FOR EACH STATEMENT EXECUTE FUNCTION \(unsafeRaw: context.controlSchema).count_intent_batch_statement();
+                """).run()
+            func rerouted(_ request: V2DirectAuthorizationRequest) -> V2DirectAuthorizationRequest {
+                .init(roomID: request.roomID,senderID: request.senderID,clientMessageID: request.clientMessageID,
+                    recipientID: request.recipientID,ownerShardID: "replacement-owner",ownerEpoch: 9,fingerprint: request.fingerprint)
+            }
+            // Equal sender/client IDs in different room scopes are distinct.
+            let freshOther = V2DirectAuthorizationRequest(roomID: otherRoom,senderID: context.sender,
+                clientMessageID: held.clientMessageID,recipientID: otherRecipient,ownerShardID: "authorization-owner",ownerEpoch: 0,fingerprint: held.fingerprint)
+            let fresh = context.request()
+            let mixed = try await context.intents.reserve([freshOther,rerouted(held),rerouted(aborted),fresh], now: now.addingTimeInterval(1))
+            #expect(mixed.count == 4)
+            #expect(mixed[0].attempt.roomID == otherRoom)
+            #expect(mixed[1].attempt == heldGrant.attempt)
+            #expect(mixed[1].policy == heldGrant.policy)
+            #expect(mixed[2].attempt.generation == abortedGrant.attempt.generation + 1)
+            #expect(mixed[2].attempt.ownerShardID == "replacement-owner")
+            #expect(mixed[2].policy.blocked && mixed[3].policy.blocked)
+            #expect(mixed[2].createdAt == abortedGrant.createdAt)
+            #expect(try #require(try await context.controlSQL.raw("""
+                SELECT value FROM \(unsafeRaw: context.controlSchema).intent_batch_statement_counts WHERE kind='INSERT'
+                """).first(decoding: Count.self)).value == 1)
+            #expect(try #require(try await context.controlSQL.raw("""
+                SELECT value FROM \(unsafeRaw: context.controlSchema).intent_batch_statement_counts WHERE kind='UPDATE'
+                """).first(decoding: Count.self)).value == 1)
+            let neverCreated = context.request(), conflict = context.request(client: held.clientMessageID, digest: Data(repeating: 8,count: 32))
+            await #expect(throws: V2DirectAuthorizationIntentError.identityConflict) {
+                try await context.intents.reserve([neverCreated,conflict], now: now.addingTimeInterval(2))
+            }
+            #expect(try await context.intents.existing(roomID: neverCreated.roomID,senderID: neverCreated.senderID,
+                clientMessageID: neverCreated.clientMessageID) == nil)
+            let replay = try await context.intents.reserve([held], now: now.addingTimeInterval(3))
+            #expect(replay[0].attempt == heldGrant.attempt)
+            #expect(replay[0].policy == heldGrant.policy)
+        }
+    }
+
     @Test(arguments: [false, true])
     func resolutionWithOccupiedSingleConnectionPools(separateOwner: Bool) async throws {
         try await fixture(separateOwner: separateOwner) { context in

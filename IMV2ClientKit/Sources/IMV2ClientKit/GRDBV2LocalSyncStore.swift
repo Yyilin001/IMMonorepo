@@ -283,6 +283,24 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         }
     }
 
+    /// Only the room-page apply transaction's durable cursor is progress evidence.
+    /// Projection maxima and directory/latest-visible heads cannot replace it.
+    /// An unresolved trimmed-history gap is deliberately not advertised as C.
+    public func roomProgressAppliedSequence(roomID: RoomID) throws -> UInt64? {
+        try databasePool.read { db in
+            if try Bool.fetchOne(db, sql: "SELECT activation_prepared FROM v2_snapshot_import LIMIT 1") == true { return nil }
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT cursor.applied_room_sequence
+                FROM v2_group_event_cursors AS cursor
+                WHERE cursor.room_id = ? AND cursor.history_incomplete = 0
+                  AND NOT EXISTS (SELECT 1 FROM v2_room_membership_states WHERE room_id = cursor.room_id AND is_member = 0)
+                  AND NOT EXISTS (SELECT 1 FROM v2_room_profile_projections WHERE room_id = cursor.room_id AND is_group_event_authorized = 0)
+                  AND NOT EXISTS (SELECT 1 FROM v2_room_event_authorizations WHERE room_id = cursor.room_id AND is_authorized = 0)
+                """, arguments: [roomID.rawValue]) else { return nil }
+            return try Self.storageUnsigned(row, column: "applied_room_sequence")
+        }
+    }
+
     /// 该房间在服务端被裁剪掉的历史下界。
     ///
     /// - Parameter roomID: 目标房间。
@@ -391,32 +409,34 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
     }
 
     public func groupEventAccess(roomID: RoomID) throws -> V2ClientGroupEventAccess? {
-        try databasePool.read { db in
-            if let row = try Row.fetchOne(
-                db,
-                sql: "SELECT is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?",
-                arguments: [roomID.rawValue]
-            ) {
-                return .init(
-                    isAuthorized: row["is_group_event_authorized"] as Bool
-                )
-            }
-            if try Bool.fetchOne(db, sql: "SELECT is_member = 0 FROM v2_room_membership_states WHERE room_id = ?", arguments: [roomID.rawValue]) == true {
-                return .init(isAuthorized: false)
-            }
-            let directKnown = try Bool.fetchOne(
-                db,
-                sql: "SELECT EXISTS (SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = ? UNION ALL SELECT 1 FROM v2_direct_room_identities WHERE room_id = ?)",
-                arguments: [roomID.rawValue, roomID.rawValue]
-            ) ?? false
-            guard directKnown else { return nil }
-            let authorized = try Bool.fetchOne(
-                db,
-                sql: "SELECT COALESCE((SELECT is_authorized FROM v2_room_event_authorizations WHERE room_id = ?), 1)",
-                arguments: [roomID.rawValue]
-            ) ?? true
-            return .init(isAuthorized: authorized)
+        try databasePool.read { try Self.groupEventAccess(roomID: roomID, db: $0) }
+    }
+
+    static func groupEventAccess(roomID: RoomID, db: Database) throws -> V2ClientGroupEventAccess? {
+        if let row = try Row.fetchOne(
+            db,
+            sql: "SELECT is_group_event_authorized FROM v2_room_profile_projections WHERE room_id = ?",
+            arguments: [roomID.rawValue]
+        ) {
+            return .init(
+                isAuthorized: row["is_group_event_authorized"] as Bool
+            )
         }
+        if try Bool.fetchOne(db, sql: "SELECT is_member = 0 FROM v2_room_membership_states WHERE room_id = ?", arguments: [roomID.rawValue]) == true {
+            return .init(isAuthorized: false)
+        }
+        let directKnown = try Bool.fetchOne(
+            db,
+            sql: "SELECT EXISTS (SELECT 1 FROM v2_direct_room_profile_projections WHERE room_id = ? UNION ALL SELECT 1 FROM v2_direct_room_identities WHERE room_id = ?)",
+            arguments: [roomID.rawValue, roomID.rawValue]
+        ) ?? false
+        guard directKnown else { return nil }
+        let authorized = try Bool.fetchOne(
+            db,
+            sql: "SELECT COALESCE((SELECT is_authorized FROM v2_room_event_authorizations WHERE room_id = ?), 1)",
+            arguments: [roomID.rawValue]
+        ) ?? true
+        return .init(isAuthorized: authorized)
     }
 
     public func roomAppliedRoomSequence(roomID: RoomID) throws -> UInt64 {
@@ -3233,12 +3253,6 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
 
     static func commandStorageUnsigned(_ row: Row, column: String) throws -> UInt64 {
         UInt64(try commandStorageInteger(row, column: column))
-    }
-
-    static func optionalCommandStorageUnsigned(_ row: Row, column: String) throws -> UInt64? {
-        let value: DatabaseValue = row[column]
-        if value.isNull { return nil }
-        return try commandStorageUnsigned(row, column: column)
     }
 
     private static func projectionStorageUnsigned(_ row: Row, column: String) throws -> UInt64 {

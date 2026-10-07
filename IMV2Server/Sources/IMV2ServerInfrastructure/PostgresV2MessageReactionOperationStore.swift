@@ -68,19 +68,17 @@ public struct PostgresV2MessageReactionOperationStore: Sendable {
         }
         if committed.1, case .receipt(let receipt) = committed.0,
            case .committed(let value) = receipt.outcome, let event = value.event {
-            committedMessageObserver?.observeCommittedRoomSequence(roomID: token.roomID, roomSequence: event.roomSequence)
+            committedMessageObserver?.observeCommittedRoomSequence(roomID: token.roomID, roomSequence: event.roomSequence, activation: token)
         }
         return committed.0
     }
     public func recover(_ request: V2MessageReactionRecoveryRequest, token: V2RoomActivationToken,
                         now: Date) async throws -> V2MessageReactionRecoveryResult {
-        try await v2WithRoomScopedTransaction(database: database) { transaction in
-            let sql = try await lock(identity: request.identity, token: token, database: transaction)
-            if let prior = try await existing(identity: request.identity, fingerprint: request.fingerprint, sql: sql) { return prior }
-            guard request.action == .closeIfAbsent else { return .unresolved }
-            return .receipt(try await persist(identity: request.identity, fingerprint: request.fingerprint,
-                outcome: .closed, now: now, sql: sql))
-        }
+        try await v2RecoverMessageOperation(database: database, action: request.action, unresolved: .unresolved,
+            lock: { try await self.lock(identity: request.identity, token: token, database: $0) },
+            existing: { try await self.existing(identity: request.identity, fingerprint: request.fingerprint, sql: $0) },
+            close: { .receipt(try await self.persist(identity: request.identity, fingerprint: request.fingerprint,
+                outcome: .closed, now: now, sql: $0)) })
     }
     public func snapshot(roomID: RoomID, actorUserID: UserID, messageID: MessageID, reaction: String,
                          token: V2RoomActivationToken) async throws -> V2MessageReactionSnapshot {
@@ -124,21 +122,21 @@ public struct PostgresV2MessageReactionOperationStore: Sendable {
         guard identity.kind == .reaction, case .message(let room, _) = identity.scope,
               room == token.roomID, let actor = identity.accountID.uuidValue,
               let operation = UUID(uuidString: identity.operation.rawOperationID), let sql = database as? any SQLDatabase else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-        try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: actor.uuidString+":"+operation.uuidString),0))").run()
-        try await v2RequireRoomActivation(token: token, sql: sql)
+        try await v2LockMessageOperation(actor: actor, operation: operation, token: token, sql: sql)
         return sql
     }
     private func existing(identity: V2OperationIdentity, fingerprint: V2OperationFingerprint, sql: any SQLDatabase) async throws -> V2MessageReactionRecoveryResult? {
-        guard let row = try await sql.raw("SELECT receipt::text AS receipt FROM im_v2.message_reaction_receipts WHERE actor_user_id=\(bind: identity.accountID.uuidValue!) AND operation_id=\(bind: UUID(uuidString: identity.operation.rawOperationID)!)").first(decoding: ReceiptRow.self) else { return nil }
-        let receipt = try JSONDecoder().decode(V2MessageReactionReceipt.self, from: Data(row.receipt.utf8))
-        return receipt.validates(identity: identity, fingerprint: fingerprint) ? .receipt(receipt) : .fingerprintConflict
+        try await v2ReadMessageOperationReceipt(V2MessageReactionReceipt.self,
+            query: "SELECT receipt::text AS receipt FROM im_v2.message_reaction_receipts WHERE actor_user_id=\(bind: identity.accountID.uuidValue!) AND operation_id=\(bind: UUID(uuidString: identity.operation.rawOperationID)!)",
+            sql: sql, validates: { $0.validates(identity: identity, fingerprint: fingerprint) },
+            receipt: { .receipt($0) }, conflict: .fingerprintConflict)
     }
     private func persist(identity: V2OperationIdentity, fingerprint: V2OperationFingerprint,
                          outcome: V2MessageReactionTerminalOutcome, now: Date, sql: any SQLDatabase) async throws -> V2MessageReactionReceipt {
         guard case .message(let room, let message) = identity.scope else { throw V2MessageOperationValidationError.invalidKind }
         let receipt = try V2MessageReactionReceipt(identity: identity, fingerprint: fingerprint,
             outcome: outcome, resolvedAtMilliseconds: milliseconds(now))
-        let encoded = String(decoding: try JSONEncoder().encode(receipt), as: UTF8.self)
+        let encoded = try v2EncodePersistenceJSON(receipt)
         try await sql.raw("""
             INSERT INTO im_v2.message_reaction_receipts(actor_user_id,operation_id,room_id,message_id,fingerprint_version,request_fingerprint,receipt,resolved_at)
             VALUES(\(bind: identity.accountID.uuidValue!),\(bind: UUID(uuidString: identity.operation.rawOperationID)!),\(bind: room.uuidValue!),\(bind: message.uuidValue!),1,\(bind: fingerprint.digest),\(bind: encoded)::jsonb,\(bind: now))
@@ -146,12 +144,9 @@ public struct PostgresV2MessageReactionOperationStore: Sendable {
         return receipt
     }
     private func milliseconds(_ value: Date) throws -> UInt64 {
-        let ms = value.timeIntervalSince1970 * 1000
-        guard v2PostgresTimestampCanEncode(value), ms.isFinite, ms > 0, ms < Double(Int64.max) else { throw V2MessageOperationValidationError.invalidReceipt }
-        return UInt64(ms)
+        try v2PersistenceMilliseconds(value, invalid: V2MessageOperationValidationError.invalidReceipt)
     }
 }
-private struct ReceiptRow: Decodable { let receipt: String }
 private struct MembershipRow: Decodable { let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" } }
 private struct MessageRow: Decodable { let withdrawnAt: Date?; enum CodingKeys: String, CodingKey { case withdrawnAt = "withdrawn_at" } }
 private struct ExistsRow: Decodable { let present: Int }

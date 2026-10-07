@@ -65,7 +65,7 @@ R1 可以复用现有 rooms 行锁作为序列化点，新增持久 activation �
 
 只扩展 `V2RoomOwnerTransactionFence.swift` 不够：发送 fast append/合批、转发 SQL、trusted moderation、retention、后台 import 等所有写路径均需台账证明。对 production writer 隐藏无 context 的裸 store API。RoomExecutionContext 是调用约束，数据库 fence 才是最终安全边界。
 
-**Admission credit 的独立事务必须单独处理。** 基线 `V2RoomAdmissionCommandCreditPool.reserveBatch` 在另一连接上取 rooms 的 KEY SHARE 并更新 room_admission，允许外层持 NO KEY UPDATE 等待它。直接把外层升级为 FOR UPDATE 或让 credit 预留等待外层 activation 锁会形成自等待。首版选择：需要持久 refill 时先在业务 fence/房间锁之外完成有界预留，再进入接受事务核验最新 activation、admission window/lease generation 和额度身份；不得持业务锁等待另一连接 refill。需要重试 refill 时先确定回滚/离开该业务事务，不能一边持锁一边重试。
+**消息写入资源由实际数据库连接调度。** 房间 Actor 保持同房间执行顺序，节点调度器分配实际写连接，每个房间独立事务提交。旧的房间、分片 command-credit 池及跨连接 refill 已移除，不再作为消息发送路径的执行边界。
 
 Room credit 预留事务也校验当前 activation，内存额度与该 token 绑定，旧 activation 的余量不可转交新实例。共享 shard pool 仍是节点级容量池，分配给命令的额度具有独立身份/代次，不能代替房间写资格；完成、回滚和重复释放保持原有单次消费语义。失租/崩溃可以保守丢弃未消费的预留，不能重复返还或凭内存余额绕过持久上限。C0/R1/D1 联合冻结锁/事务图，测试 warm refill、接管与回滚，记录丢弃额度对窗口容量的影响。
 

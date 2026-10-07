@@ -31,7 +31,6 @@ public enum V2NetworkEntryRegistry {
         "V2HTTPGroupNicknamePresentationClient.swift": [.accountHTTP],
         "V2HTTPMessageMutationOperationClient.swift": [.accountHTTP],
         "V2HTTPMessageReactionOperationClient.swift": [.accountHTTP],
-        "V2HTTPMessageSendOperationClient.swift": [.accountHTTP],
         "V2ProtobufSyncTransport+MessageSendOperations.swift": [.tcp],
         "V2HTTPNameOperationClient.swift": [.accountHTTP],
         "V2HTTPOwnProfileClient.swift": [.accountHTTP],

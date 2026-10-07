@@ -11,7 +11,7 @@ import SQLKit
 /// 此类型不会再次尝试预留执行轮次。
 public struct V2ActorForwardPairDomainExecutor: Sendable {
     private let database: any Database
-    private let write: PostgresV2RoomWriteStore
+    private var write: PostgresV2RoomWriteStore
     private let capacityProfile: V2CapacityProfile
     private let limits: V2MessageCommandLimits
     private let acceptanceIDs: V2AcceptanceIDFactory
@@ -27,6 +27,10 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
         self.capacityProfile = capacityProfile; self.limits = limits
         self.acceptanceIDs = acceptanceIDs; self.now = now
         self.databaseWorkAdmission = databaseWorkAdmission
+    }
+
+    package func usingPolicyAuthorizations(_ service: V2RoomPolicyAuthorizationService) -> Self {
+        var copy = self; copy.write = write.usingPolicyAuthorizations(service); return copy
     }
 
     public func execute(_ pair: V2ActorForwardPairWire,

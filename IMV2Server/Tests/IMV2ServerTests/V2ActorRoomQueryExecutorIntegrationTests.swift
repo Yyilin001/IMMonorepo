@@ -3,6 +3,7 @@
 import FluentKit
 import FluentPostgresDriver
 import Foundation
+import Synchronization
 import IMV2ActorContracts
 import IMV2Core
 @testable import IMV2Server
@@ -240,7 +241,7 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         }
     }
 
-    @Test("saturated batcher retains bounded queues, rejects mixed epochs, and expires only call deadlines")
+    @Test("saturated batcher bounds queued plus actual items, separates epochs and byte groups, and honors call deadlines")
     func saturatedBatcher() async throws {
         let actor = UserID(uuid: UUID())
         let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
@@ -251,8 +252,10 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         }
         let roomA = UUID(), roomB = UUID(), roomC = UUID(), roomD = UUID()
         let occupied = ActorQueryGate(), release = ActorQueryGate()
+        let actualTokens = Mutex<[[V2RoomActivationToken]]>([])
         let batcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(maximumItems: 2,
-            maximumPendingItems: 2, maximumInFlightBatches: 1)) { _, _ in
+            maximumPendingItems: 6, maximumInFlightBatches: 1)) { _, tokens in
+            actualTokens.withLock { $0.append(tokens) }
             await occupied.signal()
             await release.wait()
             throw CancellationError()
@@ -265,15 +268,18 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         let queued = Task { try await batcher.state(.init(token: try token(roomB), actorUserID: actor,
             batchDeadline: pendingDeadline, callDeadline: .now.advanced(by: .seconds(2)))) }
         try await waitForPending(batcher, count: 1)
-        // The queued room B item remains separate from a new incarnation of
-        // that same room while the sole execution slot is occupied.
-        await #expect(throws: V2HostRoomRecoveryBatchError.busy) {
-            _ = try await batcher.state(.init(token: token(roomB, epoch: 2), actorUserID: actor,
-                batchDeadline: pendingDeadline, callDeadline: .now.advanced(by: .seconds(2))))
-        }
-        let third = Task { try await batcher.state(.init(token: try token(roomC), actorUserID: actor,
+        // A successor token remains a distinct queued input; it cannot merge
+        // with the predecessor even after the actual slot becomes available.
+        let replacement = Task { try await batcher.state(.init(token: try token(roomB, epoch: 2), actorUserID: actor,
             batchDeadline: pendingDeadline, callDeadline: .now.advanced(by: .seconds(2)))) }
         try await waitForPending(batcher, count: 2)
+        let third = Task { try await batcher.state(.init(token: try token(roomC), actorUserID: actor,
+            batchDeadline: pendingDeadline, callDeadline: .now.advanced(by: .seconds(2)))) }
+        try await waitForPending(batcher, count: 3)
+        let held = await batcher.collectorSnapshot()
+        #expect(held.retainedItems == 4 && held.ordinaryRetainedItems == 4 && held.actualBatches == 1)
+        // Six total inputs reserve a complete two-item trusted cohort; ordinary
+        // already owns four (including the executing input), so this is full.
         await #expect(throws: V2HostRoomRecoveryBatchError.busy) {
             _ = try await batcher.state(.init(token: token(roomD), actorUserID: actor,
                 batchDeadline: pendingDeadline, callDeadline: .now.advanced(by: .seconds(2))))
@@ -282,13 +288,24 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         _ = try? await first.value
         _ = try? await queued.value
         _ = try? await third.value
+        _ = try? await replacement.value
+        let executions = actualTokens.withLock { $0 }
+        #expect(executions.count == 3)
+        #expect(executions[1] == [try token(roomB)])
+        #expect(Set(executions[2]) == Set([try token(roomB, epoch: 2), try token(roomC)]))
 
         let byteOccupied = ActorQueryGate(), byteRelease = ActorQueryGate()
-        let sample = try token(UUID())
-        let oneItemBytes = try JSONEncoder().encode(sample).count + actor.rawValue.utf8.count + 64
+        // Large but individually legal immutable inputs fit one 1KiB batch
+        // envelope each. Two such inputs must execute as separate byte groups.
+        let byteOwner = try V2RoomDataOwner(shardID: String(repeating: "b", count: 300), epoch: 0)
+        func byteToken() -> V2RoomActivationToken {
+            .init(roomID: .init(uuid: UUID()), owner: byteOwner, activationEpoch: try! .init(1), host: host)
+        }
+        let sample = byteToken(), byteTokens = Mutex<[[V2RoomActivationToken]]>([])
         let byteBatcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(maximumItems: 3,
-            maximumBytes: max(256, oneItemBytes + 1), maximumPendingItems: 3,
-            maximumInFlightBatches: 1)) { _, _ in
+            maximumBytes: 1024, maximumPendingItems: 6,
+            maximumInFlightBatches: 1)) { _, tokens in
+            byteTokens.withLock { $0.append(tokens) }
             await byteOccupied.signal()
             await byteRelease.wait()
             throw CancellationError()
@@ -297,20 +314,32 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         let byteFirst = Task { try await byteBatcher.state(.init(token: sample, actorUserID: actor,
             batchDeadline: .now, callDeadline: .now.advanced(by: .seconds(2)))) }
         await byteOccupied.wait()
-        let byteQueued = Task { try await byteBatcher.state(.init(token: try token(UUID()), actorUserID: actor,
+        let byteQueued = Task { try await byteBatcher.state(.init(token: byteToken(), actorUserID: actor,
             batchDeadline: .now.advanced(by: .seconds(1)), callDeadline: .now.advanced(by: .seconds(2)))) }
         try await waitForPending(byteBatcher, count: 1)
+        let byteThird = Task { try await byteBatcher.state(.init(token: byteToken(), actorUserID: actor,
+            batchDeadline: .now.advanced(by: .seconds(1)), callDeadline: .now.advanced(by: .seconds(2)))) }
+        try await waitForPending(byteBatcher, count: 2)
         await #expect(throws: V2HostRoomRecoveryBatchError.busy) {
-            _ = try await byteBatcher.state(.init(token: token(UUID()), actorUserID: actor,
+            _ = try await byteBatcher.state(.init(token: byteToken(), actorUserID: actor,
                 batchDeadline: .now.advanced(by: .seconds(1)), callDeadline: .now.advanced(by: .seconds(2))))
+        }
+        let oversized = V2RoomActivationToken(roomID: .init(uuid: UUID()),
+            owner: try .init(shardID: String(repeating: "x", count: 2048), epoch: 0),
+            activationEpoch: try .init(1), host: host)
+        await #expect(throws: V2HostRoomRecoveryBatchError.oversized) {
+            _ = try await byteBatcher.state(.init(token: oversized, actorUserID: actor,
+                batchDeadline: .now, callDeadline: .now.advanced(by: .seconds(2))))
         }
         await byteRelease.signal()
         _ = try? await byteFirst.value
         _ = try? await byteQueued.value
+        _ = try? await byteThird.value
+        #expect(byteTokens.withLock { $0.count == 3 && $0.allSatisfy { $0.count == 1 } })
 
         let timedOccupied = ActorQueryGate(), timedRelease = ActorQueryGate()
         let timedBatcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(maximumItems: 1,
-            maximumPendingItems: 1, maximumInFlightBatches: 1)) { _, _ in
+            maximumPendingItems: 3, maximumInFlightBatches: 1)) { _, _ in
             await timedOccupied.signal()
             await timedRelease.wait()
             throw CancellationError()

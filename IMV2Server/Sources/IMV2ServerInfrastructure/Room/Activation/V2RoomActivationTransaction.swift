@@ -14,7 +14,7 @@ import Synchronization
 ///
 /// PostgreSQL 16 没有 transaction_timeout。LOCAL SQL 限制仍约束每次等待
 /// 或语句；总截止时间到达时，看门狗只关闭借用的物理连接。
-/// 方法会等待主体、看门狗及可能的关闭操作全部结束。因此调用方超时后，
+/// 方法会等待主体及可能的关闭操作结束，并同步解除超时回调。因此调用方超时后，
 /// 不会把仍活动的 SQL 事务放回连接池，也不会在其连接上执行后续语句。
 /// 主体不能在借用的连接上执行事务控制 SQL，或重试已中止的事务；
 /// 重试必须重新调用此方法。
@@ -22,25 +22,36 @@ func v2WithRoomActivationTransaction<Value: Sendable>(
     database: any Database,
     deadline: ContinuousClock.Instant,
     timeouts: V2RoomActivationSQLTimeouts = .default,
+    sendOperationMetrics: V2SendOperationBatchMetrics? = nil,
+    measureConnectionAcquire: Bool = true,
+    readOnlyRepeatableRead: Bool = false,
+    pinnedConnection: V2BorrowedRoomConnection? = nil,
     _ body: @escaping @Sendable (any Database) async throws -> Value
 ) async throws -> Value {
     try await v2WithRoomActivationTransactionCore(
-        database: database, deadline: deadline, timeouts: timeouts, needsContext: false
+        database: database, deadline: deadline, timeouts: timeouts, needsContext: false,
+        sendOperationMetrics: sendOperationMetrics, measureConnectionAcquire: measureConnectionAcquire,
+        readOnlyRepeatableRead: readOnlyRepeatableRead, pinnedConnection: pinnedConnection
     ) { borrowed, _ in
         try await body(borrowed)
     }
 }
 
-/// 只在执行 BEGIN 和首次设置 LOCAL 超时后创建上下文。
+/// 只在执行 BEGIN 并确认默认或 LOCAL 超时策略后创建上下文。
 /// 它持有实际借用的 SQL 连接；使用其组合房间围栏时，调用方不能替换为池中其他连接。
 func v2WithRoomActivationTransactionWithContext<Value: Sendable>(
     database: any Database,
     deadline: ContinuousClock.Instant,
     timeouts: V2RoomActivationSQLTimeouts = .default,
+    sendOperationMetrics: V2SendOperationBatchMetrics? = nil,
+    measureConnectionAcquire: Bool = true,
+    pinnedConnection: V2BorrowedRoomConnection? = nil,
     _ body: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext) async throws -> Value
 ) async throws -> Value {
     try await v2WithRoomActivationTransactionCore(
-        database: database, deadline: deadline, timeouts: timeouts, needsContext: true
+        database: database, deadline: deadline, timeouts: timeouts, needsContext: true,
+        sendOperationMetrics: sendOperationMetrics, measureConnectionAcquire: measureConnectionAcquire,
+        pinnedConnection: pinnedConnection
     ) { borrowed, context in
         guard let context else { throw V2RoomActivationLeaseError.activationChanged }
         return try await body(borrowed, context)
@@ -48,29 +59,76 @@ func v2WithRoomActivationTransactionWithContext<Value: Sendable>(
 }
 
 private func v2WithRoomActivationTransactionCore<Value: Sendable>(
-    database: any Database,
-    deadline: ContinuousClock.Instant,
-    timeouts: V2RoomActivationSQLTimeouts,
-    needsContext: Bool,
+    database: any Database, deadline: ContinuousClock.Instant,
+    timeouts: V2RoomActivationSQLTimeouts, needsContext: Bool,
+    sendOperationMetrics: V2SendOperationBatchMetrics?, measureConnectionAcquire: Bool = true,
+    readOnlyRepeatableRead: Bool = false,
+    pinnedConnection: V2BorrowedRoomConnection? = nil,
     _ body: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Value
 ) async throws -> Value {
+    let continuationMetrics = sendOperationMetrics ?? V2RoomSQLContinuationObservation.metrics
+    if let pinnedConnection {
+        return try await v2ExecutePinnedRoomTransaction(connection: pinnedConnection,
+            deadline: deadline, timeouts: timeouts, needsContext: needsContext,
+            sendOperationMetrics: sendOperationMetrics, continuationMetrics: continuationMetrics,
+            readOnlyRepeatableRead: readOnlyRepeatableRead, body)
+    }
+    return try await v2WithRoomPhysicalConnection(database: database, deadline: deadline,
+        sendOperationMetrics: sendOperationMetrics, measureConnectionAcquire: measureConnectionAcquire) { borrowed, control, sql, state in
+        try await v2ExecuteBorrowedRoomTransaction(borrowed: borrowed, control: control, sql: sql,
+            state: state, deadline: deadline, timeouts: timeouts, needsContext: needsContext,
+            sendOperationMetrics: sendOperationMetrics, continuationMetrics: continuationMetrics,
+            readOnlyRepeatableRead: readOnlyRepeatableRead, body)
+    }
+}
+
+/// Own one physical loan across independent owner-cohort/isolation transactions.
+/// This function opens no transaction and grants no room or quota authority.
+func v2WithOwnerBatchConnection<Value: Sendable>(database: any Database,
+    deadline: ContinuousClock.Instant, metrics: V2SendOperationBatchMetrics?,
+    acquisitionOnly: Bool = false,
+    interrupted: @escaping @Sendable (any Error) -> Void,
+    _ body: @escaping @Sendable (any Database, @escaping @Sendable () -> Bool) async throws -> Value
+) async throws -> Value {
+    try await v2WithRoomPhysicalConnection(database: database, deadline: deadline,
+        sendOperationMetrics: metrics, acquisitionOnly: acquisitionOnly, interrupted: interrupted) { borrowed, _, _, state in
+        try await body(borrowed, { state.connectionIsUsable })
+    }
+}
+
+private func v2WithRoomPhysicalConnection<Value: Sendable>(
+    database: any Database,
+    deadline: ContinuousClock.Instant,
+    sendOperationMetrics: V2SendOperationBatchMetrics?,
+    measureConnectionAcquire: Bool = true,
+    acquisitionOnly: Bool = false,
+    interrupted: @escaping @Sendable (any Error) -> Void = { _ in },
+    _ body: @escaping @Sendable (any Database, any TransactionControlDatabase, any SQLDatabase, V2RoomPhysicalTransactionState) async throws -> Value
+) async throws -> Value {
+    let connectionTimeline = V2OwnerConnectionTimeline.current
+    let enteredAt = ContinuousClock.now
+    connectionTimeline?.mark("physical_borrow_entered", at: enteredAt)
+    if let started = connectionTimeline?.marker("store_borrow_entered") {
+        connectionTimeline?.record(.ownerStoreToPhysicalEnter, from: started, to: enteredAt)
+    }
     guard ContinuousClock().now < deadline else {
         throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
     }
     let state = V2RoomPhysicalTransactionState()
+    let acquisitionCancellation = V2ConnectionAcquisitionCancellation()
     // 在借用连接前启动：连接池耗尽不能重置绝对时间预算。
-    // 公开调用返回前必须等待此任务结束。
-    let watchdog = Task<Void, Never> {
-        do {
-            try await Task.sleep(until: deadline, clock: .continuous)
-            state.stop(.deadline)
-        } catch is CancellationError {
-            // 操作完成后取消计时器。
-        } catch {
-            state.stop(.deadline)
-        }
+    // 连接回调结束前同步解除计时回调，无需等待 Swift 计时任务被调度。
+    let watchdog = V2RoomDeadlineTimer(deadline: deadline, eventLoop: database.eventLoop) {
+        state.stop(.deadline)
+        acquisitionCancellation.cancel()
+        interrupted(state.notAcceptedFailure)
     }
-    let transactionFuture: EventLoopFuture<Value> = database.withConnection { borrowed in
+    // Capture before NIO's connection callback creates its task. Task-local
+    // recorder scope is not implicitly transferred from the caller's executor.
+    let connectionTimer = measureConnectionAcquire ? sendOperationMetrics?.startStage(.ownerConnectionAcquire) : nil
+    let sendTrace = V2SendPathTrace.current
+    let timeline = V2OwnerConnectionTimeline.current
+    let connectionBody: @Sendable (any Database) -> EventLoopFuture<Value> = { borrowed in
         guard let postgres = borrowed as? any PostgresDatabase,
               let control = borrowed as? any TransactionControlDatabase,
               let sql = borrowed as? any SQLDatabase else {
@@ -79,17 +137,51 @@ private func v2WithRoomActivationTransactionCore<Value: Sendable>(
         // Fluent 的借用包装器报告 inTransaction=true；调用其 `transaction`
         // 方法会跳过 BEGIN，因此这里显式控制事务。
         return postgres.withConnection { physical in
-            physical.eventLoop.makeFutureWithTask {
-                state.install(connection: physical)
-                if ContinuousClock().now >= deadline { state.stop(.deadline) }
-                return try await v2ExecuteBorrowedRoomTransaction(borrowed: borrowed,
-                    control: control, sql: sql, state: state,
-                    timeouts: timeouts, needsContext: needsContext, body)
+            let callbackAt = ContinuousClock.now
+            let executor = V2DatabaseEventLoopTaskExecutor(physical.eventLoop)
+            let promise = physical.eventLoop.makePromise(of: Value.self)
+            Task(executorPreference: executor) {
+                do {
+                    let result: Value = try await V2BorrowedRoomConnectionScope.$current.withValue(
+                        V2BorrowedRoomConnection(borrowed: borrowed, control: control, sql: sql, physical: physical,
+                            taskExecutor: executor,
+                            isUsable: { state.connectionIsUsable })) {
+                        let taskAt = ContinuousClock.now
+                        timeline?.record(.ownerDriverCallbackTaskWait, from: callbackAt, to: taskAt)
+                        connectionTimer?.finish()
+                        state.install(connection: physical)
+                        if acquisitionOnly {
+                            // The selected room owns the transaction deadline.
+                            watchdog.disarm()
+                        }
+                        if ContinuousClock.now >= deadline { state.stop(.deadline) }
+                        guard state.connectionIsUsable else { throw state.notAcceptedFailure }
+                        return try await V2SendPathTrace.$current.withValue(sendTrace) {
+                            try await V2OwnerConnectionTimeline.$current.withValue(timeline) {
+                                try await body(borrowed, control, sql, state)
+                            }
+                        }
+                    }
+                    watchdog.disarm()
+                    state.finishLoan()
+                    try await state.settleClose()
+                    promise.succeed(result)
+                } catch {
+                    watchdog.disarm()
+                    state.finishLoan()
+                    do { try await state.settleClose(); promise.fail(error) }
+                    catch { promise.fail(error) }
+                }
             }
+            return promise.futureResult
         }
     }
-    // EventLoopFuture.get() 有意不把 Task 取消传给 future 的
-    // makeFutureWithTask 主体。直接通知被跟踪的物理连接，
+    let transactionFuture: EventLoopFuture<Value>
+    if let balanced = database as? V2EventLoopBalancedDatabase {
+        transactionFuture = balanced.withScheduledConnection(deadline: deadline, acquisitionCancellation: acquisitionCancellation, connectionBody)
+    } else { transactionFuture = database.withConnection(connectionBody) }
+    // EventLoopFuture.get() 有意不把 Task 取消传给连接任务。
+    // 直接通知被跟踪的物理连接，
     // 并在释放前继续等待该 future 完成。
     let outcome: Result<Value, any Error>
     do {
@@ -97,16 +189,65 @@ private func v2WithRoomActivationTransactionCore<Value: Sendable>(
             try await transactionFuture.get()
         } onCancel: {
             state.stop(.cancelled)
+            acquisitionCancellation.cancel()
+            interrupted(state.notAcceptedFailure)
         })
     } catch {
         outcome = .failure(error)
     }
-    watchdog.cancel()
-    await watchdog.value
+    // Acquisition failure (including pool timeout) ends only when the
+    // actual future settles, never when the watchdog or caller stops waiting.
+    connectionTimer?.finish()
+    watchdog.disarm()
     try await state.settleClose()
     if state.wasStopped && !state.hadConnection {
         throw state.notAcceptedFailure
     }
+    return try outcome.get()
+}
+
+/// Available only while the physical loan's callback is alive.
+struct V2BorrowedRoomConnection: Sendable {
+    let borrowed: any Database
+    let control: any TransactionControlDatabase
+    let sql: any SQLDatabase
+    let physical: PostgresConnection
+    let taskExecutor: V2DatabaseEventLoopTaskExecutor
+    let isUsable: @Sendable () -> Bool
+}
+
+enum V2BorrowedRoomConnectionScope {
+    @TaskLocal static var current: V2BorrowedRoomConnection?
+}
+
+/// Execute on an already borrowed connection without a nested pool/future/task bridge.
+private func v2ExecutePinnedRoomTransaction<Value: Sendable>(
+    connection: V2BorrowedRoomConnection, deadline: ContinuousClock.Instant,
+    timeouts: V2RoomActivationSQLTimeouts, needsContext: Bool,
+    sendOperationMetrics: V2SendOperationBatchMetrics?, continuationMetrics: V2SendOperationBatchMetrics?,
+    readOnlyRepeatableRead: Bool,
+    _ body: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Value
+) async throws -> Value {
+    guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+    guard connection.isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+    let state = V2RoomPhysicalTransactionState()
+    state.install(connection: connection.physical)
+    let timer = V2RoomDeadlineTimer(deadline: deadline, eventLoop: connection.physical.eventLoop) {
+        state.stop(.deadline)
+    }
+    defer { timer.disarm() }
+    let outcome: Result<Value, any Error>
+    do {
+        outcome = .success(try await withTaskCancellationHandler {
+            try await v2ExecuteBorrowedRoomTransaction(borrowed: connection.borrowed,
+                control: connection.control, sql: connection.sql, state: state,
+                deadline: deadline, timeouts: timeouts, needsContext: needsContext,
+                sendOperationMetrics: sendOperationMetrics, continuationMetrics: continuationMetrics,
+                readOnlyRepeatableRead: readOnlyRepeatableRead, body)
+        } onCancel: { state.stop(.cancelled) })
+    } catch { outcome = .failure(error) }
+    timer.disarm()
+    try await state.settleClose()
     return try outcome.get()
 }
 
@@ -115,33 +256,77 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
     control: any TransactionControlDatabase,
     sql: any SQLDatabase,
     state: V2RoomPhysicalTransactionState,
+    deadline: ContinuousClock.Instant,
     timeouts: V2RoomActivationSQLTimeouts,
     needsContext: Bool,
+    sendOperationMetrics: V2SendOperationBatchMetrics?,
+    continuationMetrics: V2SendOperationBatchMetrics?,
+    readOnlyRepeatableRead: Bool = false,
     _ body: @escaping @Sendable (any Database, V2ConfiguredRoomFenceContext?) async throws -> Value
 ) async throws -> Value {
+    let continuationTrace = continuationMetrics.map { V2RoomSQLContinuationTrace(metrics: $0) }
+    defer { continuationTrace?.finishWithoutDispatch() }
     guard state.beginTransaction() else {
         try await state.settleClose()
         throw state.notAcceptedFailure
     }
+    var rollbackTimer: V2SendOperationStageTimer?
+    defer { rollbackTimer?.finish() }
     do {
-        try await control.beginTransaction().get()
-        // 这些 LOCAL 限制必须先于操作咨询锁和房间锁设置。
-        try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
+        let setupTimer = sendOperationMetrics?.startStage(.ownerSetup)
+        do {
+            defer { setupTimer?.finish() }
+            try await V2OwnerConnectionTimeline.$sqlLabel.withValue(.begin) {
+                try await control.beginTransaction().get()
+            }
+            if let timeline = V2OwnerConnectionTimeline.current, let settled = timeline.marker("begin_future_completed") {
+                timeline.record(.ownerBeginResume, from: settled)
+            }
+            // Isolation must precede the timeout SELECT, which establishes a
+            // snapshot. The physical loan watchdog still owns close and join.
+            if readOnlyRepeatableRead {
+                try await sql.raw("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY").run()
+            }
+            // Verified message-pool defaults need no setup round trip. Other handles
+            // and custom policies install LOCAL limits before any business SQL.
+            if (borrowed as? any V2RoomSQLSessionDefaults)?.roomSQLSessionTimeouts != timeouts {
+                try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
+            }
+        }
         let context = needsContext
             ? V2ConfiguredRoomFenceContext(sql: sql, timeouts: timeouts, state: state) : nil
+        let admissionTrace = sendOperationMetrics.map { _ in V2OwnerAdmissionHandoffTrace() }
         let value: Value
-        do { value = try await body(borrowed, context) }
+        let bodyTimer = sendOperationMetrics?.startStage(.ownerBody)
+        do {
+            defer { bodyTimer?.finish() }
+            value = try await V2RoomSQLContinuationObservation.$current.withValue(continuationTrace) {
+                try await V2OwnerAdmissionHandoffObservation.$current.withValue(admissionTrace) {
+                    try await body(borrowed, context)
+                }
+            }
+        }
         catch {
             context?.invalidate()
             throw error
         }
         context?.invalidate()
-        guard state.beginCommit() else {
+        guard state.beginCommit(deadline: deadline) else {
+            rollbackTimer = sendOperationMetrics?.startStage(.ownerRollback)
             try await state.settleClose()
             throw state.rollbackFailure
         }
+        let commitTimer = sendOperationMetrics?.startStage(.ownerCommit)
         do {
-            try await control.commitTransaction().get()
+            defer { commitTimer?.finish() }
+            if let sendOperationMetrics { admissionTrace?.willDispatchCommit(metrics: sendOperationMetrics) }
+            continuationTrace?.willDispatch()
+            try await V2OwnerConnectionTimeline.$sqlLabel.withValue(.commit) {
+                try await control.commitTransaction().get()
+            }
+            if let timeline = V2OwnerConnectionTimeline.current, let settled = timeline.marker("commit_future_completed") {
+                timeline.record(.ownerCommitResume, from: settled)
+            }
             state.confirmCommit()
             return value
         } catch {
@@ -155,11 +340,13 @@ private func v2ExecuteBorrowedRoomTransaction<Value: Sendable>(
         }
     } catch {
         if state.commitWasDispatched { throw error }
+        if rollbackTimer == nil { rollbackTimer = sendOperationMetrics?.startStage(.ownerRollback) }
         if state.wasStopped {
             try await state.settleClose()
             throw state.rollbackFailure
         }
         do {
+            continuationTrace?.willDispatch()
             try await control.rollbackTransaction().get()
             state.confirmRollback()
         } catch {
@@ -203,6 +390,36 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         lifecycle = Mutex(Lifecycle())
     }
 
+    /// Uses this transaction's owned connection and already installed LOCAL
+    /// timeouts. No caller-provided connection can bypass timeout setup.
+    func requireDurableOwnersAndActivations(tokens: [V2RoomActivationToken],
+        operations: [V2DurableOwnerBatchOperationKey]? = nil,
+        policyCheck: PostgresV2RoomPolicyLeaseFence.CombinedCheck? = nil) async throws {
+        try lifecycle.withLock { lifecycle in
+            guard lifecycle.active, !lifecycle.inUse, !lifecycle.used else {
+                throw V2RoomActivationLeaseError.activationChanged
+            }
+            lifecycle.inUse = true
+            lifecycle.used = true
+        }
+        defer {
+            lifecycle.withLock { $0.inUse = false }
+        }
+        do {
+            if let operations {
+                try await v2RequireDurableOperationAndActivationLocks(keys: operations, tokens: tokens, sql: sql,
+                    policyCheck: policyCheck)
+            } else {
+                guard policyCheck == nil else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
+                try await v2RequireDurableOwnerBatchActivations(tokens: tokens, sql: sql,
+                    timeouts: configuredTimeouts, configureTimeouts: false)
+            }
+        } catch {
+            V2RoomSQLContinuationObservation.current?.finishWithoutDispatch()
+            throw error
+        }
+    }
+
     /// 此一次性操作只使用外围物理事务提供的 SQL 连接。
     /// 事务主体返回前必须等待所有 SQL 完成；若仍有未结束的操作，
     /// invalidate 会关闭连接，避免 COMMIT 和后续复用。
@@ -213,6 +430,10 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         scope: V2RoomActivationWriteScope,
         timeouts: V2RoomActivationSQLTimeouts = .default
     ) async throws {
+        if scope.reliesOnRuntimeLifecycle {
+            for room in Set(roomIDs) { _ = try scope.token(for: room) }
+            return
+        }
         try lifecycle.withLock { lifecycle in
             guard lifecycle.active, !lifecycle.inUse, !lifecycle.used else {
                 throw V2RoomActivationLeaseError.activationChanged
@@ -220,7 +441,12 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             lifecycle.inUse = true
             lifecycle.used = true
         }
-        defer { lifecycle.withLock { $0.inUse = false } }
+        defer {
+            lifecycle.withLock { $0.inUse = false }
+            // Failed fence validation may be caught by a domain/savepoint
+            // path. Do not carry its observation across uninstrumented SQL.
+            V2RoomSQLContinuationObservation.current?.finishWithoutDispatch()
+        }
         if roomIDs.count == 1, timeouts == configuredTimeouts {
             try await requireSingleOwnerAndActivation(
                 roomID: roomIDs[0], expectedRoutes: expectedRoutes,
@@ -240,11 +466,11 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         }
         let roomIDsJSON = String(decoding: try JSONEncoder().encode(
             orderedRooms.map(\.uuidString)), as: UTF8.self)
-        let rows = try await sql.raw("""
+        let rows = try await v2RoomSQLObservedAll(sql.raw("""
             SELECT room_id, room_shard_id, owner_epoch, room_kind FROM im_v2.rooms
             WHERE room_id IN (SELECT value::uuid FROM jsonb_array_elements_text(\(bind: roomIDsJSON)::jsonb))
             ORDER BY room_id FOR NO KEY UPDATE
-            """).all(decoding: V2ConfiguredRoomOwnerRow.self)
+            """), decoding: V2ConfiguredRoomOwnerRow.self, source: .configuredFenceRooms)
         // 保持普通写入路径的错误优先级：先检查类型，再检查路由行数和所有者，
         // 最后检查精确激活令牌及租约。
         if let expectedKinds,
@@ -284,10 +510,10 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         }
         var leases: [(V2RoomActivationToken, V2RoomActivationPersistenceRow?)] = []
         for (room, token) in orderedTokens {
-            let row = try await sql.raw("""
+            let row = try await v2RoomSQLObservedFirst(sql.raw("""
                 SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
                 FROM im_v2.room_activation_leases WHERE room_id = \(bind: room) FOR UPDATE
-                """).first(decoding: V2RoomActivationPersistenceRow.self)
+                """), decoding: V2RoomActivationPersistenceRow.self, source: .configuredFenceLeases)
             leases.append((token, row))
         }
         // clock_timestamp 必须在取得所有房间锁和租约锁后调用；
@@ -314,10 +540,10 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         if let expectedRoutes, expectedRoutes[roomID] == nil {
             throw V2RoomOwnerFenceError.ownerChanged
         }
-        let room = try await sql.raw("""
+        let room = try await v2RoomSQLObservedFirst(sql.raw("""
             SELECT room_id, room_shard_id, owner_epoch, room_kind FROM im_v2.rooms
             WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
-            """).first(decoding: V2ConfiguredRoomOwnerRow.self)
+            """), decoding: V2ConfiguredRoomOwnerRow.self, source: .configuredFenceRooms)
         // 保持集合路径的错误优先级：类型、记录是否存在及选定路由，
         // 然后才是不可变令牌和当前租约。
         if let room, let kind = expectedKinds?[roomID], kind != room.kind {
@@ -336,10 +562,10 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
               room.epoch == token.owner.epoch else {
             throw V2RoomActivationLeaseError.ownerChanged
         }
-        let lease = try await sql.raw("""
+        let lease = try await v2RoomSQLObservedFirst(sql.raw("""
             SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
             FROM im_v2.room_activation_leases WHERE room_id = \(bind: roomID) FOR UPDATE
-            """).first(decoding: V2RoomActivationPersistenceRow.self)
+            """), decoding: V2RoomActivationPersistenceRow.self, source: .configuredFenceLeases)
         // 取得两把锁后才读取数据库时钟。
         let observed = try await v2RoomActivationDatabaseClock(sql: sql)
         guard let lease, lease.matches(token) else {
@@ -380,6 +606,7 @@ private final class V2RoomPhysicalTransactionState: Sendable {
         var stopReason: StopReason?
         var connection: PostgresConnection?
         var closeFuture: EventLoopFuture<Void>?
+        var loanFinished = false
     }
 
     private let state = Mutex(State())
@@ -395,6 +622,7 @@ private final class V2RoomPhysicalTransactionState: Sendable {
 
     var wasStopped: Bool { state.withLock { $0.stopReason != nil } }
     var hadConnection: Bool { state.withLock { $0.connection != nil } }
+    var connectionIsUsable: Bool { state.withLock { !$0.loanFinished && $0.stopReason == nil && $0.connection?.isClosed == false } }
     var commitWasDispatched: Bool {
         state.withLock {
             $0.phase == .commitDispatched || $0.phase == .confirmed || $0.phase == .resolvedRollback
@@ -419,8 +647,17 @@ private final class V2RoomPhysicalTransactionState: Sendable {
         }
     }
 
-    func beginCommit() -> Bool {
+    func beginCommit(deadline: ContinuousClock.Instant) -> Bool {
         state.withLock {
+            // The EventLoop timer callback may be delayed behind other jobs,
+            // including a body that already crossed the budget, so enforce the
+            // same absolute deadline at the COMMIT dispatch boundary as well.
+            if $0.stopReason == nil, ContinuousClock.now >= deadline {
+                $0.stopReason = .deadline
+                if $0.closeFuture == nil, let connection = $0.connection {
+                    $0.closeFuture = connection.close()
+                }
+            }
             guard $0.stopReason == nil else { return false }
             $0.phase = .commitDispatched
             return true
@@ -445,13 +682,17 @@ private final class V2RoomPhysicalTransactionState: Sendable {
 
     func stop(_ reason: StopReason) {
         state.withLock {
-            guard $0.phase != .confirmed && $0.phase != .resolvedRollback else { return }
+            guard !$0.loanFinished, $0.phase != .confirmed && $0.phase != .resolvedRollback else { return }
             if $0.stopReason == nil { $0.stopReason = reason }
             if $0.closeFuture == nil, let connection = $0.connection {
                 $0.closeFuture = connection.close()
             }
         }
     }
+
+    /// Cancellation can arrive after the pool callback settles but before its
+    /// caller resumes. It must never close a connection now owned by another loan.
+    func finishLoan() { state.withLock { $0.loanFinished = true } }
 
     func settleClose() async throws {
         let snapshot = state.withLock { ($0.closeFuture, $0.connection, $0.stopReason, $0.phase) }

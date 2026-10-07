@@ -200,6 +200,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private let pendingCredentialDeletionStore: (any V2PendingCredentialDeletionStoring)?
     @ObservationIgnored private weak var remoteNotificationRegistrar: (any V2RemoteNotificationRegistering)?
     @ObservationIgnored private var realtimeRuntime: V2ClientRuntime?
+    private(set) var realtimeCoverage: V2AppRealtimeCoverage?
+
     @ObservationIgnored private var accountRuntime: V2AccountRuntime?
     @ObservationIgnored private var backgroundSync: V2BackgroundSyncRunner?
     @ObservationIgnored private var realtimeTask: Task<Void, Never>?
@@ -267,7 +269,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettingsStore = nil
             deviceSessionsStore = nil
             groupInvitationStore = nil
-            realtimeRuntime = nil
+            realtimeRuntime = nil; realtimeCoverage = nil
             realtimeTask = nil
             messageSearchIndexTask = nil
             return
@@ -284,7 +286,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             conversationStore = nil; contactsStore = nil; privacySettingsStore = nil
             userBlockSettingsStore = nil; publicIdentitySettingsStore = nil; pushWakeSettingsStore = nil
             deviceSessionsStore = nil; groupInvitationStore = nil
-            realtimeRuntime = nil; realtimeTask = nil; messageSearchIndexTask = nil
+            realtimeRuntime = nil; realtimeCoverage = nil; realtimeTask = nil; messageSearchIndexTask = nil
             return
         }
         do {
@@ -349,7 +351,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettingsStore = nil
             deviceSessionsStore = nil
             groupInvitationStore = nil
-            realtimeRuntime = nil
+            realtimeRuntime = nil; realtimeCoverage = nil
             realtimeTask = nil
             messageSearchIndexTask = nil
         } catch {
@@ -375,7 +377,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettingsStore = nil
             deviceSessionsStore = nil
             groupInvitationStore = nil
-            realtimeRuntime = nil
+            realtimeRuntime = nil; realtimeCoverage = nil
             realtimeTask = nil
         }
     }
@@ -819,7 +821,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let closingRealtimeTask = realtimeTask
         // Capture and detach every account owner before the first suspension.
         // Cleanup of an old account must never stop a subsequently adopted one.
-        backgroundSync = nil; accountRuntime = nil; realtimeRuntime = nil
+        backgroundSync = nil; accountRuntime = nil; realtimeRuntime = nil; realtimeCoverage = nil
         realtimeAttemptGate.cancel()
         closingRealtimeTask?.cancel(); realtimeTask = nil
         authenticationObserver.stop()
@@ -1240,6 +1242,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 }
             }
             realtimeRuntime = realtime.runtime
+            realtimeCoverage = realtime.realtimeCoverage
             accountRuntime = realtime.accountRuntime
             backgroundSync = realtime.backgroundSync
             conversationStore = conversations

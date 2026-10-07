@@ -30,6 +30,14 @@ public struct V2RoomSubscriptionSnapshot: Equatable, Sendable {
     public let authorPresentationGeneration: UUID?
     /// 房间事件可用性提示。
     public let wake: V2GroupEventAvailabilityHint?
+    /// 固定安装基线；后续可用性提示不会抬高这个值。
+    public let baselineHead: UInt64?
+    /// 已原子提交的本设备游标。订阅确认不代表已补齐基线。
+    public let appliedThrough: UInt64?
+    public var isCaughtUp: Bool {
+        guard state == .subscribed, let baselineHead, let appliedThrough else { return false }
+        return appliedThrough >= baselineHead
+    }
     /// 当前在线状态。
     public let presence: V2PresenceState?
     /// 当前正在输入的用户状态列表。
@@ -73,6 +81,8 @@ public actor V2RoomSubscriptionCoordinator {
         var serverRevoked = false
         var recoveryID: UUID?
         var authorPresentationGeneration = UUID()
+        var baselineHead: UInt64?
+        var appliedThrough: UInt64?
         var wake: V2GroupEventAvailabilityHint?
         var presence: V2PresenceState?
         var typing: [UserID: V2TypingState] = [:]
@@ -91,6 +101,7 @@ public actor V2RoomSubscriptionCoordinator {
     private let activityEvents: any V2LiveActivityEventSource
     private let isAuthorized: @Sendable (RoomID) async throws -> Bool
     private let didUnsubscribeRoom: @Sendable (RoomID) async -> Void
+    private let receiveAccountEvent: @Sendable (V2GroupEventAvailabilityHint) async throws -> Void
     private let roomCursor: @Sendable (RoomID) async throws -> UInt64
     private let retryDelay: Duration
     private let refreshInterval: Duration
@@ -124,6 +135,7 @@ public actor V2RoomSubscriptionCoordinator {
         isAuthorized: @escaping @Sendable (RoomID) async throws -> Bool,
         roomCursor: @escaping @Sendable (RoomID) async throws -> UInt64,
         didUnsubscribeRoom: @escaping @Sendable (RoomID) async -> Void = { _ in },
+        receiveAccountEvent: @escaping @Sendable (V2GroupEventAvailabilityHint) async throws -> Void = { _ in },
         retryDelay: Duration = .seconds(1),
         refreshInterval: Duration = .seconds(30),
         maximumRooms: Int = 128,
@@ -137,6 +149,7 @@ public actor V2RoomSubscriptionCoordinator {
         self.isAuthorized = isAuthorized
         self.roomCursor = roomCursor
         self.didUnsubscribeRoom = didUnsubscribeRoom
+        self.receiveAccountEvent = receiveAccountEvent
         self.retryDelay = retryDelay
         self.refreshInterval = refreshInterval
         self.maximumRooms = maximumRooms
@@ -326,6 +339,8 @@ public actor V2RoomSubscriptionCoordinator {
             rooms[roomID]?.recoveryID = nil
             rooms[roomID]?.authorPresentationGeneration = UUID()
             rooms[roomID]?.wake = nil
+            rooms[roomID]?.baselineHead = nil
+            rooms[roomID]?.appliedThrough = nil
             rooms[roomID]?.presence = nil
             rooms[roomID]?.typing = [:]
             if rooms[roomID]?.consumers.isEmpty == true { rooms[roomID] = nil }
@@ -367,6 +382,11 @@ public actor V2RoomSubscriptionCoordinator {
                     if desired { try await subscribe(roomID: roomID, channel: channel, id: id) }
                     else { try await unsubscribe(roomID: roomID, channel: channel, id: id) }
                 }
+                if rooms[roomID]?.confirmed.contains(.roomEvents) == true {
+                    let applied = try await roomCursor(roomID)
+                    try checkRun(id)
+                    rooms[roomID]?.appliedThrough = applied
+                }
                 publish(roomID)
                 if rooms[roomID]?.consumers.isEmpty == true, rooms[roomID]?.confirmed.isEmpty == true {
                     rooms[roomID] = nil
@@ -399,6 +419,8 @@ public actor V2RoomSubscriptionCoordinator {
             let hint = V2GroupEventAvailabilityHint(roomID: roomID, highWatermark: subscription.highWatermark)
             let wake = rooms[roomID]?.wake.map { $0.coalescing(with: hint) } ?? hint
             rooms[roomID]?.wake = wake
+            rooms[roomID]?.baselineHead = subscription.highWatermark
+            rooms[roomID]?.appliedThrough = cursor
             rooms[roomID]?.recoveryID = UUID()
             rooms[roomID]?.authorPresentationGeneration = UUID()
         case .typing:
@@ -433,6 +455,8 @@ public actor V2RoomSubscriptionCoordinator {
         rooms[roomID]?.confirmed.remove(channel)
         switch channel {
         case .roomEvents:
+            rooms[roomID]?.baselineHead = nil
+            rooms[roomID]?.appliedThrough = nil
             rooms[roomID]?.wake = nil
             await didUnsubscribeRoom(roomID)
             try checkRun(id)
@@ -441,7 +465,9 @@ public actor V2RoomSubscriptionCoordinator {
         }
     }
 
-    private func accept(_ hint: V2GroupEventAvailabilityHint, id: UUID) throws {
+    private func accept(_ hint: V2GroupEventAvailabilityHint, id: UUID) async throws {
+        try checkRun(id)
+        try await receiveAccountEvent(hint)
         try checkRun(id)
         guard rooms[hint.roomID]?.desired.contains(.roomEvents) == true else { return }
         let previous = rooms[hint.roomID]?.wake
@@ -481,7 +507,8 @@ public actor V2RoomSubscriptionCoordinator {
     private func refresh(id: UUID) throws {
         try checkRun(id)
         for roomID in rooms.keys {
-            if rooms[roomID]?.confirmed.contains(.roomEvents) == true { rooms[roomID]?.recoveryID = UUID() }
+            // Activity expiry refresh must not schedule message history pulls.
+            // Message recovery is driven by received heads and the account runner.
             publish(roomID)
         }
         requestReconciliation()
@@ -501,6 +528,8 @@ public actor V2RoomSubscriptionCoordinator {
                 recoveryID: consumer.channels.contains(.roomEvents) ? room.recoveryID : nil,
                 authorPresentationGeneration: consumer.observesAuthorChanges ? room.authorPresentationGeneration : nil,
                 wake: consumer.channels.contains(.roomEvents) ? room.wake : nil,
+                baselineHead: consumer.channels.contains(.roomEvents) ? room.baselineHead : nil,
+                appliedThrough: consumer.channels.contains(.roomEvents) ? room.appliedThrough : nil,
                 presence: consumer.channels.contains(.presence) && (room.presence?.expiresAt ?? .distantPast) > now ? room.presence : nil,
                 typing: consumer.channels.contains(.typing) ? room.typing.values.filter { $0.expiresAt > now }.sorted { $0.userID.rawValue < $1.userID.rawValue } : []
             )

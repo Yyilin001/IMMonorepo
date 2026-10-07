@@ -1,4 +1,5 @@
 import IMV2ServerApplication
+import Foundation
 import IMV2ServerContracts
 import Foundation
 import IMV2ActorContracts
@@ -25,10 +26,16 @@ public struct V2RoomActivationSQLTimeouts: Sendable, Equatable {
     }
 
     public static let `default` = try! Self()
+
+    /// Applied at physical connection startup; custom transactions use LOCAL overrides.
+    public var startupParameters: [(String, String)] {
+        [("options", "-c statement_timeout=\(statementMilliseconds) -c lock_timeout=\(lockMilliseconds) -c idle_in_transaction_session_timeout=\(idleTransactionMilliseconds)")]
+    }
 }
 
 /// 在获取房间围栏的同一事务中设置。
 func v2SetRoomActivationSQLTimeouts(_ timeouts: V2RoomActivationSQLTimeouts, sql: any SQLDatabase) async throws {
+    V2RoomSQLContinuationObservation.current?.willDispatch()
     // 三项 LOCAL 设置均在下一次加锁或业务语句前生效。
     // 一次往返即可维持相同的事务范围限制。
     try await sql.raw("""
@@ -66,6 +73,7 @@ func v2RequireRoomActivations(
     schema: String = "im_v2",
     timeouts: V2RoomActivationSQLTimeouts = .default
 ) async throws {
+    defer { V2RoomSQLContinuationObservation.current?.finishWithoutDispatch() }
     v2PreconditionSQLSchema(schema)
     try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
     let ordered = try tokens.map { token -> (UUID, V2RoomActivationToken) in
@@ -76,24 +84,64 @@ func v2RequireRoomActivations(
         throw V2RoomActivationLeaseError.activationChanged
     }
     for (roomUUID, token) in ordered {
-        try await v2LockRoomActivationOwner(roomID: roomUUID, owner: token.owner, sql: sql, schema: schema)
+        try await v2LockRoomActivationOwner(roomID: roomUUID, owner: token.owner, sql: sql, schema: schema, source: .scalarFenceRooms)
     }
-    var activationRows: [(V2RoomActivationToken, V2RoomActivationPersistenceRow?)] = []
-    for (roomUUID, token) in ordered {
-        let row = try await sql.raw("""
-            SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
-            FROM \(unsafeRaw: schema).room_activation_leases WHERE room_id = \(bind: roomUUID) FOR UPDATE
-            """).first(decoding: V2RoomActivationPersistenceRow.self)
-        activationRows.append((token, row))
+    let rows = try await v2LockRoomActivationLeasesAndClock(
+        roomIDs: ordered.map { $0.0 }, sql: sql, schema: schema, source: .scalarFenceLeases)
+    guard rows.count == ordered.count, Set(rows.map(\.roomID)) == Set(ordered.map { $0.0 }) else {
+        throw V2RoomActivationLeaseError.activationChanged
     }
-    // 锁等待可能跨过过期时刻。不能使用 PostgreSQL 固定在事务开始时的
-    // now()/CURRENT_TIMESTAMP。
-    let observed = try await v2RoomActivationDatabaseClock(sql: sql)
-    for (token, row) in activationRows {
-        guard let row, row.matches(token) else { throw V2RoomActivationLeaseError.activationChanged }
-        guard let expiresAt = row.expiresAt, expiresAt > observed else {
+    let byRoom = Dictionary(uniqueKeysWithValues: rows.map { ($0.roomID, $0) })
+    for (roomID, token) in ordered {
+        guard let row = byRoom[roomID], row.matches(token) else { throw V2RoomActivationLeaseError.activationChanged }
+        guard let expiresAt = row.expiresAt, expiresAt > row.observedAt else {
             throw V2RoomActivationLeaseError.leaseExpired
         }
+    }
+}
+
+/// This must be a NEW statement after all room locks have completed. A
+/// predecessor may have inserted its lease while we waited for a room lock.
+/// Fully consuming LockRows before clock_timestamp keeps expiry authoritative
+/// even when the lease locks themselves wait past the old expiry.
+func v2LockRoomActivationLeasesAndClock(
+    roomIDs: [UUID], sql: any SQLDatabase, schema: String,
+    source: V2RoomSQLContinuationSource
+) async throws -> [V2LockedRoomActivationLeaseRow] {
+    let input = String(decoding: try JSONEncoder().encode(roomIDs.map(\.uuidString)), as: UTF8.self)
+    return try await v2RoomSQLObservedAll(sql.raw("""
+        WITH requested AS MATERIALIZED (
+            SELECT value::uuid AS room_id FROM jsonb_array_elements_text(\(bind: input)::jsonb)
+            LIMIT \(literal: roomIDs.count)
+        ), locked_leases AS MATERIALIZED (
+            SELECT lease.* FROM \(unsafeRaw: schema).room_activation_leases AS lease
+            JOIN requested USING(room_id) ORDER BY lease.room_id FOR UPDATE OF lease
+        ), leases_done AS MATERIALIZED (
+            SELECT count(*) AS locked_count FROM locked_leases
+        ), observed AS MATERIALIZED (
+            SELECT clock_timestamp() AS observed_at FROM leases_done WHERE locked_count >= 0
+        )
+        SELECT requested.room_id, lease.activation_epoch, lease.owner_shard_id, lease.owner_epoch,
+               lease.host_id, lease.host_incarnation_id, lease.expires_at, observed.observed_at
+        FROM requested CROSS JOIN observed LEFT JOIN locked_leases AS lease USING(room_id)
+        ORDER BY requested.room_id
+        """), decoding: V2LockedRoomActivationLeaseRow.self, source: source)
+}
+
+struct V2LockedRoomActivationLeaseRow: Decodable {
+    let roomID: UUID
+    let activationEpoch: Int64?, ownerShardID: String?, ownerEpoch: Int64?
+    let hostID: String?, incarnationID: UUID?, expiresAt: Date?
+    let observedAt: Date
+    enum CodingKeys: String, CodingKey {
+        case roomID = "room_id", activationEpoch = "activation_epoch", ownerShardID = "owner_shard_id"
+        case ownerEpoch = "owner_epoch", hostID = "host_id", incarnationID = "host_incarnation_id"
+        case expiresAt = "expires_at", observedAt = "observed_at"
+    }
+    func matches(_ token: V2RoomActivationToken) -> Bool {
+        activationEpoch == token.activationEpoch.rawValue && ownerShardID == token.owner.shardID
+            && ownerEpoch == token.owner.epoch && hostID == token.host.hostID.rawValue
+            && incarnationID == token.host.incarnationID
     }
 }
 
@@ -106,16 +154,27 @@ func v2RequireRoomActivation(
     try await v2RequireRoomActivations(tokens: [token], sql: sql, schema: schema, timeouts: timeouts)
 }
 
-func v2LockRoomActivationOwner(roomID: UUID, owner: V2RoomDataOwner, sql: any SQLDatabase, schema: String) async throws {
-    guard let room = try await sql.raw("""
+func v2LockRoomActivationOwner(roomID: UUID, owner: V2RoomDataOwner, sql: any SQLDatabase, schema: String,
+    source: V2RoomSQLContinuationSource? = nil) async throws {
+    let query = sql.raw("""
         SELECT room_shard_id, owner_epoch FROM \(unsafeRaw: schema).rooms WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
-        """).first(decoding: RoomOwnerFenceRow.self) else { throw V2RoomActivationLeaseError.roomNotFound }
+        """)
+    let room: RoomOwnerFenceRow?
+    if let source {
+        room = try await v2RoomSQLObservedFirst(query, decoding: RoomOwnerFenceRow.self, source: source)
+    } else {
+        // Other users do not promise that their next SQL is instrumented.
+        V2RoomSQLContinuationObservation.current?.willDispatch()
+        room = try await query.first(decoding: RoomOwnerFenceRow.self)
+    }
+    guard let room else { throw V2RoomActivationLeaseError.roomNotFound }
     guard room.shardID == owner.shardID, room.epoch == owner.epoch else {
         throw V2RoomActivationLeaseError.ownerChanged
     }
 }
 
 func v2RoomActivationDatabaseClock(sql: any SQLDatabase) async throws -> Date {
+    V2RoomSQLContinuationObservation.current?.willDispatch()
     guard let row = try await sql.raw("SELECT clock_timestamp() AS observed_at")
         .first(decoding: RoomActivationClockRow.self) else {
         throw V2RoomActivationLeaseError.activationChanged

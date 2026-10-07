@@ -15,7 +15,9 @@ python3 IMV2/scripts/prepare_v2_room_actor_configuration.py \
 
 每个进程只挂载自己的 `gateway/` 或 `account/` 子目录到 `/run/im-v2-room-actor`，只包含自己的签名/TLS 私钥、叶证书、CA 公钥和配置。`ca/key.pem` 留在宿主机，不挂载进应用。对原生进程省略 `--mount-root`，地址使用 `localhost` 和不同端口。
 
-`run_v2_local_account_stack.sh` 会在第一次运行时生成 `IMV2/local-room-actors/`，本地 Compose 已分别挂载两个节点目录；该目录被 Git 忽略。普通重启保留 hostID、签名密钥和 CA，只更新随机 process incarnation。证书更新或密钥轮换应显式进行，不通过普通启动隐式轮换。
+`run_v2_local_account_stack.sh` 会在第一次运行时生成 `IMV2/local-room-actors/`，包含 Gateway、Account、Operator 三个节点。本地默认配置 16 个内存策略分区，全部由 Gateway 持有；Account 的关系/陌生人设置修改和 Operator 的封禁修改通过各自签名身份交给该 Owner。本地 Compose 分别只挂载各进程自己的节点目录；该目录被 Git 忽略。普通重启保留 hostID、签名密钥和 CA，只更新随机 process incarnation。证书更新或密钥轮换应显式进行，不通过普通启动隐式轮换。
+
+启动前 `validate_v2_local_policy_configuration.py` 检查三者的 policyPlacement 一致、Gateway 覆盖全部分区且各修改入口具备 policyMutation 权限。已有旧配置缺少 Operator 或内存策略归属时，启动会明确失败，不静默继续使用旧 SQL 授权，也不覆盖旧密钥。配置生成工具仍拒绝覆盖已有目录；可以在独立目录准备新配置供显式切换。已有数据库的部署归属切换仍由服务端原有 placement readiness 检查约束，本脚本不自动迁移数据库或删除本地数据。
 
 当前 DistributedCluster 的 TLS 路径将地址作为 SNI；NIOSSL 拒绝 IP 字面量，因此配置要求 DNS 名。证书 SAN 必须匹配该名称，TLS 固定为 1.3、完整证书校验和双向认证。Cluster 内部端口无须发布到宿主机或公网。
 

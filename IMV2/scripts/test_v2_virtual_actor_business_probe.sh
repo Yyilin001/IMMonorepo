@@ -3,12 +3,22 @@ set -Eeuo pipefail
 
 # Uses two native OS processes (default) or two Linux containers, plus a
 # task-owned PG container. The global Docker context and existing stacks stay untouched.
-: "$DOCKER_CONTEXT"
 mode="${VA_G4_MODE:-native}"
 [[ "$mode" == native || "$mode" == linux ]] || { echo 'VA_G4_MODE must be native or linux' >&2; exit 2; }
+local_postgres="${VA_G4_LOCAL_POSTGRES:-0}"
+[[ "$local_postgres" == 0 || "$local_postgres" == 1 ]] || { echo 'VA_G4_LOCAL_POSTGRES must be 0 or 1' >&2; exit 2; }
+if [[ "$local_postgres" == 1 ]]; then
+  [[ "$mode" == native ]] || { echo 'Local PostgreSQL requires native mode' >&2; exit 2; }
+  local_pg_user="${USER:?}"
+  [[ "$local_pg_user" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || { echo 'Unsupported local PostgreSQL username' >&2; exit 2; }
+else
+  : "$DOCKER_CONTEXT"
+fi
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
 script_dir="$repo_root/IMV2/scripts"
 run_id="$(date +%s)-$$"
+local_pg_database="imv2_va_g4_${run_id//-/_}"
+local_pg_created=0
 prefix="imv2-va-g4-$run_id"
 network="$prefix-net"
 pg="$prefix-pg"
@@ -63,6 +73,13 @@ else
   client_address=va-client
 fi
 dc() { docker --context "$DOCKER_CONTEXT" "$@"; }
+pgsql() {
+  if [[ "$local_postgres" == 1 ]]; then
+    psql -h 127.0.0.1 -U "$local_pg_user" -d "$local_pg_database" "$@"
+  else
+    dc exec -i "$pg" psql -U probe -d probe "$@"
+  fi
+}
 
 cleanup() {
   local status="$1"
@@ -82,8 +99,14 @@ cleanup() {
     dc logs "$client" > "$evidence_dir/client.log" 2>&1 || true
     dc rm -f "$host" "$client" >/dev/null 2>&1 || true
   fi
-  dc rm -f "$pg" >/dev/null 2>&1 || true
-  dc network rm "$network" >/dev/null 2>&1 || true
+  if [[ "$local_postgres" == 1 ]]; then
+    if [[ "$local_pg_created" == 1 ]]; then
+      dropdb -h 127.0.0.1 -U "$local_pg_user" "$local_pg_database" || status=1
+    fi
+  else
+    dc rm -f "$pg" >/dev/null 2>&1 || true
+    dc network rm "$network" >/dev/null 2>&1 || true
+  fi
   rm -rf -- "$secret_dir"
   printf 'G4_EVIDENCE_DIR=%s mode=%s exit=%s\n' "$evidence_dir" "$mode" "$status"
   trap - EXIT
@@ -94,6 +117,15 @@ trap 'cleanup "$?"' EXIT
 wait_file() {
   local path="$1" limit="$2" watched="${3:-}" started=$SECONDS
   until [[ -f "$path" ]]; do
+    if [[ "$mode" == native && -n "$watched" ]]; then
+      local watched_pid=""
+      [[ "$watched" != "$host" ]] || watched_pid="${host_pid:-}"
+      [[ "$watched" != "$client" ]] || watched_pid="${client_pid:-}"
+      if [[ -n "$watched_pid" ]] && ! kill -0 "$watched_pid" 2>/dev/null; then
+        printf '%s exited before creating %s\n' "$watched" "$path" >&2
+        return 1
+      fi
+    fi
     if [[ "$mode" == linux && -n "$watched" &&
           "$(dc inspect --format '{{.State.Running}}' "$watched" 2>/dev/null || true)" != true ]]; then
       dc logs "$watched" >&2 || true
@@ -108,6 +140,11 @@ wait_file() {
   done
 }
 
+if [[ "$local_postgres" == 1 ]]; then
+  createdb -h 127.0.0.1 -U "$local_pg_user" "$local_pg_database"
+  local_pg_created=1
+  database_url="postgres://$local_pg_user@127.0.0.1:5432/$local_pg_database"
+else
 dc network create "$network" >/dev/null
 if [[ "$mode" == linux ]]; then
   dc run -d --name "$pg" --network "$network" --network-alias va-pg \
@@ -134,9 +171,10 @@ else
   pg_port="$(dc port "$pg" 5432/tcp | tail -n 1 | sed 's/.*://')"
   database_url="postgres://probe:probe@127.0.0.1:$pg_port/probe"
 fi
-dc exec -i "$pg" psql -v ON_ERROR_STOP=1 -U probe -d probe \
+fi
+pgsql -v ON_ERROR_STOP=1 \
   < "$repo_root/IMV2/sql/schema.sql" > "$evidence_dir/schema-install.log"
-dc exec -i "$pg" psql -v ON_ERROR_STOP=1 -U probe -d probe \
+pgsql -v ON_ERROR_STOP=1 \
   > "$evidence_dir/fixture-install.log" <<'SQL'
 INSERT INTO im_v2.public_user_profiles
   (user_id, public_handle, display_name, revision, created_at, updated_at)
@@ -201,11 +239,13 @@ host_id = "10000000-0000-0000-0000-000000000001"
 services = [
     {"id": "g4-host-service",
      "publicKeyBase64": base64.b64encode((root / "host-signing.pub").read_bytes()).decode(),
-     "permissions": ["roomCoordination", "userRoomCalls"],
+     "permissions": ["roomCoordination", "userRoomCalls", "realtimePublish", "realtimeReceive"],
+     "gatewayNodeIDs": ["g4-host"],
      "hostIDs": [host_id], "shardIDs": ["room-a"]},
     {"id": "g4-client-service",
      "publicKeyBase64": base64.b64encode((root / "client-signing.pub").read_bytes()).decode(),
-     "permissions": ["roomCoordination", "userRoomCalls"],
+     "permissions": ["roomCoordination", "userRoomCalls", "realtimePublish", "realtimeReceive"],
+     "gatewayNodeIDs": ["g4-client"],
      "hostIDs": [], "shardIDs": ["room-a"]},
 ]
 peers = [{"hostID": host_id, "serviceID": "g4-host-service",
@@ -223,13 +263,17 @@ for role, port in (("host", host_port), ("client", client_port)):
         "privateKeyPath": paths(f"{role}.key"),
         "trustRootPath": paths("ca.pem"),
         "services": services, "peers": peers,
+        "realtimePeers": [
+            {"nodeID": "g4-host", "serviceID": "g4-host-service", "address": host_address, "port": host_port},
+            {"nodeID": "g4-client", "serviceID": "g4-client-service", "address": client_address, "port": client_port},
+        ],
     }
     (root / f"{role}.json").write_text(json.dumps(document))
 PY
 
 git -C "$repo_root" rev-parse HEAD > "$evidence_dir/source-sha.txt"
 printf 'mode=%s\ndocker_context=%s\nswift_image=%s\nclient_first=%s\n' \
-  "$mode" "$DOCKER_CONTEXT" "${swift_image:-native}" "${client_first:-0}" \
+  "$mode" "${DOCKER_CONTEXT:-local-postgres}" "${swift_image:-native}" "${client_first:-0}" \
   > "$evidence_dir/environment.txt"
 if [[ "$mode" == linux ]]; then
   dc run --rm --name "$prefix-build" \
@@ -352,7 +396,7 @@ printf 'first_host_sigkill=1\n' >> "$evidence_dir/processes.txt"
 # The old process never releases its lease. Observe expiry by PG's clock.
 started=$SECONDS
 while true; do
-  expired="$(dc exec "$pg" psql -At -U probe -d probe -c \
+  expired="$(pgsql -At -c \
     "SELECT expires_at <= clock_timestamp() FROM im_v2.room_activation_leases WHERE room_id = '00000000-0000-0000-0000-000000000011'")"
   [[ "$expired" == t ]] && break
   (( SECONDS - started < 50 )) || { echo 'old lease did not expire' >&2; exit 1; }
@@ -388,7 +432,7 @@ else
 fi
 rg -q 'G4_SEND_AND_LOG_OK' "$evidence_dir/client.log"
 rg -q 'G4_REPLAY_AND_SQL_FENCE_OK' "$evidence_dir/client.log"
-dc exec "$pg" psql -At -U probe -d probe -c \
+pgsql -At -c \
   "SELECT activation_epoch, host_incarnation_id FROM im_v2.room_activation_leases WHERE room_id = '00000000-0000-0000-0000-000000000011'; SELECT count(*) FROM im_v2.messages;" \
   > "$evidence_dir/final-sql.txt"
 rg -q '^2\|' "$evidence_dir/final-sql.txt"

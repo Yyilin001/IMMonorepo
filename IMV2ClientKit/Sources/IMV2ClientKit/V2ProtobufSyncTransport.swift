@@ -9,66 +9,12 @@ public protocol V2AuthenticatedFrameTransport: Sendable {
     /// 发送完整请求帧并等待对应响应；关联管理、取消和连接错误由具体传输实现负责。
     func request(_ frame: V2Frame) async throws -> V2Frame
     func negotiatedProtocolVersion() async -> UInt8?
+    func authenticatedConnectionID() async -> UUID?
 }
 
 public extension V2AuthenticatedFrameTransport {
     func negotiatedProtocolVersion() async -> UInt8? { nil }
-}
-
-/// 映射媒体展示类型与元数据；拒绝未指定或未知类型，再由领域初始化验证其余约束。
-private func v2MediaPresentation(from wire: IMV2MediaPresentation) throws -> V2MediaPresentation {
-    let kind: V2MediaPresentation.Kind
-    switch wire.kind {
-    case .image: kind = .image
-    case .animatedImage: kind = .animatedImage
-    case .video: kind = .video
-    case .audio: kind = .audio
-    case .file: kind = .file
-    case .unspecified, .UNRECOGNIZED:
-        throw V2RealtimeTransportError.unexpectedResponse
-    }
-    return try .init(
-        mediaID: .init(wire.mediaID),
-        kind: kind,
-        contentType: wire.contentType,
-        byteCount: wire.byteCount
-    )
-}
-
-/// 映射富文本类型与 UTF-16 范围；拒绝未知类型，非空链接尝试转换 URL 后交给领域初始化校验。
-private func v2MessageEntity(from wire: IMV2MessageEntity) throws -> V2MessageEntity {
-    let kind: V2MessageEntity.Kind
-    switch wire.kind {
-    case .bold: kind = .bold
-    case .italic: kind = .italic
-    case .underline: kind = .underline
-    case .strikethrough: kind = .strikethrough
-    case .spoiler: kind = .spoiler
-    case .code: kind = .code
-    case .preformatted: kind = .preformatted
-    case .link: kind = .link
-    case .unspecified, .UNRECOGNIZED: throw V2RealtimeTransportError.unexpectedResponse
-    }
-    return try .init(offsetUTF16: Int(wire.offsetUtf16), lengthUTF16: Int(wire.lengthUtf16), kind: kind, linkURL: wire.linkURL.isEmpty ? nil : URL(string: wire.linkURL))
-}
-
-/// 把已验证的富文本实体编码为 protobuf；调用方需保证 UTF-16 偏移和长度可转换为 UInt32。
-private func v2MessageEntityWire(_ entity: V2MessageEntity) -> IMV2MessageEntity {
-    var wire = IMV2MessageEntity()
-    wire.offsetUtf16 = UInt32(entity.offsetUTF16)
-    wire.lengthUtf16 = UInt32(entity.lengthUTF16)
-    wire.kind = switch entity.kind {
-    case .bold: .bold
-    case .italic: .italic
-    case .underline: .underline
-    case .strikethrough: .strikethrough
-    case .spoiler: .spoiler
-    case .code: .code
-    case .preformatted: .preformatted
-    case .link: .link
-    }
-    wire.linkURL = entity.linkURL?.absoluteString ?? ""
-    return wire
+    func authenticatedConnectionID() async -> UUID? { nil }
 }
 
 /// 只包含正式身份、房间位置和时间的消息接受回执。
@@ -474,8 +420,87 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     private let pageDigestVerifier: any V2SnapshotPageDigestVerifier
     /// 获取快照清单时检查期限的可注入当前时间；心跳默认时间来自其方法参数。
     private let now: @Sendable () -> Date
+    private let durableRoomProgress: (@Sendable (RoomID) async throws -> UInt64?)?
+    /// Test-only witness before a matching heartbeat H enters the normal hint path.
+    private let testRoomProgressObserver: (@Sendable (RoomID, UInt64) async throws -> Void)?
     /// 下一个帧关联号，从一开始递增并跳过回绕后的零；不在此维护在途号集合。
     private var nextRequestID: UInt64 = 1
+    private var pendingDeviceProgress: [RoomID: UInt64] = [:]
+    private var deviceProgressWake: AsyncStream<Void>.Continuation?
+    private var deviceProgressFlushRunning = false
+
+    public func enqueueDeviceRoomProgress(roomID: RoomID, appliedThrough: UInt64) throws {
+        guard appliedThrough <= UInt64(Int64.max),
+              pendingDeviceProgress[roomID] != nil || pendingDeviceProgress.count < 4096 else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        pendingDeviceProgress[roomID] = max(pendingDeviceProgress[roomID] ?? 0, appliedThrough)
+        deviceProgressWake?.yield(())
+    }
+
+    /// The active connection task group owns this worker. Failed confirmations
+    /// retain their reports across reconnect; message reception never waits for SQL.
+    public func runDeviceRoomProgressReports() async throws {
+        guard deviceProgressWake == nil, !deviceProgressFlushRunning else { throw V2RealtimeTransportError.unexpectedResponse }
+        let wake = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        deviceProgressWake = wake.continuation
+        defer { deviceProgressWake = nil; wake.continuation.finish() }
+        wake.continuation.yield(())
+        for await _ in wake.stream {
+            try Task.checkCancellation()
+            var retrySeconds = 1
+            while !pendingDeviceProgress.isEmpty {
+                try Task.checkCancellation()
+                let roomIDs = pendingDeviceProgress.keys.sorted { $0.rawValue < $1.rawValue }
+                let batch: [RoomID: UInt64] = Dictionary(uniqueKeysWithValues: roomIDs.prefix(64).map {
+                    ($0, pendingDeviceProgress[$0]!)
+                })
+                do {
+                    try await reportPendingDeviceProgressBatch(batch)
+                } catch V2RealtimeTransportError.server(let code, let retryable, _, _) where retryable {
+                    _ = code
+                    try await Task.sleep(for: .seconds(retrySeconds))
+                    retrySeconds = min(10, retrySeconds * 2)
+                    continue
+                }
+                for (room, cursor) in batch where pendingDeviceProgress[room] == cursor {
+                    pendingDeviceProgress.removeValue(forKey: room)
+                }
+                retrySeconds = 1
+            }
+        }
+        try Task.checkCancellation()
+    }
+
+    private func reportPendingDeviceProgressBatch(_ batch: [RoomID: UInt64]) async throws {
+        do {
+            try await reportDeviceRoomProgress(batch)
+        } catch V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _) {
+            // A revoked room must not prevent other rooms from confirming.
+            for (room, cursor) in batch {
+                do { try await reportDeviceRoomProgress([room: cursor]) }
+                catch V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _) { continue }
+            }
+        }
+    }
+
+    /// A bounded background connection drains its current reports before closing.
+    /// Failed reports remain pending; reconnect recovery rebuilds them from SQLite.
+    public func flushDeviceRoomProgressReports() async throws {
+        guard deviceProgressWake == nil, !deviceProgressFlushRunning else { throw V2RealtimeTransportError.unexpectedResponse }
+        deviceProgressFlushRunning = true
+        defer { deviceProgressFlushRunning = false }
+        let snapshot = pendingDeviceProgress
+        let rooms = snapshot.keys.sorted { $0.rawValue < $1.rawValue }
+        for offset in stride(from: 0, to: rooms.count, by: 64) {
+            try Task.checkCancellation()
+            let batch = Dictionary(uniqueKeysWithValues: rooms[offset..<min(offset + 64, rooms.count)].map { ($0, snapshot[$0]!) })
+            try await reportPendingDeviceProgressBatch(batch)
+            for (room, cursor) in batch where pendingDeviceProgress[room] == cursor {
+                pendingDeviceProgress.removeValue(forKey: room)
+            }
+        }
+    }
 
     /// 配置已认证连接与协议映射依赖。
     ///
@@ -490,13 +515,17 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         wire: any V2AuthenticatedFrameTransport,
         protocolVersion: UInt8,
         pageDigestVerifier: any V2SnapshotPageDigestVerifier = V2SHA256SnapshotPageDigestVerifier(),
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        durableRoomProgress: (@Sendable (RoomID) async throws -> UInt64?)? = nil,
+        testRoomProgressObserver: (@Sendable (RoomID, UInt64) async throws -> Void)? = nil
     ) {
         precondition(protocolVersion > 0)
         self.wire = wire
         self.protocolVersion = protocolVersion
         self.pageDigestVerifier = pageDigestVerifier
         self.now = now
+        self.durableRoomProgress = durableRoomProgress
+        self.testRoomProgressObserver = testRoomProgressObserver
     }
 
     /// 构造同步拉取请求并映射增量或恢复响应。
@@ -515,7 +544,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         request.syncPull.syncToken = syncToken?.rawValue ?? ""
         request.syncPull.maxRecords = UInt32(clamping: maxRecords)
         request.syncPull.requireSnapshot = requireSnapshot
-        let response = try await requestEnvelope(request)
+        let response = try await requestSyncEnvelope(request)
         switch response.body {
         case .syncBatch(let batch):
             guard batch.generation > 0, batch.generation <= UInt64(Int64.max),
@@ -552,7 +581,7 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         request.syncAck.generation = generation
         request.syncAck.highestContiguousSequence = highestContiguousSequence
         request.syncAck.syncReceipt = receipt.rawValue
-        let response = try await requestEnvelope(request)
+        let response = try await requestSyncEnvelope(request)
         guard case .acknowledged? = response.body else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
@@ -564,7 +593,31 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     /// - Parameter clientTime: 当前客户端日期；有限负时间钳制为零，毫秒向零舍入。
     /// - Throws: 时间非有限或无法放入 UInt64，响应类型错误，以及服务端或传输错误。
     ///
-    /// 只验证响应类型，不据此校准本地时钟或计算往返延迟。
+    /// Report only cursors read after a successful local storage transaction.
+    /// The acknowledgement must never advance local message storage.
+    public func reportDeviceRoomProgress(_ cursors: [RoomID: UInt64]) async throws {
+        guard !cursors.isEmpty, cursors.count <= 64,
+              cursors.values.allSatisfy({ $0 <= UInt64(Int64.max) }) else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        var request = IMV2Envelope()
+        request.deviceRoomProgressReport = .init()
+        request.deviceRoomProgressReport.rooms = cursors.sorted { $0.key.rawValue < $1.key.rawValue }.map { room, cursor in
+            var value = IMV2DeviceRoomCursor()
+            value.roomID = room.rawValue; value.appliedThrough = cursor
+            return value
+        }
+        let response = try await requestEnvelope(request)
+        guard case .deviceRoomProgressRecorded(let recorded)? = response.body else {
+            try throwServerErrorIfPresent(response)
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        guard recorded.rooms == request.deviceRoomProgressReport.rooms else {
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+    }
+
+    /// 附带前台房间进度；独立设备确认不会搭载在心跳上。
     public func sendHeartbeat(clientTime: Date = Date()) async throws {
         let milliseconds = clientTime.timeIntervalSince1970 * 1_000
         guard milliseconds.isFinite,
@@ -573,10 +626,42 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
         var request = IMV2Envelope()
         request.heartbeat = .init()
         request.heartbeat.clientTimeMs = wireTime
+        let progressConnection = wire as? any V2RoomProgressConnection
+        let connectionID = await wire.authenticatedConnectionID()
+        if let scope = await progressConnection?.roomProgressScope(),
+           scope.connectionGeneration == connectionID,
+           let durableRoomProgress,
+           let applied = try await durableRoomProgress(RoomID(scope.scopeID)) {
+            guard applied <= UInt64(Int64.max) else { throw V2RealtimeTransportError.unexpectedResponse }
+            var progress = IMV2GroupEventProgress()
+            progress.roomID = scope.scopeID
+            progress.scopeGeneration = scope.scopeGeneration
+            progress.appliedRoomSequence = applied
+            request.heartbeat.roomProgress = [progress]
+        }
         let response = try await requestEnvelope(request)
-        guard case .heartbeatAck? = response.body else {
+        guard case .heartbeatAck(let ack)? = response.body else {
             try throwServerErrorIfPresent(response)
             throw V2RealtimeTransportError.unexpectedResponse
+        }
+        guard ack.roomSubscriptionStates.count <= 1 else { throw V2RealtimeTransportError.unexpectedResponse }
+        for state in ack.roomSubscriptionStates {
+            guard UUID(uuidString: state.roomID) != nil, state.scopeGeneration > 0,
+                  state.highWatermark <= UInt64(Int64.max),
+                  state.appliedRoomSequence <= state.highWatermark else {
+                throw V2RealtimeTransportError.unexpectedResponse
+            }
+            // Server C is an observation, never evidence for a local write.
+            if state.ready, let connectionID {
+                if let scope = await progressConnection?.roomProgressScope(),
+                   scope.connectionGeneration == connectionID, scope.scopeGeneration == state.scopeGeneration,
+                   scope.scopeID.lowercased() == state.roomID.lowercased() {
+                    try await testRoomProgressObserver?(RoomID(state.roomID), state.highWatermark)
+                }
+                try await progressConnection?.acceptRoomProgressHead(roomID: state.roomID,
+                    scopeGeneration: state.scopeGeneration, highWatermark: state.highWatermark,
+                    connectionID: connectionID)
+            }
         }
     }
 
@@ -1137,6 +1222,42 @@ public actor V2ProtobufSyncTransport: V2ClientSyncTransport, V2ClientGroupRolePo
     ///
     /// 编码与解码使用适配器默认预算，未在此传入压缩协商；响应必须匹配本次请求号和协议版本。
     /// 计数器回绕跳过零，但不在此扫描仍在途的历史编号。返回的业务错误 envelope 由各命令方法另行映射。
+    /// Retry only an explicit pre-admission BUSY, preserving the immutable
+    /// pull or acknowledgement. Other errors keep their existing semantics.
+    private func requestSyncEnvelope(_ request: IMV2Envelope) async throws -> IMV2Envelope {
+        let policy = V2NetworkWorkPolicy.interactiveRead
+        let clock = ContinuousClock()
+        let started = clock.now
+        let deadline = min(V2SyncRequestScope.deadline ?? started + .seconds(policy.totalBudget),
+                           started + .seconds(policy.totalBudget))
+        let currentConnectionID = await wire.authenticatedConnectionID()
+        let connectionID = V2ConnectionRequestScope.connectionID ?? currentConnectionID
+        return try await V2ConnectionRequestScope.$connectionID.withValue(connectionID) {
+            try await V2SyncRequestScope.$deadline.withValue(deadline) {
+                for attempt in 1...policy.maximumAttempts {
+                    try Task.checkCancellation()
+                    guard clock.now < deadline else { throw V2TLSFrameConnectionError.requestTimedOut }
+                    if let connectionID, await wire.authenticatedConnectionID() != connectionID {
+                        throw V2TLSFrameConnectionError.connectionClosed
+                    }
+                    let response = try await requestEnvelope(request)
+                    guard case .error(let error)? = response.body,
+                          error.code == "SERVER_BUSY", error.retryable,
+                          attempt < policy.maximumAttempts else { return response }
+                    let base = clock.now + .seconds(Double(error.retryAfterSeconds))
+                    guard base < deadline else { return response }
+                    let remaining = base.duration(to: deadline).components
+                    let remainingSeconds = Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18
+                    let ceiling = min(30, 0.5 * pow(2, Double(attempt - 1)))
+                    let wake = base + .seconds(min(ceiling, remainingSeconds) * Double.random(in: 0...1))
+                    guard wake < deadline else { return response }
+                    try await clock.sleep(until: wake)
+                }
+                throw V2RealtimeTransportError.unexpectedResponse
+            }
+        }
+    }
+
     func requestEnvelope(_ envelope: IMV2Envelope,
                          maximumMessageSendPayloadBytes: Int = V2MessageSendWireLimits.maximumPayloadBytes) async throws -> IMV2Envelope {
         var outbound = envelope

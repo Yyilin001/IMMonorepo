@@ -34,7 +34,7 @@ extension IMAppRoomRecoveryScaleTests {
             guard !pressureRooms.isEmpty, Set(pressureRooms).count == pressureRooms.count else {
                 throw V2RealtimeTransportError.unexpectedResponse
             }
-            try await sendRecoveryOnlineMessage(transport: transport, auth: auth, account: account, roomID: roomID,
+            try await sendRecoveryOnlineMessage(transport: transport, connection: connection, auth: auth, account: account, roomID: roomID,
                 deadline: ContinuousClock.now.advanced(by: .seconds(30)))
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
@@ -52,7 +52,8 @@ extension IMAppRoomRecoveryScaleTests {
             }
             print("IMV2_TLS_ROOM_SLOW_TLS_COVERAGE_PROVEN")
             _ = try await transport.subscribeToGroupEvents(roomID: roomID, afterRoomSequence: 3)
-            _ = try await senderCoordinator.connect()
+            let senderSession = try await senderCoordinator.connect()
+            let senderTransport = V2ProtobufSyncTransport(wire: secondary, protocolVersion: senderSession.protocolVersion)
             let baseline = try await controlSlowTLS(.pause)
             paused = true
             guard baseline.paused else { throw V2RealtimeTransportError.unexpectedResponse }
@@ -76,7 +77,8 @@ extension IMAppRoomRecoveryScaleTests {
                 try Task.checkCancellation()
                 guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
                 _ = try await V2HTTPRequestDeadline.run(until: deadline, service: "accountAPI") {
-                    try await account.sendMessage(roomID: targetRoom, clientMessageID: id, text: text, auth: auth)
+                    try await account.sendMessage(roomID: targetRoom, clientMessageID: id, text: text,
+                        auth: auth, connection: secondary, transport: senderTransport)
                 }
                 textsByRoom[targetRoom, default: []].insert(text)
                 committed += 1

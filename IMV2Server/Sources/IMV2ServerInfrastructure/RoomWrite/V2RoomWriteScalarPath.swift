@@ -16,6 +16,8 @@ struct V2ScalarAcceptanceContext {
     let cachedDirectPolicy: V2DirectSendPolicyCache.Entry?
     let importedForward: ForwardInboxAuthorization?
     let controlScopeRoomKinds: [UUID: String]?
+    var leasedPolicy: V2DirectSendControlPolicy? = nil
+    var leasedAccount: V2PolicyAccountFacts? = nil
 }
 
 enum V2ScalarAcceptancePreparation {
@@ -30,9 +32,10 @@ enum V2ScalarAcceptancePreparation {
 }
 
 struct V2ScalarAuthorizedAdmission {
-    let snapshot: AdmissionSnapshotRow
-    let admission: AdmissionRow
-    let shard: ShardRow
+    let actorRole: String?
+    let senderIsActive: Bool?
+    let muted: Bool?
+
 }
 
 /// Runs only on the connection borrowed from V2RoomWriteTransactionCoordinator.
@@ -43,7 +46,7 @@ enum V2RoomWriteScalarPath {
         let loaded = try await ScalarMessagePreflight.load(
             roomID: context.roomID, senderID: context.senderID,
             clientMessageID: context.clientMessageID, now: context.now,
-            cachedDirectPolicy: context.cachedDirectPolicy, sql: sql)
+            cachedDirectPolicy: context.cachedDirectPolicy, leasedPolicy: context.leasedPolicy, leasedAccount: context.leasedAccount, sql: sql)
         let room = loaded.room
         guard context.controlScopeRoomKinds == nil
                 || context.controlScopeRoomKinds?[context.roomID] == room.kind else {
@@ -82,14 +85,7 @@ enum V2RoomWriteScalarPath {
     }
 
     static func admission(_ fresh: V2ScalarAcceptancePreparation.Fresh) throws -> V2ScalarAuthorizedAdmission {
-        let snapshot = try fresh.loaded.admissionSnapshot()
-        let admission = snapshot.room
-        let shard = snapshot.shard
-        guard admission.shardLeaseID == shard.leaseID,
-              admission.shardLeaseGeneration == shard.generation else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        return .init(snapshot: snapshot, admission: admission, shard: shard)
+        .init(actorRole: fresh.loaded.actorRole, senderIsActive: fresh.loaded.senderIsActive, muted: fresh.loaded.muted)
     }
 
     static func authorizeContent(_ fresh: V2ScalarAcceptancePreparation.Fresh,
@@ -99,7 +95,7 @@ enum V2RoomWriteScalarPath {
         try await v2AuthorizeContentWrite(
             roomID: roomID, isGroup: fresh.room.kind == "group",
             frozenAt: fresh.room.frozenAt, actorIsActive: actorIsActive,
-            actorRole: admission.snapshot.actorRole,
-            isMuted: admission.snapshot.muted != false, sql: sql)
+            actorRole: admission.actorRole,
+            isMuted: admission.muted != false, sql: sql)
     }
 }

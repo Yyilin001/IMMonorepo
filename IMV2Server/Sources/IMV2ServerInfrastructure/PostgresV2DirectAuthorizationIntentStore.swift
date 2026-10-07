@@ -67,17 +67,34 @@ struct PostgresV2DirectAuthorizationIntentStore: Sendable {
         return try await V2DirectSendControlPolicyFence(database: database, schema: schema)
             .withLockedPolicies(pairs: requests.map(\.pair)) { transaction, policies in
                 let sql = try sqlDatabase(transaction)
+                try await v2AcquireOrderedDirectAuthorizationLocks(
+                    ordered.map { "v2-direct-authorization:" + $0.operationKey }, shared: false, sql: sql)
+                let keysJSON = String(decoding: try JSONEncoder().encode(ordered.map(DirectIntentBatchKey.init)), as: UTF8.self)
+                let priorRows = try await sql.raw("""
+                    SELECT intent.*, intent.policy::text AS policy_json
+                    FROM \(unsafeRaw: schema).direct_authorization_intents intent
+                    JOIN jsonb_to_recordset(\(bind: keysJSON)::jsonb)
+                      AS input(room_id uuid,sender_user_id uuid,client_message_id uuid)
+                      ON intent.room_id=input.room_id AND intent.sender_user_id=input.sender_user_id
+                     AND intent.client_message_id=input.client_message_id
+                    ORDER BY intent.room_id,intent.sender_user_id,intent.client_message_id FOR UPDATE OF intent
+                    """).all(decoding: IntentRow.self)
+                var priorByKey: [String: V2DirectAuthorizationGrant] = [:]
+                for row in priorRows {
+                    let grant = try row.grant(), key = directIntentOperationKey(grant.attempt)
+                    guard priorByKey.updateValue(grant, forKey: key) == nil else { throw V2DirectAuthorizationIntentError.corruptPersistence }
+                }
                 var byKey: [String: V2DirectAuthorizationGrant] = [:]
+                var mutations: [DirectIntentBatchMutation] = []
                 for request in ordered {
-                    try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-direct-authorization:" + request.operationKey), 0))").run()
                     guard let policy = policies[request.pair] else { throw V2DirectAuthorizationIntentError.corruptPersistence }
-                    let prior = try await lookup(request.attempt(generation: 1), sql: sql, lock: true)
+                    let prior = priorByKey[request.operationKey]
                     if let prior {
                         guard prior.attempt.recipientID == request.recipientID, prior.attempt.fingerprint == request.fingerprint else {
                             throw V2DirectAuthorizationIntentError.identityConflict
                         }
-                        // 沿用原始所有者、纪元、代次和事实重试。
-                        // 不得悄然迁移结果不明的尝试。
+                        // An unresolved or accepted/denied attempt keeps its
+                        // exact original owner, generation and frozen policy.
                         if prior.receipt?.disposition != .aborted {
                             byKey[request.operationKey] = prior
                             continue
@@ -85,35 +102,56 @@ struct PostgresV2DirectAuthorizationIntentStore: Sendable {
                         guard prior.attempt.generation < Int64.max else { throw V2DirectAuthorizationIntentError.generationExhausted }
                         guard now >= prior.updatedAt else { throw V2DirectAuthorizationIntentError.invalidRequest }
                     }
-                    let policyJSON = String(decoding: try JSONEncoder().encode(policy), as: UTF8.self)
-                    if let prior {
-                        try await sql.raw("""
-                            UPDATE \(unsafeRaw: schema).direct_authorization_intents
-                            SET generation = generation + 1, owner_shard_id = \(bind: request.ownerShardID),
-                                owner_epoch = \(bind: request.ownerEpoch), policy = \(bind: policyJSON)::jsonb,
-                                disposition = NULL, event_id = NULL, attempt_created_at = \(bind: now),
-                                updated_at = \(bind: now), next_check_at = \(bind: nextCheck),
-                                lease_token = NULL, lease_until = NULL, attempt_count = 0
-                            WHERE room_id = \(bind: request.roomID) AND sender_user_id = \(bind: request.senderID)
-                              AND client_message_id = \(bind: request.clientMessageID) AND generation = \(bind: prior.attempt.generation)
-                              AND disposition = 'aborted'
-                            """).run()
-                    } else {
-                        try await sql.raw("""
-                            INSERT INTO \(unsafeRaw: schema).direct_authorization_intents
-                                (room_id, sender_user_id, client_message_id, recipient_user_id, request_fingerprint,
-                                 generation, owner_shard_id, owner_epoch, policy, created_at, attempt_created_at,
-                                 updated_at, next_check_at)
-                            VALUES (\(bind: request.roomID), \(bind: request.senderID), \(bind: request.clientMessageID),
-                                \(bind: request.recipientID), \(bind: request.fingerprint), 1, \(bind: request.ownerShardID),
-                                \(bind: request.ownerEpoch), \(bind: policyJSON)::jsonb, \(bind: now), \(bind: now),
-                                \(bind: now), \(bind: nextCheck))
-                            """).run()
+                    mutations.append(.init(request: request, policy: policy, previousGeneration: prior?.attempt.generation))
+                }
+                if !mutations.isEmpty {
+                    let mutationJSON = String(decoding: try JSONEncoder().encode(mutations), as: UTF8.self)
+                    // Fresh and aborted identities form disjoint sets. No
+                    // ON CONFLICT ignore can silently drop an obligation.
+                    // RETURNING is the authoritative new grant; there is no
+                    // per-command post-write lookup or provisional return.
+                    let changedRows = try await sql.raw("""
+                        WITH input AS MATERIALIZED (
+                          SELECT * FROM jsonb_to_recordset(\(bind: mutationJSON)::jsonb)
+                            AS item(room_id uuid,sender_user_id uuid,client_message_id uuid,recipient_user_id uuid,
+                              request_fingerprint text,owner_shard_id text,owner_epoch bigint,policy jsonb,previous_generation bigint)
+                        ), inserted AS (
+                          INSERT INTO \(unsafeRaw: schema).direct_authorization_intents
+                            (room_id,sender_user_id,client_message_id,recipient_user_id,request_fingerprint,generation,
+                             owner_shard_id,owner_epoch,policy,created_at,attempt_created_at,updated_at,next_check_at)
+                          SELECT room_id,sender_user_id,client_message_id,recipient_user_id,decode(request_fingerprint,'base64'),1,
+                                 owner_shard_id,owner_epoch,policy,\(bind: now),\(bind: now),\(bind: now),\(bind: nextCheck)
+                          FROM input WHERE previous_generation IS NULL
+                          ORDER BY room_id,sender_user_id,client_message_id
+                          RETURNING *
+                        ), restarted AS (
+                          UPDATE \(unsafeRaw: schema).direct_authorization_intents intent
+                          SET generation=input.previous_generation+1,owner_shard_id=input.owner_shard_id,
+                              owner_epoch=input.owner_epoch,policy=input.policy,disposition=NULL,event_id=NULL,
+                              attempt_created_at=\(bind: now),updated_at=\(bind: now),next_check_at=\(bind: nextCheck),
+                              lease_token=NULL,lease_until=NULL,attempt_count=0
+                          FROM input
+                          WHERE input.previous_generation IS NOT NULL AND intent.room_id=input.room_id
+                            AND intent.sender_user_id=input.sender_user_id AND intent.client_message_id=input.client_message_id
+                            AND intent.generation=input.previous_generation AND intent.disposition='aborted'
+                            AND intent.recipient_user_id=input.recipient_user_id
+                            AND intent.request_fingerprint=decode(input.request_fingerprint,'base64')
+                          RETURNING intent.*
+                        )
+                        SELECT inserted.*,inserted.policy::text AS policy_json FROM inserted
+                        UNION ALL SELECT restarted.*,restarted.policy::text AS policy_json FROM restarted
+                        """).all(decoding: IntentRow.self)
+                    guard changedRows.count == mutations.count else { throw V2DirectAuthorizationIntentError.corruptPersistence }
+                    let expected = Dictionary(uniqueKeysWithValues: mutations.map { ($0.request.operationKey, $0) })
+                    for row in changedRows {
+                        let grant = try row.grant(), key = directIntentOperationKey(grant.attempt)
+                        guard let mutation = expected[key], byKey[key] == nil,
+                              grant.attempt == mutation.request.attempt(generation: (mutation.previousGeneration ?? 0)+1),
+                              grant.policy == mutation.policy, grant.receipt == nil else {
+                            throw V2DirectAuthorizationIntentError.corruptPersistence
+                        }
+                        byKey[key] = grant
                     }
-                    guard let result = try await lookup(request.attempt(generation: 1), sql: sql, lock: false) else {
-                        throw V2DirectAuthorizationIntentError.corruptPersistence
-                    }
-                    byKey[request.operationKey] = result
                 }
                 return try requests.map {
                     guard let grant = byKey[$0.operationKey] else { throw V2DirectAuthorizationIntentError.corruptPersistence }
@@ -264,5 +302,35 @@ private struct IntentRow: Decodable {
         return .init(attempt: attempt, policy: policy, receipt: disposition.map { .init(disposition: $0, eventID: eventID) },
             createdAt: createdAt, attemptCreatedAt: attemptCreatedAt, updatedAt: updatedAt, nextCheckAt: nextCheckAt,
             leaseToken: leaseToken, leaseUntil: leaseUntil, attemptCount: attemptCount)
+    }
+}
+
+private func directIntentOperationKey(_ attempt: V2DirectAuthorizationAttempt) -> String {
+    [attempt.roomID, attempt.senderID, attempt.clientMessageID].map { $0.uuidString.lowercased() }.joined(separator: ":")
+}
+private struct DirectIntentBatchKey: Encodable {
+    let roomID: UUID; let senderID: UUID; let clientID: UUID
+    init(_ request: V2DirectAuthorizationRequest) { roomID=request.roomID; senderID=request.senderID; clientID=request.clientMessageID }
+    enum CodingKeys: String, CodingKey { case roomID="room_id",senderID="sender_user_id",clientID="client_message_id" }
+}
+private struct DirectIntentBatchMutation: Encodable {
+    let request: V2DirectAuthorizationRequest
+    let policy: V2DirectSendControlPolicy
+    let previousGeneration: Int64?
+    enum CodingKeys: String, CodingKey {
+        case roomID="room_id",senderID="sender_user_id",clientID="client_message_id",recipientID="recipient_user_id",
+             fingerprint="request_fingerprint",ownerShard="owner_shard_id",ownerEpoch="owner_epoch",policy,previousGeneration="previous_generation"
+    }
+    func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(request.roomID,forKey:.roomID)
+        try values.encode(request.senderID,forKey:.senderID)
+        try values.encode(request.clientMessageID,forKey:.clientID)
+        try values.encode(request.recipientID,forKey:.recipientID)
+        try values.encode(request.fingerprint.base64EncodedString(),forKey:.fingerprint)
+        try values.encode(request.ownerShardID,forKey:.ownerShard)
+        try values.encode(request.ownerEpoch,forKey:.ownerEpoch)
+        try values.encode(policy,forKey:.policy)
+        try values.encodeIfPresent(previousGeneration,forKey:.previousGeneration)
     }
 }

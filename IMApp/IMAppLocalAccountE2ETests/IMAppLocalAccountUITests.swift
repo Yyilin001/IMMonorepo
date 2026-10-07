@@ -25,6 +25,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
         let receiverConnection = V2TLSFrameConnection(endpoint: receiverEndpoint, frameLimits: frameLimits)
 
         let restoredSenderConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+        let restoredReceiverConnection = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("im-v2-private-hint-e2e-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -56,7 +57,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             await assertDirectMessageIsRestricted(
                 sender: sender,
                 roomID: directRoom.roomID,
-                text: "must-not-deliver-while-blocked"
+                text: "must-not-deliver-while-blocked", connection: senderConnection, transport: senderTransport
             )
 
             let senderBinding = LocalE2EInstallationBindingStore()
@@ -98,7 +99,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             try await assertPrivateHintSurvivesAppRelaunch(sender: sender, roomID: directRoom.roomID.rawValue, hintID: hint.id) {
                 let before = Set(try await restoredStore.timelineActivities(in: directRoom.roomID).map(\.id))
                 await assertDirectMessageIsRestricted(sender: sender, roomID: directRoom.roomID,
-                    text: "background-recovery-\(UUID())")
+                    text: "background-recovery-\(UUID())", connection: restoredSenderConnection, transport: restoredTransport)
                 let deadline = ContinuousClock.now.advanced(by: .seconds(10))
                 while ContinuousClock.now < deadline {
                     try await synchronizeInitialState(restoredSync)
@@ -112,24 +113,31 @@ final class IMAppLocalAccountUITests: XCTestCase {
 
 
             try await receiver.setBlock(target: sender.userID, blocked: false)
-            await receiverConnection.disconnect()
+            // Keep the authenticated old connection and its directory interests
+            // alive while the same device restores on the other Gateway.
+            _ = try await receiverTransport.startAccountRoomChanges()
+            _ = try await receiverTransport.userRoomDirectory(cursor: nil, pageSize: 100)
+            let reconnected = try await restoredReceiverConnection.connectAndAuthenticate(
+                accessToken: receiver.accessToken, deviceID: receiver.deviceID, supportedCapabilityProfiles: ["base"])
+            XCTAssertEqual(reconnected.userID, receiverSession.userID)
             let accepted = try await sender.sendMessage(
                 roomID: directRoom.roomID,
                 clientMessageID: try ClientMessageID(UUID().uuidString.lowercased()),
                 text: "allowed-after-explicit-unblock",
                 media: [],
-                mentions: []
+                mentions: [], connection: restoredSenderConnection, transport: restoredTransport
             )
-            let reconnected = try await receiverConnection.connectAndAuthenticate(
-                accessToken: receiver.accessToken, deviceID: receiver.deviceID, supportedCapabilityProfiles: ["base"])
-            let recoveryTransport = V2ProtobufSyncTransport(wire: receiverConnection,
+            try await waitForRoomChange(receiverConnection, roomID: directRoom.roomID,
+                sequence: accepted.roomSequence)
+            let recoveryTransport = V2ProtobufSyncTransport(wire: restoredReceiverConnection,
                 protocolVersion: reconnected.protocolVersion)
             let recoveryPersonal = V2SyncEngine(transport: recoveryTransport, store: receiverStore,
                 capabilityProfile: reconnected.capabilityProfile)
             try await synchronizeInitialState(recoveryPersonal)
+            let recoveryGroupEvents = V2GroupEventSyncEngine(transport: recoveryTransport, store: receiverStore)
             let recoveryEngine = V2RoomRecoveryEngine(transport: recoveryTransport, latestVisible: recoveryTransport,
-                store: receiverStore, groupEvents: V2GroupEventSyncEngine(transport: recoveryTransport, store: receiverStore))
-            let recoveryRunner = V2RoomRecoveryRunner(engine: recoveryEngine, source: receiverConnection,
+                store: receiverStore, groupEvents: recoveryGroupEvents)
+            let recoveryRunner = V2RoomRecoveryRunner(engine: recoveryEngine, source: restoredReceiverConnection,
                 personalSync: recoveryPersonal)
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask { try await recoveryRunner.run(userID: receiver.userID) }
@@ -159,6 +167,9 @@ final class IMAppLocalAccountUITests: XCTestCase {
             XCTAssertEqual(recovered.first?.text, "allowed-after-explicit-unblock")
             let cursor = try await receiverStore.groupEventCursor(roomID: directRoom.roomID)
             XCTAssertGreaterThanOrEqual(cursor, accepted.roomSequence)
+            // The new connection has persisted recovery before the old one is
+            // retired; its cleanup must leave the new connection's scopes intact.
+            await receiverConnection.disconnect()
             let list = try await receiverStore.conversationListPage(isArchived: false, before: nil, limit: 20)
             let entry = try XCTUnwrap(list.entries.first { $0.roomID == directRoom.roomID })
             XCTAssertEqual(entry.lastMessage?.messageID, accepted.messageID)
@@ -173,11 +184,11 @@ final class IMAppLocalAccountUITests: XCTestCase {
             if secondaryPort != nil {
                 let online = try await sender.sendMessage(roomID: directRoom.roomID,
                     clientMessageID: .init(UUID().uuidString.lowercased()), text: "cross-gateway-online",
-                    media: [], mentions: [])
+                    media: [], mentions: [], connection: restoredSenderConnection, transport: restoredTransport)
                 try await withThrowingTaskGroup(of: Void.self) { group in
                     group.addTask {
                         while true {
-                            let change = try await receiverConnection.nextAccountRoomChange()
+                            let change = try await restoredReceiverConnection.nextAccountRoomChange()
                             if case .changed(_, let room, let head) = change,
                                room == directRoom.roomID, head >= online.roomSequence { return }
                             if case .resyncRequired = change { throw V2RealtimeTransportError.unexpectedResponse }
@@ -190,18 +201,29 @@ final class IMAppLocalAccountUITests: XCTestCase {
                     defer { group.cancelAll() }
                     _ = try await group.next()
                 }
+                try await recoveryGroupEvents.synchronizeUntilCaughtUp(roomID: directRoom.roomID)
+                let restoredMessages = try await receiverStore.messages(in: directRoom.roomID)
+                XCTAssertTrue(restoredMessages.contains { $0.messageID == online.messageID })
+                let restoredCursor = try await receiverStore.groupEventCursor(roomID: directRoom.roomID)
+                XCTAssertGreaterThanOrEqual(restoredCursor, online.roomSequence)
+                print("IMV2_CROSS_GATEWAY_SAME_DEVICE_OVERLAP_AND_OLD_EXIT_PASSED")
                 print("IMV2_CROSS_GATEWAY_RECOVERY_AND_ONLINE_WAKE_PASSED")
+                try await verifyCrossGatewaySiblingDevice(account: receiver, sender: sender,
+                    senderConnection: restoredSenderConnection, senderTransport: restoredTransport, existing: restoredReceiverConnection, existingTransport: recoveryTransport, endpoint: receiverEndpoint, frameLimits: frameLimits,
+                    roomID: directRoom.roomID)
             }
         } catch {
             await senderConnection.disconnect()
             await receiverConnection.disconnect()
             await restoredSenderConnection.disconnect()
+            await restoredReceiverConnection.disconnect()
             throw error
         }
 
         await senderConnection.disconnect()
         await receiverConnection.disconnect()
         await restoredSenderConnection.disconnect()
+        await restoredReceiverConnection.disconnect()
     }
 
     @MainActor
@@ -364,6 +386,75 @@ func synchronizeInitialState(_ syncEngine: V2SyncEngine) async throws {
     }
 }
 
+/// A second real device of the same account subscribes on the other Gateway.
+/// Closing that device must preserve the existing device's delivery coverage.
+private func verifyCrossGatewaySiblingDevice(account: LocalE2EAccountCredentials,
+    sender: LocalE2EAccountCredentials, senderConnection: V2TLSFrameConnection, senderTransport: V2ProtobufSyncTransport,
+    existing: V2TLSFrameConnection, existingTransport: V2ProtobufSyncTransport,
+    endpoint: V2RealtimeEndpoint, frameLimits: V2FrameLimits, roomID: RoomID) async throws {
+    let deviceID = try DeviceID(UUID().uuidString.lowercased())
+    let assertion = try await localJSONRequest(
+        endpoint: try requireLocalE2E(URL(string: "https://localhost:8443/v2/account-auth/password/assertion")),
+        body: ["accountHandle": account.accountHandle, "password": "local-clientkit-password",
+            "deviceID": deviceID.rawValue])
+    let pending = try V2PendingDeviceCredentialRegistration.prepare(deviceID: deviceID, operationID: UUID())
+    let issued = try await localJSONRequest(
+        endpoint: try requireLocalE2E(URL(string: "https://localhost:8443/v2/device-credentials")),
+        body: ["accountAssertion": requireLocalE2E(assertion["accountAssertion"] as? String),
+            "deviceID": deviceID.rawValue, "operationID": pending.operationID.uuidString],
+        cancellation: pending.cancellation)
+    let sibling = V2TLSFrameConnection(endpoint: endpoint, frameLimits: frameLimits)
+    do {
+        let session = try await sibling.connectAndAuthenticate(
+            accessToken: requireLocalE2E(issued["accessToken"] as? String), deviceID: deviceID,
+            supportedCapabilityProfiles: ["base"])
+        XCTAssertEqual(session.userID, account.userID)
+        XCTAssertNotEqual(deviceID, account.deviceID)
+        let transport = V2ProtobufSyncTransport(wire: sibling, protocolVersion: session.protocolVersion)
+        _ = try await transport.startAccountRoomChanges()
+        _ = try await transport.userRoomDirectory(cursor: nil, pageSize: 100)
+        // A real reply establishes mutual messaging before this delivery test;
+        // the stranger-message allowance is a separate authorization boundary.
+        _ = try await account.sendMessage(roomID: roomID,
+            clientMessageID: .init(UUID().uuidString.lowercased()), text: "multi-device-peer-reply",
+            media: [], mentions: [], connection: existing, transport: existingTransport)
+        let first = try await sender.sendMessage(roomID: roomID,
+            clientMessageID: .init(UUID().uuidString.lowercased()), text: "two-devices-two-gateways",
+            media: [], mentions: [], connection: senderConnection, transport: senderTransport)
+        async let originalReceived: Void = waitForRoomChange(existing, roomID: roomID, sequence: first.roomSequence)
+        async let siblingReceived: Void = waitForRoomChange(sibling, roomID: roomID, sequence: first.roomSequence)
+        _ = try await (originalReceived, siblingReceived)
+        await sibling.disconnect()
+        let second = try await sender.sendMessage(roomID: roomID,
+            clientMessageID: .init(UUID().uuidString.lowercased()), text: "delivery-after-sibling-exit",
+            media: [], mentions: [], connection: senderConnection, transport: senderTransport)
+        try await waitForRoomChange(existing, roomID: roomID, sequence: second.roomSequence)
+        print("IMV2_CROSS_GATEWAY_TWO_DEVICES_AND_SINGLE_EXIT_PASSED")
+    } catch {
+        await sibling.disconnect()
+        throw error
+    }
+}
+
+private func waitForRoomChange(_ connection: V2TLSFrameConnection, roomID: RoomID,
+    sequence: UInt64) async throws {
+    try await withThrowingTaskGroup(of: Void.self) { tasks in
+        tasks.addTask {
+            while true {
+                let change = try await connection.nextAccountRoomChange()
+                if case .changed(_, let room, let head) = change, room == roomID, head >= sequence { return }
+                if case .resyncRequired = change { throw V2RealtimeTransportError.unexpectedResponse }
+            }
+        }
+        tasks.addTask {
+            try await Task.sleep(for: .seconds(10))
+            throw V2RealtimeTransportError.unexpectedResponse
+        }
+        defer { tasks.cancelAll() }
+        _ = try await tasks.next()
+    }
+}
+
 private func awaitReceiverProjection(
     in store: GRDBV2LocalSyncStore,
     roomID: RoomID,
@@ -381,9 +472,9 @@ private func awaitReceiverProjection(
     throw LocalE2EDeliveryError.receiverProjectionTimedOut(visibleMessageCount: visibleMessages.count)
 }
 
-private func assertDirectMessageIsRestricted(sender: LocalE2EAccountCredentials, roomID: RoomID, text: String) async {
+private func assertDirectMessageIsRestricted(sender: LocalE2EAccountCredentials, roomID: RoomID, text: String, connection: V2TLSFrameConnection? = nil, transport: V2ProtobufSyncTransport? = nil) async {
     do {
-        let client = try sender.sendOperationClient()
+        try await sender.withMessageSendClient(connection: connection, transport: transport) { client in
         let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
             senderUserID: sender.userID, clientMessageID: .init(uuid: UUID()), text: text,
             media: [], mentions: [], limits: .init(maxUTF8Bytes: 4096)),
@@ -397,6 +488,7 @@ private func assertDirectMessageIsRestricted(sender: LocalE2EAccountCredentials,
             XCTFail("Restricted message must recover its original proof"); return
         }
         XCTAssertEqual(replay, proof)
+        }
     } catch { XCTFail("Restricted message must return a bound authorization proof: \(error)") }
 }
 
@@ -495,10 +587,6 @@ private struct PrivateHintCredentials: V2ClientMediaEdgeCredentialProvider {
     }
 }
 private extension LocalE2EAccountCredentials {
-    func sendOperationClient() throws -> V2HTTPMessageSendOperationClient {
-        try .init(baseURL: URL(string: "https://localhost:8443")!, credentials: PrivateHintCredentials(account: self),
-            transport: V2URLSessionMediaEdgeHTTPTransport())
-    }
     func openDirectRoom(target: UserID) async throws -> (roomID: RoomID, proof: V2DirectRoomOperationReceipt) {
         let client = try V2HTTPDirectRoomOperationClient(baseURL: URL(string: "https://localhost:8443")!,
             credentials: PrivateHintCredentials(account: self), transport: V2URLSessionMediaEdgeHTTPTransport())

@@ -5,6 +5,29 @@ import Testing
 
 @Suite("V2 group-event availability acceleration")
 struct V2GroupEventAvailabilityHintTests {
+    @Test("different rooms retain independent pending notifications")
+    func independentRoomInbox() throws {
+        var inbox = V2RoomEventInbox(maximumRooms: 2)
+        let a = RoomID(uuid: UUID()), b = RoomID(uuid: UUID())
+        try inbox.offer(.init(roomID: a, highWatermark: 1))
+        try inbox.offer(.init(roomID: b, highWatermark: 3))
+        try inbox.offer(.init(roomID: a, highWatermark: 2))
+        #expect(inbox.next() == .init(roomID: a, highWatermark: 2))
+        #expect(inbox.next() == .init(roomID: b, highWatermark: 3))
+        #expect(inbox.next() == nil)
+    }
+
+    @Test("inbox overflow reports failure instead of silently losing another room")
+    func inboxOverflow() throws {
+        var inbox = V2RoomEventInbox(maximumRooms: 1)
+        let a = RoomID(uuid: UUID()), b = RoomID(uuid: UUID())
+        try inbox.offer(.init(roomID: a, highWatermark: 1))
+        #expect(throws: V2TLSFrameConnectionError.unexpectedResponse) {
+            try inbox.offer(.init(roomID: b, highWatermark: 2))
+        }
+        #expect(inbox.next()?.roomID == a)
+    }
+
     @Test("unpersistable optional event sequences degrade to a metadata wake", arguments: [false, true], [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
     func liveSequenceBounds(direct: Bool, sequence: UInt64) {
         var hint = IMV2GroupEventAvailable()

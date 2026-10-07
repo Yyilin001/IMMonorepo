@@ -158,38 +158,29 @@ public struct V2MediaPurgeWorker: Sendable {
         for start in stride(from: 0, to: leases.count, by: maximumConcurrency) {
             let end = Swift.min(start + maximumConcurrency, leases.count)
             let batch = Array(leases[start..<end])
-            let batchOutcomes = try await withThrowingTaskGroup(
-                of: V2MediaPurgeWorkOutcome.self,
-                returning: [V2MediaPurgeWorkOutcome].self
-            ) { group in
-                for lease in batch {
-                    group.addTask {
-                        do {
-                            try await self.provider.purge(mediaID: lease.mediaID)
-                            try await self.store.markCompleted(lease, now: self.now())
-                            return .completed
-                        } catch is CancellationError {
-                            throw CancellationError()
-                        } catch {
-                            let failureTime = self.now()
-                            let disposition = self.retryPolicy.disposition(
-                                attempt: lease.attempt,
-                                claimToken: lease.claimToken,
-                                now: failureTime,
-                                kind: v2DurableWorkFailureKind(for: error)
-                            )
-                            if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
-                                throw V2RoomWriteStoreError.corruptPersistenceState
-                            }
-                            try await self.store.scheduleRetry(lease, disposition: disposition, now: failureTime)
-                            return disposition.isPause ? .paused : .released
+            let batchOutcomes: [V2MediaPurgeWorkOutcome] = try await v2ProcessClaimedWorkBatch(
+                batch, initial: [], process: { lease in
+                    do {
+                        try await self.provider.purge(mediaID: lease.mediaID)
+                        try await self.store.markCompleted(lease, now: self.now())
+                        return .completed
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        let failureTime = self.now()
+                        let disposition = self.retryPolicy.disposition(
+                            attempt: lease.attempt,
+                            claimToken: lease.claimToken,
+                            now: failureTime,
+                            kind: v2DurableWorkFailureKind(for: error)
+                        )
+                        if case .retry(let retryAt) = disposition, !v2PostgresTimestampPrecedes(failureTime, retryAt) {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
                         }
+                        try await self.store.scheduleRetry(lease, disposition: disposition, now: failureTime)
+                        return disposition.isPause ? .paused : .released
                     }
-                }
-                var values: [V2MediaPurgeWorkOutcome] = []
-                for try await value in group { values.append(value) }
-                return values
-            }
+                }, accumulate: { $0.append($1) })
             outcomes.append(contentsOf: batchOutcomes)
         }
         return .init(

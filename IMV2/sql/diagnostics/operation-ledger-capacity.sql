@@ -12,7 +12,7 @@ JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
 LEFT JOIN pg_catalog.pg_stat_user_tables AS s ON s.relid = c.oid
 WHERE n.nspname = 'im_v2' AND c.relkind IN ('r', 'p')
   AND c.relname IN (
-      'message_send_completions', 'message_send_operation_receipts',
+      'message_send_completions',
       'message_operation_closures', 'direct_authorization_intents',
       'direct_authorization_receipts', 'message_mutation_receipts',
       'message_reaction_receipts'

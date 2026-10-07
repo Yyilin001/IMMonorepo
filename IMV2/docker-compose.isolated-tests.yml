@@ -57,20 +57,6 @@ services:
     volumes:
       - postgres-control-test-data:/var/lib/postgresql/data
 
-  # Optional wake hints are never a correctness dependency, but the isolated
-  # Server suite verifies that the minimal NIO publisher reaches a real Core
-  # NATS subscriber and emits only its privacy-safe trigger envelope.
-  nats:
-    image: nats:2.11-alpine
-    command: ["-m", "8222"]
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"]
-      interval: 1s
-      timeout: 3s
-      retries: 30
-    mem_limit: 256m
-    pids_limit: 64
-
   swift-tests:
     build:
       # The image does not copy source; keep build context narrow. The full
@@ -84,12 +70,6 @@ services:
         condition: service_healthy
       postgres-control:
         condition: service_healthy
-      nats:
-        condition: service_healthy
-    # Keep the broker-free production rule intact while allowing the real
-    # Core NATS integration test to use the explicitly permitted loopback
-    # plaintext mode. No NATS bytes cross the Compose bridge network.
-    network_mode: "service:nats"
     environment:
       IMV2_POSTGRES_TEST_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
       IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL: postgres://im_v2_secondary_test:im_v2_secondary_test@postgres-secondary:5432/im_v2_secondary_test
@@ -130,7 +110,6 @@ services:
       IMV2_ACTOR_D5_IMPORT_TEST_DATABASE_IS_DISPOSABLE: "1"
       IMV2_ACTOR_D5_MEDIA_DATABASE_URL: postgres://im_v2_test:im_v2_test@postgres:5432/im_v2_test
       IMV2_ACTOR_D5_MEDIA_TEST_DATABASE_IS_DISPOSABLE: "1"
-      IMV2_REAL_NATS_URL: nats://127.0.0.1:4222
       # Cold compilation plus the complete PostgreSQL suite running serially
       # can exceed an hour. This is a wall-clock watchdog, not a relaxation
       # of individual test, SQL, or container resource limits.
@@ -155,7 +134,7 @@ services:
     tmpfs:
       - /tmp:exec,size=10g
     # The dedicated local capacity profile has four virtual CPUs and 16 GiB
-    # RAM. Leave headroom for three PostgreSQL instances and NATS while letting
+    # RAM. Leave headroom for three PostgreSQL instances while letting
     # the four delivery workers contend under the intended CPU envelope.
     cpus: 4.0
     mem_limit: 12g

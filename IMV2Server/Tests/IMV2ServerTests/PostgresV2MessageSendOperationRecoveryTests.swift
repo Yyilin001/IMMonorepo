@@ -44,7 +44,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             #expect(try await count("im_v2.direct_authorization_intents", on: sql) == 0)
-            #expect(try await count("im_v2.message_send_operation_receipts", on: sql) == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
         }
     }
@@ -74,7 +73,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                     #expect(hint.reason == .rateLimited)
                 }
-                for table in ["messages", "message_send_completions", "message_send_operation_receipts", "message_operation_closures"] {
+                for table in ["messages", "message_send_completions", "message_operation_closures"] {
                     #expect(try await count("im_v2.\(table)", on: sql) == 0)
                 }
                 let query = try V2MessageSendOperationRecoveryRequest(identity: changed.identity,
@@ -91,16 +90,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(failed[1] == .sendOperation(.fingerprintConflict))
                 #expect(try await store.recover(query, token: token) == .receipt(accepted))
                 #expect(try await count("im_v2.message_send_completions", on: sql) == 1)
-                #expect(try await count("im_v2.message_send_operation_receipts", on: sql) == 1)
             }
         }
     }
 
-    @Test("batch rollback restores direct denial facts atomically", arguments: ["rateLimited", "leaseChanged", "recoveryFailure"])
-    func durableSendBatchRestoresDirectDenial(failure: String) async throws {
+    @Test("operation policy denial creates no durable result or projection")
+    func durableSendBatchRestoresDirectDenial() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
+            let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             let direct = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
                 roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { now }).openedIdentity(
                     actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
@@ -110,82 +107,26 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let denied = try V2MessageSendOperationCommand(command: .init(roomID: direct.roomID,
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "denied",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
-            let reverse = try V2MessageSendOperationCommand(command: .init(roomID: direct.roomID,
-                senderUserID: .init(uuid: memberTwoUUID), clientMessageID: .init(uuid: UUID()), text: "accepted",
-                limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
-            let leaseChanged = failure == "leaseChanged"
-            if leaseChanged {
-                // Change the shared lease only after the scalar reduction, so
-                // admission fails at the batch tail. Rollback restores the lease.
-                try await sql.raw("CREATE FUNCTION im_v2.recovery_change_lease() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN UPDATE im_v2.shard_admission_pools SET generation=generation+1 WHERE room_shard_id='room-a'; RETURN NEW; END $$").run()
-                try await sql.raw("CREATE TRIGGER recovery_change_lease BEFORE INSERT ON im_v2.messages FOR EACH ROW EXECUTE FUNCTION im_v2.recovery_change_lease()").run()
-            } else {
-                try await installRecoveryTailFailure(on: sql)
-            }
-            if failure == "recoveryFailure" {
-                // Sequences survive savepoint rollback, allowing failure only
-                // on the second (recovery) attempt to write the denial fact.
-                try await sql.raw("CREATE SEQUENCE im_v2.recovery_denial_attempts").run()
-                try await sql.raw("CREATE FUNCTION im_v2.recovery_fail_denial() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF nextval('im_v2.recovery_denial_attempts') > 1 THEN RAISE EXCEPTION 'denial recovery failed' USING ERRCODE='23514'; END IF; RETURN NEW; END $$").run()
-                try await sql.raw("CREATE TRIGGER recovery_fail_denial BEFORE INSERT ON im_v2.direct_message_denials FOR EACH ROW EXECUTE FUNCTION im_v2.recovery_fail_denial()").run()
-                let initialOutboxCount = try await count("im_v2.user_state_event_outbox", on: sql)
-                let initialTimelineCount = try await count("im_v2.room_timeline_activities", on: sql)
-                try await withRoomActivation(database: database, roomID: direct.roomID) { token in
-                    await #expect(throws: (any Error).self) {
-                        _ = try await store.sendBatch([denied, reverse], token: token,
-                            capacityProfile: profile, identifiers: .init(), now: { now })
-                    }
-                }
-                let attempts = try await sql.raw("SELECT last_value AS count FROM im_v2.recovery_denial_attempts").first(decoding: RecoveryCount.self)
-                #expect(attempts?.count == 2)
-                for table in ["direct_message_denials", "direct_authorization_receipts", "message_send_operation_receipts", "message_operation_closures", "message_send_completions"] {
-                    #expect(try await count("im_v2.\(table)", on: sql) == 0)
-                }
-                #expect(try await count("im_v2.user_state_event_outbox", on: sql) == initialOutboxCount)
-                #expect(try await count("im_v2.room_timeline_activities", on: sql) == initialTimelineCount)
-                return
-            }
-            let results = try await withRoomActivation(database: database, roomID: direct.roomID) { token in
-                let results = try await store.sendBatch([denied, reverse, denied], token: token,
+            let initialOutbox = try await count("im_v2.user_state_event_outbox", on: sql)
+            let initialTimeline = try await count("im_v2.room_timeline_activities", on: sql)
+            try await withRoomActivation(database: database, roomID: direct.roomID) { token in
+                let results = try await store.sendBatch([denied, denied], token: token,
                     capacityProfile: profile, identifiers: .init(), now: { now })
-                guard case .sendOperation(.receipt(let receipt)) = results[0],
-                      case .sendOperation(.deferred(let hint)) = results[1] else {
-                    Issue.record("Unexpected results: \(results)")
-                    throw V2RoomWriteStoreError.corruptPersistenceState
+                for result in results {
+                    guard case .sendOperation(.receipt(let rejection)) = result else {
+                        throw V2MessageOperationValidationError.invalidReceipt
+                    }
+                    #expect(rejection.outcome == .rejected(.directPolicyDenied))
                 }
-                #expect(receipt.outcome == .rejected(.directPolicyDenied))
-                #expect(hint.reason == (leaseChanged ? .admissionUnavailable : .rateLimited))
-                #expect(results[2] == results[0])
-                #expect(try await store.send(denied, token: token, capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID()))) == .receipt(receipt))
-                return results
+                let query = try V2MessageSendOperationRecoveryRequest(identity: denied.identity,
+                    fingerprint: denied.fingerprint, domainFingerprint: denied.command.fingerprint, action: .query)
+                #expect(try await store.recover(query, token: token) == .unresolved)
             }
-            #expect(results.count == 3)
-            let fact = try #require(try await sql.raw("""
-                SELECT denial.source_event_id, denial.timeline_sequence,
-                       (SELECT COUNT(*) FROM im_v2.user_state_event_outbox work
-                        WHERE work.source_event_id=denial.source_event_id AND work.user_id=denial.sender_user_id
-                          AND work.projection_kind='timeline_activity') AS activity_count,
-                       (SELECT COUNT(*) FROM im_v2.user_state_event_outbox work
-                        WHERE work.source_event_id=denial.source_event_id AND work.user_id=denial.sender_user_id
-                          AND work.projection_kind='direct_sending_capability') AS capability_count,
-                       CASE WHEN pair.lower_user_id=denial.sender_user_id THEN pair.lower_can_send ELSE pair.higher_can_send END AS can_send
-                FROM im_v2.direct_message_denials denial JOIN im_v2.direct_room_pairs pair USING(room_id)
-                WHERE denial.room_id=\(bind:direct.roomID.uuidValue!) AND denial.sender_user_id=\(bind:senderUUID)
-                  AND denial.client_message_id=\(bind:denied.command.clientMessageID.uuidValue!)
-                """).first(decoding: RecoveredDenialFact.self))
-            #expect(fact.activityCount == 1 && fact.capabilityCount == 1 && !fact.canSend)
-            let timeline = try await sql.raw("SELECT count(*) AS count FROM im_v2.room_timeline_activities WHERE source_event_id=\(bind:fact.sourceEventID) AND timeline_sequence=\(bind:fact.timelineSequence)").first(decoding: RecoveryCount.self)
-            #expect(timeline?.count == 1)
-            #expect(try await count("im_v2.direct_message_denials", on: sql) == 1)
-            #expect(try await count("im_v2.message_send_operation_receipts", on: sql) == 1)
-            #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
-            let generation = try #require(try await sql.raw("SELECT generation AS count FROM im_v2.direct_authorization_intents WHERE room_id=\(bind:direct.roomID.uuidValue!) AND sender_user_id=\(bind:senderUUID) AND client_message_id=\(bind:denied.command.clientMessageID.uuidValue!)").first(decoding: RecoveryCount.self)).count
-            let attempt = V2DirectAuthorizationAttempt(roomID: direct.roomID.uuidValue!, senderID: senderUUID,
-                clientMessageID: denied.command.clientMessageID.uuidValue!, generation: generation,
-                recipientID: memberTwoUUID, ownerShardID: "room-a", ownerEpoch: 0, fingerprint: denied.command.fingerprint.digest)
-            let proof = try await PostgresV2DirectAuthorizationReceiptStore().committedReceipt(attempt, database: database)
-            #expect(proof?.disposition == .denied && proof?.eventID == fact.sourceEventID)
+            for table in ["messages", "message_send_completions", "direct_message_denials", "direct_authorization_receipts", "message_operation_closures"] {
+                #expect(try await count("im_v2.\(table)", on: sql) == 0)
+            }
+            #expect(try await count("im_v2.user_state_event_outbox", on: sql) == initialOutbox)
+            #expect(try await count("im_v2.room_timeline_activities", on: sql) == initialTimeline)
         }
     }
 
@@ -217,7 +158,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let intent = try await sql.raw("SELECT count(*) AS count FROM im_v2.direct_authorization_intents WHERE room_id=\(bind:direct.roomID.uuidValue!) AND sender_user_id=\(bind:senderUUID) AND client_message_id=\(bind:operation.uuidValue!) AND request_fingerprint=\(bind:first.command.fingerprint.digest)").first(decoding: RecoveryCount.self)
             #expect(intent?.count == 1)
-            #expect(try await count("im_v2.message_send_operation_receipts", on: sql) == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
         }
     }

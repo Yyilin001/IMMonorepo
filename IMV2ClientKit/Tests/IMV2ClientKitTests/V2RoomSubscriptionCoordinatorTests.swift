@@ -5,6 +5,87 @@ import Testing
 
 @Suite("Runtime room subscription intents", .timeLimit(.minutes(1)))
 struct V2RoomSubscriptionCoordinatorTests {
+    @Test("account events are consumed without acquiring a foreground room")
+    func accountDeliveryWithoutRoomIntent() async throws {
+        let wire = SubscriptionWire()
+        let received = AsyncStream<V2GroupEventAvailabilityHint>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true }, roomCursor: { _ in 0 },
+            receiveAccountEvent: { hint in received.continuation.yield(hint) })
+        let run = Task { try await owner.run(connectionID: UUID()) }
+        let room = RoomID(uuid: UUID())
+        await wire.emitGroup(room: room, watermark: 1)
+        var iterator = received.stream.makeAsyncIterator()
+        let event = await iterator.next()
+        #expect(event?.roomID == room)
+        #expect(await wire.count("subscribe-room") == 0)
+        run.cancel()
+        _ = await run.result
+        received.continuation.finish()
+    }
+
+    @Test("installation has a fixed baseline and later hints do not reinstall it")
+    func installedBaselineSurvivesHints() async throws {
+        let wire = SubscriptionWire()
+        let room = try RoomID("baseline-room")
+        let cursor = SubscriptionCommittedCursor()
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true },
+            roomCursor: { _ in await cursor.read() }, retryDelay: .milliseconds(1))
+        let lease = try await owner.acquire(roomID: room, channels: [.roomEvents])
+        let run = Task { try await owner.run(connectionID: UUID()) }
+        defer { run.cancel() }
+        var snapshots = lease.updates.makeAsyncIterator()
+        let installed = try await next(&snapshots) { $0.state == .subscribed }
+        #expect(installed.baselineHead == 4)
+        #expect(installed.appliedThrough == 3)
+        #expect(!installed.isCaughtUp)
+        await wire.emitGroup(room: room, watermark: 9)
+        let dirty = try await next(&snapshots) { $0.wake?.highWatermark == 9 }
+        #expect(dirty.baselineHead == installed.baselineHead)
+        #expect(dirty.recoveryID == installed.recoveryID)
+        #expect(dirty.state == .subscribed)
+        #expect(await wire.count("subscribe-room") == 1)
+        await cursor.commit(4)
+        await owner.requestReconciliation()
+        let caughtUp = try await next(&snapshots) { $0.isCaughtUp }
+        #expect(caughtUp.baselineHead == 4)
+        #expect(caughtUp.wake?.highWatermark == 9)
+        #expect(await wire.count("subscribe-room") == 1)
+        await owner.release(roomID: room, consumerID: lease.id)
+        run.cancel()
+        _ = await run.result
+    }
+
+    @Test("periodic activity refresh preserves the installed room recovery identity")
+    func activityRefreshDoesNotScheduleHistoryPull() async throws {
+        let wire = SubscriptionWire(), room = try RoomID("activity-refresh-room")
+        let ticks = SubscriptionRefreshCounter()
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in await ticks.advance(); return true },
+            roomCursor: { _ in 3 }, refreshInterval: .milliseconds(5))
+        let lease = try await owner.acquire(roomID: room, channels: [.roomEvents])
+        let run = Task { try await owner.run(connectionID: UUID()) }
+        defer { run.cancel() }
+        var snapshots = lease.updates.makeAsyncIterator()
+        let installed = try await next(&snapshots) { $0.state == .subscribed }
+        let identity = try #require(installed.recoveryID)
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await ticks.count < 5 {
+            guard ContinuousClock.now < deadline else { throw V2TLSFrameConnectionError.requestTimedOut }
+            await Task.yield()
+        }
+        // Unchanged snapshots are intentionally deduplicated. A later real
+        // watermark exposes the identity retained across the observed ticks.
+        await wire.emitGroup(room: room, watermark: 9)
+        let refreshed = try await next(&snapshots) { $0.wake?.highWatermark == 9 }
+        #expect(refreshed.recoveryID == identity)
+        #expect(refreshed.baselineHead == installed.baselineHead)
+        #expect(await wire.count("subscribe-room") == 1)
+        await owner.release(roomID: room, consumerID: lease.id)
+        run.cancel(); _ = await run.result
+    }
+
     @Test("two scenes share subscriptions and only the final token unsubscribes")
     func scenesShareWireSubscriptions() async throws {
         let wire = SubscriptionWire()
@@ -47,12 +128,14 @@ struct V2RoomSubscriptionCoordinatorTests {
             firstRun.cancel()
             _ = await firstRun.result
             let offline = try await next(&snapshots) { $0.state == .offline }
+            #expect(offline.baselineHead == nil && offline.appliedThrough == nil && !offline.isCaughtUp)
             #expect(offline.typing.isEmpty && offline.presence == nil && offline.wake == nil)
         }
         let newGeneration = UUID()
         let secondRun = Task { try await owner.run(connectionID: newGeneration) }
         _ = await firstRun.result
         let resumed = try await next(&snapshots) { $0.state == .subscribed && $0.connectionID == newGeneration }
+        #expect(resumed.baselineHead == 4 && resumed.appliedThrough == 3 && !resumed.isCaughtUp)
         #expect(resumed.typing.isEmpty)
         #expect(resumed.recoveryID != first.recoveryID)
         #expect(await wire.count("subscribe-room") == 2)
@@ -308,4 +391,15 @@ private actor SubscriptionWire: V2ClientGroupEventSubscriptionTransport, V2Clien
         if let waiter = activityWaiter { activityWaiter = nil; waiter.1.resume(returning: event) }
         else { pendingActivities.append(event) }
     }
+}
+
+private actor SubscriptionCommittedCursor {
+    private var value: UInt64 = 3
+    func read() -> UInt64 { value }
+    func commit(_ cursor: UInt64) { value = cursor }
+}
+
+private actor SubscriptionRefreshCounter {
+    private(set) var count = 0
+    func advance() { count += 1 }
 }

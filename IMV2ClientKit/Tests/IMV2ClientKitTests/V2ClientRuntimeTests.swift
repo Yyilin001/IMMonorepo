@@ -61,6 +61,8 @@ struct V2ClientRuntimeTests {
         }
         #expect(await runtime.currentState() == .stopped)
         #expect(await connection.disconnectCount() == 1)
+        #expect(await runtime.lastBackgroundFailure() as? RuntimeFailure == .failed)
+        #expect(await runtime.lastBackgroundFailureLoop() == .initialSync)
         await runtime.stop()
     }
 

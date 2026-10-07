@@ -5,6 +5,57 @@ import Testing
 
 @Suite("Finite room-log catch-up", .timeLimit(.minutes(1)))
 struct V2RoomLogCatchUpTests {
+    @Test("online bodies persist in unopened rooms and gaps never skip the durable cursor")
+    func onlineBodiesAndGaps() async throws {
+        let room = try makeRooms(1)[0], store = CatchUpStore(rooms: [])
+        let transport = CatchUpTransport(tails: [room: 3])
+        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
+        let first = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString), roomSequence: 1,
+            projectionKind: "message", payload: Data())
+        let third = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString), roomSequence: 3,
+            projectionKind: "message", payload: Data())
+        let firstApplied = try await engine.applyOnlineEvents(.init(roomID: room, highWatermark: 1, liveEvents: [first]))
+        #expect(firstApplied)
+        #expect(await store.groupEventCursor(roomID: room) == 1)
+        let gapApplied = try await engine.applyOnlineEvents(.init(roomID: room, highWatermark: 3, liveEvents: [third]))
+        #expect(!gapApplied)
+        #expect(await store.groupEventCursor(roomID: room) == 1)
+        #expect(await transport.roomsRequested().isEmpty)
+        try await engine.synchronizeUntilCaughtUp(roomID: room)
+        #expect(await store.groupEventCursor(roomID: room) == 3)
+        let replayApplied = try await engine.applyOnlineEvents(.init(roomID: room, highWatermark: 1, liveEvents: [first]))
+        #expect(replayApplied)
+        #expect(await store.groupEventCursor(roomID: room) == 3)
+    }
+
+    @Test("online application yields recovery work without waiting for or cancelling an in-flight pull")
+    func onlineAndPullShareRoomFlight() async throws {
+        let rooms = try makeRooms(2), room = rooms[0], otherRoom = rooms[1]
+        let store = CatchUpStore(rooms: rooms)
+        let transport = GatedCatchUpTransport(room: room)
+        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
+        let pull = Task { try await engine.synchronizeOnePage(roomID: room) }
+        await transport.started.wait()
+        let event = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString), roomSequence: 2,
+            projectionKind: "message", payload: Data())
+        let applied = try await engine.applyOnlineEvents(.init(roomID: room, highWatermark: 2, liveEvents: [event]))
+        #expect(!applied)
+        #expect(await store.groupEventCursor(roomID: room) == 0)
+        let otherEvent = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString), roomSequence: 1,
+            projectionKind: "message", payload: Data())
+        let otherApplied = try await engine.applyOnlineEvents(.init(roomID: otherRoom,
+            highWatermark: 1, liveEvents: [otherEvent]))
+        #expect(otherApplied)
+        #expect(await store.groupEventCursor(roomID: otherRoom) == 1)
+        // Completion above must happen while the original network request is held.
+        await transport.release.signal()
+        _ = try await pull.value
+        #expect(await store.groupEventCursor(roomID: room) == 1)
+        _ = try await engine.synchronizeOnePage(roomID: room)
+        #expect(await transport.cursors() == [0, 1])
+        #expect(await store.groupEventCursor(roomID: room) == 2)
+    }
+
     @Test("a server claiming more without cursor progress is rejected")
     func rejectsNoProgressLoop() async throws {
         let room = try makeRooms(1)[0]

@@ -212,10 +212,6 @@ enum IMV2AccountServerApp {
                     do { try await v2Sleep(for:.seconds(1)) } catch { break }
                 }
             }
-            let socialOperations=PostgresV2SocialRelationshipStore(database:database,projectionDelivery:socialProjectionDelivery,authorizationCoordinator:socialAuthorization)
-            V2VaporSocialOperationRoutes(authenticator:authenticator,store:socialOperations).register(on:authenticatedAccountRoutes)
-            let accountPreferenceOperations=PostgresV2AccountPreferenceOperationStore(database:database,projectionDelivery:socialProjectionDelivery,authorizationCoordinator:socialAuthorization)
-            V2VaporAccountPreferenceOperationRoutes(authenticator:authenticator,store:accountPreferenceOperations).register(on:authenticatedAccountRoutes)
             var fixedGroupBootstraps:[String:V2RoomBootstrapDomainExecutor]=[:]
             for storage in configuration.roomShardStorage {
                 guard let owner=roomDatabases[storage.shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -242,10 +238,27 @@ enum IMV2AccountServerApp {
             let actorConfiguration = try V2RoomActorApplicationConfiguration(
                 environment: ProcessRuntimeEnvironment(), hostsRooms: false,
                 configuredShardIDs: Set(roomDatabases.keys))
+            if let placement = actorConfiguration.policyPlacement {
+                try await PostgresV2PolicyDeploymentPlacementStore(database: database).require(
+                    V2PolicyOwnerPlacement(placement))
+            } else {
+                try await PostgresV2PolicyDeploymentPlacementStore(database: database).requireLegacy()
+            }
             let actor = try await V2RoomActorApplication.start(
                 configuration: actorConfiguration, ownerRouter: roomRouter,
                 roomDatabases: roomDatabases)
             roomActor = actor
+            var socialOperations = PostgresV2SocialRelationshipStore(database: database,
+                projectionDelivery: socialProjectionDelivery, authorizationCoordinator: socialAuthorization)
+            var accountPreferenceOperations = PostgresV2AccountPreferenceOperationStore(database: database,
+                projectionDelivery: socialProjectionDelivery, authorizationCoordinator: socialAuthorization)
+            if actorConfiguration.policyPlacement != nil {
+                let policies = try await actor.policyMutationExecutor()
+                socialOperations = socialOperations.usingPolicyOwners(policies)
+                accountPreferenceOperations = accountPreferenceOperations.usingPolicyOwners(policies)
+            }
+            V2VaporSocialOperationRoutes(authenticator: authenticator, store: socialOperations).register(on: authenticatedAccountRoutes)
+            V2VaporAccountPreferenceOperationRoutes(authenticator: authenticator, store: accountPreferenceOperations).register(on: authenticatedAccountRoutes)
             let forwardPlans=V2ForwardPlanService(store:.init(database:database),
                 port:.init(router:roomRouter,rooms:.init(directory:actor.directory)))
             V2VaporForwardPlanRoutes(authenticator:authenticator,service:forwardPlans).register(on:authenticatedAccountRoutes)
@@ -442,7 +455,6 @@ enum IMV2AccountServerApp {
             ).register(on: authenticatedAccountRoutes)
             let profileUpdateStore = PostgresV2ProfileUpdateStore(database: database)
             V2VaporPersonalPreferenceRecoveryRoutes(authenticator:authenticator,administration:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
-            V2VaporMessageSendOperationRoutes(authenticator:authenticator,messages:V2RoomRefMessagingClient(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
             V2VaporMessageMutationOperationRoutes(authenticator:authenticator,messages:V2RoomRefMessagingClient(directory:actor.directory,callTimeout:try .init(10_000))).register(on:authenticatedAccountRoutes)
             V2VaporGroupCapabilityRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)
             V2VaporMembershipOperationRoutes(authenticator:authenticator,rooms:V2RoomRefAdministrationClient(directory:actor.directory)).register(on:authenticatedAccountRoutes)

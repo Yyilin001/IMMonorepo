@@ -1,6 +1,7 @@
 @testable import IMV2ServerApplication
 @testable import IMV2ServerContracts
 import Foundation
+import IMV2ActorContracts
 import Synchronization
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
@@ -8,6 +9,40 @@ import Testing
 
 @Suite("V2 Prometheus telemetry exporter")
 struct V2PrometheusTelemetrySinkTests {
+    @Test("cached call and recovery metrics preserve counter baselines and current gauges")
+    func cachedRoomCallMetrics() {
+        let snapshot = V2RoomRuntimeMetricsSnapshot(host: nil, commands: nil,
+            cachedLocations: 2, pendingResolutions: 0, activeResolutions: 0, resolutionWaiters: 0,
+            directoryCalls: .init(cachedCalls: 17, cachedResponses: 17, recoveringRooms: 1),
+            transportCalls: .init(cachedRemoteCalls: 17, roomLookups: 1, roomInvocations: 18))
+        let lines = v2RoomActorMetricLines(snapshot)
+        #expect(lines.contains("# TYPE im_v2_room_actor_cached_remote_calls_total counter"))
+        #expect(lines.contains("im_v2_room_actor_cached_remote_calls_total 17"))
+        #expect(lines.contains("im_v2_room_actor_physical_lookups_total 1"))
+        #expect(lines.contains("im_v2_room_actor_reference_misses_total 0"))
+        #expect(lines.contains("# TYPE im_v2_room_actor_recovering_rooms gauge"))
+        #expect(lines.contains("im_v2_room_actor_recovering_rooms 1"))
+        #expect(lines.filter { $0.hasPrefix("# TYPE ") }.count == Set(lines.filter { $0.hasPrefix("# TYPE ") }).count)
+    }
+
+    @Test("internal message failures export bounded zero baselines and reject arbitrary labels")
+    func internalMessageFailureLabelsAreClosed() async {
+        #expect(V2MessageSendFailureReason(rawValue: "arbitrary_error_text") == nil)
+        #expect(V2MessageSendFailureDisposition(rawValue: "sql_failure") == nil)
+        #expect(V2MessageSendFailureCommand(rawValue: "send_message") == nil)
+        let sink = V2PrometheusTelemetrySink()
+        let before = await sink.renderPrometheus()
+        let name = "im_v2_gateway_message_operation_internal_failures_total{"
+        #expect(before.split(separator: "\n").filter { $0.hasPrefix(name) }.count ==
+            V2MessageSendFailureCommand.allCases.count * V2MessageSendFailureDisposition.allCases.count * V2MessageSendFailureReason.allCases.count)
+        let key = "im_v2_gateway_message_operation_internal_failures_total{command=\"message_send_operation\",disposition=\"not_accepted\",reason=\"overloaded\"} "
+        #expect(before.contains(key + "0"))
+        await sink.record(.messageSendInternalFailure(command: .submit, disposition: .notAccepted, reason: .overloaded))
+        await sink.record(.messageSendInternalFailure(command: .submit, disposition: .notAccepted, reason: .overloaded))
+        let after = await sink.renderPrometheus()
+        #expect(after.contains(key + "2"))
+    }
+
     @Test("command diagnostic logging keeps an exact bounded burst per result key")
     func boundsCommandDiagnosticLogging() {
         let now = Mutex<UInt64>(1_000_000_000)

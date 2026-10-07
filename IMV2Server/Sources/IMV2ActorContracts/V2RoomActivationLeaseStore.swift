@@ -13,6 +13,10 @@ public enum V2RoomActivationLeaseError: Error, Equatable, Sendable {
     case activationChanged
     case leaseExpired
     case epochExhausted
+    /// 此次续租确定未成功：尚未执行，或事务已确认回滚。
+    /// 原租约仍可能有效，但此错误不授予任何新的有效期。
+    /// 宿主只能在原安全期限内按既有周期重试；提交结果未知不能使用此错误。
+    case renewalDeferred
     /// 数据库可能已提交新租约，但没有返回令牌。
     /// 调用方必须重新定位围栏，不能宣称已回滚。
     case outcomeUnknown
@@ -35,6 +39,7 @@ public protocol V2RoomActivationLeaseStore: Sendable {
     ) async throws -> V2RoomActivationAcquisition
 
     /// 匹配但已过期的令牌必须获取新纪元，不能续期。
+    /// `renewalDeferred` 仅表示确定未续成功，不能延长调用方持有的原租约。
     func renew(
         token: V2RoomActivationToken,
         duration: V2ActorMilliseconds
@@ -42,6 +47,14 @@ public protocol V2RoomActivationLeaseStore: Sendable {
 
     /// 返回 false 表示此令牌已不再拥有租约；绝不释放后继实例的租约。
     func release(token: V2RoomActivationToken) async throws -> Bool
+
+    /// Close this runtime's renewal producer and await accepted SQL completion.
+    /// The store belongs to one application lifecycle, not unrelated Hosts.
+    func shutdownRenewals() async
+}
+
+public extension V2RoomActivationLeaseStore {
+    func shutdownRenewals() async {}
 }
 
 /// 数据所有者查询封装在运行时内部；调用方只提供 RoomID。

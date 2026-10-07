@@ -18,7 +18,6 @@ struct GatewayCommandAssembly {
         configuration: V2GatewayRuntimeConfiguration,
         prepared: GatewayPreparedAssembly,
         roomServices: GatewayRoomServicesAssembly,
-        realtime: GatewayRealtimeAssembly,
         roomRecovery: V2RoomRecoveryCommandService,
         actors: V2RoomActorApplication
     ) async throws -> Self {
@@ -64,12 +63,12 @@ struct GatewayCommandAssembly {
         let liveActivityStore = try PostgresV2LiveActivityStore(database: topology.database)
         let liveActivity = V2LiveActivityService(store: liveActivityStore)
         await frontdoor.connectionRegistry.configureLivePresenceLeases(liveActivityStore)
+        await frontdoor.connectionRegistry.configurePresenceReader(liveActivityStore)
         await frontdoor.connectionRegistry.configureLiveActivityObservationAuthorizer(liveActivity)
         let handler = V2GatewayDomainCommandHandler(
             roomActors: roomServices.roomActorServices,
             messageLimits: configuration.messageLimits,
             liveActivity: liveActivity,
-            foregroundGroupEventHints: realtime.foregroundGroupEventHints,
             roomRecovery: roomRecovery,
             accountChanges: frontdoor.connectionRegistry,
             conversationCapabilities: conversationCapabilities,

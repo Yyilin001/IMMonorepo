@@ -1,5 +1,5 @@
 {
-  "sourceCount": 575,
+  "sourceCount": 605,
   "fileTargets": {
     "IMV2Server/Composition/Room/V2GatewayDomainCommandHandler+RoomActors.swift": "IMV2Server",
     "IMV2Server/Composition/Room/V2GatewayRoomActorServices.swift": "IMV2Server",
@@ -79,6 +79,7 @@
     "IMV2ServerApplication/Room/V2SendMessageService.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/Room/V2UserRoomDirectoryCursorCodec.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2AccountAssertion.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2ActorRealtimeMetrics.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2AdaptiveWorkerCadence.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2AdmittedRoomDatabaseWork.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2AggregatedReadReceiptBatchMetrics.swift": "IMV2ServerApplication",
@@ -132,6 +133,11 @@
     "IMV2ServerApplication/V2PublicIdentityResolutionService.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2PushWakeWorker.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2ReadReceiptService.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2RealtimeFanoutDispatcher.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2RealtimeInterestCoordinator.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2RealtimePublicationRetry.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2RealtimeShardService.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2RealtimeShardSupport.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2RoomActorMetrics.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2RoomLiveEventMaterialization.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2RoomMembershipDirectoryService.swift": "IMV2ServerApplication",
@@ -140,6 +146,7 @@
     "IMV2ServerApplication/V2RuntimeLatencyMetrics.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2RuntimePressureMetrics.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2SafeLogMetadata.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2SendOperationBatchMetrics.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2SharedGroupEventWakeInterests.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2SocialRelationshipService.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2SyncHousekeepingWorker.swift": "IMV2ServerApplication",
@@ -149,12 +156,14 @@
     "IMV2ServerApplication/V2TelemetryMetrics.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2UserRoomDirectoryService.swift": "IMV2ServerApplication",
     "IMV2ServerApplication/V2UserStateEventWorker.swift": "IMV2ServerApplication",
+    "IMV2ServerApplication/V2UserSyncWakeRelay.swift": "IMV2ServerApplication",
     "IMV2ServerContracts/V2AccessTokenHMACKey.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2AccountAssertionVerifier.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2AccountDisableContracts.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2AccountEdgeAuthorizationSecret.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2AccountEdgeClientRateLimit.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2AccountEdgeRateLimitPorts.swift": "IMV2ServerContracts",
+    "IMV2ServerContracts/V2ActorRealtimeMetricsContracts.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2AuthenticatedConnectionLeaseContract.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2AuthorPresentationPageSample.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2CommittedMessageBatchObserving.swift": "IMV2ServerContracts",
@@ -209,6 +218,9 @@
     "IMV2ServerContracts/V2RateLimitRetryAfter.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2ReadReceiptContracts.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2RealtimeInterestPorts.swift": "IMV2ServerContracts",
+    "IMV2ServerContracts/V2RealtimePartitionPorts.swift": "IMV2ServerContracts",
+    "IMV2ServerContracts/V2RealtimeRecoveryHeadOutcome.swift": "IMV2ServerContracts",
+    "IMV2ServerContracts/V2RealtimeRouteContracts.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2RoomBatchExecutionErrors.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2RoomExecutionCapabilities.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2RoomKind.swift": "IMV2ServerContracts",
@@ -224,6 +236,7 @@
     "IMV2ServerContracts/V2RuntimePressureMetricsContracts.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2SendMessageBatchMetricsSnapshot.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2SendMessageContracts.swift": "IMV2ServerContracts",
+    "IMV2ServerContracts/V2SendOperationBatchMetrics.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2SyncContracts.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2SyncWakeCoalescerSnapshot.swift": "IMV2ServerContracts",
     "IMV2ServerContracts/V2TelemetryContracts.swift": "IMV2ServerContracts",
@@ -238,6 +251,7 @@
     "IMV2ServerGateway/Gateway/V2AuthorPresentationPageSample+Protobuf.swift": "IMV2ServerGateway",
     "IMV2ServerGateway/Gateway/V2EventLoopLagMetrics.swift": "IMV2ServerGateway",
     "IMV2ServerGateway/Gateway/V2ForegroundGroupEventHints.swift": "IMV2ServerGateway",
+    "IMV2ServerGateway/Gateway/V2GatewayRealtimeIngress.swift": "IMV2ServerGateway",
     "IMV2ServerGateway/Gateway/V2GroupEventPageEncoder.swift": "IMV2ServerGateway",
     "IMV2ServerGateway/Gateway/V2TelemetryCommandMapping.swift": "IMV2ServerGateway",
     "IMV2ServerGateway/Generated/IMV2ProtocolVersion.swift": "IMV2ServerGateway",
@@ -294,7 +308,6 @@
     "IMV2ServerHTTP/V2VaporMessageModerationRoutes.swift": "IMV2ServerHTTP",
     "IMV2ServerHTTP/V2VaporMessageMutationOperationRoutes.swift": "IMV2ServerHTTP",
     "IMV2ServerHTTP/V2VaporMessageReactionOperationRoutes.swift": "IMV2ServerHTTP",
-    "IMV2ServerHTTP/V2VaporMessageSendOperationRoutes.swift": "IMV2ServerHTTP",
     "IMV2ServerHTTP/V2VaporMetricsRoutes.swift": "IMV2ServerHTTP",
     "IMV2ServerHTTP/V2VaporPersonalPreferenceRecoveryRoutes.swift": "IMV2ServerHTTP",
     "IMV2ServerHTTP/V2VaporProfilePresentationBatchRoutes.swift": "IMV2ServerHTTP",
@@ -309,7 +322,6 @@
     "IMV2ServerHTTP/V2VaporSocialOperationRoutes.swift": "IMV2ServerHTTP",
     "IMV2ServerInfrastructure/Forwarding/ForwardMediaFileIO.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Forwarding/PostgresV2ForwardPersistence.swift": "IMV2ServerInfrastructure",
-    "IMV2ServerInfrastructure/Generated/Protobuf/im_realtime/internal/v1/group_event_notification.pb.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2AccountPreferenceOperationStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2ContentWriteAuthorization.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2ConversationCapabilitiesStore.swift": "IMV2ServerInfrastructure",
@@ -318,6 +330,7 @@
     "IMV2ServerInfrastructure/PostgresV2DirectAuthorizationReceiptStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2DirectMessagingStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2DirectRoomOperationStore.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/PostgresV2DurableSendBatchReceipts.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2DurableWorkReplayStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2ForwardDeliveryStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2ForwardExportCompactor.swift": "IMV2ServerInfrastructure",
@@ -351,6 +364,7 @@
     "IMV2ServerInfrastructure/PostgresV2MediaVisibilityAuthorization.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2MemberAdministrationStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2MembershipOperationStore.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/PostgresV2MentionPushWakeRelay.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2MessageEditStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2MessageModerationOperationStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2MessageMutationOperationStore.swift": "IMV2ServerInfrastructure",
@@ -369,6 +383,8 @@
     "IMV2ServerInfrastructure/PostgresV2PushWakeStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2ReadReceiptRecovery.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2ReadReceiptStore.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/PostgresV2RealtimePartitionLeaseStore.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/PostgresV2RealtimeRoomHeadReader.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2RoomActivationStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2RoomLatestVisibleStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2RoomMembershipDirectoryStore.swift": "IMV2ServerInfrastructure",
@@ -405,6 +421,7 @@
     "IMV2ServerInfrastructure/PostgresV2UserStateEventMetricsSource.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2UserStateEventOutbox.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/PostgresV2UserStateEventProjector.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/PostgresV2UserSyncWakeStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalMultipartUpload.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceDelivery.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Resources/Adapters/Local/V2LocalResourceScanner.swift": "IMV2ServerInfrastructure",
@@ -430,9 +447,14 @@
     "IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceRecoveryWorker.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceStorageReadiness.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceVariantProcessor.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/Room/Activation/V2OwnerAdmissionHandoffTrace.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationLifecycleBatcher.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationLifecycleSQL.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationRenewalBatcher.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationRestoration.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationTransaction.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationWriteScope.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/Room/Activation/V2RoomSQLContinuationTrace.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Room/Activation/V2RoomSQLDeadline.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Room/Activation/V2RoomServerPlacement.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/Room/Administration/PostgresV2RoomAdministrationAdapter.swift": "IMV2ServerInfrastructure",
@@ -482,6 +504,8 @@
     "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteControlResolution.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDirectBatchPath.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDirectPolicyContext.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchAdmission.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchPath.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteFastDirectEligibility.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteFastDirectPath.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteForwardInboxPath.swift": "IMV2ServerInfrastructure",
@@ -494,11 +518,14 @@
     "IMV2ServerInfrastructure/V2AccountEdgeClientRateLimiter.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2ContentReviewWorker.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2ControlPlaneHousekeepingWorker.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2DatabaseLoanObservation.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2DeploymentRoomShardRouter.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DeviceCredentialService.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DeviceRegistrationCancellation.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DeviceRevocationWorker.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DeviceSessionService.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DeviceSnapshotResetService.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2DirectAuthorizationBatchLocks.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectAuthorizationCoordinator.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectReadReceiptPolicy.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectRoomIdentityReader.swift": "IMV2ServerInfrastructure",
@@ -507,6 +534,9 @@
     "IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectSendControlPolicyFence.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectSendPolicyCache.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2DurableOwnerBatchLocks.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2DurableSendOperationOwnerBatcher.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2DurableSendOperationPreparationCollector.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DurableWorkMetrics.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2EventLoopBalancedDatabase.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2EventLoopDatabasePool.swift": "IMV2ServerInfrastructure",
@@ -527,12 +557,9 @@
     "IMV2ServerInfrastructure/V2MessageAcceptanceFact.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2MessageMediaOwner.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2MessageOperationClosedError.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2MessageSendPreparationRequest.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2ModerationAuditRetentionWorker.swift": "IMV2ServerInfrastructure",
-    "IMV2ServerInfrastructure/V2NATSAuthenticatedPayloadCodec.swift": "IMV2ServerInfrastructure",
-    "IMV2ServerInfrastructure/V2NATSGroupEventProtobufCodec.swift": "IMV2ServerInfrastructure",
-    "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift": "IMV2ServerInfrastructure",
-    "IMV2ServerInfrastructure/V2NATSInboundFrameParser.swift": "IMV2ServerInfrastructure",
-    "IMV2ServerInfrastructure/V2NATSLiveActivityBroker.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2ObservedBorrowedDatabase.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2OwnerModerationAuditRetentionStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2OwnerValidatedForwardMessages.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2OwnerValidatedGroupCapabilitiesStore.swift": "IMV2ServerInfrastructure",
@@ -546,6 +573,7 @@
     "IMV2ServerInfrastructure/V2PasswordLifecycleService.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2PasswordLoginAttemptLimiter.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2PersistenceTimestamp+PostgresSQL.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2PhysicalDatabaseLoanGate.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2PostgresGatewayAuthenticator.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2PostgresHTTPOperationAdapters.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2PostgresLivePresenceLeaseAdapter.swift": "IMV2ServerInfrastructure",
@@ -566,11 +594,13 @@
     "IMV2ServerInfrastructure/V2RoutedGroupEventWakeStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2RoutedSyncStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2RoutedUserStateEventProjector.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2RoutedUserSyncWakeStore.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2SchemaReadiness.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2SendMessageAdmissionBatcher.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2ShardAdmissionCommandCreditPool.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2ShardedSendMessageAdmissionBatcher.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2SpecialAccountMessagingService.swift": "IMV2ServerInfrastructure",
+    "IMV2ServerInfrastructure/V2StaticUserShardRouter.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2StorageTopologyConfiguration.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2SyncHousekeepingWorker.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2UserShardRouter.swift": "IMV2ServerInfrastructure",
@@ -578,8 +608,8 @@
     "IMV2ServerInfrastructure/V2UserSyncLogCompactionWorker.swift": "IMV2ServerInfrastructure"
   },
   "classificationOverrides": [],
-  "indexedUniqueDeclarations": 1951,
-  "fileEdges": 1941,
+  "indexedUniqueDeclarations": 2118,
+  "fileEdges": 2097,
   "forbiddenEdges": [],
   "crossTargetEdges": [
     {
@@ -760,8 +790,8 @@
         "V2RoomRefReadReceiptClient"
       ],
       "referenceLines": {
-        "V2RoomRefQueryClient": 13,
-        "V2RoomRefReadReceiptClient": 14
+        "V2RoomRefReadReceiptClient": 14,
+        "V2RoomRefQueryClient": 13
       }
     },
     {
@@ -798,8 +828,8 @@
         "V2ActorGrantedSendBatching"
       ],
       "referenceLines": {
-        "V2ActorGrantedSendBatching": 31,
-        "V2ActorGrantedSendBatchAdapter": 23
+        "V2ActorGrantedSendBatching": 40,
+        "V2ActorGrantedSendBatchAdapter": 27
       }
     },
     {
@@ -811,7 +841,7 @@
         "V2ActorRoomMaintenanceExecutor"
       ],
       "referenceLines": {
-        "V2ActorRoomMaintenanceExecutor": 273
+        "V2ActorRoomMaintenanceExecutor": 429
       }
     },
     {
@@ -823,7 +853,7 @@
         "V2RoomAdministrationDomainExecutor"
       ],
       "referenceLines": {
-        "V2RoomAdministrationDomainExecutor": 291
+        "V2RoomAdministrationDomainExecutor": 452
       }
     },
     {
@@ -835,7 +865,7 @@
         "v2RoomDomainCompletion"
       ],
       "referenceLines": {
-        "v2RoomDomainCompletion": 183
+        "v2RoomDomainCompletion": 337
       }
     },
     {
@@ -847,7 +877,7 @@
         "V2RoomMediaAuthorizationDomainExecutor"
       ],
       "referenceLines": {
-        "V2RoomMediaAuthorizationDomainExecutor": 283
+        "V2RoomMediaAuthorizationDomainExecutor": 439
       }
     },
     {
@@ -856,10 +886,12 @@
       "to": "IMV2ServerApplication/Room/V2RoomMessagingExecutor.swift",
       "toTarget": "IMV2ServerApplication",
       "symbols": [
-        "V2RoomMessagingExecutor"
+        "V2RoomMessagingExecutor",
+        "v2ExecutePreparedRoomSendOperationBatch"
       ],
       "referenceLines": {
-        "V2RoomMessagingExecutor": 287
+        "V2RoomMessagingExecutor": 446,
+        "v2ExecutePreparedRoomSendOperationBatch": 304
       }
     },
     {
@@ -871,7 +903,7 @@
         "v2WithAdmittedRoomDatabaseWork"
       ],
       "referenceLines": {
-        "v2WithAdmittedRoomDatabaseWork": 159
+        "v2WithAdmittedRoomDatabaseWork": 288
       }
     },
     {
@@ -883,7 +915,7 @@
         "V2DatabaseWorkAdmissionController"
       ],
       "referenceLines": {
-        "V2DatabaseWorkAdmissionController": 27
+        "V2DatabaseWorkAdmissionController": 31
       }
     },
     {
@@ -896,8 +928,20 @@
         "V2GroupInviteSecretIssuer"
       ],
       "referenceLines": {
-        "V2GroupInviteSecretIssuer": 17,
-        "V2GroupInvitationServiceError": 250
+        "V2GroupInviteSecretIssuer": 21,
+        "V2GroupInvitationServiceError": 406
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 34
       }
     },
     {
@@ -909,7 +953,7 @@
         "V2CommittedMessageBatchObserving"
       ],
       "referenceLines": {
-        "V2CommittedMessageBatchObserving": 28
+        "V2CommittedMessageBatchObserving": 33
       }
     },
     {
@@ -921,7 +965,7 @@
         "V2ContentReviewMode"
       ],
       "referenceLines": {
-        "V2ContentReviewMode": 37
+        "V2ContentReviewMode": 46
       }
     },
     {
@@ -933,7 +977,7 @@
         "V2DatabaseWorkClass"
       ],
       "referenceLines": {
-        "V2DatabaseWorkClass": 301
+        "V2DatabaseWorkClass": 462
       }
     },
     {
@@ -945,7 +989,7 @@
         "V2ForwardExportError"
       ],
       "referenceLines": {
-        "V2ForwardExportError": 194
+        "V2ForwardExportError": 350
       }
     },
     {
@@ -957,7 +1001,7 @@
         "V2ForwardInboxError"
       ],
       "referenceLines": {
-        "V2ForwardInboxError": 194
+        "V2ForwardInboxError": 350
       }
     },
     {
@@ -969,7 +1013,7 @@
         "V2GroupEventLogError"
       ],
       "referenceLines": {
-        "V2GroupEventLogError": 236
+        "V2GroupEventLogError": 392
       }
     },
     {
@@ -981,7 +1025,7 @@
         "V2MediaStoreError"
       ],
       "referenceLines": {
-        "V2MediaStoreError": 202
+        "V2MediaStoreError": 358
       }
     },
     {
@@ -993,7 +1037,7 @@
         "V2MembershipIdentitySnapshotValidating"
       ],
       "referenceLines": {
-        "V2MembershipIdentitySnapshotValidating": 16
+        "V2MembershipIdentitySnapshotValidating": 20
       }
     },
     {
@@ -1010,12 +1054,12 @@
         "V2RoomReceiptQueryExecuting"
       ],
       "referenceLines": {
-        "V2RoomReceiptQueryExecuting": 277,
-        "V2RoomAdministrationExecuting": 270,
-        "V2RoomMediaAuthorizationExecuting": 275,
-        "V2GrantedRoomReadTurn": 240,
-        "V2RoomMessagingExecuting": 269,
-        "V2RoomQueryExecuting": 276
+        "V2GrantedRoomReadTurn": 396,
+        "V2RoomReceiptQueryExecuting": 433,
+        "V2RoomMediaAuthorizationExecuting": 431,
+        "V2RoomMessagingExecuting": 425,
+        "V2RoomAdministrationExecuting": 426,
+        "V2RoomQueryExecuting": 432
       }
     },
     {
@@ -1027,7 +1071,21 @@
         "V2CapacityProfile"
       ],
       "referenceLines": {
-        "V2CapacityProfile": 24
+        "V2CapacityProfile": 28
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2SendOperationOwnerMetricsReading",
+        "V2SendOperationOwnerMetricsSnapshot"
+      ],
+      "referenceLines": {
+        "V2SendOperationOwnerMetricsSnapshot": 89,
+        "V2SendOperationOwnerMetricsReading": 13
       }
     },
     {
@@ -1039,7 +1097,7 @@
         "V2UserShardProjectionDelivering"
       ],
       "referenceLines": {
-        "V2UserShardProjectionDelivering": 35
+        "V2UserShardProjectionDelivering": 44
       }
     },
     {
@@ -1051,7 +1109,19 @@
         "PostgresV2MessageMutationOperationStore"
       ],
       "referenceLines": {
-        "PostgresV2MessageMutationOperationStore": 15
+        "PostgresV2MessageMutationOperationStore": 19
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
+      "toTarget": "IMV2ServerInfrastructure",
+      "symbols": [
+        "PostgresV2MessageSendOperationStore"
+      ],
+      "referenceLines": {
+        "PostgresV2MessageSendOperationStore": 108
       }
     },
     {
@@ -1063,7 +1133,7 @@
         "PostgresV2RoomWriteStore"
       ],
       "referenceLines": {
-        "PostgresV2RoomWriteStore": 14
+        "PostgresV2RoomWriteStore": 18
       }
     },
     {
@@ -1075,7 +1145,19 @@
         "v2ValidateRoomActivation"
       ],
       "referenceLines": {
-        "v2ValidateRoomActivation": 126
+        "v2ValidateRoomActivation": 242
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerInfrastructure/Room/Activation/V2RoomSQLContinuationTrace.swift",
+      "toTarget": "IMV2ServerInfrastructure",
+      "symbols": [
+        "V2RoomSQLContinuationObservation"
+      ],
+      "referenceLines": {
+        "V2RoomSQLContinuationObservation": 194
       }
     },
     {
@@ -1087,7 +1169,7 @@
         "V2RoomSQLDeadline"
       ],
       "referenceLines": {
-        "V2RoomSQLDeadline": 125
+        "V2RoomSQLDeadline": 238
       }
     },
     {
@@ -1099,7 +1181,7 @@
         "V2RoomInvitationDomainExecutor"
       ],
       "referenceLines": {
-        "V2RoomInvitationDomainExecutor": 272
+        "V2RoomInvitationDomainExecutor": 428
       }
     },
     {
@@ -1111,7 +1193,7 @@
         "V2ActorRoomQueryExecutor"
       ],
       "referenceLines": {
-        "V2ActorRoomQueryExecutor": 21
+        "V2ActorRoomQueryExecutor": 25
       }
     },
     {
@@ -1123,7 +1205,7 @@
         "V2ActorRoomReceiptExecutor"
       ],
       "referenceLines": {
-        "V2ActorRoomReceiptExecutor": 19
+        "V2ActorRoomReceiptExecutor": 23
       }
     },
     {
@@ -1135,7 +1217,7 @@
         "V2RoomForwardDomainExecutor"
       ],
       "referenceLines": {
-        "V2RoomForwardDomainExecutor": 274
+        "V2RoomForwardDomainExecutor": 430
       }
     },
     {
@@ -1147,7 +1229,7 @@
         "V2RoomSpecialAccountAuditExecutor"
       ],
       "referenceLines": {
-        "V2RoomSpecialAccountAuditExecutor": 271
+        "V2RoomSpecialAccountAuditExecutor": 427
       }
     },
     {
@@ -1159,7 +1241,7 @@
         "V2HostRoomRecoveryQueryBatcher"
       ],
       "referenceLines": {
-        "V2HostRoomRecoveryQueryBatcher": 22
+        "V2HostRoomRecoveryQueryBatcher": 26
       }
     },
     {
@@ -1171,7 +1253,43 @@
         "V2HostRoomReceiptBatcher"
       ],
       "referenceLines": {
-        "V2HostRoomReceiptBatcher": 20
+        "V2HostRoomReceiptBatcher": 24
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerInfrastructure/V2DurableSendOperationOwnerBatcher.swift",
+      "toTarget": "IMV2ServerInfrastructure",
+      "symbols": [
+        "V2DurableSendOperationOwnerBatcher"
+      ],
+      "referenceLines": {
+        "V2DurableSendOperationOwnerBatcher": 109
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerInfrastructure/V2DurableSendOperationPreparationCollector.swift",
+      "toTarget": "IMV2ServerInfrastructure",
+      "symbols": [
+        "V2DurableSendOperationPreparationCollector"
+      ],
+      "referenceLines": {
+        "V2DurableSendOperationPreparationCollector": 110
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerInfrastructure/V2EventLoopBalancedDatabase.swift",
+      "toTarget": "IMV2ServerInfrastructure",
+      "symbols": [
+        "V2EventLoopBalancedDatabase"
+      ],
+      "referenceLines": {
+        "V2EventLoopBalancedDatabase": 64
       }
     },
     {
@@ -1183,7 +1301,7 @@
         "V2GroupInvitationIdentityReading"
       ],
       "referenceLines": {
-        "V2GroupInvitationIdentityReading": 18
+        "V2GroupInvitationIdentityReading": 22
       }
     },
     {
@@ -1195,7 +1313,19 @@
         "V2ReadReceiptBatcher"
       ],
       "referenceLines": {
-        "V2ReadReceiptBatcher": 39
+        "V2ReadReceiptBatcher": 48
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/Room/V2RoomServerActivationFactory.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerInfrastructure/V2SendMessageAdmissionBatcher.swift",
+      "toTarget": "IMV2ServerInfrastructure",
+      "symbols": [
+        "V2SendMessageAdmissionBatcher"
+      ],
+      "referenceLines": {
+        "V2SendMessageAdmissionBatcher": 36
       }
     },
     {
@@ -1303,7 +1433,7 @@
         "V2DirectRoomLogAppendStageMetrics"
       ],
       "referenceLines": {
-        "V2DirectRoomLogAppendStageMetrics": 21
+        "V2DirectRoomLogAppendStageMetrics": 24
       }
     },
     {
@@ -1315,7 +1445,7 @@
         "V2SyncWakeCoalescer"
       ],
       "referenceLines": {
-        "V2SyncWakeCoalescer": 16
+        "V2SyncWakeCoalescer": 19
       }
     },
     {
@@ -1327,7 +1457,7 @@
         "V2ReadReceiptBatchMetricsReading"
       ],
       "referenceLines": {
-        "V2ReadReceiptBatchMetricsReading": 20
+        "V2ReadReceiptBatchMetricsReading": 23
       }
     },
     {
@@ -1336,13 +1466,15 @@
       "to": "IMV2ServerContracts/V2RuntimePressureMetricsContracts.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2DatabaseLoanMetricsSnapshot",
         "V2DatabasePoolTopologySnapshot",
         "V2RuntimePressureMetricsSnapshot",
         "V2RuntimePressureMetricsSource"
       ],
       "referenceLines": {
-        "V2DatabasePoolTopologySnapshot": 15,
-        "V2RuntimePressureMetricsSnapshot": 89,
+        "V2DatabaseLoanMetricsSnapshot": 16,
+        "V2RuntimePressureMetricsSnapshot": 107,
+        "V2DatabasePoolTopologySnapshot": 18,
         "V2RuntimePressureMetricsSource": 13
       }
     },
@@ -1355,7 +1487,21 @@
         "V2SendMessageBatchMetricsReading"
       ],
       "referenceLines": {
-        "V2SendMessageBatchMetricsReading": 19
+        "V2SendMessageBatchMetricsReading": 22
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/V2GatewayRuntimePressureMetricsSource.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2SendOperationBatchMetricsReading",
+        "V2SendOperationOwnerMetricsReading"
+      ],
+      "referenceLines": {
+        "V2SendOperationOwnerMetricsReading": 33,
+        "V2SendOperationBatchMetricsReading": 32
       }
     },
     {
@@ -1367,7 +1513,7 @@
         "V2EventLoopLagMetrics"
       ],
       "referenceLines": {
-        "V2EventLoopLagMetrics": 22
+        "V2EventLoopLagMetrics": 25
       }
     },
     {
@@ -1379,7 +1525,19 @@
         "V2DeviceConnectionRegistry"
       ],
       "referenceLines": {
-        "V2DeviceConnectionRegistry": 27
+        "V2DeviceConnectionRegistry": 30
+      }
+    },
+    {
+      "from": "IMV2Server/Composition/V2GatewayRuntimePressureMetricsSource.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerGateway/V2GatewayMessageSendBudget.swift",
+      "toTarget": "IMV2ServerGateway",
+      "symbols": [
+        "V2GatewayMessageSendBudget"
+      ],
+      "referenceLines": {
+        "V2GatewayMessageSendBudget": 17
       }
     },
     {
@@ -1391,7 +1549,7 @@
         "V2PreparedGroupEventPageCache"
       ],
       "referenceLines": {
-        "V2PreparedGroupEventPageCache": 26
+        "V2PreparedGroupEventPageCache": 29
       }
     },
     {
@@ -1403,7 +1561,7 @@
         "V2DirectRoomLogEventCache"
       ],
       "referenceLines": {
-        "V2DirectRoomLogEventCache": 25
+        "V2DirectRoomLogEventCache": 28
       }
     },
     {
@@ -1415,7 +1573,7 @@
         "V2DirectRoomLogFastAppendCache"
       ],
       "referenceLines": {
-        "V2DirectRoomLogFastAppendCache": 24
+        "V2DirectRoomLogFastAppendCache": 27
       }
     },
     {
@@ -1427,7 +1585,7 @@
         "V2DirectSendPolicyCache"
       ],
       "referenceLines": {
-        "V2DirectSendPolicyCache": 23
+        "V2DirectSendPolicyCache": 26
       }
     },
     {
@@ -1439,7 +1597,7 @@
         "V2RoomAdmissionCommandCreditPool"
       ],
       "referenceLines": {
-        "V2RoomAdmissionCommandCreditPool": 18
+        "V2RoomAdmissionCommandCreditPool": 21
       }
     },
     {
@@ -1451,7 +1609,7 @@
         "V2ShardAdmissionCommandCreditPool"
       ],
       "referenceLines": {
-        "V2ShardAdmissionCommandCreditPool": 17
+        "V2ShardAdmissionCommandCreditPool": 20
       }
     },
     {
@@ -1476,8 +1634,8 @@
         "V2PasswordLoginRateLimitPolicy"
       ],
       "referenceLines": {
-        "V2PasswordLoginRateLimitError": 149,
-        "V2PasswordLoginRateLimitPolicy": 60
+        "V2PasswordLoginRateLimitPolicy": 60,
+        "V2PasswordLoginRateLimitError": 149
       }
     },
     {
@@ -1490,8 +1648,8 @@
         "V2PublicIdentityLookupRateLimitPolicy"
       ],
       "referenceLines": {
-        "V2PublicIdentityLookupRateLimitError": 163,
-        "V2PublicIdentityLookupRateLimitPolicy": 64
+        "V2PublicIdentityLookupRateLimitPolicy": 64,
+        "V2PublicIdentityLookupRateLimitError": 163
       }
     },
     {
@@ -1529,9 +1687,9 @@
         "V2AccountEdgeClientRateLimitPolicy"
       ],
       "referenceLines": {
-        "V2AccountEdgeClientRateLimitPolicy": 62,
         "V2AccountEdgeClientRateLimitKey": 52,
-        "V2AccountEdgeClientRateLimitError": 118
+        "V2AccountEdgeClientRateLimitError": 118,
+        "V2AccountEdgeClientRateLimitPolicy": 62
       }
     },
     {
@@ -1652,8 +1810,8 @@
         "V2UserShardStorageConfiguration"
       ],
       "referenceLines": {
-        "V2UserShardStorageConfiguration": 72,
-        "V2RoomShardStorageConfiguration": 68
+        "V2RoomShardStorageConfiguration": 68,
+        "V2UserShardStorageConfiguration": 72
       }
     },
     {
@@ -1678,8 +1836,8 @@
         "V2StrangerMessagePolicy"
       ],
       "referenceLines": {
-        "V2StrangerMessagePolicy": 319,
-        "V2DirectRoomShardRouter": 310
+        "V2DirectRoomShardRouter": 310,
+        "V2StrangerMessagePolicy": 319
       }
     },
     {
@@ -1691,7 +1849,7 @@
         "V2DurableRetryPolicy"
       ],
       "referenceLines": {
-        "V2DurableRetryPolicy": 196
+        "V2DurableRetryPolicy": 194
       }
     },
     {
@@ -1703,7 +1861,7 @@
         "V2GroupInviteSecretIssuer"
       ],
       "referenceLines": {
-        "V2GroupInviteSecretIssuer": 93
+        "V2GroupInviteSecretIssuer": 91
       }
     },
     {
@@ -1715,7 +1873,7 @@
         "V2AccessTokenHMACKey"
       ],
       "referenceLines": {
-        "V2AccessTokenHMACKey": 94
+        "V2AccessTokenHMACKey": 92
       }
     },
     {
@@ -1727,7 +1885,7 @@
         "V2AuthenticatedConnectionAdmissionPolicy"
       ],
       "referenceLines": {
-        "V2AuthenticatedConnectionAdmissionPolicy": 141
+        "V2AuthenticatedConnectionAdmissionPolicy": 139
       }
     },
     {
@@ -1763,7 +1921,7 @@
         "V2GroupRoomShardSelector"
       ],
       "referenceLines": {
-        "V2GroupRoomShardSelector": 1055
+        "V2GroupRoomShardSelector": 1076
       }
     },
     {
@@ -1775,7 +1933,7 @@
         "V2RoomLogRetentionMode"
       ],
       "referenceLines": {
-        "V2RoomLogRetentionMode": 220
+        "V2RoomLogRetentionMode": 218
       }
     },
     {
@@ -1787,7 +1945,7 @@
         "V2RuntimeEnvironment"
       ],
       "referenceLines": {
-        "V2RuntimeEnvironment": 330
+        "V2RuntimeEnvironment": 342
       }
     },
     {
@@ -1799,7 +1957,7 @@
         "V2CapacityProfile"
       ],
       "referenceLines": {
-        "V2CapacityProfile": 95
+        "V2CapacityProfile": 93
       }
     },
     {
@@ -1811,7 +1969,7 @@
         "IMV2ProtocolVersion"
       ],
       "referenceLines": {
-        "IMV2ProtocolVersion": 350
+        "IMV2ProtocolVersion": 362
       }
     },
     {
@@ -1823,7 +1981,7 @@
         "V2GatewayCommandRateLimitPolicy"
       ],
       "referenceLines": {
-        "V2GatewayCommandRateLimitPolicy": 144
+        "V2GatewayCommandRateLimitPolicy": 142
       }
     },
     {
@@ -1835,7 +1993,7 @@
         "V2GatewayConnectionTimeouts"
       ],
       "referenceLines": {
-        "V2GatewayConnectionTimeouts": 537
+        "V2GatewayConnectionTimeouts": 549
       }
     },
     {
@@ -1847,7 +2005,7 @@
         "V2ServerProtobufFrameCodec"
       ],
       "referenceLines": {
-        "V2ServerProtobufFrameCodec": 376
+        "V2ServerProtobufFrameCodec": 388
       }
     },
     {
@@ -1859,7 +2017,7 @@
         "V2TLSListenerConfiguration"
       ],
       "referenceLines": {
-        "V2TLSListenerConfiguration": 92
+        "V2TLSListenerConfiguration": 90
       }
     },
     {
@@ -1871,19 +2029,7 @@
         "V2APNSJWTAuthorizer"
       ],
       "referenceLines": {
-        "V2APNSJWTAuthorizer": 1191
-      }
-    },
-    {
-      "from": "IMV2Server/V2GatewayRuntimeConfiguration.swift",
-      "fromTarget": "IMV2Server",
-      "to": "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift",
-      "toTarget": "IMV2ServerInfrastructure",
-      "symbols": [
-        "V2NATSGroupEventWakeConfiguration"
-      ],
-      "referenceLines": {
-        "V2NATSGroupEventWakeConfiguration": 42
+        "V2APNSJWTAuthorizer": 1212
       }
     },
     {
@@ -1896,8 +2042,8 @@
         "V2PostgresWorkloadPoolBudget"
       ],
       "referenceLines": {
-        "V2PostgresRuntimePolicy": 78,
-        "V2PostgresWorkloadPoolBudget": 79
+        "V2PostgresWorkloadPoolBudget": 77,
+        "V2PostgresRuntimePolicy": 76
       }
     },
     {
@@ -1909,7 +2055,19 @@
         "V2PushEndpointEnvelopeKey"
       ],
       "referenceLines": {
-        "V2PushEndpointEnvelopeKey": 50
+        "V2PushEndpointEnvelopeKey": 48
+      }
+    },
+    {
+      "from": "IMV2Server/V2GatewayRuntimeConfiguration.swift",
+      "fromTarget": "IMV2Server",
+      "to": "IMV2ServerInfrastructure/V2SendMessageAdmissionBatcher.swift",
+      "toTarget": "IMV2ServerInfrastructure",
+      "symbols": [
+        "V2SendMessageAdmissionBatcher"
+      ],
+      "referenceLines": {
+        "V2SendMessageAdmissionBatcher": 333
       }
     },
     {
@@ -1922,8 +2080,8 @@
         "V2UserShardStorageConfiguration"
       ],
       "referenceLines": {
-        "V2UserShardStorageConfiguration": 300,
-        "V2RoomShardStorageConfiguration": 304
+        "V2RoomShardStorageConfiguration": 304,
+        "V2UserShardStorageConfiguration": 300
       }
     },
     {
@@ -2032,8 +2190,8 @@
         "V2UserShardStorageConfiguration"
       ],
       "referenceLines": {
-        "V2UserShardStorageConfiguration": 54,
-        "V2RoomShardStorageConfiguration": 56
+        "V2RoomShardStorageConfiguration": 56,
+        "V2UserShardStorageConfiguration": 54
       }
     },
     {
@@ -2070,8 +2228,8 @@
         "V2ForwardPlanStoring"
       ],
       "referenceLines": {
-        "V2ForwardPlanStoring": 65,
-        "V2ForwardPlanStoreError": 76
+        "V2ForwardPlanStoreError": 76,
+        "V2ForwardPlanStoring": 65
       }
     },
     {
@@ -2084,8 +2242,8 @@
         "V2RoomShardRouting"
       ],
       "referenceLines": {
-        "V2RoomShardRouting": 9,
-        "V2RoomShardRouteError": 23
+        "V2RoomShardRouteError": 23,
+        "V2RoomShardRouting": 9
       }
     },
     {
@@ -2123,9 +2281,9 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
-        "V2RoomWriteStore": 20,
+        "V2RoomWriteRequest": 30,
         "V2SendMessageOutcome": 31,
-        "V2RoomWriteRequest": 30
+        "V2RoomWriteStore": 20
       }
     },
     {
@@ -2233,7 +2391,7 @@
         "V2MediaStoreError"
       ],
       "referenceLines": {
-        "V2MediaStoreError": 174
+        "V2MediaStoreError": 182
       }
     },
     {
@@ -2282,8 +2440,8 @@
         "v2PostgresTimestampMicrosecondsCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 403,
-        "v2PostgresTimestampMicrosecondsCanEncode": 196
+        "v2PostgresTimestampMicrosecondsCanEncode": 196,
+        "v2PostgresTimestampCanEncode": 403
       }
     },
     {
@@ -2335,11 +2493,11 @@
         "V2ForwardReceiptReading"
       ],
       "referenceLines": {
-        "V2CrossOwnerForwardOutcome": 36,
         "V2CrossOwnerForwarding": 18,
         "V2ForwardDeliveryError": 28,
+        "V2ForwardReceiptReading": 7,
         "V2ForwardDeliveryStatusReading": 8,
-        "V2ForwardReceiptReading": 7
+        "V2CrossOwnerForwardOutcome": 36
       }
     },
     {
@@ -2352,8 +2510,8 @@
         "V2ForwardExportError"
       ],
       "referenceLines": {
-        "V2ForwardExportError": 65,
-        "V2ForwardExport": 59
+        "V2ForwardExport": 59,
+        "V2ForwardExportError": 65
       }
     },
     {
@@ -2429,8 +2587,8 @@
       ],
       "referenceLines": {
         "V2ForwardTerminalReceiptReading": 8,
-        "V2ForwardExportDelivering": 7,
         "V2ForwardMediaImportRunning": 9,
+        "V2ForwardExportDelivering": 7,
         "V2ForwardDeliveryError": 25
       }
     },
@@ -2482,10 +2640,10 @@
         "V2ForwardExportMedia"
       ],
       "referenceLines": {
-        "V2ForwardExportError": 28,
-        "V2ForwardExport": 20,
         "V2ForwardExportMedia": 62,
-        "V2ForwardExportIntent": 35
+        "V2ForwardExportIntent": 35,
+        "V2ForwardExport": 20,
+        "V2ForwardExportError": 28
       }
     },
     {
@@ -2499,9 +2657,9 @@
         "V2ForwardInboxError"
       ],
       "referenceLines": {
+        "V2ForwardImportOutcome": 74,
         "V2ForwardInboxError": 86,
-        "V2ForwardImportPendingReason": 96,
-        "V2ForwardImportOutcome": 74
+        "V2ForwardImportPendingReason": 96
       }
     },
     {
@@ -2515,9 +2673,9 @@
         "V2ForwardPendingError"
       ],
       "referenceLines": {
-        "V2CrossOwnerForwarding": 22,
         "V2ForwardMessagesHandling": 18,
-        "V2ForwardPendingError": 78
+        "V2ForwardPendingError": 78,
+        "V2CrossOwnerForwarding": 22
       }
     },
     {
@@ -2543,9 +2701,9 @@
         "V2RoomShardRouting"
       ],
       "referenceLines": {
-        "V2RoomShardRouting": 19,
         "V2RoomShardRouteError": 81,
-        "V2RoomShardRoute": 24
+        "V2RoomShardRoute": 24,
+        "V2RoomShardRouting": 19
       }
     },
     {
@@ -2558,8 +2716,8 @@
         "V2SendMessageAdmissionBatcherError"
       ],
       "referenceLines": {
-        "V2SendMessageAdmissionBatcherError": 41,
-        "V2RoomTransactionOutcomeUnknown": 64
+        "V2RoomTransactionOutcomeUnknown": 64,
+        "V2SendMessageAdmissionBatcherError": 41
       }
     },
     {
@@ -2702,8 +2860,8 @@
         "V2UserRoomDirectorySlice"
       ],
       "referenceLines": {
-        "V2UserRoomDirectorySlice": 142,
-        "V2UserRoomDirectoryEntry": 108
+        "V2UserRoomDirectoryEntry": 108,
+        "V2UserRoomDirectorySlice": 142
       }
     },
     {
@@ -2731,9 +2889,9 @@
       ],
       "referenceLines": {
         "V2GroupEventLogPage": 41,
-        "V2GroupEventLogError": 5,
         "V2GroupEventSubscription": 59,
-        "V2GroupEventLogEntry": 25
+        "V2GroupEventLogEntry": 25,
+        "V2GroupEventLogError": 5
       }
     },
     {
@@ -2776,10 +2934,10 @@
       "referenceLines": {
         "V2ReadReceiptRecordResult": 107,
         "V2ReadReceiptRecordRequest": 123,
-        "V2ReadReceiptOutcome": 43,
         "V2GroupReadReceiptReaderCandidatePage": 161,
         "V2AuthenticatedReadReceipt": 7,
-        "V2ReadReceiptStoreError": 82
+        "V2ReadReceiptStoreError": 82,
+        "V2ReadReceiptOutcome": 43
       }
     },
     {
@@ -2819,11 +2977,11 @@
         "V2RoomMaintenanceScanning"
       ],
       "referenceLines": {
-        "V2RoomMaintenanceError": 33,
+        "V2RoomMaintenanceInvoking": 10,
         "V2RoomActorMaintenanceReport": 23,
+        "V2RoomMaintenanceError": 33,
         "V2RoomMaintenanceScanning": 9,
-        "V2RoomLogRetentionMode": 22,
-        "V2RoomMaintenanceInvoking": 10
+        "V2RoomLogRetentionMode": 22
       }
     },
     {
@@ -2849,9 +3007,9 @@
         "V2RoomMembershipOperationPersisting"
       ],
       "referenceLines": {
-        "V2ActorTrustedSafetyAuthority": 46,
+        "V2RoomMembershipOperationPersisting": 8,
         "V2RoomAdministrationStoring": 7,
-        "V2RoomMembershipOperationPersisting": 8
+        "V2ActorTrustedSafetyAuthority": 46
       }
     },
     {
@@ -2911,7 +3069,7 @@
         "V2RoomOwnerFenceError"
       ],
       "referenceLines": {
-        "V2RoomOwnerFenceError": 21
+        "V2RoomOwnerFenceError": 22
       }
     },
     {
@@ -2923,7 +3081,7 @@
         "V2HostRoomRecoveryBatchError"
       ],
       "referenceLines": {
-        "V2HostRoomRecoveryBatchError": 22
+        "V2HostRoomRecoveryBatchError": 23
       }
     },
     {
@@ -2944,9 +3102,11 @@
       "to": "IMV2ServerContracts/V2RoomExecutionCapabilities.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2PreparedRoomSendOperationBatch",
         "V2RoomMessagingPersisting"
       ],
       "referenceLines": {
+        "V2PreparedRoomSendOperationBatch": 85,
         "V2RoomMessagingPersisting": 14
       }
     },
@@ -2978,12 +3138,12 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
-        "V2RoomWriteStore": 11,
-        "V2SendMessageOutcome": 67,
-        "V2AuthenticatedSendMessage": 67,
+        "V2RoomWriteRequest": 80,
         "V2CapacityProfile": 15,
         "V2SendMessageAdmission": 13,
-        "V2RoomWriteRequest": 80
+        "V2SendMessageOutcome": 67,
+        "V2RoomWriteStore": 11,
+        "V2AuthenticatedSendMessage": 67
       }
     },
     {
@@ -3011,6 +3171,48 @@
       }
     },
     {
+      "from": "IMV2ServerApplication/V2ActorRealtimeMetrics.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2ActorRealtimeMetricsContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2ActorRealtimeActivationResult",
+        "V2ActorRealtimeHeadReadResult",
+        "V2ActorRealtimeMetricsSnapshot",
+        "V2ActorRealtimeMetricsSource",
+        "V2ActorRealtimeOperation",
+        "V2ActorRealtimeQueue",
+        "V2ActorRealtimeRPCResult",
+        "V2ActorRealtimeResult",
+        "V2ActorRealtimeRouteQueryKind",
+        "V2ActorRealtimeSessionRotationReason"
+      ],
+      "referenceLines": {
+        "V2ActorRealtimeRouteQueryKind": 28,
+        "V2ActorRealtimeSessionRotationReason": 55,
+        "V2ActorRealtimeResult": 13,
+        "V2ActorRealtimeRPCResult": 21,
+        "V2ActorRealtimeActivationResult": 60,
+        "V2ActorRealtimeMetricsSnapshot": 8,
+        "V2ActorRealtimeOperation": 13,
+        "V2ActorRealtimeQueue": 22,
+        "V2ActorRealtimeHeadReadResult": 63,
+        "V2ActorRealtimeMetricsSource": 7
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2ActorRealtimeMetrics.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeRecoveryHeadOutcome.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeRecoveryHeadOutcome"
+      ],
+      "referenceLines": {
+        "V2RealtimeRecoveryHeadOutcome": 64
+      }
+    },
+    {
       "from": "IMV2ServerApplication/V2AdmittedRoomDatabaseWork.swift",
       "fromTarget": "IMV2ServerApplication",
       "to": "IMV2ServerContracts/V2DatabaseWorkAdmissionValues.swift",
@@ -3032,8 +3234,8 @@
         "V2ReadReceiptBatchMetricsSnapshot"
       ],
       "referenceLines": {
-        "V2ReadReceiptBatchMetricsReading": 6,
-        "V2ReadReceiptBatchMetricsSnapshot": 18
+        "V2ReadReceiptBatchMetricsSnapshot": 18,
+        "V2ReadReceiptBatchMetricsReading": 6
       }
     },
     {
@@ -3058,8 +3260,8 @@
         "V2SendMessageBatchMetricsReading"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 54,
-        "V2SendMessageBatchMetricsReading": 91
+        "V2SendMessageBatchMetricsReading": 91,
+        "V2AtomicRoomWriteBatchError": 54
       }
     },
     {
@@ -3074,8 +3276,8 @@
       ],
       "referenceLines": {
         "V2DirectRoomShardRouting": 14,
-        "V2RoomShardRouteError": 109,
-        "V2RoomShardRoute": 17
+        "V2RoomShardRoute": 17,
+        "V2RoomShardRouteError": 109
       }
     },
     {
@@ -3140,12 +3342,12 @@
         "V2ForwardReceiptReading"
       ],
       "referenceLines": {
-        "V2CrossOwnerForwardOutcome": 62,
-        "V2ForwardExportPreparing": 9,
         "V2CrossOwnerForwarding": 30,
+        "V2ForwardExportPreparing": 9,
         "V2ForwardDeliveryError": 42,
+        "V2ForwardReceiptReading": 11,
         "V2ForwardDeliveryStatusReading": 13,
-        "V2ForwardReceiptReading": 11
+        "V2CrossOwnerForwardOutcome": 62
       }
     },
     {
@@ -3158,8 +3360,8 @@
         "V2ForwardExportError"
       ],
       "referenceLines": {
-        "V2ForwardExportError": 72,
-        "V2ForwardExport": 75
+        "V2ForwardExport": 75,
+        "V2ForwardExportError": 72
       }
     },
     {
@@ -3212,12 +3414,12 @@
         "V2DatabaseWorkClass"
       ],
       "referenceLines": {
-        "V2DatabaseWorkClass": 18,
-        "V2DatabaseWorkAdmissionSnapshot": 124,
-        "V2DatabaseWorkAdmissionResult": 19,
         "V2DatabaseWorkAdmissionWaitBucket": 39,
+        "V2DatabaseWorkAdmissionClassSnapshot": 380,
         "V2DatabaseWorkAdmissionPolicy": 42,
-        "V2DatabaseWorkAdmissionClassSnapshot": 380
+        "V2DatabaseWorkAdmissionResult": 19,
+        "V2DatabaseWorkAdmissionSnapshot": 124,
+        "V2DatabaseWorkClass": 18
       }
     },
     {
@@ -3242,8 +3444,8 @@
         "v2PostgresTimestampPrecedes"
       ],
       "referenceLines": {
-        "v2PostgresFutureTimestamp": 31,
-        "v2PostgresTimestampPrecedes": 30
+        "v2PostgresTimestampPrecedes": 30,
+        "v2PostgresFutureTimestamp": 31
       }
     },
     {
@@ -3385,11 +3587,11 @@
         "V2ForwardTerminalReceiptReading"
       ],
       "referenceLines": {
-        "V2ForwardExportDelivering": 9,
-        "V2ForwardDeliveryError": 48,
         "V2ForwardExportImporting": 11,
+        "V2ForwardMediaImportRunning": 12,
+        "V2ForwardDeliveryError": 48,
         "V2ForwardTerminalReceiptReading": 10,
-        "V2ForwardMediaImportRunning": 12
+        "V2ForwardExportDelivering": 9
       }
     },
     {
@@ -3500,9 +3702,9 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
+        "V2RoomWriteRequest": 157,
         "V2SendMessageOutcome": 159,
         "V2RoomWriteStoreError": 197,
-        "V2RoomWriteRequest": 157,
         "V2CapacityProfile": 14
       }
     },
@@ -3519,11 +3721,11 @@
         "V2GatewayRoomMembershipDirectoryHandling"
       ],
       "referenceLines": {
-        "V2GatewayReadReceiptHandling": 4,
         "V2GatewayGroupEventLogHandling": 8,
+        "V2GatewayReadReceiptHandling": 4,
+        "V2GatewayRoomMembershipDirectoryHandling": 6,
         "V2GatewayLiveActivityHandling": 5,
-        "V2GatewayConversationCapabilitiesHandling": 7,
-        "V2GatewayRoomMembershipDirectoryHandling": 6
+        "V2GatewayConversationCapabilitiesHandling": 7
       }
     },
     {
@@ -3563,11 +3765,11 @@
         "V2GroupEventSubscription"
       ],
       "referenceLines": {
-        "V2GroupEventLogPage": 46,
-        "V2GroupEventSubscription": 87,
         "V2GroupEventLogStore": 17,
+        "V2GroupEventLogError": 50,
+        "V2GroupEventSubscription": 87,
         "V2CommittedRoomLogObserving": 18,
-        "V2GroupEventLogError": 50
+        "V2GroupEventLogPage": 46
       }
     },
     {
@@ -3619,9 +3821,9 @@
       ],
       "referenceLines": {
         "V2GroupEventWakeStore": 92,
+        "V2GroupEventWakePublishing": 93,
         "V2ForegroundGroupEventHintSubmitting": 18,
-        "V2GroupEventWakeStoreError": 128,
-        "V2GroupEventWakePublishing": 93
+        "V2GroupEventWakeStoreError": 128
       }
     },
     {
@@ -3633,7 +3835,7 @@
         "v2PostgresFutureTimestamp"
       ],
       "referenceLines": {
-        "v2PostgresFutureTimestamp": 132
+        "v2PostgresFutureTimestamp": 133
       }
     },
     {
@@ -3684,8 +3886,8 @@
         "V2LiveActivityStore"
       ],
       "referenceLines": {
-        "V2LiveActivityStore": 7,
-        "V2LiveActivityObservationAuthorizing": 6
+        "V2LiveActivityObservationAuthorizing": 6,
+        "V2LiveActivityStore": 7
       }
     },
     {
@@ -3700,9 +3902,9 @@
         "V2LivePresenceLeaseRenewalRequest"
       ],
       "referenceLines": {
+        "V2LiveActivityStoreError": 106,
+        "V2LivePresenceLeaseManaging": 50,
         "V2LivePresenceLeaseRefresh": 46,
-        "V2LivePresenceLeaseManaging": 49,
-        "V2LiveActivityStoreError": 94,
         "V2LivePresenceLeaseRenewalRequest": 44
       }
     },
@@ -3715,7 +3917,7 @@
         "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 94
+        "v2PostgresTimestampCanEncode": 106
       }
     },
     {
@@ -3727,7 +3929,7 @@
         "V2LivePresenceRenewalBatcherSnapshot"
       ],
       "referenceLines": {
-        "V2LivePresenceRenewalBatcherSnapshot": 128
+        "V2LivePresenceRenewalBatcherSnapshot": 141
       }
     },
     {
@@ -3776,8 +3978,8 @@
         "v2PostgresTimestampPrecedes"
       ],
       "referenceLines": {
-        "v2PostgresFutureTimestamp": 50,
-        "v2PostgresTimestampPrecedes": 60
+        "v2PostgresTimestampPrecedes": 60,
+        "v2PostgresFutureTimestamp": 50
       }
     },
     {
@@ -3923,9 +4125,9 @@
         "V2PreparedGroupEventPullResult"
       ],
       "referenceLines": {
-        "V2PreparedGroupEventPageEncodingContext": 24,
+        "V2PreparedGroupEventLogStore": 31,
         "V2PreparedGroupEventPullResult": 25,
-        "V2PreparedGroupEventLogStore": 31
+        "V2PreparedGroupEventPageEncodingContext": 24
       }
     },
     {
@@ -3962,8 +4164,8 @@
         "V2GatewayAuthenticator"
       ],
       "referenceLines": {
-        "V2GatewayAuthenticator": 8,
-        "V2GatewayAuthenticationError": 21
+        "V2GatewayAuthenticationError": 21,
+        "V2GatewayAuthenticator": 8
       }
     },
     {
@@ -3994,10 +4196,148 @@
       ],
       "referenceLines": {
         "V2ReadReceiptRecordRequest": 39,
-        "V2ReadReceiptAdmission": 8,
-        "V2ReadReceiptOutcome": 38,
         "V2AuthenticatedReadReceipt": 38,
-        "V2ReadReceiptStore": 7
+        "V2ReadReceiptStore": 7,
+        "V2ReadReceiptAdmission": 8,
+        "V2ReadReceiptOutcome": 38
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeFanoutDispatcher.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2DirectRoomLiveEvent.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2DirectRoomLiveEvent"
+      ],
+      "referenceLines": {
+        "V2DirectRoomLiveEvent": 48
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeFanoutDispatcher.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2GroupEventWakeContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2ForegroundGroupEventHintPublishing",
+        "V2GroupEventWake",
+        "V2GroupEventWakePublishing"
+      ],
+      "referenceLines": {
+        "V2ForegroundGroupEventHintPublishing": 66,
+        "V2GroupEventWakePublishing": 66,
+        "V2GroupEventWake": 104
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeFanoutDispatcher.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeInterestPorts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2BatchGroupEventWakeInterestManaging",
+        "V2LiveActivityInterestManaging",
+        "V2LiveActivityPublishing"
+      ],
+      "referenceLines": {
+        "V2LiveActivityInterestManaging": 67,
+        "V2BatchGroupEventWakeInterestManaging": 67,
+        "V2LiveActivityPublishing": 67
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeFanoutDispatcher.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeDirectoryError",
+        "V2RealtimePublicationBackpressure",
+        "V2UserSyncWake",
+        "V2UserSyncWakePublishing"
+      ],
+      "referenceLines": {
+        "V2RealtimeDirectoryError": 83,
+        "V2UserSyncWakePublishing": 67,
+        "V2UserSyncWake": 108,
+        "V2RealtimePublicationBackpressure": 22
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeInterestCoordinator.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2ActorRealtimeMetricsContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2ActorRealtimeActivationResult",
+        "V2ActorRealtimeSessionRotationReason"
+      ],
+      "referenceLines": {
+        "V2ActorRealtimeSessionRotationReason": 582,
+        "V2ActorRealtimeActivationResult": 207
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeInterestCoordinator.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimePartitionPorts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeCoverageConfirmation"
+      ],
+      "referenceLines": {
+        "V2RealtimeCoverageConfirmation": 47
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeInterestCoordinator.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeRecoveryHeadOutcome.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeRecoveryHeadOutcome"
+      ],
+      "referenceLines": {
+        "V2RealtimeRecoveryHeadOutcome": 10
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeInterestCoordinator.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimePublicationBackpressure"
+      ],
+      "referenceLines": {
+        "V2RealtimePublicationBackpressure": 285
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimePublicationRetry.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimePublicationBackpressure"
+      ],
+      "referenceLines": {
+        "V2RealtimePublicationBackpressure": 9
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2RealtimeShardService.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeDirectoryError",
+        "V2RealtimePublicationBackpressure"
+      ],
+      "referenceLines": {
+        "V2RealtimeDirectoryError": 197,
+        "V2RealtimePublicationBackpressure": 62
       }
     },
     {
@@ -4026,8 +4366,8 @@
       "referenceLines": {
         "V2RoomMembershipDirectoryStore": 10,
         "V2RoomMembershipDirectoryPage": 27,
-        "V2RoomMembershipDirectoryError": 30,
-        "V2RoomMembershipDirectoryRequest": 27
+        "V2RoomMembershipDirectoryRequest": 27,
+        "V2RoomMembershipDirectoryError": 30
       }
     },
     {
@@ -4043,9 +4383,9 @@
       ],
       "referenceLines": {
         "V2DirectRoomLogAppendStageMetricsSnapshot": 79,
-        "V2RuntimeLatencyBucket": 15,
         "V2RuntimeLatencyHistogramSnapshot": 26,
-        "V2DirectRoomLogAppendStage": 45
+        "V2DirectRoomLogAppendStage": 45,
+        "V2RuntimeLatencyBucket": 15
       }
     },
     {
@@ -4058,8 +4398,8 @@
         "V2DatabaseWorkClass"
       ],
       "referenceLines": {
-        "V2DatabaseWorkClass": 44,
-        "V2DatabaseWorkAdmissionWaitBucket": 99
+        "V2DatabaseWorkAdmissionWaitBucket": 99,
+        "V2DatabaseWorkClass": 44
       }
     },
     {
@@ -4072,8 +4412,8 @@
         "V2RuntimeLatencyBucket"
       ],
       "referenceLines": {
-        "V2RuntimeLatencyBucket": 279,
-        "V2DirectRoomLogAppendStage": 277
+        "V2DirectRoomLogAppendStage": 277,
+        "V2RuntimeLatencyBucket": 279
       }
     },
     {
@@ -4082,9 +4422,17 @@
       "to": "IMV2ServerContracts/V2RuntimePressureMetricsContracts.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2DatabaseLoanObservationMetricSQLPhase",
+        "V2DatabaseLoanObservationMetricSource",
+        "V2DatabaseLoanObservationMetricStage",
+        "V2GatewayMessageSendRejectionReason",
         "V2RuntimePressureMetricsSnapshot"
       ],
       "referenceLines": {
+        "V2DatabaseLoanObservationMetricSQLPhase": 484,
+        "V2DatabaseLoanObservationMetricSource": 470,
+        "V2DatabaseLoanObservationMetricStage": 473,
+        "V2GatewayMessageSendRejectionReason": 310,
         "V2RuntimePressureMetricsSnapshot": 17
       }
     },
@@ -4101,6 +4449,24 @@
       }
     },
     {
+      "from": "IMV2ServerApplication/V2RuntimePressureMetrics.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomSQLContinuationSource",
+        "V2SendOperationAdmissionPath",
+        "V2SendOperationOwnerScalarFallbackReason",
+        "V2SendOperationStage"
+      ],
+      "referenceLines": {
+        "V2SendOperationAdmissionPath": 593,
+        "V2SendOperationStage": 677,
+        "V2SendOperationOwnerScalarFallbackReason": 658,
+        "V2RoomSQLContinuationSource": 567
+      }
+    },
+    {
       "from": "IMV2ServerApplication/V2SafeLogMetadata.swift",
       "fromTarget": "IMV2ServerApplication",
       "to": "IMV2ServerContracts/V2GatewayRuntimeConfigurationError.swift",
@@ -4113,15 +4479,55 @@
       }
     },
     {
+      "from": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomSQLContinuationSource",
+        "V2SendOperationAdmissionPath",
+        "V2SendOperationBatchMetricsReading",
+        "V2SendOperationBatchMetricsSnapshot",
+        "V2SendOperationOwnerMetricsReading",
+        "V2SendOperationOwnerMetricsSnapshot",
+        "V2SendOperationOwnerScalarFallbackReason",
+        "V2SendOperationStage"
+      ],
+      "referenceLines": {
+        "V2RoomSQLContinuationSource": 69,
+        "V2SendOperationAdmissionPath": 48,
+        "V2SendOperationBatchMetricsReading": 24,
+        "V2SendOperationStage": 29,
+        "V2SendOperationOwnerMetricsSnapshot": 272,
+        "V2SendOperationOwnerMetricsReading": 269,
+        "V2SendOperationBatchMetricsSnapshot": 26,
+        "V2SendOperationOwnerScalarFallbackReason": 136
+      }
+    },
+    {
       "from": "IMV2ServerApplication/V2SharedGroupEventWakeInterests.swift",
       "fromTarget": "IMV2ServerApplication",
       "to": "IMV2ServerContracts/V2RealtimeInterestPorts.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2BatchGroupEventWakeInterestManaging",
         "V2GroupEventWakeInterestManaging"
       ],
       "referenceLines": {
-        "V2GroupEventWakeInterestManaging": 21
+        "V2BatchGroupEventWakeInterestManaging": 94,
+        "V2GroupEventWakeInterestManaging": 27
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2SharedGroupEventWakeInterests.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RoomRecoveryReading.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomRecoveryReadError"
+      ],
+      "referenceLines": {
+        "V2RoomRecoveryReadError": 50
       }
     },
     {
@@ -4149,11 +4555,11 @@
         "V2SyncStore"
       ],
       "referenceLines": {
-        "V2SyncPullResult": 40,
         "V2SnapshotPage": 121,
         "V2SyncServiceError": 179,
         "V2SnapshotManifest": 85,
-        "V2SyncStore": 7
+        "V2SyncStore": 7,
+        "V2SyncPullResult": 40
       }
     },
     {
@@ -4181,19 +4587,25 @@
         "V2GatewayTelemetryRejection",
         "V2GatewayTransportMetricsRecorder",
         "V2GatewayTransportMetricsSnapshot",
+        "V2MessageSendFailureCommand",
+        "V2MessageSendFailureDisposition",
+        "V2MessageSendFailureReason",
         "V2TelemetryEvent",
         "V2TelemetrySink"
       ],
       "referenceLines": {
-        "V2GatewayTransportMetricsSnapshot": 180,
-        "V2GatewayTransportMetricsRecorder": 27,
         "V2TelemetryEvent": 390,
+        "V2MessageSendFailureReason": 416,
+        "V2MessageSendFailureDisposition": 415,
         "V2GatewayTelemetryOutcome": 324,
-        "V2TelemetrySink": 383,
         "V2GatewayConnectionClosure": 31,
+        "V2ConnectionMetricsSnapshot": 10,
+        "V2TelemetrySink": 383,
+        "V2GatewayTransportMetricsSnapshot": 180,
+        "V2MessageSendFailureCommand": 414,
         "V2GatewayTelemetryRejection": 325,
         "V2GatewayTelemetryCommand": 323,
-        "V2ConnectionMetricsSnapshot": 10
+        "V2GatewayTransportMetricsRecorder": 27
       }
     },
     {
@@ -4231,7 +4643,7 @@
         "V2DurableWorkFailureKind"
       ],
       "referenceLines": {
-        "V2DurableWorkFailureKind": 32
+        "V2DurableWorkFailureKind": 84
       }
     },
     {
@@ -4241,13 +4653,43 @@
       "toTarget": "IMV2ServerContracts",
       "symbols": [
         "V2UserStateEventError",
+        "V2UserStateEventLease",
         "V2UserStateEventOutbox",
         "V2UserStateEventProjecting"
       ],
       "referenceLines": {
-        "V2UserStateEventError": 32,
-        "V2UserStateEventOutbox": 6,
-        "V2UserStateEventProjecting": 7
+        "V2UserStateEventProjecting": 7,
+        "V2UserStateEventLease": 67,
+        "V2UserStateEventError": 24,
+        "V2UserStateEventOutbox": 6
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2UserSyncWakeRelay.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2PersistenceTimestampBounds.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "v2PostgresFutureTimestamp"
+      ],
+      "referenceLines": {
+        "v2PostgresFutureTimestamp": 30
+      }
+    },
+    {
+      "from": "IMV2ServerApplication/V2UserSyncWakeRelay.swift",
+      "fromTarget": "IMV2ServerApplication",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeDirectoryError",
+        "V2UserSyncWakePublishing",
+        "V2UserSyncWakeStore"
+      ],
+      "referenceLines": {
+        "V2RealtimeDirectoryError": 33,
+        "V2UserSyncWakePublishing": 8,
+        "V2UserSyncWakeStore": 7
       }
     },
     {
@@ -4271,7 +4713,7 @@
         "V2SharedGroupEventWakeInterests"
       ],
       "referenceLines": {
-        "V2SharedGroupEventWakeInterests": 42
+        "V2SharedGroupEventWakeInterests": 25
       }
     },
     {
@@ -4292,13 +4734,17 @@
       "to": "IMV2ServerContracts/V2RoomRecoveryReading.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2RealtimeRegistrationHeadReading",
         "V2RoomRecoveryReadError",
+        "V2RoomStateReadResult",
         "V2RoomStateReading",
         "V2UserRoomDirectoryEntry"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 59,
-        "V2UserRoomDirectoryEntry": 86,
+        "V2UserRoomDirectoryEntry": 90,
+        "V2RoomRecoveryReadError": 61,
+        "V2RealtimeRegistrationHeadReading": 44,
+        "V2RoomStateReadResult": 127,
         "V2RoomStateReading": 41
       }
     },
@@ -4312,8 +4758,8 @@
         "V2UserRoomDirectoryEntry"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 49,
-        "V2UserRoomDirectoryEntry": 96
+        "V2UserRoomDirectoryEntry": 96,
+        "V2RoomRecoveryReadError": 49
       }
     },
     {
@@ -4385,7 +4831,7 @@
         "v2Sleep"
       ],
       "referenceLines": {
-        "v2Sleep": 332
+        "v2Sleep": 358
       }
     },
     {
@@ -4397,7 +4843,7 @@
         "V2DirectRoomLiveEventDraft"
       ],
       "referenceLines": {
-        "V2DirectRoomLiveEventDraft": 170
+        "V2DirectRoomLiveEventDraft": 177
       }
     },
     {
@@ -4424,10 +4870,10 @@
         "V2GroupEventWakePublishing"
       ],
       "referenceLines": {
-        "V2ForegroundGroupEventHintSubmitting": 31,
         "V2ForegroundGroupEventHintPublishing": 34,
-        "V2GroupEventWakePublishing": 497,
-        "V2GroupEventWake": 56
+        "V2GroupEventWakePublishing": 527,
+        "V2GroupEventWake": 58,
+        "V2ForegroundGroupEventHintSubmitting": 31
       }
     },
     {
@@ -4439,7 +4885,55 @@
         "V2GatewayTransportMetricsRecorder"
       ],
       "referenceLines": {
-        "V2GatewayTransportMetricsRecorder": 52
+        "V2GatewayTransportMetricsRecorder": 53
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/Gateway/V2GatewayRealtimeIngress.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerApplication/V2ActorRealtimeMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2ActorRealtimeMetrics"
+      ],
+      "referenceLines": {
+        "V2ActorRealtimeMetrics": 27
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/Gateway/V2GatewayRealtimeIngress.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerApplication/V2RealtimeInterestCoordinator.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2RealtimeInterestCoordinator"
+      ],
+      "referenceLines": {
+        "V2RealtimeInterestCoordinator": 15
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/Gateway/V2GatewayRealtimeIngress.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerContracts/V2ActorRealtimeMetricsContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2ActorRealtimeQueue"
+      ],
+      "referenceLines": {
+        "V2ActorRealtimeQueue": 79
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/Gateway/V2GatewayRealtimeIngress.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerContracts/V2DirectRoomLiveEvent.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2DirectRoomLiveEvent"
+      ],
+      "referenceLines": {
+        "V2DirectRoomLiveEvent": 26
       }
     },
     {
@@ -4504,8 +4998,8 @@
         "V2AuthorPresentationIngress"
       ],
       "referenceLines": {
-        "V2AuthorPresentationIngress": 26,
-        "V2AuthorPresentationHints": 438
+        "V2AuthorPresentationHints": 1261,
+        "V2AuthorPresentationIngress": 27
       }
     },
     {
@@ -4517,7 +5011,7 @@
         "V2ResourceProviderError"
       ],
       "referenceLines": {
-        "V2ResourceProviderError": 102
+        "V2ResourceProviderError": 228
       }
     },
     {
@@ -4529,7 +5023,7 @@
         "V2LivePresenceRenewalBatcher"
       ],
       "referenceLines": {
-        "V2LivePresenceRenewalBatcher": 29
+        "V2LivePresenceRenewalBatcher": 30
       }
     },
     {
@@ -4541,7 +5035,31 @@
         "V2LiveSyncNotifier"
       ],
       "referenceLines": {
-        "V2LiveSyncNotifier": 1216
+        "V2LiveSyncNotifier": 2212
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/V2DeviceConnectionRegistry.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerApplication/V2RealtimeFanoutDispatcher.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2LifecycleTypingPublishing"
+      ],
+      "referenceLines": {
+        "V2LifecycleTypingPublishing": 1705
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/V2DeviceConnectionRegistry.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerApplication/V2SharedGroupEventWakeInterests.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SharedGroupEventWakeInterests"
+      ],
+      "referenceLines": {
+        "V2SharedGroupEventWakeInterests": 76
       }
     },
     {
@@ -4550,12 +5068,10 @@
       "to": "IMV2ServerContracts/V2AuthenticatedConnectionLeaseContract.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
-        "V2AuthenticatedConnectionAdmissionPolicy",
-        "V2AuthenticatedConnectionLeaseOutcome"
+        "V2AuthenticatedConnectionAdmissionPolicy"
       ],
       "referenceLines": {
-        "V2AuthenticatedConnectionAdmissionPolicy": 28,
-        "V2AuthenticatedConnectionLeaseOutcome": 125
+        "V2AuthenticatedConnectionAdmissionPolicy": 29
       }
     },
     {
@@ -4567,7 +5083,7 @@
         "V2DeviceConnectionRevoking"
       ],
       "referenceLines": {
-        "V2DeviceConnectionRevoking": 1218
+        "V2DeviceConnectionRevoking": 2214
       }
     },
     {
@@ -4579,7 +5095,7 @@
         "V2DirectRoomLiveEvent"
       ],
       "referenceLines": {
-        "V2DirectRoomLiveEvent": 415
+        "V2DirectRoomLiveEvent": 1238
       }
     },
     {
@@ -4589,13 +5105,19 @@
       "toTarget": "IMV2ServerContracts",
       "symbols": [
         "V2LiveActivityObservationAuthorizing",
+        "V2LiveActivityStore",
         "V2LivePresenceLeaseManaging",
-        "V2LivePresenceLeaseRefresh"
+        "V2LivePresenceLeaseRefresh",
+        "V2PresenceObservationOutcome",
+        "V2PresenceObservationRequest"
       ],
       "referenceLines": {
-        "V2LivePresenceLeaseManaging": 49,
-        "V2LivePresenceLeaseRefresh": 641,
-        "V2LiveActivityObservationAuthorizing": 51
+        "V2LiveActivityObservationAuthorizing": 73,
+        "V2PresenceObservationOutcome": 945,
+        "V2LiveActivityStore": 75,
+        "V2PresenceObservationRequest": 155,
+        "V2LivePresenceLeaseRefresh": 256,
+        "V2LivePresenceLeaseManaging": 56
       }
     },
     {
@@ -4609,9 +5131,33 @@
         "V2LiveActivityPublishing"
       ],
       "referenceLines": {
-        "V2LiveActivityPublishing": 52,
-        "V2GroupEventWakeInterestManaging": 48,
-        "V2LiveActivityInterestManaging": 52
+        "V2LiveActivityInterestManaging": 140,
+        "V2GroupEventWakeInterestManaging": 55,
+        "V2LiveActivityPublishing": 140
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/V2DeviceConnectionRegistry.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerContracts/V2RealtimePartitionPorts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeCoverageConfirmation"
+      ],
+      "referenceLines": {
+        "V2RealtimeCoverageConfirmation": 130
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/V2DeviceConnectionRegistry.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimePublicationBackpressure"
+      ],
+      "referenceLines": {
+        "V2RealtimePublicationBackpressure": 546
       }
     },
     {
@@ -4623,7 +5169,7 @@
         "V2RoomKind"
       ],
       "referenceLines": {
-        "V2RoomKind": 1265
+        "V2RoomKind": 2289
       }
     },
     {
@@ -4636,8 +5182,8 @@
         "V2UserRoomDirectoryEntry"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 1265,
-        "V2UserRoomDirectoryEntry": 1264
+        "V2RoomRecoveryReadError": 2289,
+        "V2UserRoomDirectoryEntry": 2288
       }
     },
     {
@@ -4649,7 +5195,7 @@
         "V2LivePresenceRenewalBatcherSnapshot"
       ],
       "referenceLines": {
-        "V2LivePresenceRenewalBatcherSnapshot": 606
+        "V2LivePresenceRenewalBatcherSnapshot": 1429
       }
     },
     {
@@ -4662,8 +5208,8 @@
         "V2ConnectionMetricsSource"
       ],
       "referenceLines": {
-        "V2ConnectionMetricsSnapshot": 590,
-        "V2ConnectionMetricsSource": 1217
+        "V2ConnectionMetricsSource": 2213,
+        "V2ConnectionMetricsSnapshot": 1413
       }
     },
     {
@@ -4675,7 +5221,7 @@
         "V2AuthorPresentationDispatcher"
       ],
       "referenceLines": {
-        "V2AuthorPresentationDispatcher": 320
+        "V2AuthorPresentationDispatcher": 372
       }
     },
     {
@@ -4688,8 +5234,8 @@
         "V2AuthorPresentationIngress"
       ],
       "referenceLines": {
-        "V2AuthorPresentationIngress": 321,
-        "V2AuthorPresentationHints": 938
+        "V2AuthorPresentationHints": 1232,
+        "V2AuthorPresentationIngress": 373
       }
     },
     {
@@ -4702,8 +5248,8 @@
         "V2AuthorPresentationWrite"
       ],
       "referenceLines": {
-        "V2AuthorPresentationTransport": 322,
-        "V2AuthorPresentationWrite": 323
+        "V2AuthorPresentationTransport": 374,
+        "V2AuthorPresentationWrite": 375
       }
     },
     {
@@ -4715,7 +5261,7 @@
         "V2ResourceProviderError"
       ],
       "referenceLines": {
-        "V2ResourceProviderError": 875
+        "V2ResourceProviderError": 1166
       }
     },
     {
@@ -4727,7 +5273,7 @@
         "V2SecureProcessUUIDGenerator"
       ],
       "referenceLines": {
-        "V2SecureProcessUUIDGenerator": 307
+        "V2SecureProcessUUIDGenerator": 333
       }
     },
     {
@@ -4753,7 +5299,7 @@
         "v2GatewayMilliseconds"
       ],
       "referenceLines": {
-        "v2GatewayMilliseconds": 755
+        "v2GatewayMilliseconds": 1037
       }
     },
     {
@@ -4765,7 +5311,7 @@
         "V2SyncService"
       ],
       "referenceLines": {
-        "V2SyncService": 213
+        "V2SyncService": 240
       }
     },
     {
@@ -4777,7 +5323,7 @@
         "V2ConversationCapabilitiesStoreError"
       ],
       "referenceLines": {
-        "V2ConversationCapabilitiesStoreError": 51
+        "V2ConversationCapabilitiesStoreError": 78
       }
     },
     {
@@ -4794,12 +5340,12 @@
         "V2GatewayRoomMembershipDirectoryHandling"
       ],
       "referenceLines": {
-        "V2GatewayReadReceiptHandling": 72,
-        "V2GatewayMessageSendOperationHandling": 10,
-        "V2GatewayGroupEventLogHandling": 278,
-        "V2GatewayLiveActivityHandling": 180,
-        "V2GatewayConversationCapabilitiesHandling": 12,
-        "V2GatewayRoomMembershipDirectoryHandling": 117
+        "V2GatewayGroupEventLogHandling": 305,
+        "V2GatewayMessageSendOperationHandling": 18,
+        "V2GatewayReadReceiptHandling": 99,
+        "V2GatewayRoomMembershipDirectoryHandling": 144,
+        "V2GatewayLiveActivityHandling": 207,
+        "V2GatewayConversationCapabilitiesHandling": 20
       }
     },
     {
@@ -4811,7 +5357,7 @@
         "v2GatewayMilliseconds"
       ],
       "referenceLines": {
-        "v2GatewayMilliseconds": 62
+        "v2GatewayMilliseconds": 89
       }
     },
     {
@@ -4823,7 +5369,7 @@
         "V2GroupEventLogPage"
       ],
       "referenceLines": {
-        "V2GroupEventLogPage": 317
+        "V2GroupEventLogPage": 344
       }
     },
     {
@@ -4836,8 +5382,8 @@
         "V2GroupRolePolicyBaselineReading"
       ],
       "referenceLines": {
-        "V2GroupRolePolicyBaselineError": 123,
-        "V2GroupRolePolicyBaselineReading": 116
+        "V2GroupRolePolicyBaselineError": 150,
+        "V2GroupRolePolicyBaselineReading": 143
       }
     },
     {
@@ -4850,8 +5396,8 @@
         "V2RoomShardStorageRegistryError"
       ],
       "referenceLines": {
-        "V2RoomShardStorageRegistryError": 129,
-        "V2ReadReceiptBatcherError": 77
+        "V2ReadReceiptBatcherError": 104,
+        "V2RoomShardStorageRegistryError": 156
       }
     },
     {
@@ -4863,7 +5409,7 @@
         "V2PreparedGroupEventPullResult"
       ],
       "referenceLines": {
-        "V2PreparedGroupEventPullResult": 285
+        "V2PreparedGroupEventPullResult": 312
       }
     },
     {
@@ -4875,7 +5421,7 @@
         "V2ReadReceiptOutcome"
       ],
       "referenceLines": {
-        "V2ReadReceiptOutcome": 74
+        "V2ReadReceiptOutcome": 101
       }
     },
     {
@@ -4887,7 +5433,7 @@
         "V2RoomShardRouteError"
       ],
       "referenceLines": {
-        "V2RoomShardRouteError": 125
+        "V2RoomShardRouteError": 152
       }
     },
     {
@@ -4923,7 +5469,7 @@
         "V2GroupCapabilitiesStoreError"
       ],
       "referenceLines": {
-        "V2GroupCapabilitiesStoreError": 558
+        "V2GroupCapabilitiesStoreError": 596
       }
     },
     {
@@ -4935,7 +5481,7 @@
         "V2MessageEditStoreError"
       ],
       "referenceLines": {
-        "V2MessageEditStoreError": 628
+        "V2MessageEditStoreError": 666
       }
     },
     {
@@ -4947,7 +5493,7 @@
         "V2MessageReactionStoreError"
       ],
       "referenceLines": {
-        "V2MessageReactionStoreError": 640
+        "V2MessageReactionStoreError": 678
       }
     },
     {
@@ -4959,7 +5505,7 @@
         "V2MessageWithdrawalStoreError"
       ],
       "referenceLines": {
-        "V2MessageWithdrawalStoreError": 618
+        "V2MessageWithdrawalStoreError": 656
       }
     },
     {
@@ -4971,7 +5517,7 @@
         "V2ModerationStoreError"
       ],
       "referenceLines": {
-        "V2ModerationStoreError": 622
+        "V2ModerationStoreError": 660
       }
     },
     {
@@ -4983,7 +5529,7 @@
         "V2RoomMembershipStoreError"
       ],
       "referenceLines": {
-        "V2RoomMembershipStoreError": 540
+        "V2RoomMembershipStoreError": 578
       }
     },
     {
@@ -5007,7 +5553,7 @@
         "V2ConversationCapabilitiesStoreError"
       ],
       "referenceLines": {
-        "V2ConversationCapabilitiesStoreError": 546
+        "V2ConversationCapabilitiesStoreError": 584
       }
     },
     {
@@ -5048,12 +5594,12 @@
         "V2GatewayRoomMembershipDirectoryHandling"
       ],
       "referenceLines": {
-        "V2GatewayReadReceiptHandling": 134,
-        "V2GatewayMessageSendOperationHandling": 135,
         "V2GatewayGroupEventLogHandling": 138,
+        "V2GatewayMessageSendOperationHandling": 135,
+        "V2GatewayReadReceiptHandling": 134,
+        "V2GatewayRoomMembershipDirectoryHandling": 140,
         "V2GatewayLiveActivityHandling": 137,
-        "V2GatewayConversationCapabilitiesHandling": 143,
-        "V2GatewayRoomMembershipDirectoryHandling": 140
+        "V2GatewayConversationCapabilitiesHandling": 143
       }
     },
     {
@@ -5066,8 +5612,8 @@
         "v2GatewayMilliseconds"
       ],
       "referenceLines": {
-        "v2GatewayMilliseconds": 703,
-        "V2GatewayTimestampError": 501
+        "V2GatewayTimestampError": 501,
+        "v2GatewayMilliseconds": 741
       }
     },
     {
@@ -5080,8 +5626,8 @@
         "V2GroupEventLogError"
       ],
       "referenceLines": {
-        "V2GroupEventLogError": 319,
-        "V2GroupEventLogEntry": 54
+        "V2GroupEventLogEntry": 54,
+        "V2GroupEventLogError": 319
       }
     },
     {
@@ -5117,7 +5663,7 @@
         "V2LiveActivityStoreError"
       ],
       "referenceLines": {
-        "V2LiveActivityStoreError": 570
+        "V2LiveActivityStoreError": 608
       }
     },
     {
@@ -5129,7 +5675,7 @@
         "V2MediaStoreError"
       ],
       "referenceLines": {
-        "V2MediaStoreError": 538
+        "V2MediaStoreError": 576
       }
     },
     {
@@ -5150,16 +5696,16 @@
         "V2SyncStoreError"
       ],
       "referenceLines": {
-        "V2DirectMessagingStoreError": 679,
-        "V2DirectAuthorizationIntentError": 580,
-        "V2RoomOwnerFenceError": 540,
-        "V2DirectAuthorizationReceiptError": 584,
-        "V2DirectSendControlPolicyError": 585,
-        "V2GroupRoomCreationIntentStoreError": 680,
-        "V2GroupMessagingStoreError": 681,
-        "V2SocialRelationshipStoreError": 589,
-        "V2DirectAuthorizationCoordinationError": 582,
-        "V2SyncStoreError": 647
+        "V2SocialRelationshipStoreError": 627,
+        "V2GroupRoomCreationIntentStoreError": 718,
+        "V2DirectSendControlPolicyError": 623,
+        "V2SyncStoreError": 685,
+        "V2GroupMessagingStoreError": 719,
+        "V2DirectAuthorizationCoordinationError": 620,
+        "V2DirectMessagingStoreError": 717,
+        "V2DirectAuthorizationIntentError": 618,
+        "V2RoomOwnerFenceError": 578,
+        "V2DirectAuthorizationReceiptError": 622
       }
     },
     {
@@ -5183,7 +5729,7 @@
         "V2ReadReceiptStoreError"
       ],
       "referenceLines": {
-        "V2ReadReceiptStoreError": 540
+        "V2ReadReceiptStoreError": 578
       }
     },
     {
@@ -5195,7 +5741,7 @@
         "V2RoomMembershipDirectoryError"
       ],
       "referenceLines": {
-        "V2RoomMembershipDirectoryError": 536
+        "V2RoomMembershipDirectoryError": 574
       }
     },
     {
@@ -5220,8 +5766,8 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2AcceptanceIdentifierError": 502,
-        "V2RoomWriteStoreError": 593
+        "V2RoomWriteStoreError": 631,
+        "V2AcceptanceIdentifierError": 502
       }
     },
     {
@@ -5244,12 +5790,32 @@
       "symbols": [
         "V2GatewayTelemetryCommand",
         "V2GatewayTelemetryRejection",
+        "V2MessageSendFailureCommand",
+        "V2MessageSendFailureDisposition",
+        "V2MessageSendFailureReason",
         "V2TelemetrySink"
       ],
       "referenceLines": {
-        "V2GatewayTelemetryCommand": 373,
+        "V2MessageSendFailureReason": 551,
+        "V2MessageSendFailureDisposition": 528,
+        "V2TelemetrySink": 121,
+        "V2MessageSendFailureCommand": 522,
         "V2GatewayTelemetryRejection": 377,
-        "V2TelemetrySink": 121
+        "V2GatewayTelemetryCommand": 373
+      }
+    },
+    {
+      "from": "IMV2ServerGateway/V2GatewayMessageSendBudget.swift",
+      "fromTarget": "IMV2ServerGateway",
+      "to": "IMV2ServerContracts/V2RuntimePressureMetricsContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2GatewayMessageSendMetricsSnapshot",
+        "V2GatewayMessageSendRejectionReason"
+      ],
+      "referenceLines": {
+        "V2GatewayMessageSendRejectionReason": 11,
+        "V2GatewayMessageSendMetricsSnapshot": 41
       }
     },
     {
@@ -5275,9 +5841,9 @@
         "V2GatewayAuthenticator"
       ],
       "referenceLines": {
-        "V2GatewayAuthenticator": 170,
+        "V2GatewayAuthentication": 368,
         "V2GatewayAuthenticationError": 133,
-        "V2GatewayAuthentication": 368
+        "V2GatewayAuthenticator": 170
       }
     },
     {
@@ -5301,7 +5867,7 @@
         "V2SafeLogMetadata"
       ],
       "referenceLines": {
-        "V2SafeLogMetadata": 348
+        "V2SafeLogMetadata": 372
       }
     },
     {
@@ -5314,8 +5880,8 @@
         "V2GatewayTransportMetricsRecorder"
       ],
       "referenceLines": {
-        "V2GatewayConnectionClosure": 57,
-        "V2GatewayTransportMetricsRecorder": 20
+        "V2GatewayTransportMetricsRecorder": 20,
+        "V2GatewayConnectionClosure": 57
       }
     },
     {
@@ -5450,8 +6016,8 @@
         "V2AccountEdgeClientRateLimitError"
       ],
       "referenceLines": {
-        "V2AccountEdgeClientAddress": 5,
-        "V2AccountEdgeClientRateLimitError": 9
+        "V2AccountEdgeClientRateLimitError": 9,
+        "V2AccountEdgeClientAddress": 5
       }
     },
     {
@@ -5464,8 +6030,8 @@
         "V2AccountEdgeClientRateLimitError"
       ],
       "referenceLines": {
-        "V2AccountEdgeClientAddress": 56,
-        "V2AccountEdgeClientRateLimitError": 35
+        "V2AccountEdgeClientRateLimitError": 35,
+        "V2AccountEdgeClientAddress": 56
       }
     },
     {
@@ -5478,8 +6044,8 @@
         "V2AccountEdgeClientRateLimiting"
       ],
       "referenceLines": {
-        "V2AccountEdgeClientRateLimiting": 11,
-        "V2AccountEdgeClientRateLimitResult": 32
+        "V2AccountEdgeClientRateLimitResult": 32,
+        "V2AccountEdgeClientRateLimiting": 11
       }
     },
     {
@@ -5492,8 +6058,8 @@
         "V2AuthenticatedAccountRateLimiting"
       ],
       "referenceLines": {
-        "V2AuthenticatedAccountRateLimiting": 76,
-        "V2AccountEdgeClientRateLimitResult": 95
+        "V2AccountEdgeClientRateLimitResult": 95,
+        "V2AuthenticatedAccountRateLimiting": 76
       }
     },
     {
@@ -5506,8 +6072,8 @@
         "V2GatewayAuthenticator"
       ],
       "referenceLines": {
-        "V2GatewayAuthenticator": 18,
-        "V2GatewayAuthenticationError": 39
+        "V2GatewayAuthenticationError": 39,
+        "V2GatewayAuthenticator": 18
       }
     },
     {
@@ -5520,8 +6086,8 @@
         "V2MediaEdgeDownloadService"
       ],
       "referenceLines": {
-        "V2MediaEdgeDownloadService": 16,
-        "V2MediaDownloadTargetResolving": 11
+        "V2MediaDownloadTargetResolving": 11,
+        "V2MediaEdgeDownloadService": 16
       }
     },
     {
@@ -5558,8 +6124,8 @@
         "V2PasswordAccountStoring"
       ],
       "referenceLines": {
-        "V2PasswordAccountStoring": 14,
-        "V2PasswordAccountStoreError": 51
+        "V2PasswordAccountStoreError": 51,
+        "V2PasswordAccountStoring": 14
       }
     },
     {
@@ -5573,9 +6139,9 @@
         "V2PasswordHashing"
       ],
       "referenceLines": {
+        "V2PasswordHashing": 16,
         "V2PasswordHashPolicy": 82,
-        "V2PasswordHashError": 59,
-        "V2PasswordHashing": 16
+        "V2PasswordHashError": 59
       }
     },
     {
@@ -5624,8 +6190,8 @@
         "V2PasswordLifecycleManaging"
       ],
       "referenceLines": {
-        "V2PasswordLifecycleManaging": 12,
-        "V2PasswordLifecycleError": 36
+        "V2PasswordLifecycleError": 36,
+        "V2PasswordLifecycleManaging": 12
       }
     },
     {
@@ -5650,8 +6216,8 @@
         "V2GatewayAuthenticator"
       ],
       "referenceLines": {
-        "V2GatewayAuthenticator": 12,
-        "V2GatewayAuthenticationError": 43
+        "V2GatewayAuthenticationError": 43,
+        "V2GatewayAuthenticator": 12
       }
     },
     {
@@ -5693,11 +6259,11 @@
         "V2AccountDisabling"
       ],
       "referenceLines": {
+        "V2AccountDisableError": 61,
         "V2AccountDisableCommand": 20,
         "V2AccountDisableReason": 12,
-        "V2AccountDisableError": 61,
-        "V2AccountDisabling": 38,
-        "V2AccountDisableOutcome": 59
+        "V2AccountDisableOutcome": 59,
+        "V2AccountDisabling": 38
       }
     },
     {
@@ -5722,8 +6288,8 @@
         "V2HTTPOperationError"
       ],
       "referenceLines": {
-        "V2AccountPreferenceOperationHandling": 10,
-        "V2HTTPOperationError": 18
+        "V2HTTPOperationError": 18,
+        "V2AccountPreferenceOperationHandling": 10
       }
     },
     {
@@ -5764,12 +6330,12 @@
         "V2IssuedDeviceCredentials"
       ],
       "referenceLines": {
-        "V2DeviceCredentialIssuing": 165,
-        "V2DeviceRegistrationMetadata": 201,
-        "V2IssuedDeviceCredentials": 111,
+        "V2DeviceRegistrationOutcome": 221,
         "V2DeviceCredentialRefreshOutcome": 255,
         "V2DeviceCredentialRefresh": 252,
-        "V2DeviceRegistrationOutcome": 221
+        "V2DeviceCredentialIssuing": 165,
+        "V2IssuedDeviceCredentials": 111,
+        "V2DeviceRegistrationMetadata": 201
       }
     },
     {
@@ -5855,8 +6421,8 @@
         "V2DeviceSessionServiceError"
       ],
       "referenceLines": {
-        "V2DeviceSessionServiceError": 87,
         "V2DeviceSessionMutationOutcome": 121,
+        "V2DeviceSessionServiceError": 87,
         "V2DeviceSessionManaging": 59
       }
     },
@@ -5947,17 +6513,17 @@
         "V2DurableWorkReplayValidationError"
       ],
       "referenceLines": {
-        "V2DurableWorkReplayValidationError": 144,
-        "V2DurableWorkEventReplayCommand": 78,
-        "V2DurableWorkReplayStoreError": 168,
-        "V2DurableWorkReplayOutcome": 106,
-        "V2DurableWorkReplayCommand": 36,
-        "V2DurableWorkOperatorReplayService": 122,
-        "V2DurableWorkReplayTargetKind": 10,
-        "V2DurableWorkEventReplayResult": 96,
         "V2DurableWorkReplayResult": 109,
+        "V2DurableWorkEventReplayResult": 96,
+        "V2DurableWorkReplayOutcome": 106,
         "V2DurableWorkReplayTarget": 39,
-        "V2DurableWorkReplayReason": 16
+        "V2DurableWorkReplayCommand": 36,
+        "V2DurableWorkReplayReason": 16,
+        "V2DurableWorkOperatorReplayService": 122,
+        "V2DurableWorkReplayValidationError": 144,
+        "V2DurableWorkReplayStoreError": 168,
+        "V2DurableWorkEventReplayCommand": 78,
+        "V2DurableWorkReplayTargetKind": 10
       }
     },
     {
@@ -6023,9 +6589,9 @@
       ],
       "referenceLines": {
         "V2ForwardWorkReplayError": 55,
-        "V2ForwardWorkReplayKind": 19,
         "V2ForwardWorkReplayCommand": 48,
-        "V2ForwardWorkOperatorReplayService": 33
+        "V2ForwardWorkOperatorReplayService": 33,
+        "V2ForwardWorkReplayKind": 19
       }
     },
     {
@@ -6362,8 +6928,8 @@
         "V2LocalMediaByteServing"
       ],
       "referenceLines": {
-        "V2LocalFilesystemMediaProviderError": 65,
-        "V2LocalMediaByteServing": 12
+        "V2LocalMediaByteServing": 12,
+        "V2LocalFilesystemMediaProviderError": 65
       }
     },
     {
@@ -6400,8 +6966,8 @@
         "V2MediaStoreError"
       ],
       "referenceLines": {
-        "V2MediaStoreError": 50,
-        "V2MediaEdgeHTTPHandlerError": 43
+        "V2MediaEdgeHTTPHandlerError": 43,
+        "V2MediaStoreError": 50
       }
     },
     {
@@ -6561,27 +7127,15 @@
       }
     },
     {
-      "from": "IMV2ServerHTTP/V2VaporMessageSendOperationRoutes.swift",
+      "from": "IMV2ServerHTTP/V2VaporMetricsRoutes.swift",
       "fromTarget": "IMV2ServerHTTP",
-      "to": "IMV2ServerContracts/V2GatewayAuthenticationContract.swift",
-      "toTarget": "IMV2ServerContracts",
+      "to": "IMV2ServerApplication/V2ActorRealtimeMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
       "symbols": [
-        "V2GatewayAuthenticator"
+        "v2RenderPrometheusActorRealtimeMetrics"
       ],
       "referenceLines": {
-        "V2GatewayAuthenticator": 9
-      }
-    },
-    {
-      "from": "IMV2ServerHTTP/V2VaporMessageSendOperationRoutes.swift",
-      "fromTarget": "IMV2ServerHTTP",
-      "to": "IMV2ServerContracts/V2RoomOperationHandling.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2MessageSendOperationHandling"
-      ],
-      "referenceLines": {
-        "V2MessageSendOperationHandling": 10
+        "v2RenderPrometheusActorRealtimeMetrics": 51
       }
     },
     {
@@ -6593,7 +7147,7 @@
         "v2RenderPrometheusDurableWorkMetrics"
       ],
       "referenceLines": {
-        "v2RenderPrometheusDurableWorkMetrics": 42
+        "v2RenderPrometheusDurableWorkMetrics": 43
       }
     },
     {
@@ -6605,7 +7159,7 @@
         "v2RenderPrometheusRuntimePressureMetrics"
       ],
       "referenceLines": {
-        "v2RenderPrometheusRuntimePressureMetrics": 45
+        "v2RenderPrometheusRuntimePressureMetrics": 46
       }
     },
     {
@@ -6619,9 +7173,21 @@
         "v2RenderPrometheusGatewayTransportMetrics"
       ],
       "referenceLines": {
-        "v2RenderPrometheusGatewayTransportMetrics": 39,
-        "v2RenderPrometheusConnectionMetrics": 36,
+        "v2RenderPrometheusGatewayTransportMetrics": 40,
+        "v2RenderPrometheusConnectionMetrics": 37,
         "V2PrometheusTelemetrySink": 24
+      }
+    },
+    {
+      "from": "IMV2ServerHTTP/V2VaporMetricsRoutes.swift",
+      "fromTarget": "IMV2ServerHTTP",
+      "to": "IMV2ServerContracts/V2ActorRealtimeMetricsContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2ActorRealtimeMetricsSource"
+      ],
+      "referenceLines": {
+        "V2ActorRealtimeMetricsSource": 29
       }
     },
     {
@@ -6658,8 +7224,8 @@
         "V2GatewayTransportMetricsSource"
       ],
       "referenceLines": {
-        "V2GatewayTransportMetricsSource": 26,
-        "V2ConnectionMetricsSource": 25
+        "V2ConnectionMetricsSource": 25,
+        "V2GatewayTransportMetricsSource": 26
       }
     },
     {
@@ -6830,8 +7396,8 @@
         "V2ProfileUpdateService"
       ],
       "referenceLines": {
-        "V2ProfileUpdateError": 30,
-        "V2ProfileUpdateService": 11
+        "V2ProfileUpdateService": 11,
+        "V2ProfileUpdateError": 30
       }
     },
     {
@@ -6870,9 +7436,9 @@
         "V2PushEndpointProvider"
       ],
       "referenceLines": {
-        "V2PushDeviceEndpointStore": 32,
         "V2PushEndpointEnvironment": 16,
         "V2PushEndpointProvider": 15,
+        "V2PushDeviceEndpointStore": 32,
         "V2PushDeviceEndpointRegistration": 58
       }
     },
@@ -6901,11 +7467,11 @@
         "V2PushEndpointProvider"
       ],
       "referenceLines": {
-        "V2PushEndpointEnvironment": 39,
-        "V2PushDeviceEndpointError": 87,
-        "V2PushEndpointIntent": 85,
+        "V2PushEndpointIntentStoring": 48,
         "V2PushEndpointProvider": 37,
-        "V2PushEndpointIntentStoring": 48
+        "V2PushEndpointIntent": 85,
+        "V2PushEndpointEnvironment": 39,
+        "V2PushDeviceEndpointError": 87
       }
     },
     {
@@ -7103,11 +7669,11 @@
         "V2ForwardStoreError"
       ],
       "referenceLines": {
+        "V2ForwardPersistence": 8,
         "V2ForwardStoreError": 46,
-        "ForwardSourceContent": 125,
-        "ForwardPairKey": 179,
         "ForwardSource": 43,
-        "V2ForwardPersistence": 8
+        "ForwardSourceContent": 125,
+        "ForwardPairKey": 179
       }
     },
     {
@@ -7362,7 +7928,7 @@
         "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 130,
+        "v2PostgresTimestampCanEncode": 168,
         "v2PostgresFutureTimestamp": 62
       }
     },
@@ -7387,7 +7953,7 @@
         "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 142
+        "v2PostgresTimestampCanEncode": 150
       }
     },
     {
@@ -7401,9 +7967,9 @@
         "V2SetUserAddPermissionOutcome"
       ],
       "referenceLines": {
-        "V2SetStrangerMessagePermissionOutcome": 124,
+        "V2SetUserAddPermissionOutcome": 151,
         "V2OpenDirectRoomOutcome": 45,
-        "V2SetUserAddPermissionOutcome": 151
+        "V2SetStrangerMessagePermissionOutcome": 124
       }
     },
     {
@@ -7529,6 +8095,30 @@
       }
     },
     {
+      "from": "IMV2ServerInfrastructure/PostgresV2DurableSendBatchReceipts.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceBoundaryErrors.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2DirectAuthorizationReceiptError"
+      ],
+      "referenceLines": {
+        "V2DirectAuthorizationReceiptError": 231
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2DurableSendBatchReceipts.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceTimestampBounds.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "v2PostgresTimestampCanEncode"
+      ],
+      "referenceLines": {
+        "v2PostgresTimestampCanEncode": 278
+      }
+    },
+    {
       "from": "IMV2ServerInfrastructure/PostgresV2DurableWorkReplayStore.swift",
       "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerApplication/V2DurableWorkOperatorReplay.swift",
@@ -7546,16 +8136,16 @@
         "V2DurableWorkReplayValidationError"
       ],
       "referenceLines": {
-        "V2DurableWorkReplayValidationError": 315,
-        "V2DurableWorkEventReplayCommand": 239,
-        "V2DurableWorkReplayStoreError": 45,
-        "V2DurableWorkReplayOutcome": 75,
-        "V2DurableWorkReplayCommand": 39,
-        "V2DurableWorkReplayStore": 13,
-        "V2DurableWorkReplayTargetKind": 294,
-        "V2DurableWorkEventReplayResult": 242,
         "V2DurableWorkReplayResult": 42,
-        "V2DurableWorkReplayTarget": 261
+        "V2DurableWorkEventReplayResult": 242,
+        "V2DurableWorkReplayOutcome": 75,
+        "V2DurableWorkReplayTarget": 261,
+        "V2DurableWorkReplayCommand": 39,
+        "V2DurableWorkReplayValidationError": 315,
+        "V2DurableWorkReplayStore": 13,
+        "V2DurableWorkReplayStoreError": 45,
+        "V2DurableWorkEventReplayCommand": 239,
+        "V2DurableWorkReplayTargetKind": 294
       }
     },
     {
@@ -7616,8 +8206,8 @@
         "V2ForwardExportError"
       ],
       "referenceLines": {
-        "V2ForwardExportError": 34,
-        "V2ForwardExport": 10
+        "V2ForwardExport": 10,
+        "V2ForwardExportError": 34
       }
     },
     {
@@ -7693,9 +8283,9 @@
         "V2ForwardExportMedia"
       ],
       "referenceLines": {
-        "V2ForwardExportError": 47,
+        "V2ForwardExportMedia": 214,
         "V2ForwardExport": 100,
-        "V2ForwardExportMedia": 214
+        "V2ForwardExportError": 47
       }
     },
     {
@@ -7804,8 +8394,8 @@
         "V2ForwardInboxError"
       ],
       "referenceLines": {
-        "V2ForwardInboxError": 62,
-        "V2ForwardImportOutcome": 119
+        "V2ForwardImportOutcome": 119,
+        "V2ForwardInboxError": 62
       }
     },
     {
@@ -7844,8 +8434,8 @@
       ],
       "referenceLines": {
         "V2StoredObjectFacts": 153,
-        "V2ResourceProviderError": 156,
-        "V2StoredObjectReference": 162
+        "V2StoredObjectReference": 162,
+        "V2ResourceProviderError": 156
       }
     },
     {
@@ -7962,8 +8552,8 @@
         "V2ForwardPlanStoring"
       ],
       "referenceLines": {
-        "V2ForwardPlanStoring": 14,
-        "V2ForwardPlanStoreError": 168
+        "V2ForwardPlanStoreError": 168,
+        "V2ForwardPlanStoring": 14
       }
     },
     {
@@ -8025,8 +8615,8 @@
         "V2DurableWorkReplayResult"
       ],
       "referenceLines": {
-        "V2DurableWorkOperatorReplayService": 34,
         "V2DurableWorkReplayResult": 33,
+        "V2DurableWorkOperatorReplayService": 34,
         "V2DurableWorkReplayOutcome": 44
       }
     },
@@ -8069,8 +8659,8 @@
         "V2GroupCapabilitiesStoreError"
       ],
       "referenceLines": {
-        "V2GroupCapabilitiesOutcome": 44,
         "V2GroupCapabilitiesStoreError": 47,
+        "V2GroupCapabilitiesOutcome": 44,
         "V2GroupCapabilitiesStore": 13
       }
     },
@@ -8083,7 +8673,7 @@
         "v2GatewayMilliseconds"
       ],
       "referenceLines": {
-        "v2GatewayMilliseconds": 500
+        "v2GatewayMilliseconds": 484
       }
     },
     {
@@ -8134,8 +8724,8 @@
         "V2GroupCapabilitiesStoreError"
       ],
       "referenceLines": {
-        "V2GroupCapabilitiesOutcome": 150,
-        "V2GroupCapabilitiesStoreError": 101
+        "V2GroupCapabilitiesStoreError": 101,
+        "V2GroupCapabilitiesOutcome": 150
       }
     },
     {
@@ -8232,8 +8822,8 @@
         "V2GroupRoomCreationIntentStoreError"
       ],
       "referenceLines": {
-        "V2GroupRoomCreationIntentStoreError": 118,
-        "V2GroupMessagingStoreError": 33
+        "V2GroupMessagingStoreError": 33,
+        "V2GroupRoomCreationIntentStoreError": 118
       }
     },
     {
@@ -8286,8 +8876,8 @@
       "referenceLines": {
         "V2GroupEventLogPage": 43,
         "V2GroupEventSubscription": 363,
-        "V2GroupEventLogError": 46,
-        "V2GroupEventLogEntry": 258
+        "V2GroupEventLogEntry": 258,
+        "V2GroupEventLogError": 46
       }
     },
     {
@@ -8301,9 +8891,9 @@
         "V2PreparedGroupEventPullResult"
       ],
       "referenceLines": {
-        "V2PreparedGroupEventPageEncodingContext": 291,
+        "V2PreparedGroupEventLogStore": 12,
         "V2PreparedGroupEventPullResult": 292,
-        "V2PreparedGroupEventLogStore": 12
+        "V2PreparedGroupEventPageEncodingContext": 291
       }
     },
     {
@@ -8318,8 +8908,8 @@
       ],
       "referenceLines": {
         "V2GroupEventWakeStore": 11,
-        "V2GroupEventWakeStoreError": 36,
-        "V2GroupEventWakeLease": 33
+        "V2GroupEventWakeLease": 33,
+        "V2GroupEventWakeStoreError": 36
       }
     },
     {
@@ -8372,8 +8962,8 @@
         "V2GroupInviteSecretIssuer"
       ],
       "referenceLines": {
-        "V2GroupInvitationServiceError": 52,
         "V2GroupInviteSecretIssuer": 16,
+        "V2GroupInvitationServiceError": 52,
         "V2GroupInvitationPolicy": 17,
         "V2GroupInviteCreatePersistenceRequest": 147
       }
@@ -8448,8 +9038,8 @@
         "V2GroupJoinQuotaOutcome"
       ],
       "referenceLines": {
-        "V2GroupJoinQuotaIntent": 783,
-        "V2GroupJoinQuotaOutcome": 907
+        "V2GroupJoinQuotaOutcome": 907,
+        "V2GroupJoinQuotaIntent": 783
       }
     },
     {
@@ -8472,18 +9062,18 @@
         "V2StoredGroupInvite"
       ],
       "referenceLines": {
-        "V2GroupInviteCreatePersistenceRequest": 74,
-        "V2GroupJoinRequestRecordPage": 313,
-        "V2GroupInvitationServiceError": 40,
-        "V2GroupJoinSubmissionPersistenceRequest": 244,
-        "V2GroupInvitePreviewPersistenceOutcome": 192,
+        "V2GroupInviteCreationTimestamps": 773,
         "V2GroupJoinRequestRecord": 442,
-        "V2GroupJoinApprovalPersistenceOutcome": 357,
-        "V2GroupJoinDecisionPreparationOutcome": 474,
-        "V2GroupJoinSubmissionPersistenceOutcome": 741,
+        "V2GroupJoinSubmissionPersistenceRequest": 244,
         "V2GroupInvitePreviewRecord": 616,
+        "V2GroupJoinApprovalPersistenceOutcome": 357,
+        "V2GroupInvitePreviewPersistenceOutcome": 192,
+        "V2GroupJoinSubmissionPersistenceOutcome": 741,
+        "V2GroupInvitationServiceError": 40,
+        "V2GroupInviteCreatePersistenceRequest": 74,
         "V2StoredGroupInvite": 74,
-        "V2GroupInviteCreationTimestamps": 773
+        "V2GroupJoinDecisionPreparationOutcome": 474,
+        "V2GroupJoinRequestRecordPage": 313
       }
     },
     {
@@ -8581,9 +9171,9 @@
         "V2GroupInviteCreationRecoveryStoring"
       ],
       "referenceLines": {
-        "V2GroupInviteCreationRecoveryStoring": 12,
+        "V2GroupInviteCreationRecoveryFailure": 186,
         "V2GroupInviteCreationRecoveryClaim": 137,
-        "V2GroupInviteCreationRecoveryFailure": 186
+        "V2GroupInviteCreationRecoveryStoring": 12
       }
     },
     {
@@ -8643,9 +9233,9 @@
         "V2GroupJoinQuotaReservation"
       ],
       "referenceLines": {
-        "V2GroupJoinQuotaIntent": 84,
         "V2GroupJoinQuotaReservation": 42,
-        "V2GroupJoinQuotaOutcome": 132
+        "V2GroupJoinQuotaOutcome": 132,
+        "V2GroupJoinQuotaIntent": 84
       }
     },
     {
@@ -8660,8 +9250,8 @@
       ],
       "referenceLines": {
         "V2GroupJoinRequestRecord": 216,
-        "V2GroupInvitationServiceError": 18,
-        "V2GroupJoinSubmissionPersistenceRequest": 41
+        "V2GroupJoinSubmissionPersistenceRequest": 41,
+        "V2GroupInvitationServiceError": 18
       }
     },
     {
@@ -8736,8 +9326,8 @@
         "V2GroupRoomCreationIntentStoreError"
       ],
       "referenceLines": {
-        "V2GroupRoomCreationIntentStoreError": 75,
-        "V2GroupMessagingStoreError": 29
+        "V2GroupMessagingStoreError": 29,
+        "V2GroupRoomCreationIntentStoreError": 75
       }
     },
     {
@@ -8800,8 +9390,8 @@
         "V2AuthenticatedConnectionLeaseOutcome"
       ],
       "referenceLines": {
-        "V2AuthenticatedConnectionAdmissionPolicy": 183,
-        "V2AuthenticatedConnectionLeaseOutcome": 185
+        "V2AuthenticatedConnectionAdmissionPolicy": 257,
+        "V2AuthenticatedConnectionLeaseOutcome": 258
       }
     },
     {
@@ -8813,7 +9403,7 @@
         "v2GatewayMilliseconds"
       ],
       "referenceLines": {
-        "v2GatewayMilliseconds": 159
+        "v2GatewayMilliseconds": 236
       }
     },
     {
@@ -8826,14 +9416,20 @@
         "V2LiveActivityStoreError",
         "V2LivePresenceLeaseRefresh",
         "V2LivePresenceLeaseRenewalRequest",
+        "V2PresenceObservationDenial",
+        "V2PresenceObservationOutcome",
+        "V2PresenceObservationRequest",
         "V2PresencePublicationLeaseObservation"
       ],
       "referenceLines": {
-        "V2PresencePublicationLeaseObservation": 367,
-        "V2LiveActivityStoreError": 47,
+        "V2PresenceObservationOutcome": 107,
+        "V2LiveActivityStoreError": 52,
+        "V2PresencePublicationLeaseObservation": 423,
         "V2LiveActivityStore": 18,
-        "V2LivePresenceLeaseRefresh": 280,
-        "V2LivePresenceLeaseRenewalRequest": 279
+        "V2PresenceObservationRequest": 106,
+        "V2LivePresenceLeaseRenewalRequest": 349,
+        "V2LivePresenceLeaseRefresh": 269,
+        "V2PresenceObservationDenial": 159
       }
     },
     {
@@ -8846,8 +9442,8 @@
         "v2PostgresTimestampPrecedes"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 50,
-        "v2PostgresTimestampPrecedes": 158
+        "v2PostgresTimestampCanEncode": 55,
+        "v2PostgresTimestampPrecedes": 235
       }
     },
     {
@@ -8860,8 +9456,8 @@
         "V2MediaDownloadSessionStore"
       ],
       "referenceLines": {
-        "V2ClaimedMediaDownload": 48,
-        "V2MediaDownloadSessionStore": 12
+        "V2MediaDownloadSessionStore": 12,
+        "V2ClaimedMediaDownload": 48
       }
     },
     {
@@ -8973,7 +9569,7 @@
         "V2DurableRetryDisposition"
       ],
       "referenceLines": {
-        "V2DurableRetryDisposition": 124
+        "V2DurableRetryDisposition": 146
       }
     },
     {
@@ -8985,7 +9581,7 @@
         "V2MediaScanResult"
       ],
       "referenceLines": {
-        "V2MediaScanResult": 86
+        "V2MediaScanResult": 108
       }
     },
     {
@@ -8997,7 +9593,7 @@
         "V2PersistenceTimestamp"
       ],
       "referenceLines": {
-        "V2PersistenceTimestamp": 96
+        "V2PersistenceTimestamp": 118
       }
     },
     {
@@ -9010,7 +9606,7 @@
         "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 137,
+        "v2PostgresTimestampCanEncode": 169,
         "v2PostgresFutureTimestamp": 38
       }
     },
@@ -9147,6 +9743,32 @@
       }
     },
     {
+      "from": "IMV2ServerInfrastructure/PostgresV2MentionPushWakeRelay.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceTimestampBounds.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "v2PostgresFutureTimestamp",
+        "v2PostgresTimestampCanEncode"
+      ],
+      "referenceLines": {
+        "v2PostgresTimestampCanEncode": 22,
+        "v2PostgresFutureTimestamp": 23
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2MentionPushWakeRelay.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendMessageContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomWriteStoreError"
+      ],
+      "referenceLines": {
+        "V2RoomWriteStoreError": 25
+      }
+    },
+    {
       "from": "IMV2ServerInfrastructure/PostgresV2MessageEditStore.swift",
       "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerApplication/V2MessageEditService.swift",
@@ -9157,8 +9779,8 @@
         "V2MessageEditStoreError"
       ],
       "referenceLines": {
-        "V2MessageEditStoreError": 86,
         "V2MessageEditStore": 11,
+        "V2MessageEditStoreError": 86,
         "V2MessageEditOutcome": 46
       }
     },
@@ -9402,8 +10024,8 @@
         "v2MessageProjectionStateID"
       ],
       "referenceLines": {
-        "V2MessageProjectionState": 52,
-        "v2MessageProjectionStateID": 63
+        "v2MessageProjectionStateID": 63,
+        "V2MessageProjectionState": 52
       }
     },
     {
@@ -9477,9 +10099,9 @@
         "V2MessageReactionStoreError"
       ],
       "referenceLines": {
-        "V2MessageReactionOutcome": 37,
         "V2MessageReactionStoreError": 74,
-        "V2MessageReactionStore": 12
+        "V2MessageReactionStore": 12,
+        "V2MessageReactionOutcome": 37
       }
     },
     {
@@ -9545,13 +10167,65 @@
     {
       "from": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
       "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/Room/V2AcceptanceIDFactory.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2AcceptanceIDFactory"
+      ],
+      "referenceLines": {
+        "V2AcceptanceIDFactory": 49
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 16
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerContracts/V2CommittedMessageBatchObserving.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
         "V2CommittedMessageBatchObserving"
       ],
       "referenceLines": {
-        "V2CommittedMessageBatchObserving": 13
+        "V2CommittedMessageBatchObserving": 15
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2MediaContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2MediaStoreError"
+      ],
+      "referenceLines": {
+        "V2MediaStoreError": 598
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceBoundaryErrors.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2DirectAuthorizationIntentError",
+        "V2DirectAuthorizationReceiptError",
+        "V2RoomOwnerFenceError"
+      ],
+      "referenceLines": {
+        "V2DirectAuthorizationReceiptError": 408,
+        "V2DirectAuthorizationIntentError": 408,
+        "V2RoomOwnerFenceError": 314
       }
     },
     {
@@ -9560,14 +10234,28 @@
       "to": "IMV2ServerContracts/V2SendMessageContracts.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2AtomicRoomWriteBatchError",
         "V2CapacityProfile",
         "V2RoomWriteStoreError",
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
-        "V2SendMessageOutcome": 17,
-        "V2RoomWriteStoreError": 29,
-        "V2CapacityProfile": 15
+        "V2SendMessageOutcome": 30,
+        "V2RoomWriteStoreError": 409,
+        "V2CapacityProfile": 26,
+        "V2AtomicRoomWriteBatchError": 352
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2MessageSendOperationStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2SendOperationOwnerScalarFallbackReason"
+      ],
+      "referenceLines": {
+        "V2SendOperationOwnerScalarFallbackReason": 213
       }
     },
     {
@@ -9581,8 +10269,8 @@
         "V2MessageWithdrawalStoreError"
       ],
       "referenceLines": {
-        "V2MessageWithdrawalStore": 13,
         "V2MessageWithdrawalStoreError": 70,
+        "V2MessageWithdrawalStore": 13,
         "V2MessageWithdrawalOutcome": 39
       }
     },
@@ -9658,9 +10346,9 @@
         "V2TrustedSafetyModerationStore"
       ],
       "referenceLines": {
-        "V2ModerationResult": 553,
         "V2TrustedSafetyModerationStore": 13,
         "V2ModerationStoreError": 42,
+        "V2ModerationResult": 553,
         "V2ModerationOutcome": 35
       }
     },
@@ -9726,10 +10414,10 @@
         "V2ProfilePresentationManaging"
       ],
       "referenceLines": {
-        "V2ProfilePresentationManaging": 12,
+        "V2GroupNicknamePage": 123,
         "V2ProfilePresentationError": 76,
-        "V2ContactAliasPage": 74,
-        "V2GroupNicknamePage": 123
+        "V2ProfilePresentationManaging": 12,
+        "V2ContactAliasPage": 74
       }
     },
     {
@@ -9791,8 +10479,8 @@
         "V2ProfileUpdateStore"
       ],
       "referenceLines": {
-        "V2OwnProfileReading": 12,
         "V2ProfileUpdateError": 48,
+        "V2OwnProfileReading": 12,
         "V2ProfileUpdateStore": 12
       }
     },
@@ -9858,8 +10546,8 @@
         "V2PushWakeStore"
       ],
       "referenceLines": {
-        "V2PushWakeLease": 39,
-        "V2PushWakeStore": 13
+        "V2PushWakeStore": 13,
+        "V2PushWakeLease": 45
       }
     },
     {
@@ -9871,7 +10559,7 @@
         "V2PersistenceTimestamp"
       ],
       "referenceLines": {
-        "V2PersistenceTimestamp": 244
+        "V2PersistenceTimestamp": 287
       }
     },
     {
@@ -9884,8 +10572,8 @@
         "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 74,
-        "v2PostgresFutureTimestamp": 41
+        "v2PostgresTimestampCanEncode": 102,
+        "v2PostgresFutureTimestamp": 47
       }
     },
     {
@@ -9897,7 +10585,7 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 42
+        "V2RoomWriteStoreError": 48
       }
     },
     {
@@ -9945,15 +10633,15 @@
       "referenceLines": {
         "V2ReadReceiptRecordResult": 181,
         "V2ReadReceiptRecordRequest": 180,
-        "V2GroupReadReceiptBatchResult": 237,
-        "V2GroupReadReceiptReaderCandidate": 488,
-        "V2ReadReceiptOutcome": 28,
-        "V2ReadReceiptControlStore": 18,
         "V2ReadReceiptBatchStore": 19,
-        "V2GroupReadReceiptOwnerStore": 16,
         "V2GroupReadReceiptReaderCandidatePage": 441,
+        "V2GroupReadReceiptOwnerStore": 16,
+        "V2ReadReceiptControlStore": 18,
+        "V2GroupReadReceiptRecordingAttempt": 52,
+        "V2GroupReadReceiptReaderCandidate": 488,
+        "V2GroupReadReceiptBatchResult": 237,
         "V2ReadReceiptStoreError": 51,
-        "V2GroupReadReceiptRecordingAttempt": 52
+        "V2ReadReceiptOutcome": 28
       }
     },
     {
@@ -9981,15 +10669,65 @@
       }
     },
     {
-      "from": "IMV2ServerInfrastructure/PostgresV2RoomActivationStore.swift",
+      "from": "IMV2ServerInfrastructure/PostgresV2RealtimePartitionLeaseStore.swift",
       "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2RoomBatchExecutionErrors.swift",
+      "to": "IMV2ServerContracts/V2PersistenceTimestampBounds.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
-        "V2RoomTransactionOutcomeUnknown"
+        "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "V2RoomTransactionOutcomeUnknown": 135
+        "v2PostgresTimestampCanEncode": 41
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2RealtimePartitionLeaseStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RealtimePartitionPorts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimePartitionLease",
+        "V2RealtimePartitionLeaseStore"
+      ],
+      "referenceLines": {
+        "V2RealtimePartitionLease": 31,
+        "V2RealtimePartitionLeaseStore": 14
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2RealtimeRoomHeadReader.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RealtimeRecoveryHeadOutcome.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeRecoveryHeadOutcome"
+      ],
+      "referenceLines": {
+        "V2RealtimeRecoveryHeadOutcome": 22
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2RealtimeRoomHeadReader.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeDirectoryError"
+      ],
+      "referenceLines": {
+        "V2RealtimeDirectoryError": 16
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2RoomActivationStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 20
       }
     },
     {
@@ -10002,8 +10740,8 @@
         "V2RoomLatestVisibleResult"
       ],
       "referenceLines": {
-        "V2RoomLatestVisibleResult": 97,
-        "V2RoomLatestVisibleReading": 10
+        "V2RoomLatestVisibleResult": 122,
+        "V2RoomLatestVisibleReading": 11
       }
     },
     {
@@ -10015,7 +10753,7 @@
         "V2RoomRecoveryReadError"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 16
+        "V2RoomRecoveryReadError": 17
       }
     },
     {
@@ -10031,11 +10769,11 @@
         "V2RoomMembershipDirectoryStore"
       ],
       "referenceLines": {
-        "V2RoomMembershipDirectoryError": 42,
+        "V2RoomMembershipDirectoryPage": 37,
         "V2RoomMembershipDirectoryRequest": 37,
         "V2RoomMembershipDirectoryStore": 12,
-        "V2RoomMembershipDirectoryEntry": 104,
-        "V2RoomMembershipDirectoryPage": 37
+        "V2RoomMembershipDirectoryError": 42,
+        "V2RoomMembershipDirectoryEntry": 104
       }
     },
     {
@@ -10159,7 +10897,7 @@
         "V2RoomKind"
       ],
       "referenceLines": {
-        "V2RoomKind": 96
+        "V2RoomKind": 106
       }
     },
     {
@@ -10168,6 +10906,7 @@
       "to": "IMV2ServerContracts/V2RoomRecoveryReading.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2RealtimeRegistrationHeadReading",
         "V2RoomRecoveryReadError",
         "V2RoomStateReadResult",
         "V2RoomStateReading",
@@ -10176,11 +10915,12 @@
         "V2UserRoomDirectorySlice"
       ],
       "referenceLines": {
-        "V2RoomStateReadResult": 21,
-        "V2UserRoomDirectoryReading": 9,
-        "V2UserRoomDirectorySlice": 68,
+        "V2UserRoomDirectoryEntry": 102,
         "V2RoomRecoveryReadError": 15,
-        "V2UserRoomDirectoryEntry": 92,
+        "V2UserRoomDirectorySlice": 78,
+        "V2RealtimeRegistrationHeadReading": 9,
+        "V2UserRoomDirectoryReading": 9,
+        "V2RoomStateReadResult": 21,
         "V2RoomStateReading": 9
       }
     },
@@ -10194,8 +10934,8 @@
         "V2UserRoomDirectoryReading"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 22,
-        "V2UserRoomDirectoryReading": 13
+        "V2UserRoomDirectoryReading": 13,
+        "V2RoomRecoveryReadError": 22
       }
     },
     {
@@ -10208,8 +10948,8 @@
         "V2RoomRecoveryTopologyReading"
       ],
       "referenceLines": {
-        "V2RoomRecoveryTopology": 32,
-        "V2RoomRecoveryTopologyReading": 10
+        "V2RoomRecoveryTopologyReading": 10,
+        "V2RoomRecoveryTopology": 32
       }
     },
     {
@@ -10257,7 +10997,7 @@
         "V2AtomicRoomWriteBatchError"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 39
+        "V2AtomicRoomWriteBatchError": 25
       }
     },
     {
@@ -10270,8 +11010,8 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 320,
-        "V2RoomWriteStoreError": 327
+        "V2RoomWriteStoreError": 327,
+        "V2AtomicRoomWriteBatchError": 320
       }
     },
     {
@@ -10283,7 +11023,7 @@
         "v2GatewayMilliseconds"
       ],
       "referenceLines": {
-        "v2GatewayMilliseconds": 65
+        "v2GatewayMilliseconds": 73
       }
     },
     {
@@ -10295,7 +11035,7 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 216
+        "V2RoomWriteStoreError": 55
       }
     },
     {
@@ -10332,8 +11072,8 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 30,
-        "V2RoomWriteStoreError": 21
+        "V2RoomWriteStoreError": 21,
+        "V2AtomicRoomWriteBatchError": 30
       }
     },
     {
@@ -10346,8 +11086,8 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 58,
-        "V2RoomWriteStoreError": 196
+        "V2RoomWriteStoreError": 196,
+        "V2AtomicRoomWriteBatchError": 58
       }
     },
     {
@@ -10419,7 +11159,7 @@
         "v2GatewayMilliseconds"
       ],
       "referenceLines": {
-        "v2GatewayMilliseconds": 463
+        "v2GatewayMilliseconds": 557
       }
     },
     {
@@ -10431,7 +11171,7 @@
         "V2MessageProjectionState"
       ],
       "referenceLines": {
-        "V2MessageProjectionState": 179
+        "V2MessageProjectionState": 184
       }
     },
     {
@@ -10445,9 +11185,9 @@
         "V2RoomOwnerFenceError"
       ],
       "referenceLines": {
-        "V2DirectAuthorizationReceiptError": 675,
-        "V2DirectAuthorizationIntentError": 672,
-        "V2RoomOwnerFenceError": 39
+        "V2DirectAuthorizationReceiptError": 769,
+        "V2DirectAuthorizationIntentError": 766,
+        "V2RoomOwnerFenceError": 41
       }
     },
     {
@@ -10459,7 +11199,7 @@
         "V2RoomShardRoute"
       ],
       "referenceLines": {
-        "V2RoomShardRoute": 653
+        "V2RoomShardRoute": 747
       }
     },
     {
@@ -10473,9 +11213,9 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2DirectMessageDenied": 456,
-        "V2RoomWriteStoreError": 331,
-        "V2CapacityProfile": 20
+        "V2RoomWriteStoreError": 315,
+        "V2CapacityProfile": 20,
+        "V2DirectMessageDenied": 550
       }
     },
     {
@@ -10489,9 +11229,9 @@
         "V2UserStateEventKind"
       ],
       "referenceLines": {
-        "V2UserStateEventKind": 566,
-        "V2UserStateEventError": 567,
-        "V2UserStateEvent": 569
+        "V2UserStateEvent": 663,
+        "V2UserStateEventError": 661,
+        "V2UserStateEventKind": 660
       }
     },
     {
@@ -10515,7 +11255,7 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 30
+        "V2RoomWriteStoreError": 29
       }
     },
     {
@@ -10528,8 +11268,8 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2DirectMessageDenied": 545,
-        "V2RoomWriteStoreError": 279
+        "V2RoomWriteStoreError": 279,
+        "V2DirectMessageDenied": 545
       }
     },
     {
@@ -10571,6 +11311,18 @@
     {
       "from": "IMV2ServerInfrastructure/PostgresV2RoomWriteStore.swift",
       "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 148
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2RoomWriteStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerContracts/V2ContentReviewMode.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
@@ -10589,7 +11341,7 @@
         "V2ForwardExport"
       ],
       "referenceLines": {
-        "V2ForwardExport": 409
+        "V2ForwardExport": 454
       }
     },
     {
@@ -10602,8 +11354,8 @@
         "V2ForwardInboxError"
       ],
       "referenceLines": {
-        "V2ForwardInboxError": 484,
-        "V2ForwardImportOutcome": 414
+        "V2ForwardImportOutcome": 459,
+        "V2ForwardInboxError": 529
       }
     },
     {
@@ -10618,10 +11370,10 @@
         "V2RoomOwnerFenceError"
       ],
       "referenceLines": {
-        "V2DirectAuthorizationIntentError": 167,
-        "V2DirectAuthorizationCoordinationError": 471,
-        "V2DirectSendControlPolicyError": 708,
-        "V2RoomOwnerFenceError": 318
+        "V2DirectSendControlPolicyError": 809,
+        "V2DirectAuthorizationCoordinationError": 516,
+        "V2DirectAuthorizationIntentError": 212,
+        "V2RoomOwnerFenceError": 363
       }
     },
     {
@@ -10635,9 +11387,9 @@
         "v2PostgresTimestampMicrosecondsCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 250,
-        "v2PostgresTimestampMicrosecondsCanEncode": 1968,
-        "v2PostgresPastTimestamp": 1999
+        "v2PostgresTimestampMicrosecondsCanEncode": 2072,
+        "v2PostgresTimestampCanEncode": 295,
+        "v2PostgresPastTimestamp": 2103
       }
     },
     {
@@ -10649,7 +11401,7 @@
         "V2RoomTransactionOutcomeUnknown"
       ],
       "referenceLines": {
-        "V2RoomTransactionOutcomeUnknown": 193
+        "V2RoomTransactionOutcomeUnknown": 238
       }
     },
     {
@@ -10679,13 +11431,13 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchPartition": 561,
-        "V2SendMessageOutcome": 221,
-        "V2DirectMessageDenied": 1870,
-        "V2CapacityProfile": 333,
-        "V2AtomicRoomWriteBatchError": 698,
-        "V2RoomWriteStoreError": 222,
-        "V2RoomWriteRequest": 220
+        "V2RoomWriteStoreError": 267,
+        "V2RoomWriteRequest": 265,
+        "V2CapacityProfile": 378,
+        "V2AtomicRoomWriteBatchError": 799,
+        "V2DirectMessageDenied": 1969,
+        "V2SendMessageOutcome": 266,
+        "V2AtomicRoomWriteBatchPartition": 606
       }
     },
     {
@@ -10746,8 +11498,8 @@
         "V2UserBlockOutcome"
       ],
       "referenceLines": {
-        "V2RelationshipOutcome": 42,
-        "V2UserBlockOutcome": 112
+        "V2UserBlockOutcome": 112,
+        "V2RelationshipOutcome": 42
       }
     },
     {
@@ -10849,11 +11601,11 @@
         "V2SyncStore"
       ],
       "referenceLines": {
-        "V2SyncPullResult": 66,
         "V2SnapshotPage": 355,
+        "V2SyncRecord": 170,
         "V2SnapshotManifest": 297,
         "V2SyncStore": 11,
-        "V2SyncRecord": 170
+        "V2SyncPullResult": 66
       }
     },
     {
@@ -10965,7 +11717,7 @@
         "V2DurableRetryDisposition"
       ],
       "referenceLines": {
-        "V2DurableRetryDisposition": 100
+        "V2DurableRetryDisposition": 110
       }
     },
     {
@@ -10977,7 +11729,7 @@
         "V2PersistenceTimestamp"
       ],
       "referenceLines": {
-        "V2PersistenceTimestamp": 144
+        "V2PersistenceTimestamp": 154
       }
     },
     {
@@ -11005,11 +11757,11 @@
         "V2UserStateEventOutbox"
       ],
       "referenceLines": {
-        "V2UserStateEventOutbox": 9,
-        "V2UserStateEvent": 22,
-        "V2UserStateEventKind": 74,
+        "V2UserStateEventLease": 47,
+        "V2UserStateEventKind": 84,
         "V2UserStateEventError": 15,
-        "V2UserStateEventLease": 47
+        "V2UserStateEventOutbox": 9,
+        "V2UserStateEvent": 22
       }
     },
     {
@@ -11023,9 +11775,39 @@
         "V2UserStateEventProjecting"
       ],
       "referenceLines": {
-        "V2UserStateEventError": 15,
         "V2UserStateEvent": 22,
-        "V2UserStateEventProjecting": 9
+        "V2UserStateEventProjecting": 9,
+        "V2UserStateEventError": 15
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2UserSyncWakeStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceTimestampBounds.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "v2PostgresFutureTimestamp",
+        "v2PostgresTimestampCanEncode"
+      ],
+      "referenceLines": {
+        "v2PostgresTimestampCanEncode": 100,
+        "v2PostgresFutureTimestamp": 48
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/PostgresV2UserSyncWakeStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeDirectoryError",
+        "V2UserSyncWakeLease",
+        "V2UserSyncWakeStore"
+      ],
+      "referenceLines": {
+        "V2RealtimeDirectoryError": 15,
+        "V2UserSyncWakeLease": 47,
+        "V2UserSyncWakeStore": 10
       }
     },
     {
@@ -11038,8 +11820,8 @@
         "V2ResourceProviderError"
       ],
       "referenceLines": {
-        "V2ResourceProviderError": 11,
-        "V2ResourceByteStream": 64
+        "V2ResourceByteStream": 64,
+        "V2ResourceProviderError": 11
       }
     },
     {
@@ -11092,8 +11874,8 @@
       "referenceLines": {
         "V2ResourceStorageRegistry": 11,
         "V2ResourceByteStream": 94,
-        "V2ResourceProviderError": 30,
-        "V2StoredObjectReference": 131
+        "V2StoredObjectReference": 131,
+        "V2ResourceProviderError": 30
       }
     },
     {
@@ -11107,8 +11889,8 @@
         "V2ResourceDelivery"
       ],
       "referenceLines": {
-        "V2ResourceDelivery": 10,
         "V2AuthorizedResourceDelivery": 34,
+        "V2ResourceDelivery": 10,
         "V2ResourceByteServing": 10
       }
     },
@@ -11123,9 +11905,9 @@
         "V2StoredObjectFacts"
       ],
       "referenceLines": {
+        "V2StoredObjectFacts": 8,
         "V2ObjectStorage": 8,
-        "V2ResourceProviderError": 10,
-        "V2StoredObjectFacts": 8
+        "V2ResourceProviderError": 10
       }
     },
     {
@@ -11169,11 +11951,11 @@
       ],
       "referenceLines": {
         "V2StorageBinding": 14,
+        "V2StoredObjectReference": 24,
         "V2ObjectStorage": 13,
         "V2StoredObjectFacts": 33,
         "V2ResourceByteStream": 20,
-        "V2ResourceProviderError": 17,
-        "V2StoredObjectReference": 24
+        "V2ResourceProviderError": 17
       }
     },
     {
@@ -11188,10 +11970,10 @@
         "V2StoredObjectReference"
       ],
       "referenceLines": {
-        "V2StoredObjectFacts": 21,
-        "V2ResourceStorageRegistry": 22,
-        "V2ResourceProviderError": 15,
-        "V2StoredObjectReference": 22
+        "V2ResourceStorageRegistry": 23,
+        "V2StoredObjectFacts": 22,
+        "V2StoredObjectReference": 23,
+        "V2ResourceProviderError": 16
       }
     },
     {
@@ -11201,13 +11983,15 @@
       "toTarget": "IMV2ServerApplication",
       "symbols": [
         "V2ResourceRecipe",
+        "V2ResourceTransformError",
         "V2ResourceTransformOutput",
         "V2ResourceTransformer"
       ],
       "referenceLines": {
+        "V2ResourceTransformError": 26,
         "V2ResourceTransformer": 10,
-        "V2ResourceRecipe": 21,
-        "V2ResourceTransformOutput": 22
+        "V2ResourceTransformOutput": 23,
+        "V2ResourceRecipe": 22
       }
     },
     {
@@ -11221,9 +12005,9 @@
         "V2StorageBinding"
       ],
       "referenceLines": {
-        "V2ResourceProviderError": 16,
+        "V2ResourceByteStream": 22,
         "V2StorageBinding": 9,
-        "V2ResourceByteStream": 22
+        "V2ResourceProviderError": 16
       }
     },
     {
@@ -11252,8 +12036,8 @@
         "V2ProfileControlSnapshot"
       ],
       "referenceLines": {
-        "V2ProfileControlBatchError": 30,
         "V2ProfileControlFacts": 115,
+        "V2ProfileControlBatchError": 30,
         "V2ProfileControlSnapshot": 23,
         "V2ProfileControlRequest": 13
       }
@@ -11292,8 +12076,8 @@
         "V2ResourceGroupAvatarCommandService"
       ],
       "referenceLines": {
-        "V2ResourceGroupAvatarCommandService": 36,
-        "V2GroupAvatarDeviceObservation": 14
+        "V2GroupAvatarDeviceObservation": 14,
+        "V2ResourceGroupAvatarCommandService": 36
       }
     },
     {
@@ -11380,10 +12164,10 @@
         "V2ResourceImportSourceGrant"
       ],
       "referenceLines": {
-        "V2ResourceImportRecoveryItem": 92,
+        "V2ResourceImportSnapshot": 46,
         "V2ResourceImportPort": 9,
-        "V2ResourceImportSourceGrant": 61,
-        "V2ResourceImportSnapshot": 45
+        "V2ResourceImportRecoveryItem": 114,
+        "V2ResourceImportSourceGrant": 62
       }
     },
     {
@@ -11409,9 +12193,9 @@
         "V2StoredObjectReference"
       ],
       "referenceLines": {
-        "V2StoredObjectFacts": 205,
-        "V2ResourceProviderError": 24,
-        "V2StoredObjectReference": 193
+        "V2StoredObjectFacts": 271,
+        "V2StoredObjectReference": 259,
+        "V2ResourceProviderError": 25
       }
     },
     {
@@ -11423,7 +12207,7 @@
         "V2MediaStoreError"
       ],
       "referenceLines": {
-        "V2MediaStoreError": 35
+        "V2MediaStoreError": 36
       }
     },
     {
@@ -11435,7 +12219,7 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 54
+        "V2RoomWriteStoreError": 55
       }
     },
     {
@@ -11450,9 +12234,9 @@
         "V2ResourceUploadSnapshot"
       ],
       "referenceLines": {
+        "V2ResourceUploadPhase": 59,
         "V2ResourceLifecyclePort": 6,
         "V2ResourceMediaPhase": 70,
-        "V2ResourceUploadPhase": 59,
         "V2ResourceUploadSnapshot": 9
       }
     },
@@ -11468,8 +12252,8 @@
       ],
       "referenceLines": {
         "V2StoredObjectFacts": 38,
-        "V2ResourceProviderError": 51,
-        "V2StoredObjectReference": 8
+        "V2StoredObjectReference": 8,
+        "V2ResourceProviderError": 51
       }
     },
     {
@@ -11496,8 +12280,8 @@
       ],
       "referenceLines": {
         "V2StoredObjectFacts": 110,
-        "V2ResourceProviderError": 37,
-        "V2StoredObjectReference": 18
+        "V2StoredObjectReference": 18,
+        "V2ResourceProviderError": 37
       }
     },
     {
@@ -11534,8 +12318,8 @@
         "v2PostgresTimestampPrecedes"
       ],
       "referenceLines": {
-        "v2PostgresFutureTimestamp": 98,
-        "v2PostgresTimestampPrecedes": 51
+        "v2PostgresTimestampPrecedes": 51,
+        "v2PostgresFutureTimestamp": 98
       }
     },
     {
@@ -11562,10 +12346,10 @@
         "V2ResourceMigrationStatus"
       ],
       "referenceLines": {
-        "V2ResourceMigrationClaim": 63,
-        "V2ResourceMigrationStatus": 20,
         "V2ResourceMigrationRequest": 13,
-        "V2ResourceMigrationPort": 207
+        "V2ResourceMigrationClaim": 63,
+        "V2ResourceMigrationPort": 207,
+        "V2ResourceMigrationStatus": 20
       }
     },
     {
@@ -11580,8 +12364,8 @@
       ],
       "referenceLines": {
         "V2StoredObjectFacts": 20,
-        "V2ResourceProviderError": 21,
-        "V2StoredObjectReference": 20
+        "V2StoredObjectReference": 20,
+        "V2ResourceProviderError": 21
       }
     },
     {
@@ -11610,10 +12394,10 @@
       ],
       "referenceLines": {
         "V2StorageBinding": 14,
+        "V2StoredObjectReference": 38,
         "V2ResourceStorageRegistry": 11,
         "V2StoredObjectFacts": 40,
-        "V2ResourceProviderError": 21,
-        "V2StoredObjectReference": 38
+        "V2ResourceProviderError": 21
       }
     },
     {
@@ -11666,10 +12450,10 @@
         "V2StoredObjectReference"
       ],
       "referenceLines": {
-        "V2StoredObjectFacts": 76,
         "V2ResourceStorageRegistry": 11,
-        "V2ResourceProviderError": 18,
-        "V2StoredObjectReference": 64
+        "V2StoredObjectFacts": 79,
+        "V2StoredObjectReference": 67,
+        "V2ResourceProviderError": 18
       }
     },
     {
@@ -11682,6 +12466,18 @@
       ],
       "referenceLines": {
         "V2ResourceScanner": 12
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Resources/Infrastructure/V2PlacementMediaProviders.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/Resources/Ports/V2ResourceTransformer.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2ResourceTransformError"
+      ],
+      "referenceLines": {
+        "V2ResourceTransformError": 29
       }
     },
     {
@@ -11708,10 +12504,10 @@
         "V2ProfileControlSnapshot"
       ],
       "referenceLines": {
+        "V2ProfileControlReading": 204,
         "V2ProfileControlBatchError": 79,
         "V2ProfileControlSnapshot": 43,
-        "V2ProfileControlRequest": 40,
-        "V2ProfileControlReading": 204
+        "V2ProfileControlRequest": 40
       }
     },
     {
@@ -11750,8 +12546,8 @@
       ],
       "referenceLines": {
         "V2StoredObjectFacts": 39,
-        "V2ResourceProviderError": 15,
-        "V2StoredObjectReference": 38
+        "V2StoredObjectReference": 38,
+        "V2ResourceProviderError": 15
       }
     },
     {
@@ -11776,8 +12572,8 @@
         "V2StorageBinding"
       ],
       "referenceLines": {
-        "V2ResourceProviderError": 17,
-        "V2StorageBinding": 11
+        "V2StorageBinding": 11,
+        "V2ResourceProviderError": 17
       }
     },
     {
@@ -11826,8 +12622,8 @@
         "V2RoomShardRouteError"
       ],
       "referenceLines": {
-        "V2RoomShardRouteError": 41,
-        "V2RoomShardRoute": 16
+        "V2RoomShardRoute": 16,
+        "V2RoomShardRouteError": 41
       }
     },
     {
@@ -11844,10 +12640,10 @@
       ],
       "referenceLines": {
         "V2StorageBinding": 13,
+        "V2StoredObjectReference": 13,
         "V2ResourceStorageRegistry": 12,
         "V2StoredObjectFacts": 62,
-        "V2ResourceProviderError": 21,
-        "V2StoredObjectReference": 13
+        "V2ResourceProviderError": 21
       }
     },
     {
@@ -11862,8 +12658,8 @@
         "V2ForwardMediaObjectCopying"
       ],
       "referenceLines": {
-        "V2ForwardMediaCopyError": 27,
         "V2ForwardMediaImportLease": 26,
+        "V2ForwardMediaCopyError": 27,
         "V2ForwardMediaObjectCopying": 9,
         "V2ForwardMediaCopyReceipt": 26
       }
@@ -12011,9 +12807,9 @@
         "V2ResourceRecoveryWorker"
       ],
       "referenceLines": {
-        "V2ResourceRecoveryPersistence": 9,
         "V2ResourceRecoveryWorker": 46,
-        "V2ResourceRecoveryItem": 12
+        "V2ResourceRecoveryItem": 12,
+        "V2ResourceRecoveryPersistence": 9
       }
     },
     {
@@ -12052,8 +12848,8 @@
       ],
       "referenceLines": {
         "V2ResourceStorageRegistry": 9,
-        "V2ResourceProviderError": 14,
-        "V2StorageBinding": 13
+        "V2StorageBinding": 13,
+        "V2ResourceProviderError": 14
       }
     },
     {
@@ -12070,10 +12866,10 @@
       ],
       "referenceLines": {
         "V2StorageBinding": 12,
+        "V2StoredObjectReference": 12,
         "V2ResourceStorageRegistry": 10,
         "V2StoredObjectFacts": 17,
-        "V2ResourceProviderError": 24,
-        "V2StoredObjectReference": 12
+        "V2ResourceProviderError": 24
       }
     },
     {
@@ -12091,6 +12887,92 @@
       }
     },
     {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2OwnerAdmissionHandoffTrace.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 49
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2OwnerAdmissionHandoffTrace.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2SendOperationAdmissionPath"
+      ],
+      "referenceLines": {
+        "V2SendOperationAdmissionPath": 12
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationLifecycleBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 33
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationLifecycleSQL.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RoomBatchExecutionErrors.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomTransactionOutcomeUnknown"
+      ],
+      "referenceLines": {
+        "V2RoomTransactionOutcomeUnknown": 143
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationRenewalBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RoomBatchExecutionErrors.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomTransactionOutcomeUnknown"
+      ],
+      "referenceLines": {
+        "V2RoomTransactionOutcomeUnknown": 225
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationRenewalBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendMessageContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomWriteStoreError"
+      ],
+      "referenceLines": {
+        "V2RoomWriteStoreError": 205
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationTransaction.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics",
+        "V2SendOperationStageTimer"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 25,
+        "V2SendOperationStageTimer": 145
+      }
+    },
+    {
       "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomActivationTransaction.swift",
       "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerContracts/V2PersistenceBoundaryErrors.swift",
@@ -12099,7 +12981,7 @@
         "V2RoomOwnerFenceError"
       ],
       "referenceLines": {
-        "V2RoomOwnerFenceError": 234
+        "V2RoomOwnerFenceError": 280
       }
     },
     {
@@ -12111,7 +12993,7 @@
         "V2RoomTransactionOutcomeUnknown"
       ],
       "referenceLines": {
-        "V2RoomTransactionOutcomeUnknown": 154
+        "V2RoomTransactionOutcomeUnknown": 193
       }
     },
     {
@@ -12123,7 +13005,7 @@
         "V2RoomShardRoute"
       ],
       "referenceLines": {
-        "V2RoomShardRoute": 211
+        "V2RoomShardRoute": 252
       }
     },
     {
@@ -12135,7 +13017,55 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 77
+        "V2RoomWriteStoreError": 86
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomSQLContinuationTrace.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 15
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomSQLContinuationTrace.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomSQLContinuationSource"
+      ],
+      "referenceLines": {
+        "V2RoomSQLContinuationSource": 12
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomSQLDeadline.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 41
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/Room/Activation/V2RoomServerPlacement.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 33
       }
     },
     {
@@ -12148,8 +13078,8 @@
         "V2RoomShardRouting"
       ],
       "referenceLines": {
-        "V2RoomShardRouting": 10,
-        "V2RoomShardRouteError": 18
+        "V2RoomShardRouteError": 18,
+        "V2RoomShardRouting": 10
       }
     },
     {
@@ -12225,9 +13155,9 @@
         "V2RoomMembershipOperationPersisting"
       ],
       "referenceLines": {
+        "V2RoomMembershipOperationPersisting": 161,
         "V2RoomAdministrationStoring": 159,
-        "V2ActorTrustedSafetyAuthority": 112,
-        "V2RoomMembershipOperationPersisting": 161
+        "V2ActorTrustedSafetyAuthority": 112
       }
     },
     {
@@ -12252,8 +13182,8 @@
         "V2GroupRoomBootstrapExecuting"
       ],
       "referenceLines": {
-        "V2DirectRoomBootstrapExecuting": 5,
-        "V2GroupRoomBootstrapExecuting": 6
+        "V2GroupRoomBootstrapExecuting": 6,
+        "V2DirectRoomBootstrapExecuting": 5
       }
     },
     {
@@ -12266,8 +13196,8 @@
         "V2ActorInvitationRoomPort"
       ],
       "referenceLines": {
-        "V2ActorInvitationCoordinator": 8,
-        "V2ActorInvitationRoomPort": 9
+        "V2ActorInvitationRoomPort": 9,
+        "V2ActorInvitationCoordinator": 8
       }
     },
     {
@@ -12356,8 +13286,8 @@
         "V2RoomMaintenancePersisting"
       ],
       "referenceLines": {
-        "V2RoomLogRetentionMode": 23,
-        "V2RoomMaintenancePersisting": 8
+        "V2RoomMaintenancePersisting": 8,
+        "V2RoomLogRetentionMode": 23
       }
     },
     {
@@ -12429,7 +13359,7 @@
         "V2AcceptanceIDFactory"
       ],
       "referenceLines": {
-        "V2AcceptanceIDFactory": 16
+        "V2AcceptanceIDFactory": 18
       }
     },
     {
@@ -12441,7 +13371,7 @@
         "V2RoomMessagingExecutor"
       ],
       "referenceLines": {
-        "V2RoomMessagingExecutor": 87
+        "V2RoomMessagingExecutor": 124
       }
     },
     {
@@ -12450,9 +13380,11 @@
       "to": "IMV2ServerContracts/V2RoomExecutionCapabilities.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
+        "V2PreparedRoomSendOperationBatch",
         "V2RoomMessagingPersisting"
       ],
       "referenceLines": {
+        "V2PreparedRoomSendOperationBatch": 92,
         "V2RoomMessagingPersisting": 9
       }
     },
@@ -12466,8 +13398,8 @@
         "V2RoomWriteRequest"
       ],
       "referenceLines": {
-        "V2RoomWriteRequest": 77,
-        "V2CapacityProfile": 15
+        "V2RoomWriteRequest": 114,
+        "V2CapacityProfile": 17
       }
     },
     {
@@ -12479,7 +13411,7 @@
         "V2GroupRolePolicyBaselineError"
       ],
       "referenceLines": {
-        "V2GroupRolePolicyBaselineError": 55
+        "V2GroupRolePolicyBaselineError": 57
       }
     },
     {
@@ -12491,7 +13423,7 @@
         "V2RoomMembershipDirectoryError"
       ],
       "referenceLines": {
-        "V2RoomMembershipDirectoryError": 47
+        "V2RoomMembershipDirectoryError": 49
       }
     },
     {
@@ -12503,7 +13435,7 @@
         "V2RoomRecoveryReadError"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 77
+        "V2RoomRecoveryReadError": 79
       }
     },
     {
@@ -12548,14 +13480,14 @@
         "V2ReadReceiptRecovering"
       ],
       "referenceLines": {
-        "V2MessageReactionOperationHandling": 3,
-        "V2MessageModerationOperationHandling": 6,
-        "V2ReadReceiptRecovering": 7,
         "V2PersonalPreferenceRecovering": 6,
-        "V2MembershipOperationHandling": 5,
+        "V2MessageMutationOperationHandling": 3,
         "V2GroupCapabilityOperationHandling": 5,
+        "V2MessageModerationOperationHandling": 6,
+        "V2MembershipOperationHandling": 5,
+        "V2ReadReceiptRecovering": 7,
         "V2MemberAdministrationOperationHandling": 4,
-        "V2MessageMutationOperationHandling": 3
+        "V2MessageReactionOperationHandling": 3
       }
     },
     {
@@ -12642,8 +13574,8 @@
       ],
       "referenceLines": {
         "V2GroupEventLogPage": 18,
-        "V2GroupEventSubscription": 23,
-        "V2GroupEventLogStore": 40
+        "V2GroupEventLogStore": 40,
+        "V2GroupEventSubscription": 23
       }
     },
     {
@@ -12668,8 +13600,8 @@
         "V2MediaEdgeDownloadService"
       ],
       "referenceLines": {
-        "V2MediaEdgeDownloadService": 12,
-        "V2MediaDownloadTargetResolving": 11
+        "V2MediaDownloadTargetResolving": 11,
+        "V2MediaEdgeDownloadService": 12
       }
     },
     {
@@ -12700,8 +13632,8 @@
         "V2MediaStoreError"
       ],
       "referenceLines": {
-        "V2MediaStoreError": 41,
-        "V2MediaEdgeHTTPHandlerError": 43
+        "V2MediaEdgeHTTPHandlerError": 43,
+        "V2MediaStoreError": 41
       }
     },
     {
@@ -12743,9 +13675,9 @@
         "V2RoomShardRouting"
       ],
       "referenceLines": {
-        "V2RoomShardRouting": 13,
         "V2RoomShardRouteError": 41,
-        "V2RoomShardRoute": 39
+        "V2RoomShardRoute": 39,
+        "V2RoomShardRouting": 13
       }
     },
     {
@@ -12772,10 +13704,10 @@
         "V2ProfilePresentationManaging"
       ],
       "referenceLines": {
-        "V2ProfilePresentationManaging": 10,
+        "V2GroupNicknamePage": 41,
         "V2ProfilePresentationError": 47,
-        "V2ContactAliasPage": 25,
-        "V2GroupNicknamePage": 41
+        "V2ProfilePresentationManaging": 10,
+        "V2ContactAliasPage": 25
       }
     },
     {
@@ -12871,11 +13803,11 @@
         "V2ReadReceiptStoreError"
       ],
       "referenceLines": {
-        "V2ReadReceiptOutcome": 40,
-        "V2ReadReceiptControlStore": 219,
         "V2GroupReadReceiptReaderCandidatePage": 66,
         "V2AuthenticatedReadReceipt": 40,
-        "V2ReadReceiptStoreError": 235
+        "V2ReadReceiptControlStore": 219,
+        "V2ReadReceiptStoreError": 235,
+        "V2ReadReceiptOutcome": 40
       }
     },
     {
@@ -12993,8 +13925,8 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 70,
         "V2RoomWriteRequest": 71,
+        "V2RoomWriteStoreError": 70,
         "V2CapacityProfile": 15
       }
     },
@@ -13344,8 +14276,8 @@
         "V2RoomStateReadResult"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 136,
-        "V2RoomStateReadResult": 33
+        "V2RoomStateReadResult": 33,
+        "V2RoomRecoveryReadError": 136
       }
     },
     {
@@ -13382,8 +14314,8 @@
         "V2HostRoomRecoveryBatchError"
       ],
       "referenceLines": {
-        "V2HostRoomRecoveryBatchError": 79,
-        "V2GrantedRoomReadTurn": 45
+        "V2GrantedRoomReadTurn": 45,
+        "V2HostRoomRecoveryBatchError": 79
       }
     },
     {
@@ -13432,8 +14364,8 @@
         "V2ReadReceiptBatchMetricsSnapshot"
       ],
       "referenceLines": {
-        "V2ReadReceiptBatchMetricsReading": 29,
-        "V2ReadReceiptBatchMetricsSnapshot": 64
+        "V2ReadReceiptBatchMetricsSnapshot": 64,
+        "V2ReadReceiptBatchMetricsReading": 29
       }
     },
     {
@@ -13469,7 +14401,7 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 12
+        "V2RoomWriteStoreError": 14
       }
     },
     {
@@ -13499,6 +14431,18 @@
     {
       "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteAuthorizationCoordinator.swift",
       "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 20
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteAuthorizationCoordinator.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerContracts/V2PersistenceBoundaryErrors.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
@@ -13506,7 +14450,7 @@
         "V2DirectAuthorizationIntentError"
       ],
       "referenceLines": {
-        "V2DirectAuthorizationCoordinationError": 49,
+        "V2DirectAuthorizationCoordinationError": 59,
         "V2DirectAuthorizationIntentError": 21
       }
     },
@@ -13519,7 +14463,7 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 25
+        "V2RoomWriteStoreError": 27
       }
     },
     {
@@ -13545,9 +14489,9 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
+        "V2RoomWriteRequest": 69,
         "V2SendMessageOutcome": 20,
-        "V2RoomWriteStoreError": 72,
-        "V2RoomWriteRequest": 68
+        "V2RoomWriteStoreError": 98
       }
     },
     {
@@ -13577,6 +14521,18 @@
     {
       "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDirectBatchPath.swift",
       "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 32
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDirectBatchPath.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerContracts/V2SendMessageContracts.swift",
       "toTarget": "IMV2ServerContracts",
       "symbols": [
@@ -13585,9 +14541,9 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 137,
-        "V2RoomWriteStoreError": 76,
-        "V2RoomWriteRequest": 368
+        "V2RoomWriteRequest": 375,
+        "V2RoomWriteStoreError": 83,
+        "V2AtomicRoomWriteBatchError": 144
       }
     },
     {
@@ -13600,8 +14556,84 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2DirectMessageDenied": 37,
-        "V2RoomWriteStoreError": 17
+        "V2RoomWriteStoreError": 17,
+        "V2DirectMessageDenied": 37
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchAdmission.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceTimestampBounds.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "v2PostgresTimestampCanEncode"
+      ],
+      "referenceLines": {
+        "v2PostgresTimestampCanEncode": 15
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchAdmission.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendMessageContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomWriteStoreError"
+      ],
+      "referenceLines": {
+        "V2RoomWriteStoreError": 16
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchPath.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2DirectMessagingService.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2StrangerMessagePolicy"
+      ],
+      "referenceLines": {
+        "V2StrangerMessagePolicy": 10
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchPath.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2SendOperationBatchMetrics"
+      ],
+      "referenceLines": {
+        "V2SendOperationBatchMetrics": 12
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchPath.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendMessageContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2AtomicRoomWriteBatchError",
+        "V2RoomWriteRequest",
+        "V2RoomWriteStoreError"
+      ],
+      "referenceLines": {
+        "V2RoomWriteRequest": 133,
+        "V2RoomWriteStoreError": 64,
+        "V2AtomicRoomWriteBatchError": 14
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchPath.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2SendOperationStage"
+      ],
+      "referenceLines": {
+        "V2SendOperationStage": 149
       }
     },
     {
@@ -13651,9 +14683,9 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 333,
+        "V2RoomWriteRequest": 26,
         "V2RoomWriteStoreError": 69,
-        "V2RoomWriteRequest": 26
+        "V2AtomicRoomWriteBatchError": 333
       }
     },
     {
@@ -13678,8 +14710,8 @@
         "V2ForwardInboxError"
       ],
       "referenceLines": {
-        "V2ForwardInboxError": 26,
-        "V2ForwardImportOutcome": 25
+        "V2ForwardImportOutcome": 25,
+        "V2ForwardInboxError": 26
       }
     },
     {
@@ -13717,9 +14749,9 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchError": 18,
+        "V2RoomWriteRequest": 141,
         "V2RoomWriteStoreError": 80,
-        "V2RoomWriteRequest": 141
+        "V2AtomicRoomWriteBatchError": 18
       }
     },
     {
@@ -13796,8 +14828,8 @@
         "V2PushDeviceEndpointStore"
       ],
       "referenceLines": {
-        "V2PushDeviceEndpointStore": 177,
-        "V2PushDeviceEndpoint": 258
+        "V2PushDeviceEndpoint": 258,
+        "V2PushDeviceEndpointStore": 177
       }
     },
     {
@@ -13824,10 +14856,10 @@
         "V2AccountDisabling"
       ],
       "referenceLines": {
-        "V2AccountDisabling": 10,
         "V2AccountDisableOutcome": 53,
+        "V2AccountDisableCommand": 53,
         "V2AccountDisableError": 31,
-        "V2AccountDisableCommand": 53
+        "V2AccountDisabling": 10
       }
     },
     {
@@ -13854,10 +14886,10 @@
         "V2AccountEdgeClientRateLimitPolicy"
       ],
       "referenceLines": {
-        "V2AccountEdgeClientRateLimitPolicy": 14,
-        "V2AccountEdgeClientAddress": 44,
         "V2AccountEdgeClientRateLimitKey": 15,
-        "V2AccountEdgeClientRateLimitError": 64
+        "V2AccountEdgeClientRateLimitError": 64,
+        "V2AccountEdgeClientAddress": 44,
+        "V2AccountEdgeClientRateLimitPolicy": 14
       }
     },
     {
@@ -13871,9 +14903,9 @@
         "V2AuthenticatedAccountRateLimiting"
       ],
       "referenceLines": {
+        "V2AccountEdgeClientRateLimitResult": 45,
         "V2AuthenticatedAccountRateLimiting": 12,
-        "V2AccountEdgeClientRateLimiting": 12,
-        "V2AccountEdgeClientRateLimitResult": 45
+        "V2AccountEdgeClientRateLimiting": 12
       }
     },
     {
@@ -13927,13 +14959,13 @@
         "V2ContentReviewWorkerError"
       ],
       "referenceLines": {
+        "V2ContentReviewStore": 12,
+        "V2ContentReviewInput": 73,
+        "V2ContentReviewLeaseValidation": 88,
+        "V2ContentReviewFinding": 57,
         "V2ContentReviewWorkerError": 89,
         "V2ContentReviewVerdict": 145,
-        "V2ContentReviewLeaseValidation": 88,
-        "V2ContentReviewLease": 22,
-        "V2ContentReviewStore": 12,
-        "V2ContentReviewFinding": 57,
-        "V2ContentReviewInput": 73
+        "V2ContentReviewLease": 22
       }
     },
     {
@@ -13995,7 +15027,23 @@
         "v2PostgresPastTimestamp"
       ],
       "referenceLines": {
-        "v2PostgresPastTimestamp": 163
+        "v2PostgresPastTimestamp": 170
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DeploymentRoomShardRouter.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RoomShardRouting.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomShardRoute",
+        "V2RoomShardRouteError",
+        "V2RoomShardRouting"
+      ],
+      "referenceLines": {
+        "V2RoomShardRouteError": 50,
+        "V2RoomShardRoute": 12,
+        "V2RoomShardRouting": 10
       }
     },
     {
@@ -14038,14 +15086,14 @@
         "V2TrustedDeviceRegistration"
       ],
       "referenceLines": {
+        "V2DeviceRegistrationOutcome": 110,
+        "V2DeviceCredentialRefreshOutcome": 204,
+        "V2TrustedDeviceRegistration": 110,
+        "V2DeviceCredentialRefresh": 204,
         "V2DeviceCredentialIssuing": 70,
         "V2DeviceRegistrationPolicy": 80,
-        "V2TrustedDeviceRegistration": 110,
-        "V2DeviceRegistrationMetadata": 424,
         "V2IssuedDeviceCredentials": 308,
-        "V2DeviceCredentialRefreshOutcome": 204,
-        "V2DeviceCredentialRefresh": 204,
-        "V2DeviceRegistrationOutcome": 110
+        "V2DeviceRegistrationMetadata": 424
       }
     },
     {
@@ -14176,14 +15224,14 @@
         "V2RemoteDeviceRevocationManaging"
       ],
       "referenceLines": {
-        "V2DeviceSessionManaging": 22,
-        "V2DeviceSessionServiceError": 53,
-        "V2DeviceRevocationCapabilityRedeeming": 22,
         "V2DeviceSessionMutationOutcome": 227,
-        "V2DeviceRevocationCapabilityOutcome": 113,
-        "V2RemoteDeviceRevocationManaging": 402,
         "V2DeviceSession": 182,
-        "V2DeviceSessionPage": 168
+        "V2RemoteDeviceRevocationManaging": 402,
+        "V2DeviceRevocationCapabilityRedeeming": 22,
+        "V2DeviceSessionServiceError": 53,
+        "V2DeviceRevocationCapabilityOutcome": 113,
+        "V2DeviceSessionPage": 168,
+        "V2DeviceSessionManaging": 22
       }
     },
     {
@@ -14209,8 +15257,8 @@
         "v2PostgresTimestampMicrosecondsCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 53,
         "v2PostgresTimestampMicrosecondsCanEncode": 363,
+        "v2PostgresTimestampCanEncode": 53,
         "v2PostgresFutureTimestamp": 59
       }
     },
@@ -14228,9 +15276,9 @@
       ],
       "referenceLines": {
         "V2DeviceSnapshotResetting": 43,
+        "V2DeviceAvailabilityChecking": 10,
         "V2DeviceSnapshotResetResult": 81,
         "V2DeviceSnapshotResetError": 27,
-        "V2DeviceAvailabilityChecking": 10,
         "V2DeviceSnapshotResetCommand": 81
       }
     },
@@ -14244,6 +15292,18 @@
       ],
       "referenceLines": {
         "v2PostgresFutureTimestamp": 157
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DirectAuthorizationBatchLocks.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceBoundaryErrors.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2DirectAuthorizationIntentError"
+      ],
+      "referenceLines": {
+        "V2DirectAuthorizationIntentError": 11
       }
     },
     {
@@ -14268,8 +15328,8 @@
         "V2UserStateEventError"
       ],
       "referenceLines": {
-        "V2UserStateEventError": 17,
-        "V2UserStateEvent": 10
+        "V2UserStateEvent": 10,
+        "V2UserStateEventError": 17
       }
     },
     {
@@ -14331,9 +15391,9 @@
         "V2GroupEventLogPage"
       ],
       "referenceLines": {
+        "V2GroupEventLogEntry": 48,
         "V2GroupEventLogPage": 61,
-        "V2CommittedRoomLogObserving": 15,
-        "V2GroupEventLogEntry": 48
+        "V2CommittedRoomLogObserving": 15
       }
     },
     {
@@ -14347,9 +15407,9 @@
         "V2PreparedGroupEventPageResponse"
       ],
       "referenceLines": {
-        "V2PreparedGroupEventPageEncodingContext": 330,
         "V2PreparedGroupEventPageResponse": 97,
-        "V2PreparedGroupEventPageKey": 783
+        "V2PreparedGroupEventPageKey": 783,
+        "V2PreparedGroupEventPageEncodingContext": 330
       }
     },
     {
@@ -14463,6 +15523,106 @@
       }
     },
     {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationOwnerBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/Room/V2AcceptanceIDFactory.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2AcceptanceIDFactory"
+      ],
+      "referenceLines": {
+        "V2AcceptanceIDFactory": 50
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationOwnerBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2AdmittedRoomDatabaseWork.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "v2WithAdmittedRoomDatabaseWork"
+      ],
+      "referenceLines": {
+        "v2WithAdmittedRoomDatabaseWork": 289
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationOwnerBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2DatabaseWorkAdmission.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2DatabaseWorkAdmissionController"
+      ],
+      "referenceLines": {
+        "V2DatabaseWorkAdmissionController": 25
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationOwnerBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendMessageContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2CapacityProfile"
+      ],
+      "referenceLines": {
+        "V2CapacityProfile": 49
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationOwnerBatcher.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2SendOperationOwnerMetricsReading",
+        "V2SendOperationOwnerMetricsSnapshot"
+      ],
+      "referenceLines": {
+        "V2SendOperationOwnerMetricsSnapshot": 341,
+        "V2SendOperationOwnerMetricsReading": 10
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationPreparationCollector.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2AdmittedRoomDatabaseWork.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "v2WithAdmittedRoomDatabaseWork"
+      ],
+      "referenceLines": {
+        "v2WithAdmittedRoomDatabaseWork": 202
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationPreparationCollector.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerApplication/V2DatabaseWorkAdmission.swift",
+      "toTarget": "IMV2ServerApplication",
+      "symbols": [
+        "V2DatabaseWorkAdmissionController"
+      ],
+      "referenceLines": {
+        "V2DatabaseWorkAdmissionController": 23
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2DurableSendOperationPreparationCollector.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2SendOperationOwnerMetricsReading",
+        "V2SendOperationOwnerMetricsSnapshot"
+      ],
+      "referenceLines": {
+        "V2SendOperationOwnerMetricsSnapshot": 254,
+        "V2SendOperationOwnerMetricsReading": 10
+      }
+    },
+    {
       "from": "IMV2ServerInfrastructure/V2DurableWorkMetrics.swift",
       "fromTarget": "IMV2ServerInfrastructure",
       "to": "IMV2ServerContracts/V2DurableWorkMetricsContracts.swift",
@@ -14490,12 +15650,12 @@
         "V2ForwardTerminalReceiptReading"
       ],
       "referenceLines": {
-        "V2ForwardExportPreparing": 6,
-        "V2ForwardDeliveryStatusReading": 5,
         "V2ForwardExportImporting": 9,
-        "V2ForwardTerminalReceiptReading": 7,
+        "V2ForwardExportPreparing": 6,
+        "V2ForwardMediaImportRunning": 8,
         "V2ForwardReceiptReading": 4,
-        "V2ForwardMediaImportRunning": 8
+        "V2ForwardDeliveryStatusReading": 5,
+        "V2ForwardTerminalReceiptReading": 7
       }
     },
     {
@@ -14557,9 +15717,9 @@
         "V2ForwardExportDelivering"
       ],
       "referenceLines": {
+        "V2ForwardDeliveryReport": 79,
         "V2ForwardExportDelivering": 15,
-        "V2ForwardDeliveryError": 54,
-        "V2ForwardDeliveryReport": 79
+        "V2ForwardDeliveryError": 54
       }
     },
     {
@@ -14572,8 +15732,8 @@
         "V2ForwardExportError"
       ],
       "referenceLines": {
-        "V2ForwardExportError": 149,
-        "V2ForwardExport": 14
+        "V2ForwardExport": 14,
+        "V2ForwardExportError": 149
       }
     },
     {
@@ -14598,8 +15758,8 @@
         "v2PostgresTimestampPrecedes"
       ],
       "referenceLines": {
-        "v2PostgresFutureTimestamp": 148,
-        "v2PostgresTimestampPrecedes": 173
+        "v2PostgresTimestampPrecedes": 173,
+        "v2PostgresFutureTimestamp": 148
       }
     },
     {
@@ -14638,10 +15798,10 @@
         "V2ForwardMediaObjectCopying"
       ],
       "referenceLines": {
-        "V2ForwardMediaImportOutcome": 47,
-        "V2ForwardMediaCopyError": 33,
         "V2ForwardMediaImportLease": 98,
-        "V2ForwardMediaObjectCopying": 12
+        "V2ForwardMediaCopyError": 33,
+        "V2ForwardMediaObjectCopying": 12,
+        "V2ForwardMediaImportOutcome": 47
       }
     },
     {
@@ -14714,8 +15874,8 @@
         "V2GroupInviteCreationRecoveryWorker"
       ],
       "referenceLines": {
-        "V2GroupInviteCreationRecoveryStoring": 5,
-        "V2GroupInviteCreationRecoveryWorker": 4
+        "V2GroupInviteCreationRecoveryWorker": 4,
+        "V2GroupInviteCreationRecoveryStoring": 5
       }
     },
     {
@@ -14776,8 +15936,8 @@
         "V2GroupJoinQuotaRecoveryWorker"
       ],
       "referenceLines": {
-        "V2GroupJoinQuotaRecoveryWorker": 7,
-        "V2GroupJoinQuotaRecoveryStoring": 5
+        "V2GroupJoinQuotaRecoveryStoring": 5,
+        "V2GroupJoinQuotaRecoveryWorker": 7
       }
     },
     {
@@ -14802,8 +15962,8 @@
         "V2MediaUploadObjectProvider"
       ],
       "referenceLines": {
-        "V2MediaUploadObjectProvider": 64,
-        "V2MediaProviderUploadTarget": 152
+        "V2MediaProviderUploadTarget": 152,
+        "V2MediaUploadObjectProvider": 64
       }
     },
     {
@@ -14818,10 +15978,10 @@
         "V2StagedMediaFile"
       ],
       "referenceLines": {
-        "V2LocalFilesystemMediaProviderError": 92,
         "V2LocalMediaByteServing": 64,
+        "V2StagedMediaFile": 16,
         "V2DownloadedMediaFile": 27,
-        "V2StagedMediaFile": 16
+        "V2LocalFilesystemMediaProviderError": 92
       }
     },
     {
@@ -15003,7 +16163,7 @@
         "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 42
+        "v2PostgresTimestampCanEncode": 25
       }
     },
     {
@@ -15016,8 +16176,8 @@
         "V2MessageAcceptanceFactError"
       ],
       "referenceLines": {
-        "V2MessageAcceptanceFactError": 29,
-        "V2MessageAcceptanceFact": 19
+        "V2MessageAcceptanceFact": 19,
+        "V2MessageAcceptanceFactError": 29
       }
     },
     {
@@ -15066,110 +16226,6 @@
       ],
       "referenceLines": {
         "v2PostgresTimestampCanEncode": 72
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSGroupEventProtobufCodec.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2DirectRoomLiveEvent.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2DirectRoomLiveEvent"
-      ],
-      "referenceLines": {
-        "V2DirectRoomLiveEvent": 155
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerApplication/V2ContinuousSleep.swift",
-      "toTarget": "IMV2ServerApplication",
-      "symbols": [
-        "v2Sleep"
-      ],
-      "referenceLines": {
-        "v2Sleep": 204
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2DirectRoomLiveEvent.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2DirectRoomLiveEvent",
-        "v2GroupEventsOrderedByRoomSequence"
-      ],
-      "referenceLines": {
-        "V2DirectRoomLiveEvent": 130,
-        "v2GroupEventsOrderedByRoomSequence": 870
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2GroupEventWakeContracts.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2ForegroundGroupEventHintPublishing",
-        "V2GroupEventWake",
-        "V2GroupEventWakePublishing"
-      ],
-      "referenceLines": {
-        "V2GroupEventWake": 128,
-        "V2ForegroundGroupEventHintPublishing": 619,
-        "V2GroupEventWakePublishing": 619
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2RealtimeInterestPorts.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2GroupEventWakeInterestManaging"
-      ],
-      "referenceLines": {
-        "V2GroupEventWakeInterestManaging": 619
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2TelemetryContracts.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2GatewayTransportMetricsRecorder"
-      ],
-      "referenceLines": {
-        "V2GatewayTransportMetricsRecorder": 670
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSGroupEventWakeBroker.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2TimeoutNanoseconds.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "v2TimeoutNanoseconds"
-      ],
-      "referenceLines": {
-        "v2TimeoutNanoseconds": 95
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2NATSLiveActivityBroker.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2RealtimeInterestPorts.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2LiveActivityInterestManaging",
-        "V2LiveActivityPublishing"
-      ],
-      "referenceLines": {
-        "V2LiveActivityPublishing": 14,
-        "V2LiveActivityInterestManaging": 14
       }
     },
     {
@@ -15294,10 +16350,10 @@
       ],
       "referenceLines": {
         "V2ReadReceiptRecordRequest": 11,
-        "V2GroupReadReceiptBatchResult": 45,
-        "V2ReadReceiptOutcome": 28,
         "V2GroupReadReceiptReaderCandidatePage": 58,
-        "V2GroupReadReceiptRecordingAttempt": 38
+        "V2GroupReadReceiptRecordingAttempt": 38,
+        "V2GroupReadReceiptBatchResult": 45,
+        "V2ReadReceiptOutcome": 28
       }
     },
     {
@@ -15324,10 +16380,10 @@
         "V2UserRoomDirectorySlice"
       ],
       "referenceLines": {
-        "V2RoomRecoveryReadError": 16,
-        "V2UserRoomDirectorySlice": 23,
+        "V2UserRoomDirectoryReading": 7,
         "V2UserRoomDirectoryEntry": 34,
-        "V2UserRoomDirectoryReading": 7
+        "V2UserRoomDirectorySlice": 23,
+        "V2RoomRecoveryReadError": 16
       }
     },
     {
@@ -15365,8 +16421,8 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
-        "V2SendMessageOutcome": 39,
         "V2AtomicRoomWriteBatchStore": 29,
+        "V2SendMessageOutcome": 39,
         "V2RoomWriteRequest": 11
       }
     },
@@ -15381,9 +16437,9 @@
         "V2PasswordCredential"
       ],
       "referenceLines": {
-        "V2PasswordCredential": 98,
+        "V2PasswordAccountStoreError": 58,
         "V2PasswordAccountStoring": 10,
-        "V2PasswordAccountStoreError": 58
+        "V2PasswordCredential": 98
       }
     },
     {
@@ -15445,9 +16501,9 @@
         "V2PasswordHashing"
       ],
       "referenceLines": {
+        "V2PasswordHashing": 78,
         "V2PasswordHashPolicy": 42,
-        "V2PasswordHashError": 47,
-        "V2PasswordHashing": 78
+        "V2PasswordHashError": 47
       }
     },
     {
@@ -15484,8 +16540,8 @@
         "V2PasswordHashing"
       ],
       "referenceLines": {
-        "V2PasswordHashPolicy": 36,
-        "V2PasswordHashing": 14
+        "V2PasswordHashing": 14,
+        "V2PasswordHashPolicy": 36
       }
     },
     {
@@ -15498,8 +16554,8 @@
         "V2PasswordLifecycleManaging"
       ],
       "referenceLines": {
-        "V2PasswordLifecycleManaging": 12,
-        "V2PasswordLifecycleError": 29
+        "V2PasswordLifecycleError": 29,
+        "V2PasswordLifecycleManaging": 12
       }
     },
     {
@@ -15524,8 +16580,8 @@
         "V2PasswordLoginRateLimitPolicy"
       ],
       "referenceLines": {
-        "V2PasswordLoginRateLimitError": 32,
-        "V2PasswordLoginRateLimitPolicy": 14
+        "V2PasswordLoginRateLimitPolicy": 14,
+        "V2PasswordLoginRateLimitError": 33
       }
     },
     {
@@ -15549,7 +16605,7 @@
         "V2PersistenceTimestamp"
       ],
       "referenceLines": {
-        "V2PersistenceTimestamp": 33
+        "V2PersistenceTimestamp": 35
       }
     },
     {
@@ -15562,8 +16618,8 @@
         "v2PostgresTimestampPrecedes"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 131,
-        "v2PostgresTimestampPrecedes": 135
+        "v2PostgresTimestampCanEncode": 167,
+        "v2PostgresTimestampPrecedes": 171
       }
     },
     {
@@ -15613,9 +16669,9 @@
         "V2GatewayAuthenticator"
       ],
       "referenceLines": {
-        "V2GatewayAuthenticator": 12,
+        "V2GatewayAuthentication": 52,
         "V2GatewayAuthenticationError": 54,
-        "V2GatewayAuthentication": 52
+        "V2GatewayAuthenticator": 12
       }
     },
     {
@@ -15630,8 +16686,8 @@
       ],
       "referenceLines": {
         "v2PostgresTimestampCanEncode": 60,
-        "v2PostgresFutureTimestamp": 141,
-        "v2PostgresPastTimestamp": 93
+        "v2PostgresPastTimestamp": 93,
+        "v2PostgresFutureTimestamp": 141
       }
     },
     {
@@ -15647,11 +16703,11 @@
         "V2SocialOperationHandling"
       ],
       "referenceLines": {
-        "V2GroupCreationOperationHandling": 19,
-        "V2AccountPreferenceOperationHandling": 12,
         "V2DirectRoomOperationHandling": 18,
+        "V2HTTPOperationError": 9,
+        "V2AccountPreferenceOperationHandling": 12,
         "V2SocialOperationHandling": 6,
-        "V2HTTPOperationError": 9
+        "V2GroupCreationOperationHandling": 19
       }
     },
     {
@@ -15702,8 +16758,8 @@
       ],
       "referenceLines": {
         "V2DirectRoomShardRouting": 14,
-        "V2RoomShardRouteError": 37,
-        "V2RoomShardRoute": 34
+        "V2RoomShardRoute": 34,
+        "V2RoomShardRouteError": 37
       }
     },
     {
@@ -15764,8 +16820,8 @@
         "V2UserShardProjectionDeliveryRequest"
       ],
       "referenceLines": {
-        "V2UserShardProjectionDeliveryRequest": 64,
-        "V2UserShardProjectionDelivering": 9
+        "V2UserShardProjectionDelivering": 9,
+        "V2UserShardProjectionDeliveryRequest": 64
       }
     },
     {
@@ -15860,14 +16916,14 @@
         "V2PushEndpointProvider"
       ],
       "referenceLines": {
-        "V2PushDeviceEndpointStore": 81,
-        "V2PushDeviceEndpointRegistration": 118,
-        "V2PushEndpointEnvironment": 188,
-        "V2PushDeviceEndpointError": 21,
-        "V2PushEndpointIntent": 310,
-        "V2PushEndpointProvider": 187,
+        "V2PushEndpointIntentStoring": 272,
         "V2PushDeviceEndpoint": 173,
-        "V2PushEndpointIntentStoring": 272
+        "V2PushDeviceEndpointStore": 81,
+        "V2PushEndpointProvider": 187,
+        "V2PushDeviceEndpointRegistration": 118,
+        "V2PushEndpointIntent": 310,
+        "V2PushEndpointEnvironment": 188,
+        "V2PushDeviceEndpointError": 21
       }
     },
     {
@@ -15924,12 +16980,12 @@
       "referenceLines": {
         "V2ReadReceiptRecordResult": 207,
         "V2ReadReceiptRecordRequest": 56,
-        "V2ReadReceiptAdmission": 9,
-        "V2ReadReceiptOutcome": 57,
-        "V2ReadReceiptBatchMetricsSnapshot": 126,
         "V2ReadReceiptBatchStore": 72,
         "V2ReadReceiptBatchMetricsReading": 9,
-        "V2ReadReceiptStoreError": 284
+        "V2ReadReceiptStoreError": 284,
+        "V2ReadReceiptBatchMetricsSnapshot": 126,
+        "V2ReadReceiptAdmission": 9,
+        "V2ReadReceiptOutcome": 57
       }
     },
     {
@@ -16052,8 +17108,8 @@
         "v2PostgresTimestampCanEncode"
       ],
       "referenceLines": {
-        "v2PostgresTimestampCanEncode": 107,
-        "v2PostgresPastTimestamp": 108
+        "v2PostgresTimestampCanEncode": 119,
+        "v2PostgresPastTimestamp": 120
       }
     },
     {
@@ -16077,7 +17133,7 @@
         "V2RoomWriteStoreError"
       ],
       "referenceLines": {
-        "V2RoomWriteStoreError": 74
+        "V2RoomWriteStoreError": 79
       }
     },
     {
@@ -16089,7 +17145,7 @@
         "V2RoomOwnerFenceError"
       ],
       "referenceLines": {
-        "V2RoomOwnerFenceError": 49
+        "V2RoomOwnerFenceError": 50
       }
     },
     {
@@ -16101,7 +17157,19 @@
         "V2RoomShardRoute"
       ],
       "referenceLines": {
-        "V2RoomShardRoute": 43
+        "V2RoomShardRoute": 44
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2RoomOwnerTransactionFence.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2SendOperationBatchMetrics.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomSQLContinuationSource"
+      ],
+      "referenceLines": {
+        "V2RoomSQLContinuationSource": 112
       }
     },
     {
@@ -16140,8 +17208,8 @@
       ],
       "referenceLines": {
         "V2GroupEventWakeStore": 13,
-        "V2GroupEventWakeStoreError": 97,
-        "V2GroupEventWakeLease": 31
+        "V2GroupEventWakeLease": 31,
+        "V2GroupEventWakeStoreError": 97
       }
     },
     {
@@ -16183,9 +17251,9 @@
       ],
       "referenceLines": {
         "V2SyncPullResult": 58,
+        "V2SyncStore": 9,
         "V2SnapshotPage": 108,
-        "V2SnapshotManifest": 90,
-        "V2SyncStore": 9
+        "V2SnapshotManifest": 90
       }
     },
     {
@@ -16199,9 +17267,51 @@
         "V2UserStateEventProjecting"
       ],
       "referenceLines": {
-        "V2UserStateEventError": 18,
         "V2UserStateEvent": 25,
-        "V2UserStateEventProjecting": 9
+        "V2UserStateEventProjecting": 9,
+        "V2UserStateEventError": 18
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2RoutedUserSyncWakeStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceBoundaryErrors.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RoomShardStorageRegistryError"
+      ],
+      "referenceLines": {
+        "V2RoomShardStorageRegistryError": 71
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2RoutedUserSyncWakeStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2PersistenceTimestampBounds.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "v2PostgresFutureTimestamp",
+        "v2PostgresTimestampCanEncode"
+      ],
+      "referenceLines": {
+        "v2PostgresTimestampCanEncode": 192,
+        "v2PostgresFutureTimestamp": 96
+      }
+    },
+    {
+      "from": "IMV2ServerInfrastructure/V2RoutedUserSyncWakeStore.swift",
+      "fromTarget": "IMV2ServerInfrastructure",
+      "to": "IMV2ServerContracts/V2RealtimeRouteContracts.swift",
+      "toTarget": "IMV2ServerContracts",
+      "symbols": [
+        "V2RealtimeDirectoryError",
+        "V2UserSyncWakeLease",
+        "V2UserSyncWakeStore"
+      ],
+      "referenceLines": {
+        "V2RealtimeDirectoryError": 97,
+        "V2UserSyncWakeLease": 31,
+        "V2UserSyncWakeStore": 13
       }
     },
     {
@@ -16250,8 +17360,8 @@
         "V2SendMessageAdmissionBatcherError"
       ],
       "referenceLines": {
-        "V2SendMessageAdmissionBatcherError": 393,
-        "V2RoomTransactionOutcomeUnknown": 1322
+        "V2RoomTransactionOutcomeUnknown": 1322,
+        "V2SendMessageAdmissionBatcherError": 393
       }
     },
     {
@@ -16281,13 +17391,13 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
-        "V2AtomicRoomWriteBatchPartition": 905,
-        "V2SendMessageOutcome": 166,
+        "V2RoomWriteStoreError": 833,
+        "V2RoomWriteRequest": 165,
+        "V2AtomicRoomWriteBatchStore": 210,
         "V2AtomicRoomWriteBatchError": 246,
         "V2SendMessageAdmission": 83,
-        "V2AtomicRoomWriteBatchStore": 210,
-        "V2RoomWriteStoreError": 833,
-        "V2RoomWriteRequest": 165
+        "V2SendMessageOutcome": 166,
+        "V2AtomicRoomWriteBatchPartition": 905
       }
     },
     {
@@ -16398,8 +17508,8 @@
         "V2SendMessageOutcome"
       ],
       "referenceLines": {
-        "V2SendMessageOutcome": 137,
         "V2AtomicRoomWriteBatchStore": 35,
+        "V2SendMessageOutcome": 137,
         "V2RoomWriteRequest": 136,
         "V2SendMessageAdmission": 13
       }
@@ -16475,8 +17585,8 @@
         "V2SyncHousekeepingStore"
       ],
       "referenceLines": {
-        "V2SyncHousekeepingError": 43,
         "V2SyncHousekeepingReport": 39,
+        "V2SyncHousekeepingError": 43,
         "V2SyncHousekeepingStore": 12
       }
     },

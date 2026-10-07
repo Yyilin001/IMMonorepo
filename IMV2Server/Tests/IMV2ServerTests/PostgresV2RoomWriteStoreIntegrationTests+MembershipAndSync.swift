@@ -19,7 +19,6 @@ import Testing
 import Vapor
 import VaporTesting
 
-
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("group creation delivers personal room identity without any public fanout plan")
     func groupCreationDeliversRoomProfileAndRetainsItInSnapshot() async throws {
@@ -65,7 +64,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let created = try await group.create(intent: intent, canonicalMembers: canonical, now: now)
             let createdRoute = try await V2PostgresRoomShardRouter(database: resources.database(.psql)).route(for: created.roomID)
             #expect(createdRoute.shardID == "rooms-primary" && createdRoute.epoch == 0)
-
 
             let source = try #require(try await sql.raw("SELECT event_id::text AS value FROM im_v2.room_events WHERE event_type = 'room.created'").first(decoding: StringValueRow.self)).value
             let delivery = try await V2UserStateEventWorker(
@@ -467,7 +465,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 20,    retryAfterSeconds: 3))
-            let writer = PostgresV2RoomWriteStore(database: resources.database(.psql), strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled, shardAdmissionCommandCreditPool: .init(database: resources.database(.psql), batchSize: 2))
+            let writer = PostgresV2RoomWriteStore(database: resources.database(.psql), strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             func request() throws -> V2RoomWriteRequest {
                 try .init(command: .init(roomID: roomID, senderUserID: .init(uuid: memberThreeUUID), clientMessageID: .init(uuid: UUID()), text: "permission boundary", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now)
             }
@@ -817,19 +815,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await edit.edit(.init(roomID: roomID, actorUserID: senderID,
                 operationID: original.operationID, messageID: message.messageID,
                 expectedMessageRevision: 1, text: "changed replay")) == .idempotencyConflict)
-            let batcher = V2SendMessageAdmissionBatcher(store: PostgresV2RoomWriteStore(database: resources.database(.psql)),
-                configuration: .init(maximumBatchSize: 3, maximumDelay: .milliseconds(10)))
-            let batched = V2SendMessageService(store: PostgresV2RoomWriteStore(database: resources.database(.psql)),
-                capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), batcher: batcher, now: { now })
-            // The admission queue must isolate a rejected new command from
+            let service = V2SendMessageService(store: PostgresV2RoomWriteStore(database: resources.database(.psql)),
+                capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
+            // Independent store transactions isolate a rejected new command from
             // completed replay/conflict results, including scalar fallbacks.
-            async let replay = batched.send(.init(roomID: roomID, actorUserID: senderID,
+            async let replay = service.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: clientMessageID, text: "original"))
-            async let conflict = batched.send(.init(roomID: roomID, actorUserID: senderID,
+            async let conflict = service.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: clientMessageID, text: "changed replay"))
             async let rejected: Void = { () async -> Void in
                 await #expect(throws: expected) {
-                    try await batched.send(.init(roomID: roomID, actorUserID: senderID,
+                    try await service.send(.init(roomID: roomID, actorUserID: senderID,
                         clientMessageID: .init(uuid: UUID()), text: "must not publish"))
                 }
             }()

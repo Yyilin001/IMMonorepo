@@ -89,7 +89,8 @@
       "id": "W12",
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupCapabilitiesStore.swift",
       "symbol": "func v2AppendGroupNicknameInvalidation",
-      "table_or_marker": "im_v2.group_event_wake_outbox"
+      "table_or_marker": "im_v2.room_events",
+      "notificationEvidence": "The committed room_events INSERT creates room_event_wake_outbox through the current schema enqueue trigger."
     },
     {
       "id": "W13",

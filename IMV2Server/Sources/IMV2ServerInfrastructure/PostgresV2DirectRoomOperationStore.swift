@@ -117,7 +117,7 @@ private struct HandoffRow:Decodable {
     var roomID:RoomID? {roomUUID.map{.init(uuid:$0)}}
 }
 private func sqlDatabase(_ tx:any Database) throws -> any SQLDatabase {guard let sql=tx as? any SQLDatabase else {throw V2DirectMessagingStoreError.corruptPersistenceState};return sql}
-private func json<T:Encodable>(_ value:T) throws -> String {String(decoding:try JSONEncoder().encode(value),as:UTF8.self)}
+private func json<T:Encodable>(_ value:T) throws -> String {try v2EncodePersistenceJSON(value)}
 private func decode<T:Decodable>(_ value:String) throws -> T {try JSONDecoder().decode(T.self,from:Data(value.utf8))}
 private func op(_ identity:V2OperationIdentity)->UUID {UUID(uuidString:identity.operation.rawOperationID)!}
 private func lock(_ identity:V2OperationIdentity,sql:any SQLDatabase) async throws {

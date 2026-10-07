@@ -7,7 +7,6 @@ struct V2AppConfiguration: Sendable {
     let accountBaseURL: URL
     /// 实时网关地址。
     let realtimeEndpoint: V2RealtimeEndpoint
-    let messageSendTransportMode: V2MessageSendTransportMode
     /// 钥匙串服务名。
     let keychainService: String
     /// 推送端点运行环境。
@@ -38,6 +37,9 @@ struct V2AppConfiguration: Sendable {
             : nil
         try self.init(bundle: bundle, realtimeEndpointOverride: realtimeEndpointOverride)
     }
+    init(localE2ERealtimePort: UInt16, bundle: Bundle = .main) throws {
+        try self.init(bundle: bundle, realtimeEndpointOverride: .init(host: "localhost", port: localE2ERealtimePort))
+    }
     #endif
 
     /// 读取并校验配置键后保存。
@@ -59,14 +61,6 @@ struct V2AppConfiguration: Sendable {
               let gatewayPort = UInt16(String(describing: rawGatewayPort))
         else { throw V2AppConfigurationError.invalidRealtimeEndpoint }
         self.accountBaseURL = accountBaseURL
-        if let rawMode = bundle.object(forInfoDictionaryKey: "IMV2MessageSendTransportMode") as? String {
-            guard let mode = V2MessageSendTransportMode(rawValue: rawMode) else {
-                throw V2AppConfigurationError.invalidMessageSendTransportMode
-            }
-            messageSendTransportMode = mode
-        } else {
-            messageSendTransportMode = .automatic
-        }
         if let realtimeEndpointOverride {
             realtimeEndpoint = realtimeEndpointOverride
         } else {
@@ -109,5 +103,4 @@ enum V2AppConfigurationError: Error, Equatable {
     case invalidRealtimeEndpoint
     /// 推送环境取值缺失或未知。
     case invalidPushEnvironment
-    case invalidMessageSendTransportMode
 }

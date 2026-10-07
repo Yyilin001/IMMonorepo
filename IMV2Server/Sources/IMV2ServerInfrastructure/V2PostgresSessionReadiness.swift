@@ -36,6 +36,19 @@ public enum V2PostgresSessionReadiness {
         database: any Database,
         policy: V2PostgresRuntimePolicy
     ) async throws {
+        try await verify(database: database,
+            statementMilliseconds: policy.statementTimeoutMilliseconds,
+            lockMilliseconds: policy.lockTimeoutMilliseconds,
+            idleMilliseconds: policy.idleTransactionTimeoutMilliseconds)
+    }
+
+    public static func verify(database: any Database, timeouts: V2RoomActivationSQLTimeouts) async throws {
+        try await verify(database: database, statementMilliseconds: timeouts.statementMilliseconds,
+            lockMilliseconds: timeouts.lockMilliseconds, idleMilliseconds: timeouts.idleTransactionMilliseconds)
+    }
+
+    private static func verify(database: any Database, statementMilliseconds: Int,
+        lockMilliseconds: Int, idleMilliseconds: Int) async throws {
         guard let sql = database as? any SQLDatabase else {
             throw V2PostgresSessionReadinessError.unsupportedDatabase
         }
@@ -47,14 +60,14 @@ public enum V2PostgresSessionReadiness {
                    (SELECT setting::integer FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout')
                        AS idle_transaction_timeout_ms
             """).first(decoding: V2PostgresSessionSettings.self),
-              settings.statementTimeoutMilliseconds == policy.statementTimeoutMilliseconds,
-              settings.lockTimeoutMilliseconds == policy.lockTimeoutMilliseconds,
-              settings.idleTransactionTimeoutMilliseconds == policy.idleTransactionTimeoutMilliseconds
+              settings.statementTimeoutMilliseconds == statementMilliseconds,
+              settings.lockTimeoutMilliseconds == lockMilliseconds,
+              settings.idleTransactionTimeoutMilliseconds == idleMilliseconds
         else {
             throw V2PostgresSessionReadinessError.policyMismatch(
-                statementTimeoutMilliseconds: policy.statementTimeoutMilliseconds,
-                lockTimeoutMilliseconds: policy.lockTimeoutMilliseconds,
-                idleTransactionTimeoutMilliseconds: policy.idleTransactionTimeoutMilliseconds
+                statementTimeoutMilliseconds: statementMilliseconds,
+                lockTimeoutMilliseconds: lockMilliseconds,
+                idleTransactionTimeoutMilliseconds: idleMilliseconds
             )
         }
     }

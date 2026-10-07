@@ -95,6 +95,7 @@ enum PlainHybridGroupWritePath {
                     fingerprint jsonb,
                     created_at_postgres_microseconds bigint
                 )
+                LIMIT \(literal: inputs.count)
             ), final_room_input AS MATERIALIZED (
                 SELECT DISTINCT ON (room_id) *
                 FROM input
@@ -107,14 +108,7 @@ enum PlainHybridGroupWritePath {
                 WHERE room.room_id = input.room_id
                 RETURNING room.room_id
             ), admission_update AS (
-                UPDATE im_v2.room_admission AS admission
-                SET command_window_used = input.command_window_used,
-                    shard_lease_id = input.shard_lease_id,
-                    shard_lease_generation = input.shard_lease_generation
-                FROM final_room_input AS input
-                JOIN room_update ON room_update.room_id = input.room_id
-                WHERE admission.room_id = input.room_id
-                RETURNING admission.room_id
+                SELECT room_id FROM room_update
             ), message_insert AS (
                 INSERT INTO im_v2.messages
                     (message_id, room_id, room_sequence, timeline_sequence,

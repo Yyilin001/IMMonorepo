@@ -1,5 +1,6 @@
 import IMV2ServerApplication
 import IMV2ServerContracts
+import IMV2ActorContracts
 import Foundation
 import Logging
 import IMV2ServerGateway
@@ -23,15 +24,15 @@ struct GatewayComposition {
     let actors: V2RoomActorApplication
     let actorConfiguration: V2RoomActorApplicationConfiguration
     let connectionRegistry: V2DeviceConnectionRegistry
-    let foregroundGroupEventHints: V2ForegroundGroupEventHintDispatcher
     let directRoomLogEventCache: V2DirectRoomLogEventCache?
     let backgroundWorkers: GatewayBackgroundWorkers
-    let natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
-    let sharedGroupWakeInterests: V2SharedGroupEventWakeInterests
     let accountRoomChangeService: V2AccountRoomChangeService
-    let natsLiveActivityBroker: V2NATSLiveActivityBroker?
+    let actorRealtime: GatewayActorRealtimeRuntime
     let authorPresentations: V2AuthorPresentationRuntime?
     let authorDrainTimeout: Duration
+    let durableOwnerResources: [V2RoomServerOwnerResources]
+    private let policies: GatewayPolicyAssembly?
+    private let databaseTopology: GatewayDatabaseTopology
 
     /// 按依赖顺序组装网关，并持有后续运行与停机所需的组件。
     ///
@@ -39,7 +40,7 @@ struct GatewayComposition {
     /// 实时通知、命令处理、维护任务和 TLS 传输，并初始化撤销处理游标。
     /// TLS 端口、指标 HTTP 端口及后台 Worker 分别由 `GatewayRuntime.runServices` 中的
     /// `server.bind()`、`V2HTTPService.withRunning`、`backgroundWorkers.start()` 启动。
-    /// Actor 与 Broker 创建后立即记录在局部状态中，以便任一后续抛错路径清理已启动的部分。
+    /// Actor 与实时 Runtime 创建后立即记录在局部状态中，以便任一后续抛错路径清理已启动的部分。
     /// 若 Actor 无法在失败期限内排空，会以失败状态退出进程，避免释放仍被使用的数据库资源。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
@@ -49,13 +50,15 @@ struct GatewayComposition {
         logger: Logger
     ) async throws -> Self {
         // 构建可能在任一阶段失败；这些可选值只记录已经创建、需要回滚的资源。
-        var natsGroupWakeBroker: V2NATSGroupEventWakeBroker?
-        var sharedGroupWakeInterests: V2SharedGroupEventWakeInterests?
+        var actorRealtime: GatewayActorRealtimeRuntime?
         var accountRoomChangeService: V2AccountRoomChangeService?
-        var natsLiveActivityBroker: V2NATSLiveActivityBroker?
         var roomActorApplication: V2RoomActorApplication?
         var authorPresentations: V2AuthorPresentationRuntime?
         var constructedServer: V2TLSGatewayServer?
+        var durableOwnerResources: [V2RoomServerOwnerResources] = []
+        var databaseTopology: GatewayDatabaseTopology?
+        var preparedConnectionRegistry: V2DeviceConnectionRegistry?
+        var policies: GatewayPolicyAssembly?
         do {
             guard !configuration.authorPresentationsEnabled || localMediaConfiguration != nil else {
                 throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_AUTHOR_PRESENTATIONS_ENABLED")
@@ -68,18 +71,42 @@ struct GatewayComposition {
                 app: app,
                 logger: logger
             )
+            durableOwnerResources = Array(prepared.roomOwners.physicalResources.values)
+            preparedConnectionRegistry = prepared.frontdoor.connectionRegistry
+            try await prepared.frontdoor.connectionRegistry.installDeviceRoomProgressStore(
+                PostgresV2DeviceRoomProgressStore(database: prepared.topology.deliveryDatabase))
+            databaseTopology = prepared.topology
+            let deployment = PostgresV2PolicyDeploymentPlacementStore(database: prepared.topology.authorizationControlDatabase)
+            if let placement = prepared.roomOwners.actorConfiguration.policyPlacement {
+                try await deployment.require(V2PolicyOwnerPlacement(placement))
+                policies = try GatewayPolicyAssembly.build(prepared: prepared, logger: logger)
+                if let policies { durableOwnerResources = policies.physicalResources }
+            } else {
+                try await deployment.requireLegacy()
+            }
             // 2. 启动房间 Actor：有 hostIdentity 时启动房间承载节点及发现服务，
             // 否则启动仅调用远端房间的客户端节点。返回的目录和预留协调器供房间服务使用。
-            let actorFactory = try V2RoomServerActivationFactory(owners: prepared.roomOwners.ownerResources,
+            let actorFactory = try V2RoomServerActivationFactory(owners: policies?.ownerResources ?? prepared.roomOwners.ownerResources,
                 safetyActorUserID: configuration.contentReviewSafetyActorUserID)
+            // Construct one qualification before starting the room host. The
+            // realtime discovery transport supplies authenticated witnesses to
+            // this same object; no host silently selects standalone operation.
+            let voterRoster = Set(prepared.roomOwners.actorConfiguration.realtimePeers.map(\.nodeID))
+                .union([configuration.gatewayNodeID])
+            let serviceQualification = try V2ActorServiceQualification(
+                localNodeID: configuration.gatewayNodeID, roster: voterRoster)
             let actors = try await V2RoomActorApplication.start(
                 configuration: prepared.roomOwners.actorConfiguration,
                 ownerRouter: V2PostgresRoomShardRouter(database: prepared.topology.database),
                 roomDatabases: prepared.topology.roomShardDatabases,
-                factory: prepared.roomOwners.actorConfiguration.hostIdentity == nil ? nil : actorFactory
+                factory: prepared.roomOwners.actorConfiguration.hostIdentity == nil ? nil : actorFactory,
+                physicalRegistrationKeys: prepared.roomOwners.physicalStoreKeyByShard,
+                qualification: serviceQualification, policyServices: policies?.hosted
             )
             // 从这里开始，后续任何抛错都必须先排空已启动的房间 Actor。
             roomActorApplication = actors
+            try await policies?.startMaintenance()
+            await actors.qualificationDidChange()
             if configuration.authorPresentationsEnabled, let localMediaConfiguration {
                 // Use the configured delivery handle. With workload isolation
                 // enabled, optional SQL does not use foreground connections.
@@ -97,20 +124,20 @@ struct GatewayComposition {
                 prepared: prepared,
                 actors: actors
             )
-            prepared.registerMetrics(on: app, actors: actors)
-            // 4. 选择本地或 NATS 前台唤醒通道，并把兴趣订阅、在线活动回调和提交后提示
+            // 4. 装配 Actor 前台唤醒通道，并把兴趣订阅、在线活动回调和提交后提示
             // 接入连接注册表与事件流；这里是适配器装配，不启动客户端 TLS 监听。
-            let realtime = await GatewayRealtimeAssembly.build(
+            let realtime = try await GatewayActorRealtimeRuntime.build(
                 configuration: configuration,
                 prepared: prepared,
-                roomServices: roomServices
+                roomServices: roomServices,
+                actors: actors,
+                actorFactory: actorFactory
             )
-            // 实时阶段没有可抛出操作；下一次可能失败前先登记 Broker 供 catch 关闭。
-            natsGroupWakeBroker = realtime.natsGroupWakeBroker
-            sharedGroupWakeInterests = realtime.sharedGroupWakeInterests
-            natsLiveActivityBroker = realtime.natsLiveActivityBroker
+            actorRealtime = realtime
+            prepared.registerMetrics(on: app, actors: actors, actorRealtimeMetrics: actorRealtime)
+            // 实时阶段就绪后记录其生命周期，供后续失败关闭。
             // 5. 装配房间恢复查询及账号房间变更服务，并把后者登记到连接注册表；
-            // 账号变更跟踪由连接处理时的 startAccountRoomChanges 开始，而非在此启动监听器。
+            // 认证响应写出后建立账号成员覆盖；客户端 Ready 只开启账号变更通知消费。
             let recoveryDirectory = try GatewayRoomRecoveryDirectory.build(
                 configuration: configuration, topology: prepared.topology
             )
@@ -120,12 +147,17 @@ struct GatewayComposition {
                 states: roomServices.roomQueries,
                 latestVisible: latestVisible
             )
-            let accountInterests = sharedGroupWakeInterests
-                ?? V2SharedGroupEventWakeInterests(underlying: V2LocalRoomChangeInterest())
-            // 本地模式也需要统一的兴趣管理器；账号变更服务创建失败时仍要关闭它。
-            sharedGroupWakeInterests = accountInterests
             let accountChanges = try V2AccountRoomChangeService(
-                states: roomServices.roomQueries, interests: accountInterests
+                states: roomServices.roomQueries,
+                directoryPage: { user, cursor in
+                    try await recoveryDirectory.list(actorUserID: user, cursor: cursor, pageSize: 100)
+                }, onlineDelivery: .init(
+                    activate: { [weak registry = prepared.frontdoor.connectionRegistry] user, room, reference in
+                        guard let registry else { throw V2AccountRoomChangeService.Failure.closed }
+                        try await registry.acquireAccountRoomDelivery(userID: user, roomID: room, reference: reference)
+                    }, deactivate: { [weak registry = prepared.frontdoor.connectionRegistry] reference in
+                        await registry?.releaseAccountRoomDelivery(reference: reference)
+                    })
             )
             accountRoomChangeService = accountChanges
             await prepared.frontdoor.connectionRegistry.configureAccountRoomChanges(accountChanges)
@@ -135,7 +167,6 @@ struct GatewayComposition {
                 configuration: configuration,
                 prepared: prepared,
                 roomServices: roomServices,
-                realtime: realtime,
                 roomRecovery: roomRecovery,
                 actors: actors
             )
@@ -186,45 +217,94 @@ struct GatewayComposition {
                 actors: actors,
                 actorConfiguration: prepared.roomOwners.actorConfiguration,
                 connectionRegistry: prepared.frontdoor.connectionRegistry,
-                foregroundGroupEventHints: realtime.foregroundGroupEventHints,
                 directRoomLogEventCache: prepared.projection.directRoomLogEventCache,
                 backgroundWorkers: backgroundWorkers,
-                natsGroupWakeBroker: natsGroupWakeBroker,
-                sharedGroupWakeInterests: accountInterests,
                 accountRoomChangeService: accountChanges,
-                natsLiveActivityBroker: natsLiveActivityBroker,
+                actorRealtime: realtime,
                 authorPresentations: authorPresentations,
-                authorDrainTimeout: .milliseconds(configuration.shutdownGraceMilliseconds)
+                authorDrainTimeout: .milliseconds(configuration.shutdownGraceMilliseconds),
+                durableOwnerResources: durableOwnerResources,
+                policies: policies, databaseTopology: prepared.topology
             )
         } catch {
             logger.error("IM V2 gateway composition failed; cleaning up", metadata:
                 V2SafeLogMetadata.failure(error, stage: "gateway_composition"))
             await Self.drainAuthors(authorPresentations, timeout: .milliseconds(configuration.shutdownGraceMilliseconds), logger: logger)
             try? await constructedServer?.shutdown()
+            await preparedConnectionRegistry?.shutdownRealtimeRecovery()
+            await Self.drainPolicies(policies, logger: logger)
+            await Self.drainDurableOwners(durableOwnerResources, logger: logger)
+            if let actorRealtime {
+                guard await actorRealtime.shutdown() else { exit(EXIT_FAILURE) }
+            }
             if let roomActorApplication {
                 await Self.drainActorsAfterFailure(roomActorApplication, logger: logger)
             }
-            await natsLiveActivityBroker?.shutdown()
             await accountRoomChangeService?.shutdown()
-            await sharedGroupWakeInterests?.shutdown()
-            await natsGroupWakeBroker?.shutdown()
+            await Self.drainRoomReads(durableOwnerResources, logger: logger)
+            if let databaseTopology { await Self.drainDatabaseLoans(databaseTopology, logger: logger) }
             throw error
         }
     }
 
-    /// 在连接注册表解除依赖后，按实时活动、账号变更、兴趣管理、唤醒 Broker 的顺序关闭辅助服务。
-    func shutdownAuxiliaryServices() async {
-        await natsLiveActivityBroker?.shutdown()
+    /// 在连接注册表解除依赖后，先排空实时 Runtime，再关闭账号覆盖。
+    func shutdownAuxiliaryServices(logger: Logger) async {
+        logger.notice("IM V2 auxiliary shutdown stage started", metadata: ["stage": "registry"])
+        await connectionRegistry.shutdownRealtimeRecovery()
+        await connectionRegistry.finishLivePresenceRenewals()
+        logger.notice("IM V2 auxiliary shutdown stage completed", metadata: ["stage": "registry"])
+        logger.notice("IM V2 auxiliary shutdown stage started", metadata: ["stage": "actor_realtime"])
+        guard await actorRealtime.shutdown() else { exit(EXIT_FAILURE) }
+        logger.notice("IM V2 auxiliary shutdown stage completed", metadata: ["stage": "actor_realtime"])
+        logger.notice("IM V2 auxiliary shutdown stage started", metadata: ["stage": "account_coverage"])
         await accountRoomChangeService.shutdown()
-        await sharedGroupWakeInterests.shutdown()
-        await natsGroupWakeBroker?.shutdown()
+        logger.notice("IM V2 auxiliary shutdown stage completed", metadata: ["stage": "account_coverage"])
+        await Self.drainPolicies(policies, logger: logger)
+        logger.notice("IM V2 auxiliary shutdown stage started", metadata: ["stage": "durable_owners"])
+        await Self.drainDurableOwners(durableOwnerResources, logger: logger)
+        logger.notice("IM V2 auxiliary shutdown stage completed", metadata: ["stage": "durable_owners"])
     }
 
-    /// 完整装配之后的运行失败由 `GatewayRuntime` 调用：先排空作者资料和 Actor，再关闭辅助服务。
+    /// 完整装配之后的运行失败由 `GatewayRuntime` 调用：先排空作者资料和实时辅助服务，再关闭 Actor。
     func shutdownAfterFailure(logger: Logger) async {
         await shutdownAuthorPresentations(logger: logger)
+        await shutdownAuxiliaryServices(logger: logger)
         await Self.drainActorsAfterFailure(actors, logger: logger)
-        await shutdownAuxiliaryServices()
+        await shutdownDatabaseLoans(logger: logger)
+    }
+
+    /// Close borrow admission only after workers, connections and actors have drained.
+    func shutdownDatabaseLoans(logger: Logger) async {
+        await Self.drainRoomReads(durableOwnerResources, logger: logger)
+        await Self.drainDatabaseLoans(databaseTopology, logger: logger)
+    }
+
+    private static func drainPolicies(_ policies: GatewayPolicyAssembly?, logger: Logger) async {
+        guard let policies else { return }
+        let task = Task { await policies.shutdown() }
+        guard await v2WaitForTaskDrain([task], timeout: .seconds(60)) else {
+            logger.critical("IM V2 policy work remains owned after shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_policy_shutdown"))
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func drainRoomReads(_ resources: [V2RoomServerOwnerResources], logger: Logger) async {
+        let tasks = resources.map { resource in Task { await resource.shutdownRoomReadQueries() } }
+        guard await v2WaitForTaskDrain(tasks, timeout: .seconds(60)) else {
+            logger.critical("IM V2 room read SQL drain exceeded its shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_room_read_shutdown"))
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func drainDatabaseLoans(_ topology: GatewayDatabaseTopology, logger: Logger) async {
+        let task = Task { await topology.shutdownLoans() }
+        guard await v2WaitForTaskDrain([task], timeout: .seconds(60)) else {
+            logger.critical("IM V2 database loans remain owned after shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_database_loan_shutdown"))
+            exit(EXIT_FAILURE)
+        }
     }
 
     func shutdownAuthorPresentations(logger: Logger) async {
@@ -239,6 +319,16 @@ struct GatewayComposition {
             // down its database or socket event loops while it is still alive.
             logger.critical("IM V2 author presentation drain exceeded its shutdown deadline",
                 metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_author_shutdown"))
+            exit(EXIT_FAILURE)
+        }
+    }
+
+    private static func drainDurableOwners(_ resources: [V2RoomServerOwnerResources], logger: Logger?) async {
+        for resource in resources { await resource.shutdownRoomSubscriptionDelivery() }
+        let tasks = resources.map { resource in Task { await resource.shutdownDurableSendOperations() } }
+        guard await v2WaitForTaskDrain(tasks, timeout: .seconds(60)) else {
+            logger?.critical("IM V2 durable owner SQL drain exceeded its shutdown deadline",
+                metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_durable_owner_shutdown"))
             exit(EXIT_FAILURE)
         }
     }

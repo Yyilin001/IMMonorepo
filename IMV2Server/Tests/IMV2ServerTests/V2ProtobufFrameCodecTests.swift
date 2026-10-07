@@ -9,6 +9,45 @@ import Testing
 @testable import IMV2ServerGateway
 
 struct V2ProtobufFrameCodecTests {
+    @Test("device confirmation commands require protocol 47", arguments: [false, true])
+    func deviceProgressVersionBoundary(recorded: Bool) throws {
+        var envelope = IMV2Envelope(); envelope.requestID = 1
+        if recorded { envelope.deviceRoomProgressRecorded = .init() }
+        else { envelope.deviceRoomProgressReport = .init() }
+        for oldVersion: UInt8 in [1, 45, 46] {
+            envelope.protocolVersion = UInt32(oldVersion)
+            #expect(throws: V2ServerProtobufFrameCodecError.protocolVersionMismatch) {
+                _ = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: oldVersion)
+            }
+            let frame = V2Frame(version: oldVersion,
+                command: recorded ? .deviceRoomProgressRecorded : .deviceRoomProgressReport,
+                requestID: 1, payload: try envelope.serializedData())
+            #expect(throws: V2ServerProtobufFrameCodecError.protocolVersionMismatch) { _ = try V2ServerProtobufFrameCodec.decode(frame) }
+        }
+        envelope.protocolVersion = 47
+        #expect(try V2ServerProtobufFrameCodec.decode(V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 47)) == envelope)
+    }
+    @Test("heartbeat progress and authoritative scope state survive protobuf framing")
+    func heartbeatProgressRoundTrip() throws {
+        let room = UUID().uuidString
+        var progress = IMV2GroupEventProgress(); progress.roomID = room
+        progress.scopeGeneration = 7; progress.appliedRoomSequence = 12
+        var request = IMV2Envelope(); request.requestID = 3
+        request.protocolVersion = IMV2ProtocolVersion.current; request.heartbeat.roomProgress = [progress]
+        let decoded = try V2ServerProtobufFrameCodec.decode(V2ServerProtobufFrameCodec.encode(request,
+            frameVersion: UInt8(IMV2ProtocolVersion.current)))
+        #expect(decoded.heartbeat.roomProgress == [progress])
+        var state = IMV2GroupEventProgressState(); state.roomID = room; state.scopeGeneration = 7
+        state.highWatermark = 15; state.appliedRoomSequence = 12; state.ready = false
+        var response = IMV2Envelope(); response.requestID = 3
+        response.protocolVersion = IMV2ProtocolVersion.current
+        response.heartbeatAck.serverTimeMs = 123; response.heartbeatAck.roomSubscriptionStates = [state]
+        let ack = try V2ServerProtobufFrameCodec.decode(V2ServerProtobufFrameCodec.encode(response,
+            frameVersion: UInt8(IMV2ProtocolVersion.current)))
+        #expect(ack.heartbeatAck.roomSubscriptionStates == [state])
+        #expect(!ack.heartbeatAck.roomSubscriptionStates[0].ready)
+    }
+
     @Test("recipient-specific author TCP payload retains private alias and its original revision")
     func authorContactAliasRoundTrip() throws {
         let actor = UserID(uuid:UUID()),target = UserID(uuid:UUID()),device = DeviceID(uuid:UUID()),room = RoomID(uuid:UUID()),now = Date()

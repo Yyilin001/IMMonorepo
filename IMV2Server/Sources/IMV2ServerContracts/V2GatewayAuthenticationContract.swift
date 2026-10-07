@@ -9,15 +9,18 @@ public struct V2GatewayAuthentication: Equatable, Sendable {
     public let userID: UserID
     /// 会话失效时间；`nil` 仅供明确允许永不过期的适配器使用。
     public let expiresAt: Date?
+    /// Same-snapshot device control cut; only trusted authenticators supply it.
+    public let credentialControlVersion: Int64
 
     /// 保存一次认证读取的结果。
     ///
     /// - Parameters:
     ///   - userID: 经认证确定的用户。
     ///   - expiresAt: 同一次撤销一致性读取所得的期限，`nil` 表示适配器明确不设置期限。
-    public init(userID: UserID, expiresAt: Date?) {
+    public init(userID: UserID, expiresAt: Date?, credentialControlVersion: Int64 = 0) {
         self.userID = userID
         self.expiresAt = expiresAt
+        self.credentialControlVersion = credentialControlVersion
     }
 }
 

@@ -24,6 +24,7 @@ SPLIT_TARGETS = (
     "IMV2ServerGateway",
     "IMV2ServerHTTP",
 )
+ACTOR_TARGETS = ("IMV2ActorContracts", "IMV2ActorRuntime", "IMV2ActorCluster", "IMV2ActorApplication")
 INVENTORY = ROOT / "docs/proposals/server-module-inventory.json"
 DECL = re.compile(r"^(?:(?:public|package|internal|fileprivate|private|open|final|indirect|nonisolated|isolated|distributed) +)*(?:struct|enum|protocol|class|actor|typealias|func) +([A-Za-z_]\w*)", re.M)
 IDENT = re.compile(r"\b[A-Za-z_]\w*\b")
@@ -34,7 +35,6 @@ FILE_TARGET_OVERRIDES = {
     "V2DirectRoomLogPayloadCodec.swift": "IMV2ServerApplication",
     "V2DurableWorkFailureClassification.swift": "IMV2ServerApplication",
     "V2LivePresenceRenewalBatcher.swift": "IMV2ServerApplication",
-    "V2NATSInboundFrameParser.swift": "IMV2ServerInfrastructure",
     "V2PreparedGroupEventPageCache.swift": "IMV2ServerGateway",
     "V2RoomLatestVisibleCommandService.swift": "IMV2ServerGateway",
     "V2RoomRecoveryCommandService.swift": "IMV2ServerGateway",
@@ -107,12 +107,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--output", type=Path, default=ROOT / "docs/proposals/server-dependency-graph.json")
     ap.add_argument("--sync-inventory", action="store_true", help="refresh the source inventory after file moves")
+    ap.add_argument("--include-actor-layers", action="store_true", help="also audit the four physical Actor modules; does not rewrite the original split inventory")
     args = ap.parse_args()
+    if args.include_actor_layers and args.sync_inventory:
+        ap.error("Actor audit and legacy inventory refresh must be separate operations")
     inventory = json.loads(INVENTORY.read_text())
     planned = {x["source"]: x["proposedTarget"] for x in inventory["files"]}
     files = sorted(
         p.relative_to(SOURCE_ROOT).as_posix()
-        for name in SPLIT_TARGETS
+        for name in SPLIT_TARGETS + (ACTOR_TARGETS if args.include_actor_layers else ())
         for p in (SOURCE_ROOT / name).rglob("*.swift")
         if (SOURCE_ROOT / name).is_dir()
     )
@@ -192,6 +195,22 @@ def main() -> None:
         "IMV2ServerGateway": {"IMV2ServerInfrastructure", "IMV2ServerHTTP", "IMV2Server"},
         "IMV2ServerHTTP": {"IMV2ServerInfrastructure", "IMV2ServerGateway", "IMV2Server"},
     }
+    if args.include_actor_layers:
+        all_targets = set(SPLIT_TARGETS + ACTOR_TARGETS)
+        actor_allowed = {
+            "IMV2ActorContracts": set(),
+            "IMV2ActorRuntime": {"IMV2ActorContracts"},
+            "IMV2ActorCluster": {"IMV2ActorContracts", "IMV2ActorRuntime"},
+            "IMV2ActorApplication": {"IMV2ActorContracts", "IMV2ActorRuntime", "IMV2ActorCluster",
+                "IMV2ServerContracts", "IMV2ServerApplication", "IMV2ServerInfrastructure", "IMV2Server"},
+        }
+        for module, allowed in actor_allowed.items():
+            forbidden_targets[module] = all_targets - allowed - {module}
+        for module in SPLIT_TARGETS:
+            allowed = {"IMV2ActorContracts"}
+            if module in {"IMV2Server", "IMV2ServerInfrastructure"}:
+                allowed.add("IMV2ActorRuntime")
+            forbidden_targets.setdefault(module, set()).update(set(ACTOR_TARGETS) - allowed)
     forbidden = []
     for (src, dst), symbols in sorted(edges.items()):
         if target[dst] in forbidden_targets.get(target[src], set()):
@@ -223,7 +242,9 @@ def main() -> None:
                 witness = {"files": [src] + back, "firstEdgeSymbols": sorted(symbols)}
         cross_scc.append({"size": len(group), "targets": sorted(targets), "files": group, "witnessCycle": witness})
     cross_scc.sort(key=lambda x: -x["size"])
-    data = {"sourceCount": len(files), "fileTargets": target, "classificationOverrides": classification_overrides, "indexedUniqueDeclarations": len(unique), "fileEdges": len(edges), "forbiddenEdges": forbidden, "crossTargetEdges": cross_edges, "crossTargetSCCs": cross_scc}
+    data = {"sourceCount": len(files), "fileTargets": target, "classificationOverrides": classification_overrides, "indexedUniqueDeclarations": len(unique), "fileEdges": len(edges), "forbiddenEdges": forbidden, "crossTargetEdges": cross_edges, "crossTargetSCCs": cross_scc,
+            "auditedTargets": list(SPLIT_TARGETS + (ACTOR_TARGETS if args.include_actor_layers else ())),
+            "analysisLimitations": "unique declaration references only; does not resolve dynamic dispatch or typealiases; package compilation remains authoritative"}
     args.output.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     print(f"files={len(files)} overrides={len(classification_overrides)} symbols={len(unique)} edges={len(edges)} forbidden={len(forbidden)} cross-target-SCCs={len(cross_scc)}")
     for e in forbidden[:40]:

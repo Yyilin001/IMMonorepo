@@ -26,6 +26,29 @@ struct V2RoomRefMessagingClientTests {
         #expect(client.managesForegroundWriteAdmission)
     }
 
+    @Test("send recovery can return committed results while the room actor is unavailable")
+    func recoveryBypassesActor() async throws {
+        let command = try V2MessageSendOperationCommand(command: .init(roomID: .init(uuid: UUID()),
+            senderUserID: .init(uuid: UUID()), clientMessageID: .init(uuid: UUID()),
+            text: "lost response", limits: .init(maxUTF8Bytes: 64)),
+            firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+        let request = try V2MessageSendOperationRecoveryRequest(identity: command.identity,
+            fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query)
+        let receipt = try V2MessageSendOperationReceipt(identity: request.identity,
+            fingerprint: request.fingerprint,
+            outcome: .accepted(.init(messageID: .init(uuid: UUID()), roomSequence: 1)),
+            resolvedAtMilliseconds: 1_750_000_000_000)
+        let client = V2RoomRefMessagingClient(callTimeout: try .init(1_000), recoveryQuery: { actual in
+            #expect(actual == request)
+            return .receipt(receipt)
+        }) { _, _, _ in
+            Issue.record("A result query must not activate or call the room")
+            throw V2RoomCallFailure.notAccepted(.unavailable)
+        }
+        #expect(client.usesReadOnlySendRecovery)
+        #expect(try await client.recoverSendOperation(request) == .receipt(receipt))
+    }
+
     @Test("typed rejections survive the boundary and unexpected responses remain unknown")
     func failures() async throws {
         let command = try V2MessageWithdrawalOperationCommand(command: .init(roomID: .init(uuid: UUID()),

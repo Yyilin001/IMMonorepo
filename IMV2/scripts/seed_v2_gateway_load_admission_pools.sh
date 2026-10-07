@@ -36,6 +36,12 @@ compose_project="${V2_LOCAL_COMPOSE_PROJECT:-imv2localaccount}"
 # shellcheck source=local_compose.sh
 source "${script_dir}/local_compose.sh"
 
+# A seed may be invoked against a retained source database independently of
+# fresh Compose initialization. Install only this repeatable extension first.
+"${script_dir}/install_v2_realtime_journal.sh" --print-sql |
+  v2_local_compose "${env_file}" --project-name "${compose_project}" --file "${compose_file}" \
+    exec -T postgres psql -X --set=ON_ERROR_STOP=1 --username im_v2 --dbname im_v2 > /dev/null
+
 # A new profile deliberately has no relationship to rooms created under an
 # older profile. The first open-direct-room request for a fresh user pair binds
 # that new room to one of these fenced pools. If an existing pool has expired,

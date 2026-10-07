@@ -20,7 +20,6 @@ import Testing
 import Vapor
 import VaporTesting
 
-
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("overlapping warm multi-shard batches reserve capacity without deadlocks")
     func overlappingMultiShardBatchesUseDeterministicLockOrder() async throws {
@@ -105,9 +104,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     database: resources.database(.psql),
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10_000, window: 86_400),
                     contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: sharedCache,
-                    shardAdmissionCommandCreditPool: .init(database: resources.database(.psql), batchSize: 2)
-                )
+                    directRoomLogFastAppendCache: sharedCache)
             }
             // Prime each direct room through the sole supported per-room path.
             // The shared revision cache then makes every measured batch a warm append.
@@ -280,12 +277,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     maximumMessagesPerWindow: 10_000,
                     window: 86_400
                 ),
-                contentReviewMode: .disabled,
-                shardAdmissionCommandCreditPool: .init(
-                    database: resources.database(.psql),
-                    batchSize: 128
-                )
-            )
+                contentReviewMode: .disabled)
             let writer: any V2AtomicRoomWriteBatchStore
             if actorScoped {
                 let leases = PostgresV2RoomActivationStore(database: resources.database(.psql))
@@ -505,7 +497,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 throw TestConfigurationError.schemaAlreadyExists
             }
             try await installSchema(on: sql)
-            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let now = Date()
             let user = UUID(uuidString: "00000000-0000-0000-0000-0000000008c1")!
             let device = UUID(uuidString: "00000000-0000-0000-0000-0000000008c2")!
             let peerUser = UUID(uuidString: "00000000-0000-0000-0000-0000000008d1")!
@@ -535,25 +527,28 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             )
             let store = try PostgresV2LiveActivityStore(database: resources.database(.psql), onlineLease: 10)
 
-            #expect(try await store.admitConnection(
+            guard case .accepted(let expiry1) = try await store.admitConnection(
                 identity: identity,
                 connectionID: firstConnection,
                 publicationSuppressed: false,
                 policy: policy,
                 now: now
-            ) == .accepted(expiresAt: now.addingTimeInterval(10)))
-            #expect(try await store.admitConnection(
+            ) else { throw CancellationError() }
+            #expect(expiry1 >= now.addingTimeInterval(9))
+            guard case .accepted(let expiry2) = try await store.admitConnection(
                 identity: peerIdentity,
                 connectionID: peerConnection,
                 publicationSuppressed: false,
                 policy: policy,
                 now: now
-            ) == .accepted(expiresAt: now.addingTimeInterval(10)))
-            #expect(try await store.renewConnection(
+            ) else { throw CancellationError() }
+            #expect(expiry2 >= now.addingTimeInterval(9))
+            guard case .accepted(let expiry3) = try await store.renewConnection(
                 identity: identity,
                 connectionID: firstConnection,
                 now: now.addingTimeInterval(1)
-            ) == .accepted(expiresAt: now.addingTimeInterval(11)))
+            ) else { throw CancellationError() }
+            #expect(expiry3 >= now.addingTimeInterval(9))
             try await sql.raw("""
                 INSERT INTO im_v2.user_live_activity_preferences
                     (user_id, allows_online_presence, allows_typing_indicators, updated_at)
@@ -577,33 +572,35 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 ),
             ])
             #expect(batched.count == 2)
-            #expect(batched[firstConnection] == .init(
-                outcome: .accepted(expiresAt: now.addingTimeInterval(11.5)),
-                allowsOnlinePresence: false
-            ))
-            #expect(batched[peerConnection] == .init(
-                outcome: .accepted(expiresAt: now.addingTimeInterval(11.5)),
-                allowsOnlinePresence: true
-            ))
+            #expect(batched[firstConnection]?.allowsOnlinePresence == false)
+            #expect(batched[peerConnection]?.allowsOnlinePresence == true)
+            for value in batched.values {
+                guard case .accepted(let expiry) = value.outcome else { throw CancellationError() }
+                #expect(expiry >= now.addingTimeInterval(9))
+                #expect((value.remainingLeaseSeconds ?? 0) > 9 && (value.remainingLeaseSeconds ?? 11) <= 10.001)
+            }
             #expect(try await !store.removePresence(
                 identity: peerIdentity,
                 connectionID: peerConnection,
                 now: now.addingTimeInterval(1.5)
             ))
 
-            let afterExpiry = now.addingTimeInterval(12)
+            // Expire the actual row without sleeping or treating a future caller clock as authority.
+            try await sql.raw("UPDATE im_v2.user_live_presence_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE connection_id=\(bind:firstConnection)").run()
+            let afterExpiry = Date()
             #expect(try await store.renewConnection(
                 identity: identity,
                 connectionID: firstConnection,
                 now: afterExpiry
             ) == .rejected)
-            #expect(try await store.admitConnection(
+            guard case .accepted(let expiry4) = try await store.admitConnection(
                 identity: identity,
                 connectionID: replacementConnection,
                 publicationSuppressed: false,
                 policy: policy,
                 now: afterExpiry
-            ) == .accepted(expiresAt: afterExpiry.addingTimeInterval(10)))
+            ) else { throw CancellationError() }
+            #expect(expiry4 >= now.addingTimeInterval(9))
             #expect(try await store.admitConnection(
                 identity: identity,
                 connectionID: firstConnection,
@@ -1659,7 +1656,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             throw error
         }
     }
-
 
     @Test("startup rejects incomplete completion and forward revision contracts", arguments: ["table", "schema", "forward-column", "forward-room-column", "forward-constraint", "forward-trigger", "content-index", "content-index-shape", "export-epoch", "export-completion-column", "export-compaction-column", "export-compaction-check", "export-compaction-index", "export-compaction-trigger", "export-payload", "export-trigger", "export-index", "inbox-column", "inbox-owner-shard", "inbox-owner-epoch", "inbox-owner-constraint", "inbox-compaction-column", "inbox-compaction-constraint", "inbox-compaction-index", "inbox-trigger", "inbox-constraint", "inbox-media-index", "inbox-source-fk", "media-import-column", "media-import-trigger", "media-import-shape", "receipt-column", "receipt-trigger", "receipt-shape", "receipt-fk", "delivery-column", "delivery-trigger", "delivery-shape", "delivery-index", "delivery-fk", "replay-column", "replay-trigger", "replay-shape", "replay-weak-shape", "replay-pk", "media-scope-column", "media-scope-shape", "media-scope-trigger", "media-scope-function", "media-scope-fk"])
     func sendCompletionSchemaReadinessRejectsIncompleteContract(scenario: String) async throws {

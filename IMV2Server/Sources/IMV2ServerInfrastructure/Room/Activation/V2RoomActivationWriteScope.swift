@@ -9,9 +9,15 @@ import SQLKit
 /// 提供不可变权限。事务持有房间锁期间，此对象不解析房间，
 /// 也不获取其他执行轮次。
 public struct V2RoomActivationWriteScope: Sendable {
+    let reliesOnRuntimeLifecycle: Bool
     private let byRoom: [UUID: V2RoomActivationToken]
 
     public init(tokens: [V2RoomActivationToken]) throws {
+        try self.init(tokens: tokens, reliesOnRuntimeLifecycle: false)
+    }
+
+    init(tokens: [V2RoomActivationToken], reliesOnRuntimeLifecycle: Bool) throws {
+        self.reliesOnRuntimeLifecycle = reliesOnRuntimeLifecycle
         guard !tokens.isEmpty, tokens.count <= 128,
               Set(tokens.map { $0.owner.shardID }).count == 1 else {
             throw V2RoomActivationLeaseError.activationChanged
@@ -35,6 +41,6 @@ public struct V2RoomActivationWriteScope: Sendable {
 
     func require(_ roomIDs: [UUID], sql: any SQLDatabase) async throws {
         let tokens = try Set(roomIDs).map { try token(for: $0) }
-        try await v2RequireRoomActivations(tokens: tokens, sql: sql)
+        if !reliesOnRuntimeLifecycle { try await v2RequireRoomActivations(tokens: tokens, sql: sql) }
     }
 }

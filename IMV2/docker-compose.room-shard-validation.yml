@@ -21,6 +21,7 @@ services:
       - v2-room-shard-00-postgres:/var/lib/postgresql/data
       - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/realtime-change-journal.sql:/docker-entrypoint-initdb.d/02-realtime-change-journal.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
       interval: 1s
@@ -39,6 +40,7 @@ services:
       - v2-room-shard-01-postgres:/var/lib/postgresql/data
       - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/realtime-change-journal.sql:/docker-entrypoint-initdb.d/02-realtime-change-journal.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
       interval: 1s
@@ -57,6 +59,7 @@ services:
       - v2-user-projection-postgres:/var/lib/postgresql/data
       - ./sql/00-pg-stat-statements.sql:/docker-entrypoint-initdb.d/00-pg-stat-statements.sql:ro
       - ./sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./sql/realtime-change-journal.sql:/docker-entrypoint-initdb.d/02-realtime-change-journal.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U im_v2 -d im_v2"]
       interval: 1s
@@ -83,7 +86,6 @@ services:
       IM_V2_USER_SHARD_STORES_JSON: >-
         [{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-user-projection:5432/im_v2","schema":"im_v2"}]
       # Validate the same per-room admission contract as the deployment overlay.
-      IM_V2_DIRECT_ROOM_LOG_SHARD_CREDIT_BATCH_SIZE: 32
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: 32
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS: 2
       IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 1000000

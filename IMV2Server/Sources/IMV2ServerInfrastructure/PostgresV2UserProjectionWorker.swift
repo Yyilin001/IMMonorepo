@@ -657,10 +657,6 @@ public struct PostgresV2UserProjectionWorker: Sendable {
         guard let value = object[key] as? String, !value.isEmpty else { throw V2UserProjectionWorkerError.invalidPayload }
         return value
     }
-    private func stringAllowingEmpty(_ key: String, _ object: [String: Any]) throws -> String {
-        guard let value = object[key] as? String else { throw V2UserProjectionWorkerError.invalidPayload }
-        return value
-    }
     private func boolean(_ key: String, _ object: [String: Any]) throws -> Bool {
         guard let value = object[key] as? Bool else { throw V2UserProjectionWorkerError.invalidPayload }
         return value

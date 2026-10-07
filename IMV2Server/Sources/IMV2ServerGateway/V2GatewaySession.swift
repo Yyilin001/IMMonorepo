@@ -146,10 +146,19 @@ private struct V2GatewaySessionResponse: Sendable {
 }
 
 final class V2GatewayTerminalGate: Sendable {
-    private let active = Mutex(true)
+    private struct State { var active = true; var expiresAt: Date? }
+    private let state = Mutex(State())
 
-    func isActive() -> Bool { active.withLock { $0 } }
-    func invalidate() { active.withLock { $0 = false } }
+    func isActive() -> Bool { state.withLock { $0.active } }
+    func invalidate() { state.withLock { $0.active = false } }
+    var expiresAt: Date? {
+        get { state.withLock { $0.expiresAt } }
+        set { state.withLock { $0.expiresAt = newValue } }
+    }
+    func allowsDispatch(at date: Date) -> Bool {
+        guard Int64(exactly: (date.timeIntervalSince1970 * 1_000).rounded(.towardZero)) != nil else { return false }
+        return state.withLock { $0.active && ($0.expiresAt.map { $0 > date } ?? true) }
+    }
 }
 
 /// 管理单条 Gateway 连接的握手、认证、请求关联与响应编码。
@@ -162,6 +171,7 @@ public actor V2GatewaySession {
 
     /// Synchronously reject new work while actor cleanup is still pending.
     nonisolated func invalidateImmediately() { terminalGate.invalidate() }
+    nonisolated var connectionIsActive: Bool { terminalGate.allowsDispatch(at: now()) }
     /// 本连接的握手阶段、身份和在途请求关联状态。
     private var presencePublicationSuppressed=true
     public func initialPresencePublicationSuppressed()->Bool {presencePublicationSuppressed}
@@ -189,7 +199,10 @@ public actor V2GatewaySession {
     /// 服务器时间读取闭包。
     private let now: @Sendable () -> Date
     /// 认证成功后保存的期限，终止或撤销时清除。
-    private var authenticatedSessionExpiresAt: Date?
+    private var authenticatedSessionExpiresAt: Date? {
+        get { terminalGate.expiresAt }
+        set { terminalGate.expiresAt = newValue }
+    }
     /// 握手选定的压缩算法，未协商时为空。
     private var negotiatedFrameCompression: V2NegotiatedFrameCompression?
     /// 握手中可选绑定的设备，认证时若存在则必须匹配。
@@ -269,7 +282,8 @@ public actor V2GatewaySession {
         _ frame: V2Frame,
         handler: any V2GatewayCommandHandler,
         originatingConnectionID: UUID? = nil,
-        captureAuthorSample: Bool = false
+        captureAuthorSample: Bool = false,
+        roomProgress: (@Sendable (IMV2Heartbeat) async -> [IMV2GroupEventProgressState])? = nil
     ) async throws -> V2GatewaySessionExchange {
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         let envelope = try decode(frame)
@@ -281,7 +295,7 @@ public actor V2GatewaySession {
                 envelope: envelope,
                 handler: handler,
                 originatingConnectionID: originatingConnectionID,
-                captureAuthorSample: captureAuthorSample
+                captureAuthorSample: captureAuthorSample, roomProgress: roomProgress
             )
         default:
             response = try await receiveBootstrap(frame, envelope: envelope)
@@ -392,8 +406,10 @@ public actor V2GatewaySession {
             guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
             let expiresAt = authentication.expiresAt
             let clock = try currentServerTime()
+            guard authentication.credentialControlVersion >= 0 else { throw V2GatewayAuthenticationError.corruptPersistenceState }
             guard expiresAt.map({ $0 > clock.date }) ?? true else { throw V2GatewaySessionError.sessionExpired }
-            try state.completeAuthentication(.init(userID: userID, deviceID: deviceID, capabilityProfile: capabilityProfile))
+            try state.completeAuthentication(.init(userID: userID, deviceID: deviceID, capabilityProfile: capabilityProfile,
+                credentialControlVersion: authentication.credentialControlVersion))
             presencePublicationSuppressed=request.presencePublicationSuppressed
             authenticatedSessionExpiresAt = expiresAt
             guard case .authenticated(let version, _) = state.phase else { throw V2GatewaySessionError.unsupportedCommand }
@@ -469,15 +485,7 @@ public actor V2GatewaySession {
     /// Revocation and transport closure are fenced separately by the stream.
     func authenticatedForegroundSessionCheck() -> (@Sendable () -> Bool)? {
         guard currentAuthenticatedConnection() != nil else { return nil }
-        let expiry = authenticatedSessionExpiresAt
-        return { [now, terminalGate] in
-            guard terminalGate.isActive() else { return false }
-            let date = now()
-            guard Int64(exactly: (date.timeIntervalSince1970 * 1_000).rounded(.towardZero)) != nil else {
-                return false
-            }
-            return expiry.map { $0 > date } ?? true
-        }
+        return { [now, terminalGate] in terminalGate.allowsDispatch(at: now()) }
     }
 
     /// Negotiation is usable only while this exact authenticated session is live.
@@ -490,8 +498,7 @@ public actor V2GatewaySession {
     /// Page/connection revocation is separately fenced by the transport gate.
     func authorPresentationSessionCheck() -> (@Sendable () -> Bool)? {
         guard currentAuthenticatedConnection() != nil, authorPresentationStreamID != nil else { return nil }
-        let expiry = authenticatedSessionExpiresAt
-        return { [now] in expiry.map { $0 > now() } ?? true }
+        return { [now, terminalGate] in terminalGate.allowsDispatch(at: now()) }
     }
 
     /// Encode an optional supplement independently of shared message frames.
@@ -548,7 +555,8 @@ public actor V2GatewaySession {
         envelope: IMV2Envelope,
         handler: any V2GatewayCommandHandler,
         originatingConnectionID: UUID?,
-        captureAuthorSample: Bool = false
+        captureAuthorSample: Bool = false,
+        roomProgress: (@Sendable (IMV2Heartbeat) async -> [IMV2GroupEventProgressState])? = nil
     ) async throws -> V2GatewaySessionResponse {
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         guard case .authenticated(let version, let identity) = state.phase else {
@@ -600,11 +608,16 @@ public actor V2GatewaySession {
                 response.error.code = "RATE_LIMITED"
                 response.error.retryable = true
                 response.error.retryAfterSeconds = 1
-            } else if case .heartbeat = envelope.body {
+            } else if case .heartbeat(let heartbeat) = envelope.body {
                 guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
                 response = IMV2Envelope()
                 response.heartbeatAck = .init()
                 response.heartbeatAck.serverTimeMs = try currentServerTime().milliseconds
+                guard heartbeat.roomProgress.count <= 1, heartbeat.roomProgress.allSatisfy({
+                    UUID(uuidString: $0.roomID) != nil && $0.scopeGeneration > 0
+                        && $0.appliedRoomSequence <= UInt64(Int64.max)
+                }) else { throw V2GatewaySessionError.unsupportedCommand }
+                response.heartbeatAck.roomSubscriptionStates = await roomProgress?(heartbeat) ?? []
             } else if case .groupEventPull(let request) = envelope.body,
                       version >= 21,
                       let preparedGroupEventPageCache,

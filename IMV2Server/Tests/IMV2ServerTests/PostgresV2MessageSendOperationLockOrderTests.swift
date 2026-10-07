@@ -50,9 +50,32 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
+                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now }, combineOwnerPreflight: true)
             let results = try await withRoomActivation(database: database, roomID: direct.roomID) { token in
-                try await store.sendBatch([first, second], token: token, capacityProfile: profile,
+                let originalDeadline = ContinuousClock.now + .seconds(30)
+                let prepared = try await store.prepareSendBatch([first, second], token: token,
+                    deadline: originalDeadline, now: { now })
+                #expect(prepared.deadline == originalDeadline)
+                #expect(try await count("im_v2.messages", on: sql) == 0)
+                #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
+                let differentStore = PostgresV2MessageSendOperationStore(database: database,
+                    writes: PostgresV2RoomWriteStore(database: database).usingControlDatabase(database), clock: { now })
+                await #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
+                    _ = try await differentStore.executePreparedSendBatch(prepared, capacityProfile: profile,
+                        identifiers: .init(), now: { now })
+                }
+                // Moving the handle to another task cannot enlarge that
+                // caller's earlier SQL deadline or start the owner transaction.
+                await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
+                    try await V2RoomSQLDeadline.withDeadline(ContinuousClock.now - .seconds(1)) {
+                        _ = try await store.executePreparedSendBatch(prepared, capacityProfile: profile,
+                            identifiers: .init(), now: { now })
+                    }
+                }
+                #expect(try await count("im_v2.messages", on: sql) == 0)
+                // A value copy still represents this same owner store.
+                let sameStore = store
+                return try await sameStore.executePreparedSendBatch(prepared, capacityProfile: profile,
                     identifiers: .init(), now: { now })
             }
             #expect(results.count == 2)
@@ -70,6 +93,56 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(intentCount?.count == 2)
             try await sql.raw("DROP TRIGGER fixture_require_batch_authorizations ON im_v2.messages").run()
             try await sql.raw("DROP FUNCTION im_v2.fixture_require_batch_authorizations()").run()
+            // An immutable receipt replays even when its current authorization
+            // route is absent. This store intentionally has no control database:
+            // consulting or reserving current permission would fail the replay.
+            try await sql.raw("DELETE FROM im_v2.direct_room_pairs WHERE room_id = \(bind: direct.roomID.uuidValue!)").run()
+            let replayStore = PostgresV2MessageSendOperationStore(database: database,
+                writes: PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled),
+                clock: { now }, combineOwnerPreflight: true)
+            try await withRoomActivation(database: database, roomID: direct.roomID) { token in
+                #expect(try await replayStore.sendBatch([first], token: token, capacityProfile: profile,
+                    identifiers: .init(), now: { now }) == [results[0]])
+                let conflicting = try command(firstID, "different immutable payload")
+                #expect(try await replayStore.sendBatch([conflicting], token: token, capacityProfile: profile,
+                    identifiers: .init(), now: { now }) == [.sendOperation(.fingerprintConflict)])
+            }
+            #expect(try await sql.raw("""
+                SELECT count(*) AS count FROM im_v2.direct_authorization_intents
+                WHERE room_id = \(bind: direct.roomID.uuidValue!) AND sender_user_id = \(bind: senderUUID)
+                """).first(decoding: OperationLockCount.self)?.count == 2)
+
+        }
+    }
+
+    @Test("generic durable send construction preserves separate owner and authorization databases")
+    func durableSendPreflightRequiresExplicitSameOwnerOptIn() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { primary, secondary, sql, _, _ in
+            let now = Date(timeIntervalSince1970: 1_750_000_000)
+            let profile = try forwardImportTestProfile()
+            // The secondary contains a different seeded room. Default preflight
+            // must consult writes' database, rather than silently substituting
+            // the operation store's primary database for current route lookup.
+            let store = PostgresV2MessageSendOperationStore(database: primary,
+                writes: PostgresV2RoomWriteStore(database: secondary, contentReviewMode: .disabled), clock: { now })
+            let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
+                senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "separate owner preflight",
+                limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
+            try await withRoomActivation(database: primary, roomID: roomID) { token in
+                await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
+                    _ = try await store.prepareSendBatch([command], token: token,
+                        deadline: ContinuousClock.now - .seconds(1), now: { now })
+                }
+                #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
+                let results = try await store.sendBatch([command], token: token, capacityProfile: profile,
+                    identifiers: .init(), now: { now })
+                guard let result = results.first, case .sendOperation(.receipt(let receipt)) = result else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                #expect(receipt.outcome == .rejected(.roomNotFound))
+                #expect(receipt.validates(identity: try command.identity, fingerprint: try command.fingerprint))
+            }
+            #expect(try await count("im_v2.messages", on: sql) == 0)
         }
     }
 
@@ -112,7 +185,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
+                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now }, combineOwnerPreflight: true)
             let send = Task {
                 try await store.sendBatch([command], token: lease.token, capacityProfile: profile,
                     identifiers: .init(), now: { now })
@@ -132,26 +205,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let close = Task {
                 try await store.recover(recovery, token: lease.token)
             }
-            var closeCommittedBeforeControlRelease = false
-            for _ in 0..<200 {
-                let row = try? await sql.raw("""
-                    SELECT count(*) AS count FROM im_v2.message_send_operation_receipts
-                    WHERE room_id = \(bind: direct.roomID.uuidValue!) AND actor_user_id = \(bind: senderUUID)
-                      AND operation_id = \(bind: operationID)
-                """).first(decoding: OperationLockCount.self)
-                if row?.count == 1 { closeCommittedBeforeControlRelease = true; break }
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            let closed = try await close.value
             await gate.release()
             try await controlHolder.value
-            let closed = try await close.value
             let sent = try await send.value
             _ = try await activationStore.release(token: lease.token)
             #expect(waitingForControlLock)
-            #expect(closeCommittedBeforeControlRelease)
-            guard case .receipt(let closedReceipt) = closed else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            #expect(closedReceipt.outcome == .closed)
-            #expect(sent == [.sendOperation(.receipt(closedReceipt))])
+            #expect(closed == .unresolved)
+            guard case .sendOperation(.receipt(let receipt)) = sent[0], case .accepted = receipt.outcome else {
+                throw V2MessageOperationValidationError.invalidReceipt
+            }
         }
     }
 

@@ -7,11 +7,7 @@ import SQLKit
 /// Prepares a locked direct-room append and writes policy, messages, then
 /// projections on the connection borrowed from the Store transaction.
 struct V2RoomWriteDirectBatchPath: Sendable {
-    let policyContext: V2RoomWriteDirectPolicyContext
-    let activationScope: V2RoomActivationWriteScope?
     let strangerMessagePolicy: V2StrangerMessagePolicy
-    let roomAdmissionCommandCreditPool: V2RoomAdmissionCommandCreditPool?
-    let shardAdmissionCommandCreditPool: V2ShardAdmissionCommandCreditPool?
 
     /// 在所有受影响的房间、成员、单聊配对与策略行都已完成预检加锁之后，
     /// 完成权威持久追加。
@@ -28,39 +24,67 @@ struct V2RoomWriteDirectBatchPath: Sendable {
     func complete(
         _ prepared: [PreparedDirectRoomLogAppend],
         sql: any SQLDatabase,
-        stageMetrics: V2DirectRoomLogAppendStageMetrics? = nil
+        stageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
+        sendOperationMetrics: V2SendOperationBatchMetrics? = nil,
+        combinedWrite: V2DurableOwnerCombinedWrite? = nil,
+        prevalidatedDirectMemberships: Bool = false
     ) async throws -> [OrderedRoomWriteCommit] {
         guard !prepared.isEmpty else { return [] }
-        let policyStartedAt = ContinuousClock.now
-        do {
-            try await persistPolicyMutations(prepared, sql: sql)
-        } catch {
-            stageMetrics?.record(.policyMutations, duration: policyStartedAt.duration(to: .now))
-            throw error
+        let usesRuntimeState = prepared.allSatisfy { $0.input.runtimeGuard != nil }
+        if !usesRuntimeState {
+            let startedAt = ContinuousClock.now
+            do {
+                try await v2MeasureSendOperationStage(.ownerPolicy, metrics: sendOperationMetrics) {
+                    try await persistPolicyMutations(prepared, sql: sql)
+                }
+            } catch {
+                stageMetrics?.record(.policyMutations, duration: startedAt.duration(to: .now))
+                throw error
+            }
+            stageMetrics?.record(.policyMutations, duration: startedAt.duration(to: .now))
         }
-        stageMetrics?.record(.policyMutations, duration: policyStartedAt.duration(to: .now))
 
         let messageStartedAt = ContinuousClock.now
         do {
-            try await Self.persistMessages(
-                inputs: prepared.enumerated().map { ordinal, append in
-                    append.input.withOrdinal(ordinal)
-                },
-                sql: sql
-            )
+            try await v2MeasureSendOperationStage(.ownerMessagePersistence, metrics: sendOperationMetrics) {
+                try await Self.persistMessages(
+                    inputs: prepared.enumerated().map { ordinal, append in
+                        append.input.withOrdinal(ordinal)
+                    },
+                    sql: sql, operationReceipts: try combinedWrite?.receipts(for: prepared),
+                    prevalidatedDirectMemberships: prevalidatedDirectMemberships
+                )
+            }
         } catch {
             stageMetrics?.record(.messagePersistence, duration: messageStartedAt.duration(to: .now))
             throw error
         }
         stageMetrics?.record(.messagePersistence, duration: messageStartedAt.duration(to: .now))
 
+        // Acquire room/admission write locks before pair mutations, matching the
+        // legacy room->pair order. A failure still rolls back the entire append.
+        if usesRuntimeState {
+            let startedAt = ContinuousClock.now
+            do {
+                try await v2MeasureSendOperationStage(.ownerPolicy, metrics: sendOperationMetrics) {
+                    try await persistPolicyMutations(prepared, sql: sql)
+                }
+            } catch {
+                stageMetrics?.record(.policyMutations, duration: startedAt.duration(to: .now))
+                throw error
+            }
+            stageMetrics?.record(.policyMutations, duration: startedAt.duration(to: .now))
+        }
+
         let projectionStartedAt = ContinuousClock.now
         let projectionChanges: [DirectPostAcceptanceProjectionChanges]
         do {
-            projectionChanges = try await V2RoomWriteDirectProjectionPath.appendBatch(
-                for: prepared,
-                sql: sql
-            )
+            projectionChanges = try await v2MeasureSendOperationStage(.ownerProjection, metrics: sendOperationMetrics) {
+                try await V2RoomWriteDirectProjectionPath.appendBatch(
+                    for: prepared,
+                    sql: sql
+                )
+            }
         } catch {
             stageMetrics?.record(
                 .projectionPersistence,
@@ -75,8 +99,6 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         guard projectionChanges.count == prepared.count else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
-        // 分片额度和可选的房间额度已在开启事务前预扣。
-        // 持有这些房间锁期间，不会再次从池中获取额度或进行第二次预留。
         return zip(prepared, projectionChanges).map { append, changes in
             let reciprocalReplyCacheUpdate = append.advancesReplyMarker
                 ? DirectReplyCacheUpdate(
@@ -113,304 +135,15 @@ struct V2RoomWriteDirectBatchPath: Sendable {
                 cacheKey: append.cacheKey,
                 commit: .init(
                     outcome: append.commit.outcome,
-                    directPolicyCacheUpdate: cacheEntry,
-                    directRoomLogFastAppendCacheUpdate: fastAppendCacheUpdate,
-                    reciprocalDirectReplyCacheUpdate: reciprocalReplyCacheUpdate,
-                    shardAdmissionCommandCredit: append.commit.shardAdmissionCommandCredit,
-                    roomAdmissionCommandCredit: append.commit.roomAdmissionCommandCredit,
-                    roomAdmissionHeatObservation: append.commit.roomAdmissionHeatObservation
+                    directPolicyCacheUpdate: append.publishesPolicyHints ? cacheEntry : nil,
+                    directRoomLogFastAppendCacheUpdate: append.publishesPolicyHints ? fastAppendCacheUpdate : nil,
+                    reciprocalDirectReplyCacheUpdate: append.publishesPolicyHints ? reciprocalReplyCacheUpdate : nil
                 )
             )
         }
     }
 
-    func prepare(
-        _ item: OrderedRoomWriteRequest,
-        preflight: PlainDirectRoomLogBatchPreflightRow,
-        sequenceOffset: Int64 = 0,
-        shardCreditAcquisition: V2ShardAdmissionCommandCreditPool.Acquisition? = nil
-    ) async throws -> DirectRoomLogBatchPreparation {
-        let request = item.request
-        let command = request.command
-        let clientMessageID = try directBatchUUID(command.clientMessageID)
-        guard preflight.ordinal == item.preflightOrdinal else {
-            throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
-        }
-        let room = try preflight.room.advancingSequences(by: sequenceOffset)
-        if let reason = directRoomLogAdmissionMismatchReason(
-            room: room,
-            request: request
-        ) {
-            throw V2AtomicRoomWriteBatchError(reason: reason)
-        }
-        let usesRoomAdmissionCredits = item.usesRoomAdmissionCredits
-        // 与激活绑定的额度必须在此事务前预取。
-        // 实时热路径在 fastPlainDirectRoomLogCommitsIfEligible 中完成预取；
-        // 标准路径则传入 usesRoomAdmissionCredits = false。
-        guard activationScope == nil || !usesRoomAdmissionCredits else {
-            throw V2AtomicRoomWriteBatchError(reason: .roomCreditModeMismatch)
-        }
-        let shard: ShardRow
-        let roomCommandWindowUsed: Int
-        if usesRoomAdmissionCredits {
-            shard = try preflight.shard()
-            guard try policyContext.senderIsActive(preflight.senderIsActive, roomID: item.roomID, senderID: item.senderID),
-                  let role = preflight.actorRole,
-                  V2RoomMembershipRole(rawValue: role) != nil,
-                  preflight.muted == false
-            else {
-                throw V2AtomicRoomWriteBatchError(reason: .authorizationState)
-            }
-            roomCommandWindowUsed = 0
-        } else {
-            let admissionSnapshot = try preflight.admissionSnapshot()
-            let admission = admissionSnapshot.room
-            shard = admissionSnapshot.shard
-            guard admission.shardLeaseID == shard.leaseID,
-                  admission.shardLeaseGeneration == shard.generation,
-                  try policyContext.senderIsActive(admissionSnapshot.senderIsActive, roomID: item.roomID, senderID: item.senderID),
-                  let role = admissionSnapshot.actorRole,
-                  V2RoomMembershipRole(rawValue: role) != nil,
-                  admissionSnapshot.muted == false
-            else {
-                throw V2AtomicRoomWriteBatchError(reason: .authorizationState)
-            }
-            roomCommandWindowUsed = admission.commandWindowUsed
-        }
-        let directContext = try policyContext.directMessageContext(from: preflight.directPolicySnapshot(), roomID: item.roomID, senderID: item.senderID)
-        guard directContext.restriction == nil,
-              directContext.supportAccountID == nil
-        else {
-            throw V2AtomicRoomWriteBatchError(reason: .authorizationState)
-        }
-
-        let shardState = try shard.admissionState()
-        let roomCreditToken: V2RoomAdmissionCommandCreditPool.Token?
-        if let roomAdmissionCommandCreditPool, usesRoomAdmissionCredits {
-            switch try await roomAdmissionCommandCreditPool.acquire(
-                roomID: item.roomID,
-                shardState: shardState,
-                now: request.now
-            ) {
-            case .granted(let token):
-                roomCreditToken = token
-            case .rateLimited:
-                return .outcome(.init(
-                    outcome: .rateLimited(retryAfterSeconds: request.capacityProfile.limits.retryAfterSeconds)
-                ))
-            case .unavailable(let reason):
-                return .outcome(.init(outcome: .unavailable(reason)))
-            }
-        } else {
-            roomCreditToken = nil
-        }
-        let shardStateForReduction: ShardAdmissionState
-        let shardCreditToken: V2ShardAdmissionCommandCreditPool.Token?
-        guard let shardPool = shardAdmissionCommandCreditPool else {
-            throw V2AtomicRoomWriteBatchError(reason: .incompatibleConfiguration)
-        }
-        let acquisition: V2ShardAdmissionCommandCreditPool.Acquisition
-        if let shardCreditAcquisition {
-            acquisition = shardCreditAcquisition
-        } else {
-            acquisition = try await shardPool.acquire(
-                roomShardID: room.roomShardID,
-                capacityProfileID: room.capacityProfileID,
-                shardState: shardState,
-                now: request.now
-            )
-        }
-        switch acquisition {
-        case .granted(let token, let effectiveShardState):
-            shardCreditToken = token
-            shardStateForReduction = effectiveShardState
-        case .rateLimited:
-            if let roomCreditToken, let roomAdmissionCommandCreditPool {
-                await roomAdmissionCommandCreditPool.release(roomCreditToken, now: request.now)
-            }
-            return .outcome(.init(
-                outcome: .rateLimited(retryAfterSeconds: request.capacityProfile.limits.retryAfterSeconds)
-            ))
-        case .unavailable(let reason):
-            if let roomCreditToken, let roomAdmissionCommandCreditPool {
-                await roomAdmissionCommandCreditPool.release(roomCreditToken, now: request.now)
-            }
-            return .outcome(.init(outcome: .unavailable(reason)))
-        }
-        do {
-            let writeSet: PlainDirectRoomLogWriteSet
-            if usesRoomAdmissionCredits {
-                switch try directRoomLogPrechargedCommandBatchReduction(
-                    command: command,
-                    nextRoomSequence: roomWriteNextSequence(room.roomSequence),
-                    shardState: shardStateForReduction,
-                    profile: request.capacityProfile.limits,
-                    identifiers: request.identifiers,
-                    now: request.now
-                ) {
-                case .accepted(let transaction):
-                    writeSet = .init(
-                        acceptedMessage: transaction.acceptedMessage,
-                        eventID: transaction.eventID,
-                        nextShardState: transaction.nextShardState,
-                        roomCommandWindowUsed: roomCommandWindowUsed
-                    )
-                case .rateLimited(let retryAfterSeconds):
-                    if let shardCreditToken, let shardAdmissionCommandCreditPool {
-                        await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
-                    }
-                    if let roomCreditToken, let roomAdmissionCommandCreditPool {
-                        await roomAdmissionCommandCreditPool.release(roomCreditToken, now: request.now)
-                    }
-                    return .outcome(.init(
-                        outcome: .rateLimited(retryAfterSeconds: retryAfterSeconds)
-                    ))
-                case .unavailable(let reason):
-                    if let shardCreditToken, let shardAdmissionCommandCreditPool {
-                        await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
-                    }
-                    if let roomCreditToken, let roomAdmissionCommandCreditPool {
-                        await roomAdmissionCommandCreditPool.release(roomCreditToken, now: request.now)
-                    }
-                    return .outcome(.init(
-                        outcome: .unavailable(reason)
-                    ))
-                }
-            } else {
-                let admission = try preflight.admissionSnapshot().room
-                let roomState = try room.commandState(roomID: command.roomID, admission: admission)
-                let result = try roomLogReduction(
-                    command: command,
-                    roomState: roomState,
-                    shardState: shardStateForReduction,
-                    profile: request.capacityProfile.limits,
-                    identifiers: request.identifiers,
-                    now: request.now
-                )
-                guard case .accepted(let transaction) = result else {
-                    if let shardCreditToken, let shardAdmissionCommandCreditPool {
-                        await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
-                    }
-                    return .outcome(.init(
-                        outcome: result.outcome()
-                    ))
-                }
-                writeSet = .init(
-                    acceptedMessage: transaction.acceptedMessage,
-                    eventID: transaction.eventID,
-                    nextShardState: transaction.nextShardState,
-                    roomCommandWindowUsed: roomCommandWindowUsed
-                )
-            }
-            let timelineMessage = try roomWriteWithTimelineSequence(
-                writeSet.acceptedMessage,
-                timelineSequence: roomWriteNextSequence(room.timelineSequence)
-            )
-            let shardReservation = try roomWriteShardAdmissionReservation(
-                from: shardStateForReduction,
-                to: writeSet.nextShardState
-            )
-            guard shardReservation.commandDelta == 1
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let acceptedMessage = timelineMessage.materialized(
-                mediaPresentations: [],
-
-                sourceEventID: writeSet.eventID,
-                acceptedMembershipRevision: try directBatchUnsigned(room.membershipRevision),
-                directRecipientUserID: .init(uuid: directContext.recipientID)
-            )
-            let input = try plainRoomLogMessageInput(
-                acceptedMessage: timelineMessage,
-                fingerprint: request.command.fingerprint,
-                eventID: writeSet.eventID,
-                commandWindowUsed: writeSet.roomCommandWindowUsed,
-                room: room,
-                roomID: item.roomID,
-                senderID: item.senderID,
-                clientMessageID: clientMessageID,
-                persistsRoomAdmission: !usesRoomAdmissionCredits
-            )
-            return .append(.init(
-                originalIndex: item.originalIndex,
-                request: request,
-                cacheKey: item.cacheKey,
-                roomID: item.roomID,
-                senderID: item.senderID,
-                input: input,
-                now: request.now,
-                directContext: directContext,
-                policyCacheEntry: try preflight.directPolicyCacheEntry(),
-                advancesReplyMarker: !directContext.senderHasReplied,
-                fastAppendRoomShardID: room.roomShardID,
-                fastAppendCapacityProfileID: room.capacityProfileID,
-                fastAppendShardState: writeSet.nextShardState,
-                commit: .init(
-                    outcome: .accepted(acceptedMessage),
-                    directPolicyCacheUpdate: nil,
-                    shardAdmissionCommandCredit: shardCreditToken,
-                    roomAdmissionCommandCredit: roomCreditToken,
-                    roomAdmissionHeatObservation: usesRoomAdmissionCredits ? nil : item.roomID
-                )
-            ))
-        } catch {
-            if let shardCreditToken, let shardAdmissionCommandCreditPool {
-                await shardAdmissionCommandCreditPool.release(shardCreditToken, now: request.now)
-            }
-            if let roomCreditToken, let roomAdmissionCommandCreditPool {
-                await roomAdmissionCommandCreditPool.release(roomCreditToken, now: request.now)
-            }
-            throw error
-        }
-    }
-
-    private func directRoomLogAdmissionMismatchReason(
-        room: RoomRow,
-        request: V2RoomWriteRequest
-    ) -> V2AtomicRoomWriteBatchError.Reason? {
-        guard room.kind == "direct" else { return .roomKindMismatch }
-        guard room.capacityProfileID == request.capacityProfile.id else {
-            return .capacityProfileMismatch
-        }
-        guard room.frozenAt == nil else { return .roomFrozen }
-        return nil
-    }
-
-    /// 同房间批次只有在所有单聊配对生产者标记都已建立、
-    /// 且房间准入已经由持久额度表示之后才是安全的。
-    ///
-    /// 这使「每房间一行」的集合追加免于触发陌生人配额、首次回复、
-    /// 资料/能力或房间准入等尚未在此建模逐命令顺序的可变效果。
-    ///
-    /// 该批次仍会锁定权威配对、成员、策略版本与房间行。
-    /// 这是一种收窄的有序追加优化，而不是基于缓存的授权捷径。
-    ///
-    /// - Parameter orderedRequests: 本批有序写入请求。
-    /// - Throws: 不满足同房间批次安全前提时抛出。
-    private func assertSameRoomBatchSafety(
-        orderedRequests: [OrderedRoomWriteRequest],
-        contexts: [PlainDirectRoomLogBatchPreflightRow]
-    ) throws {
-        guard orderedRequests.count == contexts.count else {
-            throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch)
-        }
-        let indicesByRoom = Dictionary(grouping: orderedRequests.indices) {
-            orderedRequests[$0].roomID
-        }
-        for indices in indicesByRoom.values where indices.count > 1 {
-            guard indices.allSatisfy({ orderedRequests[$0].usesRoomAdmissionCredits }),
-                  try indices.allSatisfy({
-                      let policy = try contexts[$0].directPolicySnapshot()
-                      return policy.senderHasReplied
-                          && policy.senderProfileVisibleToRecipient
-                          && policy.senderCanSend == true
-                  })
-            else {
-                throw V2AtomicRoomWriteBatchError(reason: .authorizationState)
-            }
-        }
-    }
-
-    private func plainRoomLogMessageInput(
+    func plainRoomLogMessageInput(
         acceptedMessage: V2AcceptedMessageDraft,
         fingerprint: V2SendMessageFingerprint,
         eventID: EventID,
@@ -443,7 +176,6 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         )
     }
 
-
     /// 各准入路径已持有房间锁。独立于用户级投递工作检查固定的私聊关系。
     static func assertDirectMemberships(roomIDs: [UUID], sql: any SQLDatabase) async throws {
         let roomsJSON = try roomWriteJSON(Array(Set(roomIDs)).map { $0.uuidString })
@@ -464,7 +196,6 @@ struct V2RoomWriteDirectBatchPath: Sendable {
             LIMIT 1
             """).first() == nil else { throw V2RoomWriteStoreError.corruptPersistenceState }
     }
-
 
     /// 为一个房间、成员、配对与用户策略行均已由权威预检锁定的批次，
     /// 应用仅限单聊的可变策略效果。
@@ -500,117 +231,31 @@ struct V2RoomWriteDirectBatchPath: Sendable {
     /// - Throws: 影响行数不符或写入失败时抛出。
     static func persistMessages(
         inputs: [PlainRoomLogMessageInput],
-        sql: any SQLDatabase
+        sql: any SQLDatabase,
+        operationReceipts: [V2DurableSendBatchPermanentReceipt]? = nil,
+        prevalidatedDirectMemberships: Bool = false
     ) async throws {
         guard !inputs.isEmpty,
               Set(inputs.map(\.messageID)).count == inputs.count,
               Set(inputs.map(\.eventID)).count == inputs.count,
               inputs.enumerated().allSatisfy({ $0.offset == $0.element.ordinal })
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        try await assertDirectMemberships(roomIDs: inputs.map(\.roomID), sql: sql)
-        try await PlainDirectRoomLogBatchWritePath.persist(inputs: inputs, sql: sql)
+        if !prevalidatedDirectMemberships {
+            try await assertDirectMemberships(roomIDs: inputs.map(\.roomID), sql: sql)
+        }
+        try await PlainDirectRoomLogBatchWritePath.persist(inputs: inputs, sql: sql, operationReceipts: operationReceipts)
     }
 
 }
-
-enum DirectRoomLogBatchPreparation {
-    case append(PreparedDirectRoomLogAppend)
-    case outcome(RoomWriteCommit)
-}
-
-/// 普通单聊房间日志快速路径使用的最小已接受事件材料。
-///
-/// 对预扣费房间，持久房间额度由独立的信用池维护；其余请求仍写入房间准入行。
-private struct PlainDirectRoomLogWriteSet {
-    let acceptedMessage: V2AcceptedMessageDraft
-    let eventID: EventID
-    let nextShardState: ShardAdmissionState
-    let roomCommandWindowUsed: Int
-}
-
 
 private func directBatchUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let value = value.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return value
 }
 
-private func directBatchUnsigned(_ value: Int64) throws -> UInt64 {
-    guard value >= 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return UInt64(value)
-}
+
 
 private func directBatchSigned(_ value: UInt64) throws -> Int64 {
     guard value <= UInt64(Int64.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return Int64(value)
-}
-
-/// 单聊房间日志投递的受众固定为两人，且不会创建扇出计划或未完成工作预留。
-///
-/// 其命令预算已由分片额度池持久预扣；
-/// 在选用旧版每房间策略时，也由房间额度池预扣。
-/// 因此这次归并只推进批量规范消息插入所需的房间序号与分片快照。
-///
-/// 授权刻意留在此辅助函数之外，
-/// 并在归并之前由 `PostgresV2RoomWriteStore.accept` 依据已锁定的房间、成员、
-/// 单聊配对、策略版本与陌生人配额状态持续校验。
-///
-/// - Parameters:
-///   - command: 发送消息命令。
-///   - roomState: 房间命令状态。
-///   - admission: 分片准入状态。
-///   - now: 服务端统一授时时刻。
-/// - Returns: 归并结果。
-/// - Throws: 状态非法或序号溢出时抛出。
-private func directRoomLogPrechargedCommandBatchReduction(
-    command: V2SendMessageCommand,
-    nextRoomSequence: UInt64,
-    shardState: ShardAdmissionState,
-    profile: RoomCapacityProfile,
-    identifiers: V2AcceptanceIdentifiers,
-    now: Date
-) throws -> DirectRoomLogPrechargedCommandReductionResult {
-    guard let lease = shardState.lease else { return .unavailable(.missingShardLease) }
-    guard lease.isValid(at: now) else { return .unavailable(.expiredShardLease) }
-    guard lease.commandWindow.canReserve(1) else {
-        return .rateLimited(retryAfterSeconds: profile.retryAfterSeconds)
-    }
-
-    let nextLease = try ShardAdmissionLease(
-        id: lease.id,
-        generation: lease.generation,
-        validUntil: lease.validUntil,
-        commandWindow: lease.commandWindow.reserving(1))
-    let nextShard = try ShardAdmissionState(
-        lease: nextLease)
-    let accepted = V2AcceptedMessageDraft(
-        messageID: identifiers.messageID,
-        roomID: command.roomID,
-        roomSequence: nextRoomSequence,
-        senderUserID: command.senderUserID,
-        clientMessageID: command.clientMessageID,
-        text: command.text,
-        media: command.media,
-        mentions: command.mentions,
-        entities: command.entities,
-        replyTo: command.replyTo,
-        createdAt: now
-    )
-    return .accepted(.init(
-        acceptedMessage: accepted,
-        eventID: identifiers.eventID,
-        nextShardState: nextShard
-    ))
-}
-
-/// 已预扣费的热路径由房间信用池持有准入计数，事务只需保留消息与分片结果。
-private enum DirectRoomLogPrechargedCommandReductionResult {
-    case accepted(DirectRoomLogPrechargedCommandWriteSet)
-    case rateLimited(retryAfterSeconds: Int)
-    case unavailable(V2CommandAdmissionUnavailableReason)
-}
-
-private struct DirectRoomLogPrechargedCommandWriteSet {
-    let acceptedMessage: V2AcceptedMessageDraft
-    let eventID: EventID
-    let nextShardState: ShardAdmissionState
 }

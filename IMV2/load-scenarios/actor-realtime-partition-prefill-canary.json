@@ -1,0 +1,30 @@
+{
+  "name": "actor-realtime-partition-prefill-canary",
+  "seed": 20260828,
+  "roomWarmupTimeoutSeconds": 120,
+  "completionDrainSeconds": 30,
+  "postDrainHoldSeconds": 10,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 50,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 4,
+  "personas": [
+    {
+      "name": "prefill_sender",
+      "share": 1.0,
+      "sendWeight": 1.0,
+      "roomLogReadWeight": 1.0,
+      "syncPullWeight": 1.0
+    }
+  ],
+  "phases": [
+    {
+      "name": "partition-prefill",
+      "durationSeconds": 60,
+      "messagesPerSecond": 120,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0
+    }
+  ]
+}

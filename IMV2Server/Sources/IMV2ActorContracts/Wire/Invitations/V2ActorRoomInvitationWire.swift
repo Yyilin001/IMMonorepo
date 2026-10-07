@@ -25,15 +25,6 @@ public struct V2ActorCreateGroupInviteWire: Codable, Equatable, Sendable {
         self.lifetime = lifetime; self.maximumApprovedUses = maximumApprovedUses
     }
 }
-public struct V2ActorRevokeGroupInviteWire: Codable, Equatable, Sendable {
-    public let roomID: RoomID
-    public let actorUserID: UserID
-    public let operationID: GroupInviteOperationID
-    public let inviteID: GroupInviteID
-    public init(roomID: RoomID, actorUserID: UserID, operationID: GroupInviteOperationID, inviteID: GroupInviteID) {
-        self.roomID = roomID; self.actorUserID = actorUserID; self.operationID = operationID; self.inviteID = inviteID
-    }
-}
 public struct V2ActorDecideGroupJoinWire: Codable, Equatable, Sendable {
     public let roomID: RoomID
     public let requestID: GroupJoinRequestID
@@ -43,14 +34,6 @@ public struct V2ActorDecideGroupJoinWire: Codable, Equatable, Sendable {
     public init(roomID: RoomID, requestID: GroupJoinRequestID, reviewerUserID: UserID, operationID: GroupJoinDecisionOperationID, decision: V2GroupJoinDecision) {
         self.roomID = roomID; self.requestID = requestID; self.reviewerUserID = reviewerUserID
         self.operationID = operationID; self.decision = decision
-    }
-}
-public struct V2ActorCancelGroupJoinWire: Codable, Equatable, Sendable {
-    public let roomID: RoomID
-    public let requestID: GroupJoinRequestID
-    public let applicantUserID: UserID
-    public init(roomID: RoomID, requestID: GroupJoinRequestID, applicantUserID: UserID) {
-        self.roomID = roomID; self.requestID = requestID; self.applicantUserID = applicantUserID
     }
 }
 public struct V2ActorActiveGroupInvitesQueryWire: Codable, Equatable, Sendable {
@@ -121,34 +104,6 @@ public struct V2ActorSubmitGroupJoinWire: Codable, Equatable, Sendable {
     public init(applicantUserID: UserID, operationID: GroupJoinRequestOperationID, secret: V2ActorInviteSecretWire, note: String?) {
         self.applicantUserID = applicantUserID; self.operationID = operationID; self.secret = secret; self.note = note
     }
-}
-public enum V2ActorInvitationCoordinatorQuery: Codable, Equatable, Sendable {
-    case previewBySecret(V2ActorInvitePreviewBySecretWire)
-    case resolveDigest(V2ActorInviteTokenDigestWire)
-    case readyInvites(V2ActorReadyInvitesQueryWire)
-    public var retryPolicy: V2RoomReplayPolicy { .readOnly }
-}
-public enum V2ActorInvitationCoordinatorCommand: Codable, Equatable, Sendable {
-    case submitBySecret(V2ActorSubmitGroupJoinWire)
-    case prepareCreation(V2ActorInviteCreatePersistenceWire)
-    case finalizeCreation(V2ActorInviteCreationIntentWire)
-    public var stableOperationIdentity: V2ActorInvitationCoordinatorOperationIdentity {
-        switch self {
-        case .submitBySecret(let v): .submission(v.operationID)
-        case .prepareCreation(let v): .invite(v.operationID)
-        case .finalizeCreation(let v): .invite(v.request.operationID)
-        }
-    }
-    public var retryPolicy: V2RoomReplayPolicy { .durableIdempotent }
-}
-public enum V2ActorInvitationCoordinatorOperationIdentity: Equatable, Sendable {
-    case submission(GroupJoinRequestOperationID)
-    case invite(GroupInviteOperationID)
-}
-public struct V2ActorReadyInvitesQueryWire: Codable, Equatable, Sendable {
-    public let roomID: RoomID
-    public let inviteIDs: [GroupInviteID]
-    public init(roomID: RoomID, inviteIDs: [GroupInviteID]) { self.roomID = roomID; self.inviteIDs = inviteIDs }
 }
 
 public struct V2ActorInvitationPublicIdentityWire: Codable, Equatable, Sendable {

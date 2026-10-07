@@ -24,8 +24,17 @@ public struct V2RoomActivationExecutor<Request: Decodable & Sendable, Response: 
 
 public struct V2RoomActivationFactory<Request: Decodable & Sendable, Response: Sendable>: Sendable {
     public let make: @Sendable (V2RoomActivationToken) -> V2RoomActivationExecutor<Request, Response>
+    public let recoveryBatch: (@Sendable ([V2RoomRecoveryBatchCallItem]) async -> V2RoomTransactionCompletion<[V2RoomRecoveryBatchCallOutcome]>)?
+    /// A pure room-log pull uses a lifecycle pin and the original command byte
+    /// budget, without entering the write lane. The Host restricts this callback
+    /// to the concrete `.roomLog(.pull)` request; all mutations retain the lane.
+    public let pureRoomLogPull: (@Sendable (V2RoomActivationToken, Request, ContinuousClock.Instant) async -> V2RoomTransactionCompletion<Response>)?
 
-    public init(make: @escaping @Sendable (V2RoomActivationToken) -> V2RoomActivationExecutor<Request, Response>) {
+    public init(recoveryBatch: (@Sendable ([V2RoomRecoveryBatchCallItem]) async -> V2RoomTransactionCompletion<[V2RoomRecoveryBatchCallOutcome]>)? = nil,
+                pureRoomLogPull: (@Sendable (V2RoomActivationToken, Request, ContinuousClock.Instant) async -> V2RoomTransactionCompletion<Response>)? = nil,
+                make: @escaping @Sendable (V2RoomActivationToken) -> V2RoomActivationExecutor<Request, Response>) {
         self.make = make
+        self.recoveryBatch = recoveryBatch
+        self.pureRoomLogPull = pureRoomLogPull
     }
 }

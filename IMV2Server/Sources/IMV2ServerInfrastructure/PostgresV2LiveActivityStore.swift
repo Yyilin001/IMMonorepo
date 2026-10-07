@@ -17,6 +17,7 @@ public enum V2LiveActivityConfigurationError: Error, Equatable, Sendable {
 /// 使同一用户/设备的竞争不会形成锁序环。
 public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     private let database: any Database
+    private let renewalDatabase: any Database
     private let onlineLease: TimeInterval
 
     /// 创建在线状态存储。
@@ -29,7 +30,11 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         guard onlineLease > 0, Int64(exactly: (onlineLease * 1_000_000).rounded(.up)) != nil else {
             throw V2LiveActivityConfigurationError.invalidOnlineLease
         }
-        self.database = database
+        let observed = (database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.presence) ?? database
+        self.database = observed
+        // Same physical entries and loan gate; only established lease renewal
+        // may consume reserved renewal capacity. Admission and reads stay ordinary.
+        self.renewalDatabase = (observed as? V2EventLoopBalancedDatabase)?.usingLoanClass(.renewal) ?? observed
         self.onlineLease = onlineLease
     }
 
@@ -95,6 +100,78 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             guard v2PostgresTimestampCanEncode(responseExpiry) else { throw V2LiveActivityStoreError.corruptPersistenceState }
             return try .init(roomID: roomID, targetUserID: .init(peer.userID.uuidString), isOnline: preference && expiry != nil, expiresAt: responseExpiry)
         }
+    }
+
+    /// 单一 SQL 快照读取完整观察键；授权拒绝仅影响对应键。
+    public func presenceBatch(_ requests: [V2PresenceObservationRequest], now: Date) async throws
+        -> [V2PresenceObservationRequest: V2PresenceObservationOutcome] {
+        guard requests.count <= 128 else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        let unique = Array(Set(requests))
+        guard unique.count <= 128, v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        guard !unique.isEmpty else { return [:] }
+        struct Input: Encodable { let ordinal: Int; let room: UUID; let viewer: UUID; let target: UUID }
+        let inputs = try unique.enumerated().map { index, request in
+            Input(ordinal: index, room: try liveActivityUUID(request.roomID),
+                  viewer: try liveActivityUUID(request.viewerUserID), target: try liveActivityUUID(request.targetUserID))
+        }
+        let json = String(decoding: try JSONEncoder().encode(inputs), as: UTF8.self)
+        guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        let rows = try await sql.raw("""
+            WITH requested AS MATERIALIZED (
+                SELECT * FROM jsonb_to_recordset(\(bind: json)::jsonb)
+                    AS i(ordinal integer, room uuid, viewer uuid, target uuid)
+            ), observations AS (
+                SELECT i.*, r.room_id IS NOT NULL AS room_exists,
+                    CASE WHEN p.lower_user_id = i.viewer THEN p.higher_user_id
+                         WHEN p.higher_user_id = i.viewer THEN p.lower_user_id END AS peer,
+                    EXISTS (SELECT 1 FROM im_v2.room_memberships m WHERE m.room_id=i.room
+                        AND m.user_id=i.viewer AND m.joined_revision <= r.membership_revision
+                        AND (m.left_revision IS NULL OR m.left_revision > r.membership_revision)) AS member,
+                    EXISTS (SELECT 1 FROM im_v2.user_blocks b WHERE
+                        (b.blocker_user_id=i.viewer AND b.blocked_user_id=i.target) OR
+                        (b.blocker_user_id=i.target AND b.blocked_user_id=i.viewer)) AS blocked,
+                    COALESCE(pref.allows_online_presence, true) AS allowed,
+                    live.expires_at
+                FROM requested i LEFT JOIN im_v2.rooms r ON r.room_id=i.room
+                LEFT JOIN im_v2.direct_room_pairs p ON p.room_id=i.room
+                LEFT JOIN im_v2.user_live_activity_preferences pref ON pref.user_id=i.target
+                LEFT JOIN LATERAL (SELECT MAX(l.expires_at) AS expires_at
+                    FROM im_v2.user_live_presence_leases l WHERE l.user_id=i.target
+                    AND NOT l.publication_suppressed AND l.expires_at > \(bind: now)) live ON true
+            )
+            SELECT ordinal, CASE WHEN peer IS NULL THEN 'notDirectRoom'
+                WHEN NOT room_exists THEN 'roomNotFound'
+                WHEN NOT member OR peer <> target THEN 'actorNotMember'
+                WHEN blocked THEN 'interactionBlocked' END AS denial,
+                allowed AND expires_at IS NOT NULL AS online,
+                CASE WHEN peer IS NULL OR NOT room_exists OR NOT member OR peer <> target OR blocked OR NOT allowed
+                    THEN \(bind: now) ELSE COALESCE(expires_at, \(bind: now)) END AS response_expiry
+            FROM observations ORDER BY ordinal
+            """).all(decoding: LiveActivityPresenceBatchRow.self)
+        guard rows.count == unique.count else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        var result: [V2PresenceObservationRequest: V2PresenceObservationOutcome] = [:]
+        for row in rows {
+            guard unique.indices.contains(row.ordinal), result[unique[row.ordinal]] == nil else {
+                throw V2LiveActivityStoreError.corruptPersistenceState
+            }
+            let request = unique[row.ordinal]
+            if let denial = row.denial {
+                let value: V2PresenceObservationDenial
+                switch denial {
+                case "roomNotFound": value = .roomNotFound
+                case "notDirectRoom": value = .notDirectRoom
+                case "actorNotMember": value = .actorNotMember
+                case "interactionBlocked": value = .interactionBlocked
+                default: throw V2LiveActivityStoreError.corruptPersistenceState
+                }
+                result[request] = .denied(value)
+            } else {
+                guard v2PostgresTimestampCanEncode(row.responseExpiry) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+                result[request] = .observed(.init(roomID: request.roomID, targetUserID: request.targetUserID,
+                    isOnline: row.online, expiresAt: row.responseExpiry))
+            }
+        }
+        return result
     }
 
     /// 校验发起者可以在该房间内发送输入状态。
@@ -176,14 +253,21 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 租约接纳结果。
     /// - Throws: 租约时间无法编码或持久化状态损坏时抛出。
-    public func admitConnection(
+    public func admitConnection(identity: V2AuthenticatedConnection, connectionID: UUID,
+        publicationSuppressed: Bool, policy: V2AuthenticatedConnectionAdmissionPolicy, now: Date)
+        async throws -> V2AuthenticatedConnectionLeaseOutcome {
+        try await admitConnectionRefresh(identity: identity, connectionID: connectionID,
+            publicationSuppressed: publicationSuppressed, policy: policy, now: now).outcome
+    }
+
+    public func admitConnectionRefresh(
         identity: V2AuthenticatedConnection,
         connectionID: UUID,
         publicationSuppressed: Bool,
         policy: V2AuthenticatedConnectionAdmissionPolicy,
         now: Date
-    ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
-        let expiry = try validatedLeaseExpiry(now: now)
+    ) async throws -> V2LivePresenceLeaseRefresh {
+        _ = try validatedLeaseExpiry(now: now)
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2LiveActivityStoreError.corruptPersistenceState
@@ -193,6 +277,9 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             // 同一用户的所有竞争者都先取得同一把锁；
             // 设备锁再串行化更窄的限制，避免用户锁与设备锁形成顺序循环。
             try await lockConnectionIdentity(user: user, device: device, sql: sql)
+            let now = try await liveActivityDatabaseClock(sql)
+            let expiry = try validatedLeaseExpiry(now: now)
+
             // `auth_devices.device_id` 全局唯一，租约又有复合所有者外键，
             // 因此此设备只能属于 `user`。查询条件只限定用户，
             // 使 PostgreSQL 可使用既有的 `(user_id, expires_at)` 索引。
@@ -212,7 +299,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             else { throw V2LiveActivityStoreError.corruptPersistenceState }
             guard counts.deviceCount < policy.maximumConnectionsPerDevice,
                   counts.userCount < policy.maximumConnectionsPerUser
-            else { return .rejected }
+            else { return .init(outcome: .rejected, allowsOnlinePresence: false) }
             guard let admitted = try await sql.raw("""
                 INSERT INTO im_v2.user_live_presence_leases
                     (user_id, device_id, connection_id, expires_at, updated_at, publication_suppressed)
@@ -227,7 +314,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
                 RETURNING expires_at
                 """).first(decoding: LiveActivityExpiryRow.self), let acceptedExpiry = admitted.expiresAt
             else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            return .accepted(expiresAt: acceptedExpiry)
+            let preference = try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id=\(bind:user)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
+            return try liveActivityConfirmedRefresh(expiry: acceptedExpiry, databaseNow: now, allows: preference)
         }
     }
 
@@ -242,113 +330,81 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     ///   - now: 服务端统一授时时刻。
     /// - Returns: 租约续租结果。
     /// - Throws: 租约时间无法编码或持久化状态损坏时抛出。
-    public func renewConnection(
-        identity: V2AuthenticatedConnection,
-        connectionID: UUID,
-        now: Date
-    ) async throws -> V2AuthenticatedConnectionLeaseOutcome {
-        let expiry = try validatedLeaseExpiry(now: now)
-        guard let sql = database as? any SQLDatabase else {
-            throw V2LiveActivityStoreError.corruptPersistenceState
-        }
-        let user = try liveActivityUUID(identity.userID)
-        let device = try liveActivityUUID(identity.deviceID)
-        let renewed = try await sql.raw("""
-            UPDATE im_v2.user_live_presence_leases
-            SET expires_at = GREATEST(expires_at, \(bind: expiry)), updated_at = GREATEST(updated_at, \(bind: now))
-            WHERE connection_id = \(bind: connectionID)
-              AND user_id = \(bind: user)
-              AND device_id = \(bind: device)
-              AND expires_at > \(bind: now)
-            RETURNING expires_at
-            """).first(decoding: LiveActivityExpiryRow.self)
-        guard let renewed else { return .rejected }
-        guard let acceptedExpiry = renewed.expiresAt else { throw V2LiveActivityStoreError.corruptPersistenceState }
-        return .accepted(expiresAt: acceptedExpiry)
+    public func renewConnection(identity: V2AuthenticatedConnection, connectionID: UUID, now: Date)
+        async throws -> V2AuthenticatedConnectionLeaseOutcome {
+        _ = try validatedLeaseExpiry(now: now)
+        let result = try await renewConnections([.init(identity: identity, connectionID: connectionID, now: now)])
+        guard let value = result[connectionID] else { throw V2LiveActivityStoreError.corruptPersistenceState }
+        return value.outcome
     }
 
     /// 批量续租多条连接租约。
     ///
-    /// 同一连接在一个物理批次中最多续租一次；若调用方竞态地提交了重复心跳，以最新观测时间为准。
+    /// 同一连接在一个物理批次中最多续租一次；写入时刻与过期判定均取排序行锁后的数据库时钟。
     /// 被拒绝的连接会保留在结果中，成功续租的结果会覆盖同名拒绝项。
     ///
     /// - Parameter requests: 本批续租请求。
     /// - Returns: 按连接标识索引的续租结果。
     /// - Throws: 持久化状态损坏或写入失败时抛出。
-    public func renewConnections(
-        _ requests: [V2LivePresenceLeaseRenewalRequest]
-    ) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+    public func renewConnections(_ requests: [V2LivePresenceLeaseRenewalRequest]) async throws
+        -> [UUID: V2LivePresenceLeaseRefresh] {
+        guard requests.count <= 256 else { throw V2LiveActivityStoreError.corruptPersistenceState }
         guard !requests.isEmpty else { return [:] }
-        guard let sql = database as? any SQLDatabase else {
-            throw V2LiveActivityStoreError.corruptPersistenceState
-        }
-
-        // 同一连接在一个物理批次中最多续租一次。
-        // 若调用方并发发出重复心跳，以最新观测时间为准。
         var unique: [UUID: V2LivePresenceLeaseRenewalRequest] = [:]
-        unique.reserveCapacity(requests.count)
         var rejected: [UUID: V2LivePresenceLeaseRefresh] = [:]
         for request in requests {
             guard (try? validatedLeaseExpiry(now: request.now)) != nil else {
-                rejected[request.connectionID] = .init(outcome: .rejected, allowsOnlinePresence: false)
-                continue
+                rejected[request.connectionID] = .init(outcome: .rejected, allowsOnlinePresence: false); continue
             }
-            if let previous = unique[request.connectionID], previous.now > request.now { continue }
+            if let old = unique[request.connectionID] {
+                guard old.identity == request.identity else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            }
             unique[request.connectionID] = request
         }
         guard !unique.isEmpty else { return rejected }
-        let rows = try unique.values.map { request in
-            LiveActivityLeaseRenewalInput(
-                connectionID: request.connectionID,
-                userID: try liveActivityUUID(request.identity.userID),
-                deviceID: try liveActivityUUID(request.identity.deviceID),
-                expiresAt: request.now.addingTimeInterval(onlineLease),
-                updatedAt: request.now
-            )
+        let ordered = unique.values.sorted { $0.connectionID.uuidString < $1.connectionID.uuidString }
+        let users = try ordered.map { try liveActivityUUID($0.identity.userID) }
+        let devices = try ordered.map { try liveActivityUUID($0.identity.deviceID) }
+        let ids = ordered.map(\.connectionID)
+        let refreshed = try await renewalDatabase.transaction { transaction in
+            guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            // Fully consume sorted locks before a new statement samples time.
+            // Missing rows are rejected, never recreated by a heartbeat.
+            _ = try await sql.raw("SELECT connection_id FROM im_v2.user_live_presence_leases WHERE connection_id=ANY(\(bind:ids)::uuid[]) ORDER BY connection_id FOR UPDATE").all(decoding: LiveActivityConnectionIDRow.self)
+            let now = try await liveActivityDatabaseClock(sql)
+            let expiry = try validatedLeaseExpiry(now: now)
+            let rows = try await sql.raw("""
+                WITH requested AS MATERIALIZED (
+                    SELECT * FROM unnest(\(bind:ids)::uuid[], \(bind:users)::uuid[], \(bind:devices)::uuid[])
+                        AS input(connection_id,user_id,device_id)
+                ), renewed AS (
+                    UPDATE im_v2.user_live_presence_leases lease
+                    SET expires_at=GREATEST(lease.expires_at,\(bind:expiry)), updated_at=GREATEST(lease.updated_at,\(bind:now))
+                    FROM requested WHERE lease.connection_id=requested.connection_id
+                        AND lease.user_id=requested.user_id AND lease.device_id=requested.device_id
+                        AND lease.expires_at > \(bind:now)
+                    RETURNING lease.connection_id,lease.expires_at
+                )
+                SELECT requested.connection_id,renewed.expires_at,
+                    COALESCE(preference.allows_online_presence,TRUE) AS allows_online_presence
+                FROM requested LEFT JOIN renewed USING(connection_id)
+                LEFT JOIN im_v2.user_live_activity_preferences preference ON preference.user_id=requested.user_id
+                """).all(decoding: LiveActivityLeaseRefreshRow.self)
+            guard rows.count == ids.count, Set(rows.map(\.connectionID)) == Set(ids) else {
+                throw V2LiveActivityStoreError.corruptPersistenceState
+            }
+            var result: [UUID: V2LivePresenceLeaseRefresh] = [:]
+            for row in rows {
+                if let expiry = row.expiresAt {
+                    result[row.connectionID] = try liveActivityConfirmedRefresh(expiry: expiry, databaseNow: now,
+                        allows: row.allowsOnlinePresence)
+                } else {
+                    result[row.connectionID] = .init(outcome: .rejected, allowsOnlinePresence: row.allowsOnlinePresence)
+                }
+            }
+            return result
         }
-        // 原生 Date 数组与逐条续租使用相同的微秒编码。
-        // 通过 to_timestamp 转换浮点 Unix 秒，可能舍入越过租约的严格过期边界。
-        let query: SQLQueryString = """
-            WITH requested AS MATERIALIZED (
-                SELECT *
-                FROM unnest(
-                    \(bind: rows.map(\.connectionID))::uuid[],
-                    \(bind: rows.map(\.userID))::uuid[],
-                    \(bind: rows.map(\.deviceID))::uuid[],
-                    \(bind: rows.map(\.expiresAt))::timestamptz[],
-                    \(bind: rows.map(\.updatedAt))::timestamptz[]
-                ) AS input(connection_id, user_id, device_id, expires_at, updated_at)
-            ), renewed AS (
-                UPDATE im_v2.user_live_presence_leases AS lease
-                SET expires_at = GREATEST(lease.expires_at, requested.expires_at),
-                    updated_at = GREATEST(lease.updated_at, requested.updated_at)
-                FROM requested
-                WHERE lease.connection_id = requested.connection_id
-                  AND lease.user_id = requested.user_id
-                  AND lease.device_id = requested.device_id
-                  AND lease.expires_at > requested.updated_at
-                RETURNING lease.connection_id, lease.expires_at
-            )
-            SELECT requested.connection_id,
-                   renewed.expires_at,
-                   COALESCE(preference.allows_online_presence, TRUE) AS allows_online_presence
-            FROM requested
-            LEFT JOIN renewed USING (connection_id)
-            LEFT JOIN im_v2.user_live_activity_preferences AS preference
-              ON preference.user_id = requested.user_id
-            """
-
-        let resultRows = try await sql.raw(query).all(decoding: LiveActivityLeaseRefreshRow.self)
-        let refreshed: [UUID: V2LivePresenceLeaseRefresh] = Dictionary(uniqueKeysWithValues: resultRows.map { row in
-            let outcome: V2AuthenticatedConnectionLeaseOutcome = row.expiresAt.map {
-                .accepted(expiresAt: $0)
-            } ?? .rejected
-            return (
-                row.connectionID,
-                .init(outcome: outcome, allowsOnlinePresence: row.allowsOnlinePresence)
-            )
-        })
-        return rejected.merging(refreshed) { _, valid in valid }
+        return rejected.merging(refreshed) { _, actual in actual }
     }
 
     /// 移除一条连接租约，并报告该用户是否仍有其他活跃租约。
@@ -446,13 +502,6 @@ private struct LiveActivityLeaseRefreshRow: Decodable {
         case allowsOnlinePresence = "allows_online_presence"
     }
 }
-private struct LiveActivityLeaseRenewalInput {
-    let connectionID: UUID
-    let userID: UUID
-    let deviceID: UUID
-    let expiresAt: Date
-    let updatedAt: Date
-}
 private struct LiveActivityOnlinePreferenceRow: Decodable { let allowsOnlinePresence: Bool; enum CodingKeys: String, CodingKey { case allowsOnlinePresence = "allows_online_presence" } }
 private struct LiveActivityTypingPreferenceRow: Decodable { let allowsTypingIndicators: Bool; enum CodingKeys: String, CodingKey { case allowsTypingIndicators = "allows_typing_indicators" } }
 private struct LiveActivityUserRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "user_id" } }
@@ -473,3 +522,25 @@ private struct LiveActivityConnectionIDRow: Decodable {
     enum CodingKeys: String, CodingKey { case connectionID = "connection_id" }
 }
 private func liveActivityUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: id.rawValue) else { throw V2LiveActivityStoreError.corruptPersistenceState }; return value }
+
+private struct LiveActivityPresenceBatchRow: Decodable {
+    let ordinal: Int
+    let denial: String?
+    let online: Bool
+    let responseExpiry: Date
+    enum CodingKeys: String, CodingKey { case ordinal, denial, online; case responseExpiry = "response_expiry" }
+}
+
+private struct LiveActivityDatabaseClockRow: Decodable { let now: Date }
+private func liveActivityDatabaseClock(_ sql: any SQLDatabase) async throws -> Date {
+    guard let row = try await sql.raw("SELECT clock_timestamp() AS now").first(decoding: LiveActivityDatabaseClockRow.self),
+          v2PostgresTimestampCanEncode(row.now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
+    return row.now
+}
+private func liveActivityConfirmedRefresh(expiry: Date, databaseNow: Date, allows: Bool) throws -> V2LivePresenceLeaseRefresh {
+    let remaining = expiry.timeIntervalSince(databaseNow)
+    guard v2PostgresTimestampCanEncode(expiry), remaining.isFinite, remaining > 0 else {
+        throw V2LiveActivityStoreError.corruptPersistenceState
+    }
+    return .init(outcome: .accepted(expiresAt: expiry), allowsOnlinePresence: allows, remainingLeaseSeconds: remaining)
+}

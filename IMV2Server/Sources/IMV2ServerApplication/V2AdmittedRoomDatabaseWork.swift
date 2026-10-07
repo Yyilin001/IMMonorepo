@@ -8,12 +8,13 @@ package func v2WithAdmittedRoomDatabaseWork<Value: Sendable>(
     _ admission: V2DatabaseWorkAdmissionController?,
     workClass: V2DatabaseWorkClass,
     callerDeadline: ContinuousClock.Instant,
+    interactiveReadPurpose: V2InteractiveReadAdmissionPurpose = .ordinary,
     operation: @Sendable () async throws -> Value
 ) async throws -> Value {
     try Task.checkCancellation()
     guard callerDeadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
     guard let admission else { return try await operation() }
-    switch await admission.acquire(workClass, callerDeadline: callerDeadline) {
+    switch await admission.acquire(workClass, callerDeadline: callerDeadline, interactiveReadPurpose: interactiveReadPurpose) {
     case .rejected(.queueFull): throw V2RoomCallFailure.notAccepted(.overloaded)
     case .rejected(.timeout):
         throw V2RoomCallFailure.notAccepted(callerDeadline <= .now ? .deadlineExceeded : .overloaded)
@@ -24,10 +25,10 @@ package func v2WithAdmittedRoomDatabaseWork<Value: Sendable>(
         try Task.checkCancellation()
         guard callerDeadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
         let value = try await operation()
-        await admission.release(workClass)
+        await admission.release(workClass, interactiveReadPurpose: interactiveReadPurpose)
         return value
     } catch {
-        await admission.release(workClass)
+        await admission.release(workClass, interactiveReadPurpose: interactiveReadPurpose)
         throw error
     }
 }

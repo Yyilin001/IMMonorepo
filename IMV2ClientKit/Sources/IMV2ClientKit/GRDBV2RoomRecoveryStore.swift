@@ -26,7 +26,7 @@ extension GRDBV2LocalSyncStore {
         CREATE TABLE v2_room_sync_states (
             room_id TEXT PRIMARY KEY,
             owner_epoch INTEGER NOT NULL CHECK (owner_epoch >= 0),
-            membership_revision INTEGER NOT NULL CHECK (membership_revision > 0),
+            membership_revision INTEGER NOT NULL CHECK (membership_revision >= 0),
             head INTEGER NOT NULL CHECK (head >= 0),
             trimmed_through INTEGER NOT NULL CHECK (trimmed_through BETWEEN 0 AND head),
             read_through INTEGER NOT NULL CHECK (read_through BETWEEN 0 AND head),
@@ -42,7 +42,7 @@ extension GRDBV2LocalSyncStore {
             priority INTEGER NOT NULL CHECK (priority BETWEEN 0 AND 2),
             enqueued_at REAL NOT NULL, next_attempt_at REAL NOT NULL,
             last_served_order INTEGER NOT NULL DEFAULT 0 CHECK (last_served_order >= 0),
-            directory_membership_revision INTEGER NULL CHECK (directory_membership_revision > 0),
+            directory_membership_revision INTEGER NULL CHECK (directory_membership_revision >= 0),
             directory_owner_epoch INTEGER NULL CHECK (directory_owner_epoch >= 0),
             room_kind TEXT NULL CHECK (room_kind IN ('direct', 'group'))
         );
@@ -128,7 +128,7 @@ extension GRDBV2LocalSyncStore {
                 if let summary = try Row.fetchOne(db, sql: "SELECT personal_generation, membership_revision, owner_epoch FROM v2_room_latest_visible WHERE room_id = ?", arguments: [entry.roomID.rawValue]) {
                     _ = try Self.recoveryInteger(summary, "personal_generation")
                     _ = try Self.recoveryInteger(summary, "owner_epoch")
-                    guard try Self.recoveryInteger(summary, "membership_revision") > 0 else { throw V2RoomRecoveryPersistenceError.invalidWork }
+                    guard try Self.recoveryInteger(summary, "membership_revision") >= 0 else { throw V2RoomRecoveryPersistenceError.invalidWork }
                 }
                 try db.execute(sql: """
                     UPDATE v2_room_recovery_work SET
@@ -148,6 +148,17 @@ extension GRDBV2LocalSyncStore {
             try db.execute(sql: """
                 UPDATE v2_room_recovery_scan SET cursor = ?, topology_generation = ?, directory_complete = ? WHERE singleton = 1
                 """, arguments: [page.nextCursor, page.topologyGeneration, page.nextCursor == nil])
+        }
+    }
+
+    /// Online hints retain work before the connection's directory scan starts.
+    /// They grant no access; the recovery driver still reads authoritative state.
+    func retainOnlineRoomHead(roomID: RoomID, targetHead: UInt64, userID: UserID, now: Date) async throws {
+        try await databasePool.write { db in
+            guard try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton = 1") == userID.rawValue else {
+                throw V2RoomRecoveryPersistenceError.staleScope
+            }
+            try Self.enqueueRoomRecovery(roomID: roomID, head: targetHead, priority: 1, now: now, db: db)
         }
     }
 
@@ -214,6 +225,14 @@ extension GRDBV2LocalSyncStore {
         guard roomID.uuidValue != nil, head <= UInt64(Int64.max), (0...2).contains(priority),
               now.timeIntervalSince1970.isFinite else { throw V2RoomRecoveryPersistenceError.invalidWork }
         try validateStoredRecoveryWork(roomID: roomID, db: db)
+        // Ordinary watermarks add responsibility only beyond durable C. Keep
+        // discovery (H=0), directory/summary reads and unknown authority intact.
+        // Do not touch an existing newer work revision when ignoring an old H.
+        if priority == 1, head > 0, try groupEventAccess(roomID: roomID, db: db)?.isAuthorized == true,
+           let cursor = try Row.fetchOne(db,
+                sql: "SELECT applied_room_sequence FROM v2_group_event_cursors WHERE room_id = ?",
+                arguments: [roomID.rawValue]),
+           try storageUnsigned(cursor, column: "applied_room_sequence") >= head { return }
         try db.execute(sql: """
             INSERT INTO v2_room_recovery_work
                 (room_id, target_head, request_revision, requires_state, priority, enqueued_at, next_attempt_at)

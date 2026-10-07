@@ -15,28 +15,8 @@ import Testing
 struct V2GatewaySlowTLSTests {
     @Test("a TLS peer that stops reading forces explicit required-notification closure")
     func stoppedTLSReaderClosesWithEvidence() async throws {
-        let directory = FileManager.default.temporaryDirectory.appending(path: "imv2-slow-tls-\(UUID())")
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let cert = directory.appending(path: "cert.pem"), key = directory.appending(path: "key.pem")
-        let openssl = Process()
-        openssl.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        openssl.arguments = ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-            "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost",
-            "-keyout", key.path, "-out", cert.path]
-        openssl.standardOutput = FileHandle.nullDevice; openssl.standardError = FileHandle.nullDevice
-        try openssl.run(); openssl.waitUntilExit()
-        try #require(openssl.terminationStatus == 0)
-        let certificates = try NIOSSLCertificate.fromPEMFile(cert.path)
-        var serverTLS = TLSConfiguration.makeServerConfiguration(
-            certificateChain: certificates.map { .certificate($0) },
-            privateKey: .privateKey(try NIOSSLPrivateKey(file: key.path, format: .pem)))
-        serverTLS.minimumTLSVersion = .tlsv13
-        let serverContext = try NIOSSLContext(configuration: serverTLS)
-        var clientTLS = TLSConfiguration.makeClientConfiguration()
-        clientTLS.minimumTLSVersion = .tlsv13
-        clientTLS.trustRoots = .certificates(certificates)
-        let clientContext = try NIOSSLContext(configuration: clientTLS)
+        let tls = try makeGatewayTestTLSContexts()
+        let serverContext = tls.server, clientContext = tls.client
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
         var server: (any Channel)?
         var client: (any Channel)?
@@ -91,13 +71,12 @@ struct V2GatewaySlowTLSTests {
             auth.authenticate.accessToken = "fixture"; auth.authenticate.deviceID = handshakeDeviceID
             _ = try await stream.receive(V2FrameCodec.encode(
                 V2ServerProtobufFrameCodec.encode(auth, frameVersion: version), limits: limits))
-            let room = RoomID(uuid: UUID()), epoch = UUID()
+            let epoch = UUID()
             var refused = false
             var accepted = 0
-            for sequence in 1...100_000 {
+            for _ in 1...100_000 {
                 try Task.checkCancellation()
-                let written = await stream.sendAccountRoomNotification(.changed(epoch: epoch,
-                    sequence: UInt64(sequence), roomID: room, highWatermark: UInt64(sequence)))
+                let written = await stream.sendAccountRoomNotification(.resyncRequired(epoch: epoch))
                 if !written { refused = true; break }
                 accepted += 1
             }
@@ -107,7 +86,7 @@ struct V2GatewaySlowTLSTests {
             // the application rejects the write. Include that configured grace
             // plus event-loop scheduling margin before asserting channelInactive.
             let closedDeadline = ContinuousClock.now.advanced(by:
-                .nanoseconds(serverTLS.shutdownTimeout.nanoseconds + 2_000_000_000))
+                .nanoseconds(serverContext.configuration.shutdownTimeout.nanoseconds + 2_000_000_000))
             while await metrics.gatewayTransportMetricsSnapshot().activeConnections > 0 {
                 try #require(ContinuousClock.now < closedDeadline)
                 await Task.yield()

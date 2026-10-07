@@ -61,24 +61,32 @@ struct PostgresV2DirectAuthorizationReceiptStore: Sendable {
         let sql = try transactionSQL(transaction)
         try await v2AcquireMessageOperationLock(roomID: attempt.roomID, senderID: attempt.senderID,
             clientMessageID: attempt.clientMessageID, sql: sql)
+        // Keep the indexed exact attempt authoritative, even when a newer
+        // generation exists. Only a missing exact row consults the latest
+        // generation; the conditional CTE avoids a second SQL round trip.
         if let row = try await sql.raw("""
-            SELECT * FROM \(unsafeRaw: schema).direct_authorization_receipts
-            WHERE room_id = \(bind: attempt.roomID) AND sender_user_id = \(bind: attempt.senderID)
-              AND client_message_id = \(bind: attempt.clientMessageID) AND generation = \(bind: attempt.generation)
+            WITH exact AS MATERIALIZED (
+                SELECT * FROM \(unsafeRaw: schema).direct_authorization_receipts
+                WHERE room_id = \(bind: attempt.roomID) AND sender_user_id = \(bind: attempt.senderID)
+                  AND client_message_id = \(bind: attempt.clientMessageID) AND generation = \(bind: attempt.generation)
+            ), prior AS (
+                SELECT * FROM \(unsafeRaw: schema).direct_authorization_receipts
+                WHERE room_id = \(bind: attempt.roomID) AND sender_user_id = \(bind: attempt.senderID)
+                  AND client_message_id = \(bind: attempt.clientMessageID)
+                  AND NOT EXISTS (SELECT 1 FROM exact)
+                ORDER BY generation DESC LIMIT 1
+            )
+            SELECT * FROM exact UNION ALL SELECT * FROM prior
             """).first(decoding: ReceiptRow.self) {
-            guard row.matches(attempt) else { throw V2DirectAuthorizationReceiptError.identityConflict }
-            return row.receipt
-        }
-        // 切换授权代次绝不能改变不可变命令，
-        // 即使调用方提供了不同路由或重试上下文。
-        if let prior = try await sql.raw("""
-            SELECT * FROM \(unsafeRaw: schema).direct_authorization_receipts
-            WHERE room_id = \(bind: attempt.roomID) AND sender_user_id = \(bind: attempt.senderID)
-              AND client_message_id = \(bind: attempt.clientMessageID)
-            ORDER BY generation DESC LIMIT 1
-            """).first(decoding: ReceiptRow.self) {
-            guard prior.generation < attempt.generation, prior.recipientUserID == attempt.recipientID,
-                  prior.requestFingerprint == attempt.fingerprint else {
+            if row.generation == attempt.generation {
+                guard row.matches(attempt) else { throw V2DirectAuthorizationReceiptError.identityConflict }
+                return row.receipt
+            }
+            // A new generation may change owner routing, never the immutable
+            // command or recipient. Do not filter future generations in SQL:
+            // their presence must still produce identityConflict here.
+            guard row.generation < attempt.generation, row.recipientUserID == attempt.recipientID,
+                  row.requestFingerprint == attempt.fingerprint else {
                 throw V2DirectAuthorizationReceiptError.identityConflict
             }
         }

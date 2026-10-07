@@ -16,6 +16,12 @@ public enum V2RoomRecoveryEngineError: Error, Equatable, Sendable {
     case concurrentRun, notStarted, wrongEpoch, coverageLost, invalidBudget
 }
 
+/// Payload-free recovery scheduling observations for diagnostics.
+public enum V2RoomRecoveryObservation: Sendable {
+    case latestVisibleRequested, directoryRestart, directoryPage
+    case onlineHead(UInt64), workSelected(UInt64, requiresState: Bool)
+}
+
 /// One runtime-owned driver for discovery and room catch-up. Notifications may
 /// enqueue while a budget is awaiting I/O, but only one budget can drive pulls.
 public actor V2RoomRecoveryEngine {
@@ -24,6 +30,8 @@ public actor V2RoomRecoveryEngine {
     private let latestVisible: any V2ClientRoomLatestVisibleTransport
     private let groupEvents: V2GroupEventSyncEngine
     private let contentRecoveryConcurrency: Int
+    private let didPersistProgress: @Sendable (RoomID, UInt64) async throws -> Void
+    private let observe: (@Sendable (V2RoomRecoveryObservation) -> Void)?
     private let now: @Sendable () -> Date
     private var scope: V2RoomRecoveryScope?
     private var epoch: UUID?
@@ -38,10 +46,14 @@ public actor V2RoomRecoveryEngine {
 
     public init(transport: any V2ClientRoomRecoveryTransport, latestVisible: any V2ClientRoomLatestVisibleTransport, store: GRDBV2LocalSyncStore,
                 groupEvents: V2GroupEventSyncEngine, contentRecoveryConcurrency: Int = 4,
-                now: @escaping @Sendable () -> Date = Date.init) {
+                now: @escaping @Sendable () -> Date = Date.init,
+                didPersistProgress: @escaping @Sendable (RoomID, UInt64) async throws -> Void = { _, _ in },
+                observe: (@Sendable (V2RoomRecoveryObservation) -> Void)? = nil) {
         precondition((1...16).contains(contentRecoveryConcurrency), "contentRecoveryConcurrency must be between 1 and 16")
         self.transport = transport; self.latestVisible = latestVisible; self.store = store; self.groupEvents = groupEvents; self.now = now
         self.contentRecoveryConcurrency = contentRecoveryConcurrency
+        self.didPersistProgress = didPersistProgress
+        self.observe = observe
     }
 
     /// Establishes the listener without reading a directory or processing old work.
@@ -52,6 +64,7 @@ public actor V2RoomRecoveryEngine {
 
     /// Restarts only directory discovery; queued targets and the listener survive.
     public func restartDirectory(userID: UserID) async throws {
+        observe?(.directoryRestart)
         _ = try await executeBudget(userID: userID, maximumDirectoryPages: 0, maximumRooms: 0, restartDirectory: true)
     }
 
@@ -62,6 +75,7 @@ public actor V2RoomRecoveryEngine {
         notificationRevision = UUID()
         pendingNotificationWrites += 1
         defer { pendingNotificationWrites -= 1 }
+        if !roomIDs.isEmpty { observe?(.latestVisibleRequested) }
         for room in Set(roomIDs) {
             try Task.checkCancellation()
             try await store.ensureRoomLatestVisible(roomID: room, scope: scope, now: now())
@@ -116,17 +130,20 @@ public actor V2RoomRecoveryEngine {
         scope = nil; epoch = nil; coverageValid = true; phase = .idle
     }
 
+    public func retainOnlineRoomHead(roomID: RoomID, highWatermark: UInt64, userID: UserID) async throws {
+        guard coverageValid, !stopping else { throw V2RoomRecoveryEngineError.coverageLost }
+        notificationRevision = UUID()
+        pendingNotificationWrites += 1
+        defer { pendingNotificationWrites -= 1 }
+        observe?(.onlineHead(highWatermark))
+        try await store.retainOnlineRoomHead(roomID: roomID, targetHead: highWatermark, userID: userID, now: now())
+        phase = .catchingUp
+    }
+
     public func accept(_ change: V2AccountRoomChange) async throws {
         guard let scope, let epoch else { throw V2RoomRecoveryEngineError.notStarted }
         guard coverageValid else { throw V2RoomRecoveryEngineError.coverageLost }
         switch change {
-        case .changed(let incoming, let room, let head):
-            guard incoming == epoch else { throw V2RoomRecoveryEngineError.wrongEpoch }
-            notificationRevision = UUID()
-            pendingNotificationWrites += 1
-            phase = .catchingUp
-            defer { pendingNotificationWrites -= 1 }
-            try await store.enqueueRoomRecovery(roomID: room, targetHead: head, priority: 1, scope: scope, now: now())
         case .resyncRequired(let incoming):
             guard incoming == epoch else { throw V2RoomRecoveryEngineError.wrongEpoch }
             coverageValid = false
@@ -204,6 +221,7 @@ public actor V2RoomRecoveryEngine {
             if scan.directoryComplete { break }
             phase = .reconciling
             do {
+                observe?(.directoryPage)
                 let page = try await transport.userRoomDirectory(cursor: scan.cursor, pageSize: 100)
                 try Task.checkCancellation()
                 try await store.commitRoomRecoveryDirectoryPage(page, expectedCursor: scan.cursor, request: scan, now: now())
@@ -224,6 +242,7 @@ public actor V2RoomRecoveryEngine {
         }
         batches = (batches + 1) % 4
         let work = try await store.roomRecoveryWork(scope: scope, limit: rooms, oldestFirst: batches % 4 == 0, now: now())
+        for item in work { observe?(.workSelected(item.targetHead, requiresState: item.requiresState)) }
         let needingState = work.filter(\.requiresState)
         if !needingState.isEmpty {
             phase = .reconciling
@@ -269,7 +288,10 @@ public actor V2RoomRecoveryEngine {
         var contentWork: [V2RoomRecoveryWork] = []
         for item in ready where !item.requiresState {
             try Task.checkCancellation()
-            if try await store.finishRoomRecoveryWork(item) { processed += 1; continue }
+            if try await store.finishRoomRecoveryWork(item) {
+                try await didPersistProgress(item.roomID, store.groupEventCursor(roomID: item.roomID))
+                processed += 1; continue
+            }
             contentWork.append(item)
         }
         if !contentWork.isEmpty {
@@ -279,11 +301,12 @@ public actor V2RoomRecoveryEngine {
             try await withThrowingTaskGroup(of: ContentRecoveryResult.self) { group in
                 var next = contentWork.makeIterator()
                 func submit(_ item: V2RoomRecoveryWork) {
-                    group.addTask { [groupEvents, store] in
+                    group.addTask { [groupEvents, store, didPersistProgress] in
                         do {
                             let content = try await groupEvents.synchronizeOnePage(roomID: item.roomID) { [store] page in
                                 try await store.applyRoomRecoveryPage(page, work: item)
                             }
+                            try await didPersistProgress(item.roomID, store.groupEventCursor(roomID: item.roomID))
                             return .applied(content.appliedEventCount)
                         } catch V2RealtimeTransportError.server(code: "FORBIDDEN", retryable: false, retryAfterSeconds: _, currentRevision: _) {
                             try Task.checkCancellation()

@@ -14,6 +14,9 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let messageSendOperation = Self(rawValue: 127)
     public static let messageSendOperationRecover = Self(rawValue: 128)
     public static let messageSendOperationResult = Self(rawValue: 129)
+    public static let realtimeCoverage = Self(rawValue: 130)
+    public static let deviceRoomProgressReport = Self(rawValue: 131)
+    public static let deviceRoomProgressRecorded = Self(rawValue: 132)
 
     public var isMessageSendOperation: Bool {
         self == .messageSendOperation || self == .messageSendOperationRecover || self == .messageSendOperationResult
@@ -185,7 +188,6 @@ public struct V2FrameCommand: RawRepresentable, Equatable, Hashable, Sendable {
     public static let roomSyncStateBatchResult = Self(rawValue: 114)
     public static let accountRoomChangesStart = Self(rawValue: 115)
     public static let accountRoomChangesReady = Self(rawValue: 116)
-    public static let accountRoomChanged = Self(rawValue: 117)
     public static let accountRoomResyncRequired = Self(rawValue: 118)
     public static let roomLatestVisibleBatch = Self(rawValue: 119)
     public static let roomLatestVisibleBatchResult = Self(rawValue: 120)

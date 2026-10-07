@@ -10,15 +10,15 @@ enum GatewayPoolMetricsTopology {
         configuration: V2GatewayRuntimeConfiguration,
         physicalDatabaseCount: Int
     ) -> V2DatabasePoolTopologySnapshot {
-        let configuredHandleCount = configuration.databasePolicy.eventLoopThreads * physicalDatabaseCount
+        let configuredHandleCount = configuration.databaseNonMessagePoolEventLoopThreads * physicalDatabaseCount
         let workloadPoolTopology: V2DatabasePoolTopologySnapshot
         if configuration.databaseWorkloadPoolIsolationEnabled {
             workloadPoolTopology = .init(
-                pools: V2PostgresWorkloadPoolBudget.Role.allCases.map { role in
+                pools: V2PostgresWorkloadPoolBudget.Role.allCases.filter { configuration.databaseWorkloadPoolBudget.connectionsPerEventLoop(for: $0) > 0 }.map { role in
                     .init(
                         poolClass: metricClass(for: role),
-                        eventLoopHandles: configuredHandleCount,
-                        connectionCeiling: configuredHandleCount *
+                        eventLoopHandles: configuration.databasePoolEventLoopCount(for: role) * physicalDatabaseCount,
+                        connectionCeiling: configuration.databasePoolEventLoopCount(for: role) * physicalDatabaseCount *
                             configuration.databaseWorkloadPoolBudget.connectionsPerEventLoop(for: role)
                     )
                 }
@@ -35,16 +35,16 @@ enum GatewayPoolMetricsTopology {
         }
         return .init(pools: workloadPoolTopology.pools + [
             .init(poolClass: .userStateRoute,
-                  eventLoopHandles: configuration.databasePolicy.eventLoopThreads,
-                  connectionCeiling: configuration.databasePolicy.eventLoopThreads),
+                  eventLoopHandles: configuration.databaseNonMessagePoolEventLoopThreads,
+                  connectionCeiling: configuration.databaseNonMessagePoolEventLoopThreads),
             .init(poolClass: .directSendControl,
-                  eventLoopHandles: configuration.databasePolicy.eventLoopThreads,
-                  connectionCeiling: configuration.databasePolicy.eventLoopThreads *
+                  eventLoopHandles: configuration.databaseNonMessagePoolEventLoopThreads,
+                  connectionCeiling: configuration.databaseNonMessagePoolEventLoopThreads *
                     configuration.directSendControlConnectionsPerEventLoop),
             .init(poolClass: .directAuthorizationResolution,
-                  eventLoopHandles: configuration.databasePolicy.eventLoopThreads *
+                  eventLoopHandles: configuration.databaseNonMessagePoolEventLoopThreads *
                     configuration.directAuthorizationResolutionDatabaseURLs.count,
-                  connectionCeiling: configuration.databasePolicy.eventLoopThreads *
+                  connectionCeiling: configuration.databaseNonMessagePoolEventLoopThreads *
                     configuration.directAuthorizationResolutionDatabaseURLs.count)
         ])
     }
@@ -53,6 +53,7 @@ enum GatewayPoolMetricsTopology {
         for role: V2PostgresWorkloadPoolBudget.Role
     ) -> V2DatabasePoolMetricClass {
         switch role {
+        case .messageWrite: .messageWrite
         case .foreground: .foreground
         case .sync: .sync
         case .delivery: .delivery

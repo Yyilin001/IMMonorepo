@@ -32,6 +32,9 @@ public struct V2ActorAuthenticationLimits: Sendable {
 public struct V2ActorVerifiedCall: Sendable {
     public let call: V2ActorAuthenticatedCall
     public let deadline: ContinuousClock.Instant
+    // Diagnostic monotonic boundaries only; never used to grant authority.
+    var authenticationEnteredAt: ContinuousClock.Instant? = nil
+    var authenticationReturnedAt: ContinuousClock.Instant? = nil
 }
 
 /// 宿主签发的进程内证明，对应远程会话使用的同一已签名握手消息。
@@ -122,14 +125,19 @@ public actor V2ActorSessionAuthenticator {
     }
 
     public func accept(_ packet: V2ActorSignedPacket) throws -> V2ActorVerifiedCall {
+        let enteredAt = ContinuousClock.now
         let receivedAt = now()
         let (call, peer) = try trust.verify(packet, as: V2ActorAuthenticatedCall.self,
                                            maximumBytes: limits.maximumRequestBytes)
-        return try acceptVerified(call, peer: peer, receivedAt: receivedAt)
+        var verified = try acceptVerified(call, peer: peer, receivedAt: receivedAt)
+        verified.authenticationEnteredAt = enteredAt
+        verified.authenticationReturnedAt = .now
+        return verified
     }
 
     func acceptLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,
                      capability: V2ActorLocalCapability, generation: UUID) throws -> V2ActorVerifiedCall {
+        let enteredAt = ContinuousClock.now
         let receivedAt = now()
         let call = payload.body
         guard capability.issuer == localIssuer, capability.generation == generation,
@@ -141,7 +149,10 @@ public actor V2ActorSessionAuthenticator {
         guard payload.byteCount > 0, payload.byteCount <= limits.maximumRequestBytes else {
             throw V2ActorAuthenticationError.oversized
         }
-        return try acceptVerified(call, peer: capability.peer, receivedAt: receivedAt)
+        var verified = try acceptVerified(call, peer: capability.peer, receivedAt: receivedAt)
+        verified.authenticationEnteredAt = enteredAt
+        verified.authenticationReturnedAt = .now
+        return verified
     }
 
     private func acceptVerified(_ call: V2ActorAuthenticatedCall, peer: V2ActorTrustedService,
@@ -166,11 +177,89 @@ public actor V2ActorSessionAuthenticator {
 
     private func authorize(_ call: V2ActorAuthenticatedCall, peer: V2ActorTrustedService) throws {
         switch call.request {
+        case .forwardPair(let token, let pair):
+            guard call.principal == .service, peer.permissions.contains(.roomCoordination) else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+            guard token.host == host, token.roomID == pair.targetRoomID else {
+                throw V2ActorAuthenticationError.wrongRecipient
+            }
+            guard pair.actorUserID.uuidValue != nil, pair.operationID.uuidValue != nil,
+                  pair.source.roomID.uuidValue != nil, pair.source.messageID.uuidValue != nil,
+                  pair.targetRoomID.uuidValue != nil else { throw V2ActorAuthenticationError.invalidRequest }
+        case .mutatePolicy, .invalidatePolicyCache, .updatePolicySnapshot:
+            guard call.principal == .service, peer.permissions.contains(.policyMutation) else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        case .policySnapshots(let request):
+            guard call.principal == .service, peer.permissions.contains(.policyRegistration),
+                  peer.hostedIDs.contains(request.subscriber.hostID) else { throw V2ActorAuthenticationError.forbidden }
+        case .claimPolicyOwnership:
+            guard call.principal == .service, peer.permissions.contains(.policyRegistration) else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        case .revokePolicyAuthorization:
+            guard call.principal == .service, peer.permissions.contains(.policyRevocation) else {
+                throw V2ActorAuthenticationError.forbidden
+            }
         case .activate, .lookup:
-            guard call.principal == .service, !peer.permissions.isEmpty else { throw V2ActorAuthenticationError.forbidden }
+            guard call.principal == .service, !peer.permissions.subtracting([.policyRevocation, .policyRegistration, .policyMutation]).isEmpty else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        case .subscriptionRenewBatch(let items):
+            guard call.principal == .service, peer.permissions.contains(.userRoomCalls),
+                  peer.permissions.contains(.realtimeReceive), !items.isEmpty, items.count <= 64,
+                  Set(items.map { $0.token.roomID }).count == items.count else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+            for item in items {
+                let command = item.command
+                guard item.token.host == host, item.token.roomID == command.roomID,
+                      command.expectedFence.activation == item.token else { throw V2ActorAuthenticationError.wrongRecipient }
+                guard command.gatewayDescriptor.identity.serviceID == peer.serviceID.rawValue,
+                      command.gatewayDescriptor.identity.incarnationID == call.callerIncarnation,
+                      peer.gatewayNodeIDs.contains(command.gatewayDescriptor.identity.nodeID)
+                        || peer.serviceID.rawValue == command.gatewayDescriptor.identity.nodeID else {
+                    throw V2ActorAuthenticationError.forbidden
+                }
+                do { try V2RoomSubscriptionCommand.renew(command).validate() }
+                catch { throw V2ActorAuthenticationError.invalidRequest }
+            }
+        case .recoveryBatch(let items):
+            guard call.principal == .service, peer.permissions.contains(.userRoomCalls),
+                  peer.permissions.contains(.roomCoordination) else { throw V2ActorAuthenticationError.forbidden }
+            guard !items.isEmpty, items.count <= 100 else { throw V2ActorAuthenticationError.invalidRequest }
+            for item in items {
+                guard item.token.host == host, item.token.roomID == item.query.roomID,
+                      item.query.kind == .state,
+                      item.query.roomID.uuidValue != nil,
+                      item.query.actorUserID.uuidValue != nil else {
+                    throw V2ActorAuthenticationError.invalidRequest
+                }
+            }
         case .invoke(let token, let request):
             guard token.host == host, token.roomID == request.roomID else { throw V2ActorAuthenticationError.wrongRecipient }
             switch request {
+            case .roomSubscription(let command):
+                guard call.principal == .user(command.actorUserID),
+                      peer.permissions.contains(.userRoomCalls), peer.permissions.contains(.realtimeReceive),
+                      command.gatewayDescriptor.identity.serviceID == peer.serviceID.rawValue,
+                      command.gatewayDescriptor.identity.incarnationID == call.callerIncarnation,
+                      peer.gatewayNodeIDs.contains(command.gatewayDescriptor.identity.nodeID)
+                        || peer.serviceID.rawValue == command.gatewayDescriptor.identity.nodeID else {
+                    throw V2ActorAuthenticationError.forbidden
+                }
+                if case .activate(let value) = command, value.fence.activation != token {
+                    throw V2ActorAuthenticationError.wrongRecipient
+                }
+                if case .renew(let value) = command, value.expectedFence.activation != token {
+                    throw V2ActorAuthenticationError.wrongRecipient
+                }
+                if case .reset(let value) = command, value.expectedFence.activation != token {
+                    throw V2ActorAuthenticationError.wrongRecipient
+                }
+                do { try command.validate() }
+                catch { throw V2ActorAuthenticationError.invalidRequest }
             case .administration(.trustedSafety):
                 guard call.principal == .service, peer.permissions.contains(.trustedSafety) else { throw V2ActorAuthenticationError.forbidden }
             case .forward(.sameOwnerPair):

@@ -41,8 +41,8 @@ struct RoomSynchronizationStateTests {
     }
 
     @Test("malformed or unpersistable observations fail at construction")
-    func rejectsInvalidStates() {
-        #expect(throws: V2RoomSynchronizationError.invalidState) { try state(member: 0) }
+    func rejectsInvalidStates() throws {
+        #expect(try state(member: 0).viewerMembershipRevision == 0)
         #expect(throws: V2RoomSynchronizationError.invalidState) { try state(read: 11) }
         #expect(throws: V2RoomSynchronizationError.invalidState) { try state(own: 11) }
         #expect(throws: V2RoomSynchronizationError.invalidState) { try state(trim: 11) }

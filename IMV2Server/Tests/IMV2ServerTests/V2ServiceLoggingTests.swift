@@ -49,10 +49,28 @@ struct V2ServiceLoggingTests {
         #expect(missingConfiguration["error_code"] == "missing_configuration")
         #expect(!String(describing: missingConfiguration).contains(secret))
         #expect(V2SafeLogMetadata.drainTimeout(stage: "gateway_worker_shutdown")["error_code"] == "drain_timeout")
+
+        // These concrete Infrastructure failures cross the existing dependency
+        // boundary without importing Infrastructure into Application.
+        let queueFull = V2SafeLogMetadata.failure(V2PhysicalDatabaseLoanFailure.queueFull, stage: "gateway_transport")
+        let timedOut = V2SafeLogMetadata.failure(V2PhysicalDatabaseLoanFailure.timedOut, stage: "gateway_transport")
+        #expect(queueFull["error_code"] == "database_loan_queue_full")
+        #expect(timedOut["error_code"] == "database_loan_timed_out")
+        let stagedLoan = V2StagedOperationalError(stage: "gateway_transport", error: V2PhysicalDatabaseLoanFailure.cancelled)
+        #expect(V2SafeLogMetadata.failure(stagedLoan, stage: "cleanup")["error_code"] == "database_loan_cancelled")
+        let classified = V2SafeLogMetadata.failure(SecretBearingClassifiedError(secret: secret), stage: "gateway_transport")
+        #expect(classified["error_code"] == "database_loan_closed")
+        #expect(!String(describing: classified).contains(secret))
     }
 }
 
 private struct SecretBearingError: Error, CustomStringConvertible {
     let secret: String
+    var description: String { secret }
+}
+
+private struct SecretBearingClassifiedError: V2SafeOperationalErrorCodeProviding, CustomStringConvertible {
+    let secret: String
+    var safeOperationalErrorCode: V2SafeOperationalErrorCode { .databaseLoanClosed }
     var description: String { secret }
 }

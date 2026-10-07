@@ -164,30 +164,6 @@ public struct V2ClientMessageProjection: Equatable, Sendable {
     }
 }
 
-/// 由房间内最新本地投影消息派生的持久化会话列表行。
-///
-/// 它刻意不含服务端掌管的展示名或可变成员事实：这些内容必须各自拥有已同步的投影，
-/// 才能作为权威界面数据展示。
-public struct V2ClientConversationSummary: Equatable, Sendable {
-    /// 目标房间。
-    public let roomID: RoomID
-    /// 该房间最新一条消息投影。
-    public let lastMessage: V2ClientMessageProjection
-
-    /// 保存会话摘要。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - lastMessage: 最新消息投影，其房间必须与 `roomID` 一致。
-    ///
-    /// 房间不一致时直接失败，避免出现归属错位的摘要行。
-    public init(roomID: RoomID, lastMessage: V2ClientMessageProjection) {
-        precondition(roomID == lastMessage.roomID)
-        self.roomID = roomID
-        self.lastMessage = lastMessage
-    }
-}
-
 /// 统一房间时间线中的条目种类。
 public enum V2ClientTimelineItemKind: Int, Equatable, Sendable { case message, activity }
 

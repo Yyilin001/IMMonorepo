@@ -28,12 +28,15 @@ enum GatewayRuntime {
     static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
         let (configuration, localMediaConfiguration) = try loadConfigurations()
+        logger.notice("IM V2 startup stage started", metadata: ["stage": "infrastructure"])
         let infrastructure = try await startInfrastructure(configuration: configuration, logger: logger)
+        logger.notice("IM V2 startup stage completed", metadata: ["stage": "infrastructure"])
         // 只登记已完整组装的组件，供外层失败路径清理。
         var startedComposition: GatewayComposition?
         // 记录当前阶段，供失败日志和向进程入口抛出的错误定位。
         var stage = "gateway_composition"
         do {
+            logger.notice("IM V2 startup stage started", metadata: ["stage": "composition"])
             let composition = try await GatewayComposition.build(
                 configuration: configuration,
                 localMediaConfiguration: localMediaConfiguration,
@@ -41,6 +44,7 @@ enum GatewayRuntime {
                 app: infrastructure.application,
                 logger: logger
             )
+            logger.notice("IM V2 startup stage completed", metadata: ["stage": "composition"])
             startedComposition = composition
             stage = "gateway_http_runtime"
             try await runServices(
@@ -137,7 +141,7 @@ enum GatewayRuntime {
                         )
                         await composition.shutdownAuthorPresentations(logger: logger)
                         await shutdownPresenceAndAuxiliaryServices(composition: composition, logger: logger)
-                        try await server.shutdown()
+                        try await shutdownTLS(server: server, logger: logger)
                         serverIsShutdown = true
                         try await stopRoomActors(composition: composition, logger: logger)
                         if let connectionDrainError {
@@ -154,7 +158,6 @@ enum GatewayRuntime {
                     } catch {
                         // HTTP 或后续停机失败时，仍保留 worker 对事件循环的依赖直到其退出。
                         workers.cancelAll()
-                        composition.foregroundGroupEventHints.finish()
                         await composition.directRoomLogEventCache?.finish()
                         guard await workers.drain(
                             timeout: .milliseconds(configuration.shutdownGraceMilliseconds)
@@ -178,9 +181,15 @@ enum GatewayRuntime {
                 )
             }
             await composition.shutdownAuthorPresentations(logger: logger)
-            if !serverIsShutdown { try await server.shutdown() }
+            if !serverIsShutdown { try await shutdownTLS(server: server, logger: logger) }
             throw error
         }
+    }
+
+    private static func shutdownTLS(server: V2TLSGatewayServer, logger: Logger) async throws {
+        logger.notice("IM V2 shutdown stage started", metadata: ["stage": "tls_resources"])
+        try await server.shutdown()
+        logger.notice("IM V2 shutdown stage completed", metadata: ["stage": "tls_resources"])
     }
 
     private static func drainConnections(
@@ -219,7 +228,6 @@ enum GatewayRuntime {
         logger.notice("IM V2 public listener closed")
 
         workers.cancelAll()
-        composition.foregroundGroupEventHints.finish()
         await composition.directRoomLogEventCache?.finish()
         let drained = await workers.drain(
             timeout: .milliseconds(configuration.shutdownGraceMilliseconds)
@@ -239,17 +247,14 @@ enum GatewayRuntime {
     private static func shutdownPresenceAndAuxiliaryServices(
         composition: GatewayComposition, logger: Logger
     ) async {
-        let connectionRegistry = composition.connectionRegistry
-        await connectionRegistry.finishLivePresenceRenewals()
-        await connectionRegistry.detachForegroundGroupInterestManager()
-        await connectionRegistry.detachLiveActivityBroker()
-        await composition.shutdownAuxiliaryServices()
+        await composition.shutdownAuxiliaryServices(logger: logger)
         logger.notice("IM V2 broker and presence shutdown finished")
     }
 
     /// 在 TLS 服务关闭后，按 Actor 配置的期限等待房间 Actor 停止。
     /// 超时直接失败退出；停止过程抛出的错误交由上层执行失败清理。
     private static func stopRoomActors(composition: GatewayComposition, logger: Logger) async throws {
+        logger.notice("IM V2 shutdown stage started", metadata: ["stage": "room_actors"])
         guard try await composition.actors.stop(
             deadline: .now + composition.actorConfiguration.runtime.drainTimeout.duration
         ) else {
@@ -257,6 +262,8 @@ enum GatewayRuntime {
                 metadata: V2SafeLogMetadata.drainTimeout(stage: "gateway_actor_shutdown"))
             exit(EXIT_FAILURE)
         }
+        logger.notice("IM V2 shutdown stage completed", metadata: ["stage": "room_actors"])
+        await composition.shutdownDatabaseLoans(logger: logger)
         logger.notice("IM V2 TLS event loops and room actors shut down")
     }
 }

@@ -1,6 +1,12 @@
 import Foundation
 
 /// 数据库工作准入分类；原始字符串同时用作固定的指标标签。
+/// Trusted server-side classification; never decoded from client input.
+public enum V2InteractiveReadAdmissionPurpose: String, CaseIterable, Sendable {
+    case ordinary
+    case coverageAuthorization = "coverage_authorization"
+}
+
 public enum V2DatabaseWorkClass: String, CaseIterable, Sendable {
     /// 让客户端可见状态持久化的消息写入；拥有独立排队预算与前台容量预留。
     case foregroundWrite = "foreground_write"
@@ -234,6 +240,8 @@ public struct V2DatabaseWorkAdmissionSnapshot: Equatable, Sendable {
     public let foregroundControlWrite: V2DatabaseWorkAdmissionClassSnapshot
     /// 交互读取类别的压力与累计结果。
     public let interactiveRead: V2DatabaseWorkAdmissionClassSnapshot
+    /// A partition of the aggregate interactiveRead counters and capacity.
+    public let interactiveReadPurposes: [V2InteractiveReadAdmissionPurpose: V2DatabaseWorkAdmissionClassSnapshot]
     /// 独立同步类别的压力与累计结果。
     public let sync: V2DatabaseWorkAdmissionClassSnapshot
 
@@ -248,11 +256,15 @@ public struct V2DatabaseWorkAdmissionSnapshot: Equatable, Sendable {
         foregroundWrite: V2DatabaseWorkAdmissionClassSnapshot,
         foregroundControlWrite: V2DatabaseWorkAdmissionClassSnapshot = .empty,
         interactiveRead: V2DatabaseWorkAdmissionClassSnapshot,
-        sync: V2DatabaseWorkAdmissionClassSnapshot
+        sync: V2DatabaseWorkAdmissionClassSnapshot,
+        interactiveReadPurposes: [V2InteractiveReadAdmissionPurpose: V2DatabaseWorkAdmissionClassSnapshot]? = nil
     ) {
         self.foregroundWrite = foregroundWrite
         self.foregroundControlWrite = foregroundControlWrite
         self.interactiveRead = interactiveRead
+        self.interactiveReadPurposes = interactiveReadPurposes ?? [
+            .ordinary: interactiveRead, .coverageAuthorization: .empty
+        ]
         self.sync = sync
     }
 

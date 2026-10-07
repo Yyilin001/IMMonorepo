@@ -11,11 +11,12 @@ import IMV2ServerGateway
 /// 持有调用方注入的组件和固定连接池拓扑，每次调用时重新读取组件快照。
 /// 采集不访问数据库验证持久化状态，也不启动后台轮询；跨组件的读取期间运行状态可继续变化。
 public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSource {
-    private let databaseWorkAdmission: V2DatabaseWorkAdmissionController
+    private let databaseWorkAdmission: V2DatabaseWorkAdmissionMetricsGroup
+    private let roomRecoveryBatches: (@Sendable () -> V2RoomRecoveryBatchPressureSnapshot)?
+    private let databaseLoans: (@Sendable () -> V2DatabaseLoanMetricsSnapshot)?
+    private let gatewayMessageSendBudget: V2GatewayMessageSendBudget?
     private let databasePools: V2DatabasePoolTopologySnapshot
     private let syncWakeCoalescer: V2SyncWakeCoalescer
-    private let shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool?
-    private let roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool?
     private let directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)?
     private let readReceiptBatcher: (any V2ReadReceiptBatchMetricsReading)?
     private let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics?
@@ -27,6 +28,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let connectionRegistry: V2DeviceConnectionRegistry?
     private let roomActors: (any V2RoomRuntimeMetricsReading)?
     private let sendOperationMetrics: (any V2SendOperationBatchMetricsReading)?
+    private let sendOperationOwnerMetrics: (any V2SendOperationOwnerMetricsReading)?
 
     /// 连接指标来源，保存依赖而不立即采样。
     ///
@@ -36,8 +38,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     ///   - databaseWorkAdmission: 数据库工作准入控制器。
     ///   - databasePools: 固定连接池配置拓扑；后续采集直接复用此值。
     ///   - syncWakeCoalescer: 同步可用性提示合并器。
-    ///   - shardAdmissionCommandCredits: 分片命令额度池。
-    ///   - roomAdmissionCommandCredits: 房间命令额度池。
     ///   - directRoomLogAppendBatcher: 私聊追加的只读批处理指标来源，可汇总多个物理归属。
     ///   - readReceiptBatcher: 已读回执批处理只读指标来源，可汇总多个物理归属。
     ///   - directRoomLogAppendStageMetrics: 私聊追加阶段耗时收集器。
@@ -51,8 +51,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWakeCoalescer: V2SyncWakeCoalescer,
-        shardAdmissionCommandCredits: V2ShardAdmissionCommandCreditPool? = nil,
-        roomAdmissionCommandCredits: V2RoomAdmissionCommandCreditPool? = nil,
         directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)? = nil,
         readReceiptBatcher: (any V2ReadReceiptBatchMetricsReading)? = nil,
         directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
@@ -63,13 +61,19 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
         connectionRegistry: V2DeviceConnectionRegistry? = nil,
         roomActors: (any V2RoomRuntimeMetricsReading)? = nil,
-        sendOperationMetrics: (any V2SendOperationBatchMetricsReading)? = nil
+        sendOperationMetrics: (any V2SendOperationBatchMetricsReading)? = nil,
+        sendOperationOwnerMetrics: (any V2SendOperationOwnerMetricsReading)? = nil,
+        databaseLoans: (@Sendable () -> V2DatabaseLoanMetricsSnapshot)? = nil,
+        gatewayMessageSendBudget: V2GatewayMessageSendBudget? = nil,
+        roomRecoveryBatches: (@Sendable () -> V2RoomRecoveryBatchPressureSnapshot)? = nil,
+        additionalDatabaseWorkAdmissions: [V2DatabaseWorkAdmissionController] = []
     ) {
-        self.databaseWorkAdmission = databaseWorkAdmission
+        self.roomRecoveryBatches = roomRecoveryBatches
+        self.gatewayMessageSendBudget = gatewayMessageSendBudget
+        self.databaseLoans = databaseLoans
+        self.databaseWorkAdmission = .init([databaseWorkAdmission] + additionalDatabaseWorkAdmissions)
         self.databasePools = databasePools
         self.syncWakeCoalescer = syncWakeCoalescer
-        self.shardAdmissionCommandCredits = shardAdmissionCommandCredits
-        self.roomAdmissionCommandCredits = roomAdmissionCommandCredits
         self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
         self.readReceiptBatcher = readReceiptBatcher
         self.directRoomLogAppendStageMetrics = directRoomLogAppendStageMetrics
@@ -81,6 +85,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.connectionRegistry = connectionRegistry
         self.roomActors = roomActors
         self.sendOperationMetrics = sendOperationMetrics
+        self.sendOperationOwnerMetrics = sendOperationOwnerMetrics
     }
 
     /// 采集一次基础压力与已注入组件的状态。
@@ -92,8 +97,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     public func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
         async let databaseWork = databaseWorkAdmission.snapshot()
         async let syncWake = syncWakeCoalescer.snapshot()
-        let credits = await shardAdmissionCommandCredits?.snapshot()
-        let roomCredits = await roomAdmissionCommandCredits?.snapshot()
         let appendBatching = await directRoomLogAppendBatcher?.snapshot()
         let receiptBatching = await readReceiptBatcher?.snapshot()
         let appendStages = directRoomLogAppendStageMetrics?.snapshot()
@@ -108,8 +111,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             databaseWork: databaseWork,
             databasePools: databasePools,
             syncWake: syncWake,
-            shardAdmissionCommandCredits: credits,
-            roomAdmissionCommandCredits: roomCredits,
             directRoomLogAppendBatching: appendBatching,
             readReceiptBatching: receiptBatching,
             directRoomLogAppendStages: appendStages,
@@ -120,7 +121,12 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             preparedGroupEventPageCache: preparedPageCache,
             livePresenceRenewals: livePresenceRenewals,
             roomActors: actorMetrics,
-            sendOperationBatching: sendOperationMetrics?.sendOperationBatchMetricsSnapshot()
+            sendOperationBatching: sendOperationMetrics?.sendOperationBatchMetricsSnapshot(),
+            sendOperationOwnerBatching: await sendOperationOwnerMetrics?.sendOperationOwnerMetricsSnapshot(),
+            databaseLoans: databaseLoans?(),
+            gatewayMessageSend: await gatewayMessageSendBudget?.metricsSnapshot(),
+            registryRecovery: await connectionRegistry?.registryRecoveryMetricsSnapshot(),
+            roomRecoveryBatches: roomRecoveryBatches?()
         )
     }
 }

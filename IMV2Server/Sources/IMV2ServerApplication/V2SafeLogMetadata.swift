@@ -3,6 +3,19 @@ import Foundation
 import IMV2Core
 import Logging
 
+/// Closed vocabulary for lower layers to expose operational failure codes
+/// without Application importing those layers or accepting error descriptions.
+public enum V2SafeOperationalErrorCode: String, Sendable {
+    case databaseLoanInvalidPolicy = "database_loan_invalid_policy"
+    case databaseLoanQueueFull = "database_loan_queue_full"
+    case databaseLoanTimedOut = "database_loan_timed_out"
+    case databaseLoanCancelled = "database_loan_cancelled"
+    case databaseLoanClosed = "database_loan_closed"
+}
+public protocol V2SafeOperationalErrorCodeProviding: Error {
+    var safeOperationalErrorCode: V2SafeOperationalErrorCode { get }
+}
+
 /// 只保存可公开的阶段和错误分类，供进程入口在完成清理后记录故障。
 public struct V2StagedOperationalError: Error, Sendable {
     public let stage: String
@@ -48,6 +61,8 @@ public enum V2SafeLogMetadata {
 
 private func v2SafeErrorCode(_ error: any Error) -> String {
     switch error {
+    case let classified as any V2SafeOperationalErrorCodeProviding:
+        classified.safeOperationalErrorCode.rawValue
     case is CancellationError:
         "cancelled"
     case V2GatewayRuntimeConfigurationError.missing:

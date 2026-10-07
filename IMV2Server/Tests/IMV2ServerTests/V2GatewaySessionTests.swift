@@ -10,6 +10,40 @@ import Testing
 struct V2GatewaySessionTests {
     private let protocolVersion = UInt8(IMV2ProtocolVersion.current)
 
+    @Test("authenticated heartbeats and business dispatch never repeat credential authentication")
+    func steadyStateDoesNotReauthenticate() async throws {
+        let auth = CountingSessionAuthenticator()
+        let session = V2GatewaySession(limits: try .init(maximumInFlightRequests: 2),
+            authenticator: auth, capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission())
+        let device = UUID().uuidString
+        var hello = IMV2Envelope(); hello.requestID = 1
+        hello.clientHello.deviceID = device
+        hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
+        var authenticate = IMV2Envelope(); authenticate.requestID = 2
+        authenticate.protocolVersion = UInt32(protocolVersion)
+        authenticate.authenticate.accessToken = "fixture"; authenticate.authenticate.deviceID = device
+        _ = try await session.receiveBootstrap(V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
+        for id in 3..<103 {
+            var request = IMV2Envelope(); request.requestID = UInt64(id)
+            request.protocolVersion = UInt32(protocolVersion)
+            if id.isMultiple(of: 2) { request.heartbeat = .init() }
+            else { request.groupEventPull.roomID = UUID().uuidString }
+            _ = try await session.receiveAuthenticated(V2ServerProtobufFrameCodec.encode(request, frameVersion: protocolVersion),
+                handler: GroupPageCommandFake())
+        }
+        #expect(await auth.calls == 1)
+        await session.revokeDevice()
+        var heartbeat = IMV2Envelope(); heartbeat.requestID = 103
+        heartbeat.protocolVersion = UInt32(protocolVersion); heartbeat.heartbeat = .init()
+        await #expect(throws: (any Error).self) {
+            _ = try await session.receiveAuthenticated(V2ServerProtobufFrameCodec.encode(heartbeat, frameVersion: protocolVersion),
+                handler: GroupPageCommandFake())
+        }
+        #expect(await auth.calls == 1)
+    }
+
     @Test("zlib is negotiated explicitly and only group pages use the compressed response path")
     func negotiatesBoundedGroupPageCompression() async throws {
         let session = V2GatewaySession(
@@ -439,7 +473,12 @@ struct V2GatewaySessionTests {
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(hello, frameVersion: 0))
         var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
         _ = try await session.receiveBootstrap(try V2ServerProtobufFrameCodec.encode(authenticate, frameVersion: protocolVersion))
+        #expect(session.connectionIsActive)
+        let actualWriteCheck = try #require(await session.authenticatedForegroundSessionCheck())
+        #expect(actualWriteCheck())
         clock.now = Date(timeIntervalSince1970: 11)
+        #expect(!session.connectionIsActive)
+        #expect(!actualWriteCheck())
         #expect(await session.authenticatedIdentity() == nil)
         #expect(await session.authenticatedProtocolVersion() == nil)
         #expect(await session.authenticatedFrameContract() == nil)
@@ -621,5 +660,13 @@ private actor PolicyBaselineSessionHandler: V2GatewayCommandHandler {
         var member = IMV2GroupRolePolicy(); member.role = "member"
         response.groupRolePolicyBaseline.policies = [admin, member]
         return response
+    }
+}
+
+private actor CountingSessionAuthenticator: V2GatewayAuthenticator {
+    private(set) var calls = 0
+    func authenticateSession(accessToken: String, deviceID: DeviceID) async throws -> V2GatewayAuthentication {
+        calls += 1
+        return .init(userID: .init(uuid: UUID()), expiresAt: Date().addingTimeInterval(60))
     }
 }

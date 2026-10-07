@@ -15,7 +15,8 @@ package func v2RoomDomainCompletion<Value: Sendable>(_ error: any Error) -> V2Ro
         case .roomNotFound: return .rolledBack(.notFound)
         case .ownerChanged, .activationChanged: return .rolledBack(.staleActivation)
         case .leaseExpired: return .rolledBack(.leaseLost)
-        case .epochExhausted, .outcomeUnknown: return .outcomeUnknown
+        // A renewal-only error proves nothing about a business transaction.
+        case .renewalDeferred, .epochExhausted, .outcomeUnknown: return .outcomeUnknown
         }
     }
     if error is V2RoomOwnerFenceError { return .rolledBack(.staleActivation) }

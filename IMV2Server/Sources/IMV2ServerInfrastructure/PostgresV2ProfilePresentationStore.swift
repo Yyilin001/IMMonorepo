@@ -640,14 +640,6 @@ private struct PresentationReceiptRow: Decodable {
     }
   }
 }
-private struct PresentationClockRow: Decodable { let value: Date }
-private func presentationClock(_ sql: any SQLDatabase) async throws -> Date {
-  guard
-    let time = try await sql.raw("SELECT clock_timestamp() AS value").first(
-      decoding: PresentationClockRow.self)?.value
-  else { throw V2ProfilePresentationError.corruptPersistenceState }
-  return time
-}
 private func presentationMilliseconds(_ time: Date) throws -> UInt64 {
   guard let value = UInt64(exactly: (time.timeIntervalSince1970 * 1000).rounded(.towardZero)),
     value <= UInt64(Int64.max)

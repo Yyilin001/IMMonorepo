@@ -9,24 +9,27 @@ import IMV2Core
 public struct V2RoomRefMessagingClient: Sendable {
     typealias Invoke = @Sendable (V2RoomRequest, UserID, ContinuousClock.Instant) async throws -> V2RoomResponse
     private let invoke: Invoke
+    private let recoveryQuery: (@Sendable (V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult)?
     private let callTimeout: V2ActorMilliseconds
 
-    public init(directory: V2RoomDirectory, callTimeout: V2ActorMilliseconds) {
-        self.init(callTimeout: callTimeout) { request, user, deadline in
+    public init(directory: V2RoomDirectory, callTimeout: V2ActorMilliseconds,
+                recoveryQuery: (@Sendable (V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult)? = nil) {
+        self.init(callTimeout: callTimeout, recoveryQuery: recoveryQuery) { request, user, deadline in
             try await directory.room(request.roomID).call(request, principal: .user(user), deadline: deadline)
         }
     }
 
-    init(callTimeout: V2ActorMilliseconds, invoke: @escaping Invoke) {
+    init(callTimeout: V2ActorMilliseconds,
+         recoveryQuery: (@Sendable (V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult)? = nil,
+         invoke: @escaping Invoke) {
+        self.recoveryQuery = recoveryQuery
         self.callTimeout = callTimeout
         self.invoke = invoke
     }
 
     // 数据库准入属于物理宿主，不属于等待中的网关。
     public var managesForegroundWriteAdmission: Bool { true }
-    // 网关可以发布提交后的前台提示。即使提示或响应丢失，
-    // 持久化发件箱仍是权威依据。
-    public var publishesCommittedGroupEvents: Bool { false }
+    package var usesReadOnlySendRecovery: Bool { recoveryQuery != nil }
 
 
 
@@ -51,7 +54,15 @@ public struct V2RoomRefMessagingClient: Sendable {
         try await sendOperationCall(.sendOperation(command),identity:command.identity,fingerprint:command.fingerprint)
     }
     public func recoverSendOperation(_ request:V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
-        try await sendOperationCall(.recoverSendOperation(request),identity:request.identity,fingerprint:request.fingerprint)
+        if let recoveryQuery {
+            let result = try await recoveryQuery(request)
+            if case .receipt(let receipt) = result,
+               !receipt.validates(identity: request.identity, fingerprint: request.fingerprint) {
+                throw V2RoomCallFailure.outcomeUnknown
+            }
+            return result
+        }
+        return try await sendOperationCall(.recoverSendOperation(request),identity:request.identity,fingerprint:request.fingerprint)
     }
     private func sendOperationCall(_ command:V2RoomMessagingCommand,identity:V2OperationIdentity,fingerprint:V2OperationFingerprint) async throws -> V2MessageSendOperationRecoveryResult {
         guard case .sendOperation(let result)=try await call(command,actor:identity.accountID) else { throw V2RoomCallFailure.outcomeUnknown }

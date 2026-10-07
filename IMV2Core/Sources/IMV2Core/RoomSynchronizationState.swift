@@ -18,8 +18,7 @@ public struct V2RoomSynchronizationState: Equatable, Sendable {
     public init(roomID: RoomID, ownerEpoch: UInt64, viewerMembershipRevision: UInt64,
                 head: UInt64, trimmedThrough: UInt64, readThrough: UInt64,
                 latestOwnMessageSequence: UInt64) throws {
-        guard viewerMembershipRevision > 0,
-              [ownerEpoch, viewerMembershipRevision, head, trimmedThrough, readThrough,
+        guard [ownerEpoch, viewerMembershipRevision, head, trimmedThrough, readThrough,
                latestOwnMessageSequence].allSatisfy({ $0 <= UInt64(Int64.max) }),
               trimmedThrough <= head, readThrough <= head, latestOwnMessageSequence <= head
         else { throw V2RoomSynchronizationError.invalidState }

@@ -7,6 +7,53 @@ import Testing
 
 @Suite("V2 client sync")
 struct V2SyncEngineTests {
+    @Test("Sync BUSY retries preserve exact pull and durable ACK; cancellation retains the actual gate", arguments: [false, true])
+    func syncBusyPreservesActionsAndActualDrain(cancelled: Bool) async throws {
+        let store = try GRDBV2LocalSyncStore(databaseURL: temporaryDatabaseURL(), installationBinding: testInstallationBinding)
+        let record = try V2ClientSyncRecord(sequence: 1, sourceEventID: .init(uuid: UUID()),
+            projectionKind: "message", payload: messagePayload(text: "busy-retry"))
+        let wire = BusySyncTestWire(record: record)
+        let transport = V2ProtobufSyncTransport(wire: wire, protocolVersion: UInt8(IMV2ProtocolVersion.current))
+        let gate = V2SyncOperationGate()
+        let engine = V2SyncEngine(transport: transport, store: store, capabilityProfile: "base", operationGate: gate)
+        let call = Task { try await engine.synchronizeOnce() }
+        do {
+            try await wire.waitForACK()
+            #expect(try await store.cursor()?.pendingAcknowledgementReceipt == .init("busy-receipt"))
+            #expect(try await store.events() == [record])
+            if cancelled {
+                call.cancel()
+                let queued = Task { try await engine.synchronizeOnce() }
+                let limit = ContinuousClock.now + .seconds(2)
+                while await gate.waitingOperationCount != 1 {
+                    guard ContinuousClock.now < limit else { queued.cancel(); throw BusySyncTestWire.Failure.timeout }
+                    await Task.yield()
+                }
+                #expect(await wire.acknowledgements.count == 1)
+                queued.cancel()
+                await wire.releaseACK()
+                await #expect(throws: CancellationError.self) { _ = try await call.value }
+                _ = await queued.result
+                #expect(try await store.cursor()?.pendingAcknowledgementReceipt == .init("busy-receipt"))
+            } else {
+                await wire.releaseACK()
+                #expect(try await call.value == .synchronized(appliedThrough: 1, hasMore: false))
+                #expect(try await store.cursor()?.pendingAcknowledgementReceipt == nil)
+                #expect(try await store.cursor()?.serverAcknowledgedSequence == 1)
+                let acks = await wire.acknowledgements
+                #expect(acks.count == 2 && acks[0] == acks[1])
+            }
+            let pulls = await wire.pulls
+            #expect(pulls.count == 2 && pulls[0] == pulls[1])
+            #expect(try await store.events() == [record])
+            #expect(await wire.deadlinesAreStable())
+        } catch {
+            await wire.releaseACK()
+            _ = await call.result
+            throw error
+        }
+    }
+
     @Test("applied room sequence validates all sources before aggregation", arguments:
         ["group_event_cursors", "group_events", "message_projections", "reaction_versions", "group_pinned_messages", "group_announcements", "group_role_policies", "group_member_roles"],
         [1.5, Double(Int64.max)])
@@ -5638,5 +5685,52 @@ extension V2SyncEngineTests {
             try? await store.close()
             throw error
         }
+    }
+}
+
+private actor BusySyncTestWire: V2AuthenticatedFrameTransport {
+    enum Failure: Error { case timeout }
+    let record: V2ClientSyncRecord
+    var pulls: [IMV2SyncPull] = []
+    var acknowledgements: [IMV2SyncAck] = []
+    private var deadlines: [V2FrameCommand: [ContinuousClock.Instant?]] = [:]
+    private var ackRelease: CheckedContinuation<Void, Never>?
+    private var released = false
+    init(record: V2ClientSyncRecord) { self.record = record }
+    func waitForACK() async throws {
+        let limit = ContinuousClock.now + .seconds(2)
+        while acknowledgements.isEmpty {
+            guard ContinuousClock.now < limit else { throw Failure.timeout }
+            await Task.yield()
+        }
+    }
+    func releaseACK() { released = true; ackRelease?.resume(); ackRelease = nil }
+    func deadlinesAreStable() -> Bool {
+        deadlines.values.allSatisfy { values in values.first! != nil && values.allSatisfy { $0 == values.first! } }
+    }
+    func request(_ frame: V2Frame) async throws -> V2Frame {
+        let request = try V2ProtobufFrameCodec.decode(frame)
+        deadlines[frame.command, default: []].append(V2SyncRequestScope.deadline)
+        var response = IMV2Envelope(); response.requestID = request.requestID; response.protocolVersion = request.protocolVersion
+        switch request.body {
+        case .syncPull(let value):
+            pulls.append(value)
+            if pulls.count == 1 { response.error.code = "SERVER_BUSY"; response.error.retryable = true }
+            else {
+                response.syncBatch.generation = 1; response.syncBatch.nextSyncToken = "busy-next"
+                response.syncBatch.syncReceipt = "busy-receipt"; response.syncBatch.capabilityProfile = "base"
+                var wireRecord = IMV2SyncRecord(); wireRecord.userSyncSequence = record.sequence
+                wireRecord.sourceEventID = record.sourceEventID.rawValue; wireRecord.projectionKind = record.projectionKind
+                wireRecord.payload = record.payload; response.syncBatch.records = [wireRecord]
+            }
+        case .syncAck(let value):
+            acknowledgements.append(value)
+            if acknowledgements.count == 1 {
+                if !released { await withCheckedContinuation { ackRelease = $0 } }
+                response.error.code = "SERVER_BUSY"; response.error.retryable = true
+            } else { response.acknowledged = .init() }
+        default: throw V2RealtimeTransportError.unexpectedResponse
+        }
+        return try V2ProtobufFrameCodec.encode(response, frameVersion: frame.version)
     }
 }

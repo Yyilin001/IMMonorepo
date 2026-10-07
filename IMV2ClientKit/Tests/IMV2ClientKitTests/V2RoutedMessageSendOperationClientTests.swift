@@ -5,19 +5,16 @@ import Testing
 
 @Suite("Routed message send operations")
 struct V2RoutedMessageSendOperationClientTests {
-    @Test func healthySubmitAndPersistedRecoveryChooseSeparateTransports() async throws {
+    @Test func healthySubmitAndPersistedRecoveryPreferReadyTCP() async throws {
         let command = try sampleCommand()
         let tcp = RouteRealtime(account: command.command.senderUserID)
-        let http = RouteHTTP()
-        let router = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp, http: http)
+        let router = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp)
         _ = try await router.submit(command)
         #expect(await tcp.submissions == 1)
-        #expect(await http.submissions == 0)
         let recovery = try V2MessageSendOperationRecoveryRequest(identity: command.identity, fingerprint: command.fingerprint,
             domainFingerprint: command.command.fingerprint, action: .query)
         _ = try await router.recover(recovery)
-        #expect(await tcp.recoveries == 0)
-        #expect(await http.recoveries == 1)
+        #expect(await tcp.recoveries == 1)
         #expect(await router.routeObservations().count == 2)
     }
 
@@ -25,35 +22,37 @@ struct V2RoutedMessageSendOperationClientTests {
         let command = try sampleCommand()
         let tcp = RouteRealtime(account: command.command.senderUserID)
         await tcp.setFailure(.outcomeUnknown)
-        let http = RouteHTTP()
-        let router = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp, http: http)
+        let router = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp)
         await #expect(throws: V2MessageSendTransportError.outcomeUnknown) { try await router.submit(command) }
         #expect(await tcp.submissions == 1)
-        #expect(await http.submissions == 0)
+        let recovery = try V2MessageSendOperationRecoveryRequest(identity: command.identity, fingerprint: command.fingerprint,
+            domainFingerprint: command.command.fingerprint, action: .query)
+        _ = try await router.recover(recovery)
+        #expect(await tcp.submissions == 1)
+        #expect(await tcp.recoveries == 1)
     }
 
-    @Test func absentSessionAndForcedModesRespectSelection() async throws {
+    @Test func absentSessionKeepsSameTCPRecovery() async throws {
         let command = try sampleCommand()
         let tcp = RouteRealtime(account: command.command.senderUserID)
         await tcp.setReady(false)
-        let http = RouteHTTP()
-        let automatic = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp, http: http)
-        _ = try await automatic.submit(command)
-        #expect(await http.submissions == 1)
-        let forced = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp, http: http, mode: .realtimeOnly)
+        let automatic = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp)
+        await #expect(throws: V2MessageSendTransportError.unavailableBeforeSubmission) { try await automatic.submit(command) }
+        let recovery = try V2MessageSendOperationRecoveryRequest(identity: command.identity, fingerprint: command.fingerprint,
+            domainFingerprint: command.command.fingerprint, action: .query)
+        _ = try await automatic.recover(recovery)
+        #expect(await tcp.recoveries == 1)
+        let forced = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp)
         await #expect(throws: V2MessageSendTransportError.unavailableBeforeSubmission) { try await forced.submit(command) }
-        #expect(await http.submissions == 1)
     }
 
-    @Test func negotiatedPayloadLimitSelectsHTTPBeforeTCPSubmission() async throws {
+    @Test func negotiatedPayloadLimitRejectsWithoutHTTPFallback() async throws {
         let command = try sampleCommand()
         let tcp = RouteRealtime(account: command.command.senderUserID)
         await tcp.setPayloadAllowed(false)
-        let http = RouteHTTP()
-        let router = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp, http: http)
-        _ = try await router.submit(command)
+        let router = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp)
+        await #expect(throws: V2MessageSendTransportError.unsupportedCapability) { try await router.submit(command) }
         #expect(await tcp.submissions == 0)
-        #expect(await http.submissions == 1)
         #expect(await router.routeObservations().first?.reason == .payloadLimit)
     }
 
@@ -85,19 +84,6 @@ private actor RouteRealtime: V2MessageSendRealtimeClient {
         submissions += 1
         if let failure { throw failure }
         guard ready else { throw V2MessageSendTransportError.unavailableBeforeSubmission }
-        return .unresolved
-    }
-    func recover(_: V2MessageSendOperationRecoveryRequest) -> V2MessageSendOperationRecoveryResult {
-        recoveries += 1
-        return .unresolved
-    }
-}
-
-private actor RouteHTTP: V2MessageSendOperationClient {
-    var submissions = 0
-    var recoveries = 0
-    func submit(_: V2MessageSendOperationCommand) -> V2MessageSendOperationRecoveryResult {
-        submissions += 1
         return .unresolved
     }
     func recover(_: V2MessageSendOperationRecoveryRequest) -> V2MessageSendOperationRecoveryResult {

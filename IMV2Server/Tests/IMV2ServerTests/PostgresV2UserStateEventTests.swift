@@ -2,6 +2,7 @@
 @testable import IMV2ServerContracts
 import FluentKit
 import FluentPostgresDriver
+import PostgresNIO
 import Foundation
 import IMV2Core
 @testable import IMV2Server
@@ -735,6 +736,14 @@ func withUserEventDatabase(databaseURL: String? = nil, _ operation: (any Databas
         try await sql.raw("DROP SCHEMA \(unsafeRaw: schema) CASCADE").run()
         try await resources.shutdown()
     } catch {
+        if ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SAFE_DIAGNOSTICS"] == "1",
+           let postgresError = error as? PSQLError {
+            // Only driver category and SQLSTATE; never query, values, or server message.
+            print("postgres_test_failure category=\(postgresError.code) sqlstate=\(postgresError.serverInfo?[.sqlState] ?? "none")")
+            let sharedMemory = postgresError.serverInfo?[.message]?.contains("out of shared memory") == true
+            let lockBudget = postgresError.serverInfo?[.hint]?.contains("max_locks_per_transaction") == true
+            print("postgres_test_resource sharedMemoryExhausted=\(sharedMemory) lockBudgetHint=\(lockBudget)")
+        }
         if let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS \(unsafeRaw: schema) CASCADE").run() }
         try? await resources.shutdown()
         throw error

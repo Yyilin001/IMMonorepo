@@ -186,4 +186,3 @@ private func reactionSigned(_ value: UInt64) throws -> Int64 { guard value <= UI
 /// - Parameter rawValue: 持久化取值。
 /// - Returns: 对应的表情动作。
 /// - Throws: 取值未知时抛出 ``V2MessageReactionStoreError/corruptPersistenceState``。
-private func reactionAction(_ rawValue: String) throws -> V2MessageReactionAction { guard let action = V2MessageReactionAction(rawValue: rawValue) else { throw V2MessageReactionStoreError.corruptPersistenceState }; return action }

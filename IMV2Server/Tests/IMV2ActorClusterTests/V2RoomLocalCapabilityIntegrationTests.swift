@@ -26,6 +26,68 @@ struct V2RoomLocalCapabilityIntegrationTests {
         }
     }
 
+    @Test("cached stable operations dispatch once each without placement lookup")
+    func cachedMessageCalls() async throws {
+        try await withFixture { fixture in
+            let token = try await fixture.activate()
+            let before = await fixture.client.callMetricsSnapshot()
+            for _ in 0..<4 {
+                let result = try await fixture.client.tryInvokeCached(token,
+                    request: fixture.send(text: "cached"), principal: .user(fixture.user),
+                    deadline: .now + .seconds(5))
+                guard case .response(let response) = result else { Issue.record("expected cache hit"); return }
+                #expect(response == .recovery(.failure(.invalidRequest)))
+            }
+            let after = await fixture.client.callMetricsSnapshot()
+            #expect(after.roomLookups == before.roomLookups)
+            #expect(after.roomInvocations - before.roomInvocations == 4)
+            #expect(after.cachedLocalCalls - before.cachedLocalCalls == 4)
+            #expect(after.hostRecoveryProbes == 0)
+            #expect(await fixture.executions.count() == 4)
+        }
+    }
+
+    @Test("a cached reference miss does not dispatch or perform hidden lookup")
+    func cachedMessageMiss() async throws {
+        try await withFixture(maximumCachedLocations: 1) { fixture in
+            let token = try await fixture.activate()
+            _ = try await fixture.activate(roomID: .init(uuid: UUID()))
+            let before = await fixture.client.callMetricsSnapshot()
+            let result = try await fixture.client.tryInvokeCached(token,
+                request: fixture.send(text: "evicted-cache"), principal: .user(fixture.user),
+                deadline: .now + .seconds(5))
+            guard case .cacheMiss = result else { Issue.record("expected cache miss"); return }
+            let after = await fixture.client.callMetricsSnapshot()
+            #expect(after.roomLookups == before.roomLookups)
+            #expect(after.roomInvocations == before.roomInvocations)
+            #expect(after.referenceMisses == before.referenceMisses + 1)
+            #expect(await fixture.executions.count() == 0)
+        }
+    }
+
+    @Test("an executing cached call returns its actual result after eviction and same-token reinstall")
+    func cachedCallEvictionAndReinstall() async throws {
+        let gate = ExecutionGate(closed: true)
+        try await withFixture(executionGate: gate, maximumCachedLocations: 1) { fixture in
+            let token = try await fixture.activate()
+            let call = Task {
+                try await fixture.client.tryInvokeCached(token, request: fixture.send(text: "held-cache"),
+                    principal: .user(fixture.user), deadline: .now + .seconds(5))
+            }
+            try await gate.waitForEntry()
+            _ = try await fixture.activate(roomID: .init(uuid: UUID()))
+            #expect(try await fixture.client.lookup(token, deadline: .now + .seconds(5)))
+            await gate.open()
+            guard case .response(let response) = try await call.value else {
+                Issue.record("dispatched cached call became a cache miss"); return
+            }
+            #expect(response == .recovery(.failure(.invalidRequest)))
+            #expect(await fixture.client.canInvokeCachedLocally(token))
+            #expect(await fixture.executions.count() == 1)
+            #expect(await fixture.client.dispatchedCallCount() == 0)
+        }
+    }
+
     @Test("the caller's smaller request ceiling rejects before local dispatch")
     func callerRequestCeiling() async throws {
         try await withFixture(clientLimits: .init(maximumRequestBytes: 900)) { fixture in
@@ -128,6 +190,30 @@ struct V2RoomLocalCapabilityIntegrationTests {
             #expect(!(await fixture.client.canInvokeCachedLocally(token)))
             #expect(try await fixture.client.lookup(token, deadline: .now + .seconds(5)))
             #expect(await fixture.client.canInvokeCachedLocally(token))
+        }
+    }
+
+    @Test("suspension closes new admission before the old physical call drains")
+    func suspendBeforeActualDrain() async throws {
+        let gate = ExecutionGate(closed: true)
+        try await withFixture(executionGate: gate) { fixture in
+            let token = try await fixture.activate()
+            let call = Task {
+                try await fixture.client.invoke(token, request: fixture.send(text: "before-suspend"),
+                    principal: .user(fixture.user), deadline: .now + .seconds(5))
+            }
+            try await gate.waitForEntry()
+            #expect(!(await fixture.client.suspendUnreachableHost(fixture.identity)))
+            do {
+                _ = try await fixture.client.invoke(token, request: fixture.send(text: "closed-admission"),
+                    principal: .user(fixture.user), deadline: .now + .seconds(2))
+                Issue.record("new business RPC crossed suspended host admission")
+            } catch { #expect(error as? V2RoomCallFailure == .notAccepted(.unavailable)) }
+            #expect(await fixture.executions.count() == 1)
+            await gate.open()
+            #expect(try await call.value == .recovery(.failure(.invalidRequest)))
+            #expect(await fixture.client.suspendUnreachableHost(fixture.identity))
+            #expect(await fixture.client.dispatchedCallCount() == 0)
         }
     }
 

@@ -167,14 +167,14 @@ public struct PostgresV2GroupInvitationOperationStore: Sendable {
     private func lock(_ intent: V2GroupInvitationOperationIntent,sql:any SQLDatabase) async throws { try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: intent.identity.accountID.uuidValue!.uuidString + ":" + operationID(intent).uuidString),0))").run() }
     private func sqlDatabase(_ db:any Database) throws -> any SQLDatabase { guard let sql = db as? any SQLDatabase else { throw V2GroupInvitationServiceError.corruptPersistenceState }; return sql }
     private func milliseconds(_ date:Date) throws -> UInt64 { guard v2PostgresTimestampCanEncode(date) else { throw V2GroupInvitationServiceError.corruptPersistenceState }; guard let value=UInt64(exactly:try v2GatewayMilliseconds(date)) else { throw V2GroupInvitationServiceError.corruptPersistenceState }; return value }
-    private func json<T:Encodable>(_ value:T) throws -> String { String(decoding:try JSONEncoder().encode(value),as:UTF8.self) }
+    private func json<T:Encodable>(_ value:T) throws -> String { try v2EncodePersistenceJSON(value) }
     private func admission(_ intent:V2GroupInvitationOperationIntent,sql:any SQLDatabase) async throws -> V2GroupInvitationAdmission? {
         guard let row = try await sql.raw("SELECT admission::text AS value FROM im_v2.group_invitation_admissions WHERE actor_user_id = \(bind: intent.identity.accountID.uuidValue!) AND operation_id = \(bind: operationID(intent))").first(decoding:TextRow.self) else { return nil }
-        return try JSONDecoder().decode(V2GroupInvitationAdmission.self,from:Data(row.value.utf8))
+        return try v2DecodePersistenceJSON(V2GroupInvitationAdmission.self, from: row.value)
     }
     private func receipt(_ intent:V2GroupInvitationOperationIntent,sql:any SQLDatabase) async throws -> V2GroupInvitationOperationReceipt? {
         guard let row = try await sql.raw("SELECT receipt::text AS value FROM im_v2.group_invitation_receipts WHERE actor_user_id = \(bind: intent.identity.accountID.uuidValue!) AND operation_id = \(bind: operationID(intent))").first(decoding:TextRow.self) else { return nil }
-        return try JSONDecoder().decode(V2GroupInvitationOperationReceipt.self,from:Data(row.value.utf8))
+        return try v2DecodePersistenceJSON(V2GroupInvitationOperationReceipt.self, from: row.value)
     }
     private func save(_ intent:V2GroupInvitationOperationIntent,_ outcome:V2GroupInvitationOperationTerminalOutcome,now:Date,sql:any SQLDatabase) async throws -> V2GroupInvitationOperationRecoveryResult {
         let value = try V2GroupInvitationOperationReceipt(intent:intent,outcome:outcome,resolvedAtMilliseconds:milliseconds(now))

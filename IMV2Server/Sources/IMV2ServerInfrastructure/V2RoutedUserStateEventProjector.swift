@@ -31,7 +31,8 @@ public struct V2RoutedUserStateEventProjector: V2UserStateEventProjecting {
             let resolvedPayload = event.kind == .directReadReceipt
                 ? try await v2ResolveDirectReadReceiptCandidate(event, sql: sql, schema: controlSchema)
                 : nil
-            let projection = try await PostgresV2UserStateEventProjector(database: owner.database, schema: owner.schema)
+            let target = (owner.database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.userStateProjection) ?? owner.database
+            let projection = try await PostgresV2UserStateEventProjector(database: target, schema: owner.schema)
                 .projectResolved(event, projectionPayload: resolvedPayload)
 
             return projection.sequence
