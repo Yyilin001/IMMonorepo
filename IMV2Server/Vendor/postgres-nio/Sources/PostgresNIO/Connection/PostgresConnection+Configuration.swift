@@ -90,6 +90,12 @@ extension PostgresConnection {
             /// startup message that the client sends to the server.
             public var additionalStartupParameters: [(String, String)]
 
+            /// Opt-in bounded cache for EventLoopFuture query() shapes with these prefixes.
+            /// Keys include SQL and binding types; capacity zero disables caching.
+            /// Statements remain owned by their physical connection, with no eviction.
+            public var preparedQueryCacheCapacity: Int = 0
+            public var preparedQuerySQLPrefixes: [String] = []
+
             /// Create an options structure with default values.
             ///
             /// Most users should not need to adjust the defaults.

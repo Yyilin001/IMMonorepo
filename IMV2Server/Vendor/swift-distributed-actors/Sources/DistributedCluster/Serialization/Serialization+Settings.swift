@@ -51,6 +51,10 @@ extension Serialization {
         /// - Note: Affects only _outbound_ messages which are `Codable`.
         public var defaultSerializerID: Serialization.SerializerID = .foundationJSON
 
+        /// Opt-in wire format; every receiving peer must support binary invocation framing.
+        /// Incoming legacy JSON invocations remain supported.
+        public var binaryDistributedInvocations: Bool = false
+
         /// `Cluster.Node` to be included in actor addresses when serializing them.
         /// By default this should be equal to the exposed node of the actor system.
         ///

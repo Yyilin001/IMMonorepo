@@ -7,6 +7,7 @@ import IMV2Core
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 import SQLKit
+import PostgresKit
 import Testing
 import Vapor
 
@@ -40,7 +41,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
     }
 
-    internal func withForwardOwnerDatabases(mode: V2GroupCapacityClass,
+    internal func withForwardOwnerDatabases(mode: V2GroupCapacityClass, messageSessionDefaults: Bool = false,
         _ operation: (any Database, any Database, any SQLDatabase, any SQLDatabase, RoomID) async throws -> Void
     ) async throws {
         guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
@@ -51,12 +52,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let secondaryID = DatabaseID(string: "forward-import-target")
         do {
             resources.databases.use(try .postgres(url: primary, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
-            resources.databases.use(try .postgres(url: secondary, maxConnectionsPerEventLoop: 4), as: secondaryID)
+            if messageSessionDefaults {
+                var configuration = try SQLPostgresConfiguration(url: secondary)
+                configuration.coreConfiguration.options.additionalStartupParameters += V2RoomActivationSQLTimeouts.default.startupParameters
+                resources.databases.use(.postgres(configuration: configuration, maxConnectionsPerEventLoop: 4), as: secondaryID)
+            } else {
+                resources.databases.use(try .postgres(url: secondary, maxConnectionsPerEventLoop: 4), as: secondaryID)
+            }
             let sourceDB = resources.database(.psql), targetDB = resources.database(secondaryID)
             let sourceSQL = try #require(sourceDB as? any SQLDatabase), targetSQL = try #require(targetDB as? any SQLDatabase)
             for sql in [sourceSQL, targetSQL] {
                 guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self))?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
-                try await installSchema(on: sql)
+                try await installSchema(on: sql, preserveSessionTimeouts: messageSessionDefaults)
             }
             let target = RoomID(uuid: UUID())
             try await seedRoom(capacityClass: mode, on: sourceSQL)
@@ -151,7 +158,7 @@ internal struct DirectWriteArtifactCounts: Decodable, Equatable {
 
 // Shared schema, projection, and acceptance assertions for all room-write shards.
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    internal func installSchema(on sql: any SQLDatabase, schema: String = "im_v2") async throws {
+    internal func installSchema(on sql: any SQLDatabase, schema: String = "im_v2", preserveSessionTimeouts: Bool = false) async throws {
         let testFile = URL(fileURLWithPath: #filePath)
         let repositoryRoot = testFile
             .deletingLastPathComponent()
@@ -163,6 +170,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             .replacingOccurrences(of: "im_v2", with: schema)
         for statement in postgresStatements(in: source) {
             guard !statement.isEmpty, statement != "BEGIN", statement != "COMMIT" else { continue }
+            if preserveSessionTimeouts && ["SET statement_timeout = 0", "SET lock_timeout = 0",
+                "SET idle_in_transaction_session_timeout = 0"].contains(statement) { continue }
             try await sql.raw("\(unsafeRaw: statement)").run()
         }
         try await configureDefaultUserShardRoute(

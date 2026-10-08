@@ -69,6 +69,9 @@ struct ConnectionStateMachine {
         case provideAuthenticationContext
         case forwardNotificationToListeners(PostgresBackendMessage.NotificationResponse)
         case fireEventReadyForQuery
+        indirect case confirmReadyForQuery(EventLoopPromise<PostgresConnection.ReadyForQueryState>,
+            PostgresConnection.ReadyForQueryState, next: ConnectionAction)
+        case failReadyForQueryConfirmation(EventLoopPromise<PostgresConnection.ReadyForQueryState>, PSQLError)
         case fireChannelInactive
         /// Close the connection by sending a `Terminate` message and then closing the connection. This is for clean shutdowns.
         case closeConnection(EventLoopPromise<Void>?)
@@ -619,6 +622,8 @@ struct ConnectionStateMachine {
         }
 
         switch task {
+        case .confirmReadyForQuery(let promise):
+            return .failReadyForQueryConfirmation(promise, psqlErrror)
         case .extendedQuery(let queryContext):
             switch queryContext.query {
             case .executeStatement(_, let promise), .unnamed(_, let promise):
@@ -1043,6 +1048,14 @@ struct ConnectionStateMachine {
         }
         
         switch task {
+        case .confirmReadyForQuery(let promise):
+            let status: PostgresConnection.ReadyForQueryState
+            switch connectionContext.transactionState {
+            case .idle: status = .idle
+            case .inTransaction: status = .inTransaction
+            case .inFailedTransaction: status = .inFailedTransaction
+            }
+            return .confirmReadyForQuery(promise, status, next: self.executeNextQueryFromQueue())
         case .extendedQuery(let queryContext):
             self.state = .modifying // avoid CoW
             var extendedQuery = ExtendedQueryStateMachine(queryContext: queryContext)
@@ -1336,4 +1349,3 @@ extension ConnectionStateMachine.QuiescingState: CustomDebugStringConvertible {
         }
     }
 }
-

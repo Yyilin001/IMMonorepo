@@ -8,6 +8,59 @@ import IMV2ServerContracts
 
 @Suite("Gateway local room subscription socket authority")
 struct V2GatewayRoomSubscriptionAuthorityTests {
+    @Test("replay fingerprint covers event fields, canonical sets and ordered controls")
+    func fingerprintEventFields() throws {
+        let f = Fixture(), other = UserID(uuid: UUID()), source = EventID(uuid: UUID())
+        let recipients: Set<UserID> = [f.user, other]
+        func event(change: Int = -1, recipients value: Set<UserID>? = nil) -> V2RealtimeRoomEvent {
+            .init(roomID: change == 0 ? RoomID(uuid: UUID()) : f.room,
+                highWatermark: change == 1 ? 13 : 12,
+                sourceEventID: change == 2 ? EventID(uuid: UUID()) : source,
+                roomSequence: change == 3 ? 13 : 12,
+                projectionKind: change == 4 ? "edited" : "message",
+                payload: change == 5 ? Data([2]) : Data([1]),
+                recipientUserIDs: value ?? (change == 6 ? [other] : recipients),
+                groupMembershipRevision: change == 7 ? 0 : nil,
+                acceptedMembershipRevision: change == 8 ? 0 : nil,
+                excludedConnectionID: change == 9 ? UUID() : nil)
+        }
+        let members = [f.member, V2RoomSubscriptionMember(userID: other, memberRevision: 2)]
+        func digest(_ value: V2RealtimeRoomEvent, members list: [V2RoomSubscriptionMember]? = nil) -> Data {
+            V2RoomSubscriptionDeliveryFingerprint.digest(f.delivery(2, .event(value, members: list ?? members)))
+        }
+        let original = digest(event())
+        #expect(digest(event(recipients: Set([other, f.user]))) == original)
+        for field in 0..<10 { #expect(digest(event(change: field)) != original) }
+        #expect(digest(event(), members: Array(members.reversed())) != original)
+        #expect(digest(event(), members: [f.member]) != original)
+        let changedRevision = [f.member, V2RoomSubscriptionMember(userID: other, memberRevision: 3)]
+        #expect(digest(event(), members: changedRevision) != original)
+        #expect(V2RoomSubscriptionDeliveryFingerprint.digest(f.delivery(2, .broadcast(event()))) != original)
+    }
+
+    @Test("replay fingerprint binds the entire activation, fence and delivery ordering")
+    func fingerprintFenceFields() throws {
+        let f = Fixture(), fence = f.fence(), token = fence.activation
+        let original = V2RoomSubscriptionDeliveryFingerprint.digest(f.delivery(2, .head(highWatermark: 12)))
+        for field in 0..<11 {
+            let host = V2ActorHostIdentity(hostID: field == 4 ? try .init("other-host") : token.host.hostID,
+                incarnationID: field == 5 ? UUID() : token.host.incarnationID)
+            let changed = V2RoomActivationToken(roomID: field == 0 ? RoomID(uuid: UUID()) : token.roomID,
+                owner: try .init(shardID: field == 1 ? "other-shard" : token.owner.shardID,
+                                 epoch: field == 2 ? token.owner.epoch + 1 : token.owner.epoch),
+                activationEpoch: field == 3 ? try .init(token.activationEpoch.rawValue + 1) : token.activationEpoch,
+                host: host)
+            let changedFence = V2RoomSubscriptionFence(activation: changed,
+                subscriptionID: field == 6 ? UUID() : fence.subscriptionID,
+                generation: field == 7 ? fence.generation + 1 : fence.generation,
+                baselineSequence: field == 8 ? fence.baselineSequence + 1 : fence.baselineSequence)
+            let delivery = V2RoomSubscriptionDelivery(fence: changedFence,
+                deliverySequence: field == 9 ? 3 : 2, authorizationSequence: field == 10 ? 2 : 1,
+                payload: .head(highWatermark: 12))
+            #expect(V2RoomSubscriptionDeliveryFingerprint.digest(delivery) != original)
+        }
+    }
+
     @Test("evicting retired history requires a trusted reset for every unknown installation")
     func retiredHistoryRequiresFreshProof() async throws {
         let f = Fixture(), authority = V2GatewayRoomSubscriptionAuthority(maximumRooms: 1, maximumRetiredRooms: 1)

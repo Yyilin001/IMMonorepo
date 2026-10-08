@@ -12,6 +12,107 @@ import Testing
 // are real, immutable and store-bound. Only owner execution is held at a
 // deterministic boundary; Store SQL correctness has separate integration tests.
 extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("synchronous loan registration keeps caller context while settlement and finalization stay global")
+    func durableOwnerDirectLoanRegistration() async throws {
+        let resources = makeV2DatabaseTestResources()
+        let loop = resources.eventLoopGroup.next(), executor = V2DatabaseEventLoopTaskExecutor(loop)
+        do {
+            try await withDurableCoordinatorHandles { store, handles in
+                let entries = Mutex(0)
+                let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                    configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1),
+                    maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
+                    scheduledConnection: { _, _ in Issue.record("Direct registration must not use the async entry"); return nil },
+                    startScheduledConnection: { _, body in
+                        #expect(V2OwnerRegistrationTestContext.marker == 73)
+                        #expect(!loop.inEventLoop)
+                        entries.withLock { $0 += 1 }
+                        let returned = V2ScheduledSendLoanReturn.current?.takeCallback()
+                        let promise = loop.makePromise(of: V2ScheduledSendOutcome?.self)
+                        Task(executorPreference: executor) {
+                            do {
+                                let value = try await body(.init(finalize: {
+                                    #expect(!loop.inEventLoop)
+                                    #expect(V2OwnerRegistrationTestContext.marker == 0)
+                                }, execute: { _, _, _, _ in [] }))
+                                returned?()
+                                promise.succeed(value)
+                            } catch { returned?(); promise.fail(error) }
+                        }
+                        return .init {
+                            #expect(!loop.inEventLoop)
+                            return try await promise.futureResult.get()
+                        }
+                    }, scheduledExecute: { _, prepared in
+                        #expect(loop.inEventLoop)
+                        return prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
+                    })
+                _ = try await V2OwnerRegistrationTestContext.$marker.withValue(73) {
+                    try await batcher.execute(handles[0])
+                }
+                await batcher.shutdown()
+                #expect(entries.withLock { $0 } == 1)
+                #expect(batcher.pressureSnapshot().retainedItems == 0)
+                #expect(batcher.pressureSnapshot().inFlightBatches == 0)
+            }
+            try await resources.shutdown()
+        } catch { try? await resources.shutdown(); throw error }
+    }
+
+    @Test("an inline unbound loan failure settles before resubmitting its ready room")
+    func durableOwnerDirectLoanFailure() async throws {
+        try await withDurableCoordinatorHandles { store, handles in
+            let entries = Mutex(0)
+            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1),
+                maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
+                scheduledConnection: { _, _ in Issue.record("Unexpected async fallback"); return nil },
+                startScheduledConnection: { _, _ in
+                    let count = entries.withLock { $0 += 1; return $0 }
+                    #expect(count == 1)
+                    V2ScheduledSendLoanReturn.current?.notify()
+                    return .init { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                }, scheduledExecute: { _, _ in Issue.record("No connection was borrowed"); return [] })
+            await #expect(throws: V2RoomCallFailure.notAccepted(.unavailable)) {
+                _ = try await batcher.execute(handles[0])
+            }
+            await batcher.shutdown()
+            #expect(entries.withLock { $0 } == 1)
+            #expect(batcher.pressureSnapshot().retainedItems == 0)
+            #expect(batcher.pressureSnapshot().inFlightBatches == 0)
+        }
+    }
+
+    @Test("acquisition and finalization stay global while the physical body uses its selected loop")
+    func acquisitionExecutorBoundary() async throws {
+        let resources = makeV2DatabaseTestResources()
+        let loop = resources.eventLoopGroup.next()
+        let taskExecutor = V2DatabaseEventLoopTaskExecutor(loop)
+        do {
+            try await withDurableCoordinatorHandles { store, handles in
+                let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                    configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1),
+                    maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
+                    scheduledConnection: { _, body in
+                        let acquisitionOnLoop = loop.inEventLoop
+                        #expect(!acquisitionOnLoop)
+                        return try await withTaskExecutorPreference(taskExecutor) {
+                            try await body(.init(finalize: {
+                                let onDatabaseLoop = loop.inEventLoop
+                                #expect(!onDatabaseLoop)
+                            }, execute: { _, _, _, _ in [] }))
+                        }
+                    }, scheduledExecute: { _, prepared in
+                        #expect(loop.inEventLoop)
+                        return prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
+                    })
+                _ = try await batcher.execute(handles[0])
+                await batcher.shutdown()
+                #expect(batcher.pressureSnapshot().retainedItems == 0)
+            }
+            try await resources.shutdown()
+        } catch { try await resources.shutdown(); throw error }
+    }
     @Test("physical return and selection progress before borrower resumption and room finalization", arguments: [false, true])
     func durableOwnerPhysicalDispatchProgress(delayBorrowerResume: Bool) async throws {
         try await withDurableCoordinatorHandles { store, handles in
@@ -869,4 +970,8 @@ private extension V2DurableSendOperationOwnerBatcher {
                     .init(), Date.init)
             })
     }
+}
+
+private enum V2OwnerRegistrationTestContext {
+    @TaskLocal static var marker: Int = 0
 }

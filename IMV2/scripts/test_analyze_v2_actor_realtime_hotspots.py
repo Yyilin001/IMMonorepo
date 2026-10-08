@@ -12,6 +12,48 @@ SPEC.loader.exec_module(hotspots)
 
 
 class ReportCoverageTests(unittest.TestCase):
+    def test_subscription_expiry_and_owner_failures_remain_distinct_counters(self):
+        head = 'im_v2_room_subscription_head_delivery_total{stage="renewalAuthorityExpired"}'
+        owner = 'im_v2_room_subscription_owner_failures_total{reason="catchUpRequired"}'
+        baseline = hotspots.prometheus(f'{head} 2\n{owner} 3')
+        current = hotspots.prometheus(f'{head} 9\n{owner} 8')
+        result = hotspots.counter_summary([(2, current)], (1, baseline))
+        self.assertEqual(result[head]['delta'], 7)
+        self.assertEqual(result[owner]['delta'], 5)
+
+    def test_ready_partition_quantiles_include_zero_contributions_and_exclude_missing_history(self):
+        def trace(at, parts, wait=30):
+            return dict(segment='room_actor', startedAtUnixMilliseconds=at,
+                        durationMilliseconds=50, operations=['test-operation'],
+                        spans=[dict(stage='owner_ready_wait', durationMilliseconds=wait)] +
+                        [dict(stage=key, durationMilliseconds=value) for key, value in parts.items()])
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            traces = [
+                trace(1100, {'ready_pool_fully_borrowed_sum': 30}),
+                trace(1200, {'ready_slots_full_callback_pending_sum': 20,
+                             'ready_diagnostic_history_missing_sum': 10}),
+                trace(1300, {'ready_pool_fully_borrowed_sum': 10}),  # truncated evidence
+                trace(1990, {'ready_pool_fully_borrowed_sum': 30}),  # crosses phase end
+            ]
+            (directory/'gateway-0.log').write_text('\n'.join('send_path='+json.dumps(t) for t in traces))
+            result = hotspots.ready_wait_traces(directory, 1, 2)
+            self.assertEqual(result['wait']['count'], 2)
+            self.assertEqual(result['incompletePartitions'], 1)
+            self.assertEqual(result['excludedBoundaryTraces'], 1)
+            borrowed = result['categories']['ready_pool_fully_borrowed_sum']
+            self.assertEqual(borrowed['meanMilliseconds'], 15)
+            self.assertEqual(borrowed['p50Milliseconds'], 0)
+            self.assertEqual(borrowed['p95Milliseconds'], 30)
+            self.assertEqual(result['categories']['ready_diagnostic_history_missing_sum']['totalMilliseconds'], 10)
+            self.assertEqual(sum(v['totalMilliseconds'] for v in result['categories'].values()), 60)
+
+    def test_no_trace_evidence_is_not_zero_wait(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = hotspots.ready_wait_traces(Path(temp), 1, 2)
+            self.assertEqual(result['status'], 'no_complete_slow_request_partitions')
+            self.assertIsNone(result['wait']['p95Milliseconds'])
+
     def test_route_query_latency_excludes_admission_rejection_and_active_queries(self):
         prefix = 'im_v2_actor_realtime_route_query_'
         label = '{kind="user_presence"}'

@@ -22,17 +22,20 @@ package final class V2PhysicalSendDispatcher: Sendable {
     }
 
     private let state: Mutex<State>
+    private let preparationStore: PostgresV2MessageSendOperationStore
     init(
         store: PostgresV2MessageSendOperationStore,
         configuration: V2SendOperationSchedulingConfiguration,
         maximumRetainedBytes: Int, capacity: Int,
-        borrow: @escaping V2ScheduledSendConnection, execute: @escaping V2ScheduledSendExecution
+        borrow: @escaping V2ScheduledSendConnection, startBorrow: V2ScheduledSendConnectionStart? = nil,
+        execute: @escaping V2ScheduledSendExecution
     ) {
+        preparationStore = store
         state = Mutex(
             State(
                 store: store, configuration: configuration,
                 maximumRetainedBytes: maximumRetainedBytes, capacity: capacity, borrow: borrow,
-                execute: execute))
+                startBorrow: startBorrow, execute: execute))
         state.withLock { $0.owner = self }
     }
 
@@ -49,6 +52,8 @@ package final class V2PhysicalSendDispatcher: Sendable {
 
     func execute(_ prepared: V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult] {
         try Task.checkCancellation()
+        // Immutable command decoding/sorting belongs before physical borrowing.
+        let prepared = try preparationStore.preparingScheduledCommandPlan(prepared)
         let id = UUID()
         let trace = V2SendPathTrace.current
         let deadline =
@@ -88,7 +93,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         update { $0.cancelQueued(id: id, roomID: roomID) }
     }
     private func flushIfCurrent(_ generation: UUID) { update { $0.flushIfCurrent(generation) } }
-    private func selectConnectedRoom(id: UUID) -> Pending? {
+    private func selectConnectedRoom(id: UUID) -> (pending: Pending, diagnose: @Sendable () -> Void)? {
         let selection = update {
             value -> (
                 Pending?, ContinuousClock.Instant, ContinuousClock.Instant?,
@@ -96,7 +101,10 @@ package final class V2PhysicalSendDispatcher: Sendable {
                 Int
             ) in
             let pending = value.selectConnectedRoom(id: id)
-            let selectedAt = ContinuousClock.now
+            // Match ownerReadyWait's endpoint. Room selection after driver entry
+            // is separate work and must not be attributed to resource waiting.
+            let selectedAt = max(pending?.enqueuedAt ?? .now,
+                value.connectionTimelines[id]?.marker("driver_entered") ?? .now)
             let timelines =
                 pending.map {
                     $0.trace != nil && $0.enqueuedAt.duration(to: selectedAt) >= .milliseconds(20)
@@ -107,11 +115,15 @@ package final class V2PhysicalSendDispatcher: Sendable {
                 value.maximumResourceDemands
             )
         }
-        let (pending, selectedAt, coverageStart, timelines, capacity) = selection
-        if let pending, let trace = pending.trace,
-            pending.enqueuedAt.duration(to: selectedAt) >= .milliseconds(20)
-        {
-            let start = max(pending.enqueuedAt, coverageStart ?? pending.enqueuedAt)
+        let (selected, selectedAt, coverageStart, timelines, capacity) = selection
+        guard let pending = selected else { return nil }
+        // Capture the covered history and fixed endpoint now, but inspect and
+        // classify it on the acquisition root only after the physical loan returns.
+        // Later markers lie beyond selectedAt and cannot extend this wait window.
+        return (pending, {
+            guard let trace = pending.trace,
+                pending.enqueuedAt.duration(to: selectedAt) >= .milliseconds(20) else { return }
+            let start = min(selectedAt, max(pending.enqueuedAt, coverageStart ?? pending.enqueuedAt))
             if start > pending.enqueuedAt {
                 trace.record(
                     "ready_diagnostic_history_missing_sum", from: pending.enqueuedAt, to: start)
@@ -122,10 +134,12 @@ package final class V2PhysicalSendDispatcher: Sendable {
             {
                 trace.record(category, from: pending.enqueuedAt, to: pending.enqueuedAt + duration)
             }
-        }
-        return pending
+        })
     }
-    private func connectionLoanReturned(id: UUID) { update { $0.connectionLoanReturned(id: id) } }
+
+    private func connectionLoanReturned(id: UUID, unboundSettled: Bool = false) {
+        update { $0.connectionLoanReturned(id: id, unboundSettled: unboundSettled) }
+    }
     private func connectedRoomSettled(
         id: UUID, pending: Pending,
         result: Result<[V2RoomMessagingResult], any Error>
@@ -143,6 +157,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         let maximumRetainedBytes: Int
         let maximumResourceDemands: Int
         let scheduledConnection: V2ScheduledSendConnection
+        let startScheduledConnection: V2ScheduledSendConnectionStart?
         let scheduledExecute: V2ScheduledSendExecution
         var returnedConnections: Set<UUID> = []
         var connectionTasks: [UUID: V2SendDispatchRoot] = [:]
@@ -173,13 +188,15 @@ package final class V2PhysicalSendDispatcher: Sendable {
             store: PostgresV2MessageSendOperationStore,
             configuration: V2SendOperationSchedulingConfiguration,
             maximumRetainedBytes: Int, capacity: Int,
-            borrow: @escaping V2ScheduledSendConnection, execute: @escaping V2ScheduledSendExecution
+            borrow: @escaping V2ScheduledSendConnection, startBorrow: V2ScheduledSendConnectionStart?,
+            execute: @escaping V2ScheduledSendExecution
         ) {
             self.store = store
             self.configuration = configuration
             self.maximumRetainedBytes = maximumRetainedBytes
             maximumResourceDemands = max(1, min(configuration.maximumPendingRequests, capacity))
             scheduledConnection = borrow
+            startScheduledConnection = startBorrow
             scheduledExecute = execute
         }
         func enqueue(
@@ -305,7 +322,11 @@ package final class V2PhysicalSendDispatcher: Sendable {
             return pending
         }
 
-        func connectionLoanReturned(id: UUID) {
+        func connectionLoanReturned(id: UUID, unboundSettled: Bool) {
+            // A synchronous failed acquisition has selected no room. Keep its
+            // scheduling position until the owner reports that failure, so an
+            // inline return cannot recursively submit the same ready request.
+            guard unboundSettled || batchStages[id] != .acquiringConnection else { return }
             guard connectionTasks[id] != nil, returnedConnections.insert(id).inserted else {
                 return
             }
@@ -371,7 +392,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         func connectionReturned(id: UUID) {
             if let timeline = connectionTimelines.removeValue(forKey: id), V2SendPathTrace.enabled {
                 recentConnectionTimelines.append(timeline)
-                if recentConnectionTimelines.count > 64 {
+                if recentConnectionTimelines.count > 512 {
                     let removed = recentConnectionTimelines.removeFirst()
                     if let released = removed.marker("scheduler_release_entered") {
                         diagnosticCoverageStart = max(diagnosticCoverageStart ?? released, released)
@@ -388,6 +409,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         func schedulePhysicalConnections() {
             guard !closed else { return }
             let borrow = scheduledConnection
+            let startBorrow = startScheduledConnection
             let execute = scheduledExecute
             let dispatcher = owner!
             let waiting = connectionTasks.keys.filter {
@@ -407,72 +429,95 @@ package final class V2PhysicalSendDispatcher: Sendable {
                 let root = V2SendDispatchRoot()
                 connectionTasks[id] = root
                 effects.append {
+                    // Register the actual borrowing Future on the already-running
+                    // caller. SQL's owned callback still enters its physical loop.
+                    let completed = Mutex<V2ScheduledSendOutcome?>(nil)
+                    let connected: @Sendable (V2OwnerConnectionExecutor) async throws -> V2ScheduledSendOutcome? = { executor in
+                        let selecting = ContinuousClock.now
+                        guard let selected = dispatcher.selectConnectedRoom(id: id)
+                        else { return nil }
+                        let pending = selected.pending
+                        timeline.record(.ownerSelectRoom, from: selecting)
+                        if let entered = timeline.marker("driver_entered") {
+                            timeline.record(
+                                .ownerReadyWait, from: pending.enqueuedAt,
+                                to: max(pending.enqueuedAt, entered))
+                        }
+                        timeline.attach(
+                            trace: pending.trace, enqueuedAt: pending.enqueuedAt)
+                        let result: Result<[V2RoomMessagingResult], any Error>
+                        do {
+                            result = .success(
+                                try await V2SendPathTrace.$current.withValue(
+                                    pending.trace
+                                ) {
+                                    pending.trace?.record(
+                                        "database_schedule_wait",
+                                        from: pending.enqueuedAt)
+                                    return try await execute(
+                                        executor, pending.prepared)
+                                })
+                        } catch { result = .failure(error) }
+                        let executed = ContinuousClock.now
+                        timeline.mark("execute_returned", at: executed)
+                        if let commit = timeline.marker("commit_future_completed") {
+                            timeline.record(
+                                .ownerCommitFutureToExecuteReturn, from: commit,
+                                to: executed)
+                        }
+                        // Retain only the post-commit action, never the borrowed executor.
+                        let finalize = executor.finalize
+                        let outcome = V2ScheduledSendOutcome(
+                            result: result,
+                            finalize: {
+                                await V2SendPathTrace.$current.withValue(
+                                    pending.trace
+                                ) {
+                                    selected.diagnose()
+                                    let startedAt = ContinuousClock.now
+                                    await finalize()
+                                    pending.trace?.record(
+                                        "post_commit_finalization", from: startedAt)
+                                }
+                            },
+                            settle: { result in
+                                dispatcher.connectedRoomSettled(
+                                    id: id, pending: pending, result: result)
+                            })
+                        completed.withLock { $0 = outcome }
+                        timeline.record(.ownerRecordOutcome, from: executed)
+                        return outcome
+                    }
+                    let started: Result<V2StartedRoomConnection<V2ScheduledSendOutcome?>, any Error>?
+                    if let startBorrow {
+                        timeline.mark("ticket_entry_started")
+                        timeline.record(.ownerTicketRegistrationWait, from: timeline.requestedAt)
+                        started = Result {
+                            try V2ScheduledSendLoanReturn.$current.withValue(
+                                V2ScheduledSendLoanReturn { dispatcher.connectionLoanReturned(id: id) }
+                            ) {
+                                try V2OwnerConnectionTimeline.$current.withValue(timeline) {
+                                    try startBorrow(deadline, connected)
+                                }
+                            }
+                        }
+                    } else { started = nil }
                     root.start {
                         // Preserve a settled turn even if loan cleanup subsequently throws.
-                        let completed = Mutex<V2ScheduledSendOutcome?>(nil)
                         var outcome: V2ScheduledSendOutcome?
                         timeline.mark("ticket_task_started")
                         timeline.record(.ownerTicketTaskWait, from: timeline.requestedAt)
                         do {
-                            outcome = try await V2ScheduledSendLoanReturn.$current.withValue(
-                                V2ScheduledSendLoanReturn {
-                                    dispatcher.connectionLoanReturned(id: id)
-                                }
-                            ) {
-                                try await V2OwnerConnectionTimeline.$current.withValue(timeline) {
-                                    try await borrow(deadline) { executor in
-                                        let selecting = ContinuousClock.now
-                                        guard let pending = dispatcher.selectConnectedRoom(id: id)
-                                        else { return nil }
-                                        timeline.record(.ownerSelectRoom, from: selecting)
-                                        if let entered = timeline.marker("driver_entered") {
-                                            timeline.record(
-                                                .ownerReadyWait, from: pending.enqueuedAt,
-                                                to: max(pending.enqueuedAt, entered))
-                                        }
-                                        timeline.attach(
-                                            trace: pending.trace, enqueuedAt: pending.enqueuedAt)
-                                        let result: Result<[V2RoomMessagingResult], any Error>
-                                        do {
-                                            result = .success(
-                                                try await V2SendPathTrace.$current.withValue(
-                                                    pending.trace
-                                                ) {
-                                                    pending.trace?.record(
-                                                        "database_schedule_wait",
-                                                        from: pending.enqueuedAt)
-                                                    return try await execute(
-                                                        executor, pending.prepared)
-                                                })
-                                        } catch { result = .failure(error) }
-                                        let executed = ContinuousClock.now
-                                        timeline.mark("execute_returned", at: executed)
-                                        if let commit = timeline.marker("commit_future_completed") {
-                                            timeline.record(
-                                                .ownerCommitFutureToExecuteReturn, from: commit,
-                                                to: executed)
-                                        }
-                                        // Retain only the post-commit action, never the borrowed executor.
-                                        let finalize = executor.finalize
-                                        let outcome = V2ScheduledSendOutcome(
-                                            result: result,
-                                            finalize: {
-                                                await V2SendPathTrace.$current.withValue(
-                                                    pending.trace
-                                                ) {
-                                                    let startedAt = ContinuousClock.now
-                                                    await finalize()
-                                                    pending.trace?.record(
-                                                        "post_commit_finalization", from: startedAt)
-                                                }
-                                            },
-                                            settle: { result in
-                                                dispatcher.connectedRoomSettled(
-                                                    id: id, pending: pending, result: result)
-                                            })
-                                        completed.withLock { $0 = outcome }
-                                        timeline.record(.ownerRecordOutcome, from: executed)
-                                        return outcome
+                            if let started {
+                                outcome = try await started.get().finish()
+                            } else {
+                                outcome = try await V2ScheduledSendLoanReturn.$current.withValue(
+                                    V2ScheduledSendLoanReturn {
+                                        dispatcher.connectionLoanReturned(id: id)
+                                    }
+                                ) {
+                                    try await V2OwnerConnectionTimeline.$current.withValue(timeline) {
+                                        try await borrow(deadline, connected)
                                     }
                                 }
                             }
@@ -487,11 +532,14 @@ package final class V2PhysicalSendDispatcher: Sendable {
                             timeline.record(
                                 .ownerExecuteReturnToPoolReturn, from: executed, to: returned)
                         }
-                        dispatcher.connectionLoanReturned(id: id)
+                        dispatcher.connectionLoanReturned(id: id, unboundSettled: true)
                         if let outcome {
                             timeline.record(
                                 .ownerPoolReturnToResourceRelease, from: returned,
                                 to: timeline.marker("scheduler_release_entered") ?? .now)
+                            // The acquisition root uses the global executor. The physical
+                            // callback scopes its own database preference; it cannot leak
+                            // into this root after the loan Future settles.
                             await outcome.finalize()
                             await outcome.settle(outcome.result)
                         }

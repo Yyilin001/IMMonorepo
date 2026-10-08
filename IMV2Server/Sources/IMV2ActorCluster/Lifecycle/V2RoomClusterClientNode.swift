@@ -64,6 +64,8 @@ public actor V2RoomClusterClientNode {
                                              host: configuration.host, port: configuration.port,
                                              tls: configuration.tls)
         settings.threadPoolSize = configuration.threadPoolSize
+        settings.serialization.binaryDistributedInvocations =
+            ProcessInfo.processInfo.environment["IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED"] == "true"
         settings.downingStrategy = .none
         settings.onDownAction = .none
         settings.maximumInboundFrameBytes = try ClusterInboundFrameLimit(

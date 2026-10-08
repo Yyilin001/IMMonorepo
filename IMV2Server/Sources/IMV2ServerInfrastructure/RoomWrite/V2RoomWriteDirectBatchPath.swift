@@ -96,6 +96,33 @@ struct V2RoomWriteDirectBatchPath: Sendable {
             .projectionPersistence,
             duration: projectionStartedAt.duration(to: .now)
         )
+        return try makeCommits(prepared, projectionChanges: projectionChanges)
+    }
+
+    static func supportsSingleStatement(_ prepared: [PreparedDirectRoomLogAppend]) -> Bool {
+        !prepared.isEmpty && Set(prepared.map(\.roomID)).count == 1 && prepared.allSatisfy {
+            $0.input.runtimeGuard != nil && !$0.publishesPolicyHints && !$0.advancesReplyMarker
+                && !$0.directContext.requiresStrangerQuota
+                && $0.directContext.senderProfileVisibleToRecipient && $0.directContext.senderCanSend == true
+        }
+    }
+
+    func completeSingleStatement(_ prepared: [PreparedDirectRoomLogAppend],
+        connection: V2BorrowedRoomConnection, combinedWrite: V2DurableOwnerCombinedWrite,
+        metrics: V2SendOperationBatchMetrics?
+    ) async throws -> [OrderedRoomWriteCommit] {
+        guard Self.supportsSingleStatement(prepared) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        let commits = try makeCommits(prepared, projectionChanges: Array(repeating:
+            .init(senderCapabilityInserted: false, recipientProfileInserted: false), count: prepared.count))
+        try await Self.persistMessages(inputs: prepared.enumerated().map { $0.element.input.withOrdinal($0.offset) },
+            sql: connection.sql, operationReceipts: try combinedWrite.receipts(for: prepared),
+            prevalidatedDirectMemberships: true, implicitConnection: connection, metrics: metrics)
+        return commits
+    }
+
+    private func makeCommits(_ prepared: [PreparedDirectRoomLogAppend],
+        projectionChanges: [DirectPostAcceptanceProjectionChanges]
+    ) throws -> [OrderedRoomWriteCommit] {
         guard projectionChanges.count == prepared.count else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
@@ -233,7 +260,9 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         inputs: [PlainRoomLogMessageInput],
         sql: any SQLDatabase,
         operationReceipts: [V2DurableSendBatchPermanentReceipt]? = nil,
-        prevalidatedDirectMemberships: Bool = false
+        prevalidatedDirectMemberships: Bool = false,
+        implicitConnection: V2BorrowedRoomConnection? = nil,
+        metrics: V2SendOperationBatchMetrics? = nil
     ) async throws {
         guard !inputs.isEmpty,
               Set(inputs.map(\.messageID)).count == inputs.count,
@@ -243,7 +272,8 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         if !prevalidatedDirectMemberships {
             try await assertDirectMemberships(roomIDs: inputs.map(\.roomID), sql: sql)
         }
-        try await PlainDirectRoomLogBatchWritePath.persist(inputs: inputs, sql: sql, operationReceipts: operationReceipts)
+        try await PlainDirectRoomLogBatchWritePath.persist(inputs: inputs, sql: sql, operationReceipts: operationReceipts,
+            implicitConnection: implicitConnection, metrics: metrics)
     }
 
 }

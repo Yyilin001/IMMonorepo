@@ -12,6 +12,37 @@ benchmark = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(benchmark)
 
 
+class LoaderFailureReportDrainTests(unittest.TestCase):
+    def test_failed_peer_does_not_immediately_abort_and_later_failures_do_not_extend_deadline(self):
+        drain = benchmark.LoaderFailureReportDrain(30)
+        self.assertFalse(drain.observe([None, 1, None], 100))
+        self.assertFalse(drain.observe([2, 1, None], 129))
+        self.assertTrue(drain.observe([2, 1, None], 130))
+        self.assertEqual(drain.started, 100)
+        self.assertEqual(drain.evidence([0, 1], 3)['failedLoaderOrdinals'], [0, 1])
+        self.assertEqual(drain.evidence([0, 1], 3)['missingReportOrdinals'], [2])
+
+    def test_all_peers_may_finish_and_report_after_failure_without_becoming_success(self):
+        drain = benchmark.LoaderFailureReportDrain(30)
+        drain.observe([1, None], 100)
+        self.assertFalse(drain.observe([1, 0], 131))
+        proof = drain.evidence([0, 1], 2)
+        self.assertTrue(proof['firstFailureObserved'])
+        self.assertTrue(proof['allReportsPresent'])
+        self.assertFalse(proof['timedOut'])
+
+    def test_no_failure_does_not_change_success_or_start_a_deadline(self):
+        drain = benchmark.LoaderFailureReportDrain(30)
+        self.assertFalse(drain.observe([0, None], 100))
+        self.assertFalse(drain.observe([0, 0], 500))
+        self.assertIsNone(drain.started)
+
+    def test_invalid_budget_is_rejected(self):
+        for seconds in [0, 601]:
+            with self.assertRaises(ValueError):
+                benchmark.LoaderFailureReportDrain(seconds)
+
+
 class CandidateAuthorizationConfigurationTests(unittest.TestCase):
     def test_candidate_only_does_not_require_frozen_baseline_binaries(self):
         args = SimpleNamespace(kind='candidate', baseline_checkout=None, baseline_binary=None,
@@ -35,11 +66,28 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                 candidate_event_loop_threads=1)
             manifest = dict(userBucket='user-a', shardID='room-a', capacityProfileID='standard', commandWindowLimit=100)
             one = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(one['IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP'], '4')
             args.candidate_event_loop_threads = 2
             two = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(two['IM_V2_SEND_PATH_TRACE_MODE'], 'sampled')
+            self.assertEqual(two['IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED'], 'true')
+            self.assertEqual(two['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'], 'false')
+            args.candidate_actor_binary_invocations = 'enabled'
+            args.candidate_send_path_trace_mode = 'all'
+            args.candidate_message_write_prepared_queries = 'disabled'
+            comparison = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(comparison['IM_V2_SEND_PATH_TRACE_MODE'], 'all')
+            self.assertEqual(comparison['IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED'], 'false')
+            self.assertEqual(comparison['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'], 'true')
             self.assertEqual(two['IM_V2_DATABASE_EVENT_LOOP_THREADS'], '2')
             self.assertEqual(two['IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS'], '1')
             self.assertEqual(two['IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP'], '2')
+            args.candidate_policy_control_connections = 8
+            control = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(control['IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP'], '8')
+            for key, value in comparison.items():
+                if key != 'IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP':
+                    self.assertEqual(control[key], value)
             for role in ('FOREGROUND', 'SYNC', 'DELIVERY', 'PROJECTION', 'MAINTENANCE'):
                 key = f'IM_V2_DATABASE_{role}_CONNECTIONS_PER_EVENT_LOOP'
                 self.assertEqual(one[key], two[key])

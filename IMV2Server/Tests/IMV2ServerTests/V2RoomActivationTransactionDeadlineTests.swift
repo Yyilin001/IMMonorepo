@@ -12,6 +12,79 @@ import Testing
 
 @Suite("V2 room activation transaction deadline")
 struct V2RoomActivationTransactionDeadlineTests {
+    @Test("a loan settles before its waiter starts and late waiter cancellation cannot close a reused connection",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func startedLoanSettlesBeforeWaiter() async throws {
+        let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_DATABASE_URL"])
+        let resources = makeV2DatabaseTestResources()
+        resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+        do {
+            let database = resources.database(.psql)
+            let firstPID = AsyncStream<Int32>.makeStream()
+            let started = try v2StartOwnerBatchConnection(database: database, deadline: .now + .seconds(5),
+                metrics: nil, acquisitionOnly: true, interrupted: { _ in }) { borrowed, _ in
+                let pid = try #require(try await deadlineSQL(borrowed).raw("SELECT pg_backend_pid() AS value").first(decoding: DeadlinePID.self)).value
+                firstPID.continuation.yield(pid)
+                return pid
+            }
+            var first = firstPID.stream.makeAsyncIterator()
+            let original = try #require(await first.next())
+            let secondPID = AsyncStream<Result<Int32, any Error>>.makeStream(), release = AsyncStream<Void>.makeStream()
+            let second = Task {
+                do {
+                    return try await v2WithOwnerBatchConnection(database: database, deadline: .now + .seconds(5),
+                        metrics: nil, acquisitionOnly: true, interrupted: { _ in }) { borrowed, _ in
+                        let sql = try deadlineSQL(borrowed)
+                        let pid = try #require(try await sql.raw("SELECT pg_backend_pid() AS value").first(decoding: DeadlinePID.self)).value
+                        secondPID.continuation.yield(.success(pid))
+                        var held = release.stream.makeAsyncIterator(); _ = await held.next()
+                        try await sql.raw("SELECT 1").run()
+                        return pid
+                    }
+                } catch { secondPID.continuation.yield(.failure(error)); throw error }
+            }
+            let verification: Result<Void, any Error>
+            do {
+                var next = secondPID.stream.makeAsyncIterator()
+                let reused = try #require(await next.next()).get()
+                #expect(reused == original)
+                let finishing = Task {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return try await started.finish()
+                }
+                #expect(try await finishing.value == original)
+                verification = .success(())
+            } catch { verification = .failure(error) }
+            release.continuation.finish(); secondPID.continuation.finish(); firstPID.continuation.finish()
+            #expect(try await second.value == original)
+            try verification.get()
+            try await resources.shutdown()
+        } catch { try? await resources.shutdown(); throw error }
+    }
+
+    @Test("a synchronously started loan keeps its absolute deadline before any waiter is scheduled",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func startedLoanDeadlineWithoutWaiter() async throws {
+        let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_DATABASE_URL"])
+        let resources = makeV2DatabaseTestResources()
+        resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
+        do {
+            let database = resources.database(.psql)
+            // Warm one real connection so the probe tests SQL cancellation,
+            // rather than depending on a cold TCP connection's startup time.
+            try await deadlineSQL(database).raw("SELECT 1").run()
+            let started = try v2StartOwnerBatchConnection(database: database, deadline: .now + .milliseconds(120),
+                metrics: nil, interrupted: { _ in }) { borrowed, _ in
+                try await deadlineSQL(borrowed).raw("SELECT pg_sleep(1)").run()
+                return 1
+            }
+            try await Task.sleep(for: .milliseconds(240))
+            await #expect(throws: (any Error).self) { _ = try await started.finish() }
+            try await deadlineSQL(database).raw("SELECT 1").run()
+            try await resources.shutdown()
+        } catch { try? await resources.shutdown(); throw error }
+    }
+
     @Test("pinned loan supports rollback then an independent transaction on the same physical loop",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_TRANSACTION_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func pinnedTransactionReuse() async throws {

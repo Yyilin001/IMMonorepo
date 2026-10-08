@@ -40,6 +40,7 @@ public final class PostgresConnection: @unchecked Sendable {
     }
 
     private let internalListenID = ManagedAtomic(0)
+    private let automaticPreparedQueries: AutomaticPreparedQueryCache?
 
     public var isClosed: Bool {
         return !self.channel.isActive
@@ -49,10 +50,11 @@ public final class PostgresConnection: @unchecked Sendable {
 
     private var _logger: Logger
 
-    init(channel: any Channel, connectionID: ID, logger: Logger) {
+    init(channel: any Channel, connectionID: ID, logger: Logger, options: Configuration.Options = .init()) {
         self.channel = channel
         self.id = connectionID
         self._logger = logger
+        self.automaticPreparedQueries = AutomaticPreparedQueryCache(options: options)
     }
     deinit {
         assert(self.isClosed, "PostgresConnection deinitialized before being closed.")
@@ -202,7 +204,7 @@ public final class PostgresConnection: @unchecked Sendable {
                     )
                 }
 
-                let connection = PostgresConnection(channel: channel, connectionID: connectionID, logger: logger)
+                let connection = PostgresConnection(channel: channel, connectionID: connectionID, logger: logger, options: configuration.options)
                 return connection.start(configuration: configuration).map { _ in
                     timeoutTask.cancel()
                     return connection
@@ -252,13 +254,14 @@ public final class PostgresConnection: @unchecked Sendable {
         }
 
         let promise = self.channel.eventLoop.makePromise(of: PSQLRowStream.self)
-        let context = ExtendedQueryContext(
-            query: query,
-            logger: logger,
-            promise: promise
-        )
-
-        self.channel.write(HandlerTask.extendedQuery(context), promise: nil)
+        if let name = automaticPreparedQueries?.name(for: query) {
+            self.channel.write(HandlerTask.executePreparedStatement(.init(
+                name: name, sql: query.sql, bindings: query.binds,
+                bindingDataTypes: [], logger: logger, promise: promise)), promise: nil)
+        } else {
+            let context = ExtendedQueryContext(query: query, logger: logger, promise: promise)
+            self.channel.write(HandlerTask.extendedQuery(context), promise: nil)
+        }
 
         return promise.futureResult
     }
@@ -885,5 +888,30 @@ extension PostgresConnection {
 #else
         return MultiThreadedEventLoopGroup.singleton
 #endif
+    }
+}
+
+
+extension PostgresConnection {
+    /// Transaction status from a completed backend ReadyForQuery cycle.
+    public enum ReadyForQueryState: Sendable, Equatable {
+        case idle
+        case inTransaction
+        case inFailedTransaction
+    }
+
+    /// Waits for all previously registered commands to reach ReadyForQuery,
+    /// without sending another SQL statement. The caller must exclusively own
+    /// this connection and separately retain any preceding query error.
+    /// An idle status does not by itself prove that a failed query succeeded.
+    public func confirmReadyForQuery() -> EventLoopFuture<ReadyForQueryState> {
+        let confirmation = self.channel.eventLoop.makePromise(of: ReadyForQueryState.self)
+        // The handler acknowledges registration even when the state machine
+        // rejects it. A failed write therefore means the handler never took
+        // ownership, and this path must settle the otherwise unowned promise.
+        self.channel.write(HandlerTask.confirmReadyForQuery(confirmation)).whenFailure {
+            confirmation.fail($0)
+        }
+        return confirmation.futureResult
     }
 }

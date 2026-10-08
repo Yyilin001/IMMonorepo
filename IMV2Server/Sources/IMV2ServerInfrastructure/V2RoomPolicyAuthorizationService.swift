@@ -22,7 +22,7 @@ private func v2CachedDirectPolicyStates(pair: V2DirectSendControlPair,
 }
 
 private func v2CurrentPolicySnapshot(
-    sender: UUID, recipient: UUID?,
+    sender: UUID, recipient: UUID?, recipientReplyConfirmed: Bool,
     cachedRead: @escaping @Sendable ([V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot]?,
     read: @escaping @Sendable ([V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot],
     metrics: V2SendOperationBatchMetrics?
@@ -44,7 +44,11 @@ private func v2CurrentPolicySnapshot(
         if let recipient {
             guard let relationship = result.first(where: { $0.scope.key == V2PolicyAuthorizationScope.pair(sender, recipient).key }),
                   case .pair(let pair) = relationship.facts else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
-            if !pair.isFriend {
+            let ordinaryAccounts = result.filter { snapshot in
+                guard case .account(let account) = snapshot.facts else { return false }
+                return account.specialKind == nil
+            }.count == 2
+            if !pair.isFriend && !(recipientReplyConfirmed && ordinaryAccounts) {
                 let stranger: [V2PolicyAuthorizationScope] = [.stranger(recipient)]
                 let startedAt = ContinuousClock.now
                 if let cached = try await cachedRead(stranger) {
@@ -59,7 +63,7 @@ private func v2CurrentPolicySnapshot(
         }
         return result
     }
-    if let recipient { return try .direct(pair: .init(sender: sender, recipient: recipient), snapshots: states) }
+    if let recipient { return try .direct(pair: .init(sender: sender, recipient: recipient), snapshots: states, recipientReplyConfirmed: recipientReplyConfirmed) }
     return try .account(sender: sender, snapshots: states)
 }
 
@@ -104,10 +108,10 @@ package final class V2RoomPolicyAuthorizationService: Sendable {
         controlPreparationAdmission: V2DatabaseWorkAdmissionController? = nil,
                  sendOperationMetrics: V2SendOperationBatchMetrics? = nil) {
         usesMemorySendPreparation = usesCurrentState
-        let currentLoader: (@Sendable (V2RoomActivationToken, UUID, UUID?) async throws -> V2CurrentRoomPolicySnapshot)?
+        let currentLoader: (@Sendable (V2RoomActivationToken, UUID, UUID?, Bool) async throws -> V2CurrentRoomPolicySnapshot)?
         if usesCurrentState {
-            currentLoader = { _, sender, recipient in
-                try await v2CurrentPolicySnapshot(sender: sender, recipient: recipient,
+            currentLoader = { _, sender, recipient, replied in
+                try await v2CurrentPolicySnapshot(sender: sender, recipient: recipient, recipientReplyConfirmed: replied,
                     cachedRead: { try await policyOwners.cachedSnapshots(scopes: $0) },
                     read: { try await policyOwners.registrationSnapshots(scopes: $0) },
                     metrics: sendOperationMetrics)
@@ -170,10 +174,10 @@ package final class V2RoomPolicyAuthorizationService: Sendable {
         controlPreparationAdmission: V2DatabaseWorkAdmissionController? = nil,
                  sendOperationMetrics: V2SendOperationBatchMetrics? = nil) {
         usesMemorySendPreparation = usesCurrentState
-        let currentLoader: (@Sendable (V2RoomActivationToken, UUID, UUID?) async throws -> V2CurrentRoomPolicySnapshot)?
+        let currentLoader: (@Sendable (V2RoomActivationToken, UUID, UUID?, Bool) async throws -> V2CurrentRoomPolicySnapshot)?
         if usesCurrentState {
-            currentLoader = { _, sender, recipient in
-                try await v2CurrentPolicySnapshot(sender: sender, recipient: recipient,
+            currentLoader = { _, sender, recipient, replied in
+                try await v2CurrentPolicySnapshot(sender: sender, recipient: recipient, recipientReplyConfirmed: replied,
                     cachedRead: { try await policyOwners.cachedSnapshots(scopes: $0) },
                     read: { try await policyOwners.registrationSnapshots(scopes: $0) },
                     metrics: sendOperationMetrics)

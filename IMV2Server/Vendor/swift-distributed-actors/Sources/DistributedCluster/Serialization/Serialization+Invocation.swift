@@ -19,6 +19,14 @@ import NIO
 import NIOFoundationCompat
 import SwiftProtobuf
 
+/// An explicitly opted-in argument can avoid a Codable wrapping allocation.
+/// The declared distributed target type owns decoding, never a wire type hint.
+/// Return nil only for a legacy encoding; malformed recognized bytes must throw.
+public protocol ClusterBinaryInvocationArgument: Codable {
+    func encodeClusterInvocationArgument() throws -> Data
+    static func decodeClusterInvocationArgument(_ bytes: Data) throws -> Self?
+}
+
 public struct ClusterInvocationEncoder: DistributedTargetInvocationEncoder {
     public typealias SerializationRequirement = any Codable
 
@@ -44,6 +52,11 @@ public struct ClusterInvocationEncoder: DistributedTargetInvocationEncoder {
     }
 
     public mutating func recordArgument<Value: Codable>(_ argument: RemoteCallArgument<Value>) throws {
+        if self.system.settings.serialization.binaryDistributedInvocations,
+            let binary = argument.value as? any ClusterBinaryInvocationArgument {
+            self.arguments.append(try binary.encodeClusterInvocationArgument())
+            return
+        }
         let serialized = try self.system.serialization.serialize(argument.value)
         let data = serialized.buffer.readData()
         self.arguments.append(data)
@@ -112,15 +125,6 @@ public struct ClusterInvocationDecoder: DistributedTargetInvocationDecoder {
             argumentData = message.arguments[self.argumentIdx]
             self.argumentIdx += 1
 
-            let manifest = try system.serialization.outboundManifest(Argument.self)
-
-            let serialized = Serialization.Serialized(
-                manifest: manifest,
-                buffer: Serialization.Buffer.data(argumentData)
-            )
-            let argument = try system.serialization.deserialize(as: Argument.self, from: serialized)
-            return argument
-
         case .localProxyCall(let invocation):
             // TODO: potentially able to optimize and avoid serialization round trip for such calls
             guard self.argumentIdx < invocation.arguments.count else {
@@ -129,6 +133,16 @@ public struct ClusterInvocationDecoder: DistributedTargetInvocationDecoder {
 
             argumentData = invocation.arguments[self.argumentIdx]
             self.argumentIdx += 1
+        }
+
+        // Accept opted-in binary arguments independently of our outbound mode.
+        // Legacy arguments still use their original Codable serializer.
+        if let binaryType = Argument.self as? any ClusterBinaryInvocationArgument.Type,
+            let decoded = try binaryType.decodeClusterInvocationArgument(argumentData) {
+            guard let argument = decoded as? Argument else {
+                throw SerializationError(.notAbleToDeserialize(hint: String(reflecting: Argument.self)))
+            }
+            return argument
         }
 
         // FIXME: make incoming manifest

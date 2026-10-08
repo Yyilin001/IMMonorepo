@@ -14,7 +14,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("committed policy mutations refresh warm production rooms from memory and preserve unrelated rooms",
           arguments: ["block", "remove", "stranger", "disable"], [false, true])
     func warmRoomPolicyMutationIsolation(kind: String, usesCurrentState: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { control, owner, controlSQL, ownerSQL, _ in
+        try await withForwardOwnerDatabases(mode: .standard, messageSessionDefaults: usesCurrentState) { control, owner, controlSQL, ownerSQL, _ in
             let now = Date(), profile = try forwardImportTestProfile()
             try await ownerSQL.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '10 minutes'").run()
             if kind == "remove" {
@@ -61,7 +61,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 .usingControlDatabase(control)
             let sendDatabase = usesCurrentState ? try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 2, reservedRenewalConnections: 0,
-                    maximumQueued: 32, maximumWait: .seconds(10))) : nil
+                    maximumQueued: 32, maximumWait: .seconds(10)), sessionTimeouts: .default) : nil
             let initializationReader = usesCurrentState ? try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 1, reservedRenewalConnections: 0,
                     maximumQueued: 32, maximumWait: .seconds(10))) : nil
@@ -108,6 +108,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState]?.count == 2)
                 #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == (usesCurrentState ? 0 : 2))
+                if usesCurrentState {
+                    try await V2PostgresSessionReadiness.verify(database: try #require(sendDatabase), timeouts: .default)
+                }
                 let initialProfileEvents = try await ownerSQL.raw("""
                     SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
                     WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
@@ -160,9 +163,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let factsBefore = try #require(beforeSend.stages[.policyOwnerStateFacts]).count
                     let transactionsBefore = try #require(beforeSend.stages[.policyOwnerStateTransaction]).count
                     #expect(factsBefore > 0 && transactionsBefore > 0)
+                    let warmRequest = try warmMutationRequest(room: rooms[0], text: "before policy commit")
                     try warmMutationAccepted(try await host.invoke(token: tokens[0],
-                        encodedRequest: warmMutationRequest(room: rooms[0], text: "before policy commit"),
-                        deadline: .now + .seconds(10)))
+                        encodedRequest: warmRequest, deadline: .now + .seconds(10)))
+                    if kind == "remove" {
+                        let implicitCount = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0
+                        #expect(implicitCount == 1)
+                        // The identical client operation replays without a second write.
+                        try warmMutationAccepted(try await host.invoke(token: tokens[0],
+                            encodedRequest: warmRequest, deadline: .now + .seconds(10)))
+                        #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0 == implicitCount)
+                    }
                     #expect(await owners.pressure().roots == 1)
                     #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateFacts]?.count ?? 0 == factsBefore)
                     #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateTransaction]?.count ?? 0 == transactionsBefore)

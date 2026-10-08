@@ -234,30 +234,41 @@ public final class V2EventLoopBalancedDatabase: Database, SQLDatabase, Sendable,
             (loanClass == .activation ? .lifecycle : loanClass == .renewal ? .renewal : .other)
         let selectedClass: V2PhysicalDatabaseLoanClass = loanClass == .ordinary &&
             V2PhysicalDatabaseLoanScope.purpose == .sync ? .sync : loanClass
+        let completion = eventLoop.makePromise(of: Value.self)
         let request = V2DatabaseLoanObservationContext.$source.withValue(source) {
-            poolBorrower.request(loanClass: selectedClass, deadline: deadline)
+            poolBorrower.request(loanClass: selectedClass, deadline: deadline, onAssignment: { [self] result in
+                switch result {
+                case .failure(let error): completion.fail(error)
+                case .success(let assignment):
+                    let callbackAt = ContinuousClock.now
+                    timeline?.mark("pool_assignment_callback_entered", at: callbackAt)
+                    if let assigned = timeline?.marker("pool_assignment_published") {
+                        timeline?.record(.ownerPoolAssignmentCallbackWait, from: assigned, to: callbackAt)
+                    }
+                    let entry = entries[assignment.index], lease = assignment.lease
+                    let actual: EventLoopFuture<Value> = entry.database.withConnection { borrowed in
+                        let enteredAt = ContinuousClock.now
+                        timeline?.mark("driver_entered", at: enteredAt)
+                        timeline?.record(.ownerPoolToDriverWait, from: callbackAt, to: enteredAt)
+                        lease.observation.driverEntered()
+                        do { try Self.requireLive(lease) }
+                        catch { return borrowed.eventLoop.makeFailedFuture(error) }
+                        return closure(v2ObserveBorrowedDatabase(borrowed, observation: lease.observation,
+                            sessionTimeouts: self.roomSQLSessionTimeouts))
+                    }
+                    actual.whenComplete { result in
+                        lease.release()
+                        timeline?.mark("pool_returned")
+                        loanReturned?()
+                        // Only the terminal Sendable result crosses the facade.
+                        // Connection assignment and SQL never wait on that loop.
+                        completion.completeWith(result)
+                    }
+                }
+            })
         }
         acquisitionCancellation?.install(request.cancel)
-        return request.future.flatMap { [self] assignment in
-            let callbackAt = ContinuousClock.now
-            if let assigned = timeline?.marker("pool_assignment_published") {
-                timeline?.record(.ownerPoolAssignmentCallbackWait, from: assigned, to: callbackAt)
-            }
-            let entry = entries[assignment.index], lease = assignment.lease
-            return entry.database.withConnection { borrowed in
-                let enteredAt = ContinuousClock.now
-                timeline?.mark("driver_entered", at: enteredAt)
-                timeline?.record(.ownerPoolToDriverWait, from: callbackAt, to: enteredAt)
-                lease.observation.driverEntered()
-                do { try Self.requireLive(lease) }
-                catch { return borrowed.eventLoop.makeFailedFuture(error) }
-                return closure(v2ObserveBorrowedDatabase(borrowed, observation: lease.observation, sessionTimeouts: self.roomSQLSessionTimeouts))
-            }.always { _ in
-                lease.release()
-                timeline?.mark("pool_returned")
-                loanReturned?()
-            }.hop(to: eventLoop)
-        }
+        return completion.futureResult
     }
 
     public func execute(query: DatabaseQuery,

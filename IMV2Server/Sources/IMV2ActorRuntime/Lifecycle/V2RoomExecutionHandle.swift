@@ -2,6 +2,17 @@ import Foundation
 import IMV2ActorContracts
 import Synchronization
 
+/// Runtime-only proof that the typed request came from these exact bytes.
+/// The custom initializer prevents constructing a mismatched byte/value pair.
+struct V2DecodedRoomInvocation<Request: Decodable & Sendable>: Sendable {
+    let encodedRequest: Data
+    let request: Request
+    init(decoding encodedRequest: Data) throws {
+        self.request = try JSONDecoder().decode(Request.self, from: encodedRequest)
+        self.encodedRequest = encodedRequest
+    }
+}
+
 /// Process drain closes every room's new admission before scanning any room.
 final class V2RoomHostAdmission: Sendable {
     private let accepting = Atomic(false)
@@ -81,13 +92,29 @@ public final class V2RoomExecutionHandle<Request: Decodable & Sendable, Response
     public func invoke(encodedRequest: Data, deadline: ContinuousClock.Instant) async throws
         -> Response
     {
+        try await invoke(encodedRequest: encodedRequest, decodedInvocation: nil, deadline: deadline)
+    }
+
+    func invoke(decodedInvocation: V2DecodedRoomInvocation<Request>,
+                deadline: ContinuousClock.Instant) async throws -> Response {
+        try await invoke(encodedRequest: decodedInvocation.encodedRequest,
+                         decodedInvocation: decodedInvocation, deadline: deadline)
+    }
+
+    private func invoke(encodedRequest: Data, decodedInvocation: V2DecodedRoomInvocation<Request>?,
+                        deadline: ContinuousClock.Instant) async throws -> Response {
         try Task.checkCancellation()
         guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
         try authority.admit()
         defer { authority.finish() }
         V2SendPathTrace.current?.mark("host_invoke_enter")
         V2SendPathTrace.current?.mark("host_lane_dispatch")
-        let result = try await lane.submit(encodedRequest: encodedRequest, deadline: deadline)
+        let result: Response
+        if let decodedInvocation {
+            result = try await lane.submit(decodedInvocation: decodedInvocation, deadline: deadline)
+        } else {
+            result = try await lane.submit(encodedRequest: encodedRequest, deadline: deadline)
+        }
         V2SendPathTrace.current?.mark("host_lane_return")
         return result
     }

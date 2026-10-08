@@ -570,6 +570,31 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.directAuthorizationResolutionDatabaseURLs == Set([controlURL, ownerURL]).sorted())
     }
 
+    @Test("policy control overrides preserve other pools and obey the process ceiling", arguments: [false, true])
+    func independentPolicyControlPool(isolated: Bool) throws {
+        var values = runtimeValues
+        let key = "IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP"
+        values["IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED"] = isolated ? "true" : "false"
+        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "1000"
+        let baseline = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        let count = baseline.directSendControlConnectionsPerEventLoop + 4
+        values[key] = String(count)
+        let configured = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(configured.directSendControlConnectionsPerEventLoop == count)
+        #expect(configured.databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop == baseline.databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop)
+        #expect(configured.databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop == baseline.databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop)
+        for bad in ["0", "-1", "invalid"] {
+            var invalid = values; invalid[key] = bad
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid(key)) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(invalid))
+            }
+        }
+        values[key] = "1000"
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")) {
+            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
     @Test("message EventLoops increase without multiplying non-message or control budgets")
     func messageEventLoopsKeepNodeConnectionBudget() throws {
         var values = runtimeValues

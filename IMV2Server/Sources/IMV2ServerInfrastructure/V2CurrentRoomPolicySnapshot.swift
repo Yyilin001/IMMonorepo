@@ -10,7 +10,7 @@ enum V2CurrentRoomPolicySnapshot: Sendable {
     case direct(V2DirectSendControlPolicy, deadline: ContinuousClock.Instant)
     case account(V2PolicyAccountFacts, deadline: ContinuousClock.Instant)
 
-    static func direct(pair: V2DirectSendControlPair, snapshots: [V2PolicyFactsSnapshot]) throws -> Self {
+    static func direct(pair: V2DirectSendControlPair, snapshots: [V2PolicyFactsSnapshot], recipientReplyConfirmed: Bool = false) throws -> Self {
         guard pair.sender != pair.recipient, (3...4).contains(snapshots.count),
               Set(snapshots.map { $0.scope.key }).count == snapshots.count,
               let sender = snapshots.first(where: { $0.scope == .account(pair.sender) }),
@@ -21,6 +21,11 @@ enum V2CurrentRoomPolicySnapshot: Sendable {
         let allowsStrangers: Bool
         if social.isFriend {
             guard snapshots.count == 3 else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
+            allowsStrangers = false
+        } else if recipientReplyConfirmed, from.specialKind == nil, to.specialKind == nil {
+            guard snapshots.count == 3 else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
+            // The ordinary-room reply fact authorizes this conversation. Keep
+            // the irrelevant stranger value restrictive, never fabricate allow.
             allowsStrangers = false
         } else {
             guard snapshots.count == 4, let stranger = snapshots.first(where: { $0.scope == .stranger(pair.recipient) }),

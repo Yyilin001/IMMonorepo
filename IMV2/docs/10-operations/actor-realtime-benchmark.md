@@ -377,3 +377,141 @@ sync SERVER_BUSY是此前的工作错误，不能替代真实终止原因。
 独立`hotpath-address-sql-proof.json`在共同rate-1000 phase内取6个完整六节点实际HTTP采集窗口：publishSettled增27042，route_lookup与realtime_owner_snapshot来源四phase SQL计数增量各0、边界active总数0。这个结果仅覆盖特定寻址来源，排除授权/注册、恢复头、持久化和租约SQL；旧routeQueries零值及ACK量单独都不能证明它。离线工具不改原quality或回填历史结果，旧记录缺实际read时间、缺节点、计数重置或有效窗口不足10000发布均为incomplete。
 
 r71正式50k/1000仍在根代理独占运行，原checkpoint180秒+90秒消息及资源不变；此处不预写终态。10k结果不能代替50k/5000或同规格基线至少80%门槛。详见[实测证据](../../../docs/reviews/actor-realtime-routing-evidence.md)。
+
+### 写连接等待的请求窗口归因
+
+`analyze_v2_actor_realtime_hotspots.py` 的每个阶段增加 `readyWaitDiagnosis`。
+分析对象为日志中写连接等待至少 20 ms、完整落在共同测量窗口内的房间请求。
+日志本身包含慢请求和固定采样，因此这里的 P50/P95/P99 **只属于这些诊断请求**，
+不是全量消息分位数。每个分类使用相同的请求集合，未发生的分类贡献为 0。
+
+等待终点与 `owner_ready_wait` 一致：实际驱动交出连接。随后选取房间的耗时
+单独记录，不能计入等待归因。分类总和必须等于该请求的原始等待；不闭合的
+记录计入 `incompletePartitions`，不进入分位数。越过阶段边界的记录另行排除。
+
+| 分类 | 实际观测状态 |
+|---|---|
+| `ready_pool_fully_borrowed_sum` | 所有写连接都已进入驱动借用闭包，尚未归还 |
+| `ready_slots_full_task_pending_sum` | 调度名额满，尚未获得连接的票据均等待任务开始 |
+| `ready_slots_full_pool_request_pending_sum` | 调度名额满，未获得连接的票据均已运行但尚未发出池请求 |
+| `ready_slots_full_assignment_pending_sum` | 调度名额满，未获得连接的票据均等待分配结果发布 |
+| `ready_slots_full_callback_pending_sum` | 调度名额满，未获得连接的票据均等待分配回调开始 |
+| `ready_slots_full_driver_pending_sum` | 调度名额满，未获得连接的票据均等待驱动借用闭包进入 |
+| `ready_slots_full_mixed_pending_sum` | 未获得连接的票据处于不同阶段，无法归为单一原因 |
+| `ready_slots_full_unknown_pending_sum` | 旧记录或缺少阶段标记，无法判断借用停在哪 |
+| `ready_slots_full_return_pending_sum` | 连接已归还，但仍占用调度名额 |
+| `ready_slot_available_sum` | 调度器有可用名额；不等于物理池必定有空闲连接 |
+| `ready_diagnostic_history_missing_sum` | 有限历史已淘汰，不能判断该区间 |
+
+分类说明资源状态，不单独证明根因：例如分配等待还可能来自池准入、续租预留
+或回调推进；任务等待不证明 CPU 全局满载。全忙时须继续结合现有
+`owner_begin/write/commit_future`、`owner_begin/write/commit_resume`、
+SQL 间隔及 PostgreSQL 等待事件判断连接为何被占用。这些子阶段与连接等待
+属于不同维度，不能全部相加。
+
+所有边界采用 `ContinuousClock`；借用票据可由另一个房间先触发，关联后只取
+当前请求窗口内的交集。历史最多保留 512 个已结束票据；区间分析采用事件扫描，
+只重算状态发生变化的票据，在调度器锁外完成，不为每个边界扫描所有票据。
+旧日志仍能分析粗分类，但缺少新标记时不得回填具体任务或回调归因。
+
+### 写连接执行路径的前三项调整
+
+消息写入的分配回调在获胜物理 gate 的 EventLoop 上直接进入对应数据库，
+不再先等待 facade 上的 assignment Future 回调。只有最终 Sendable 结果回到
+稳定的 facade Future；普通 Fluent 泛型接口保留原有结果隔离。
+
+借用轮次由调度器持有的普通全局执行器任务启动；不提前选择数据库 Executor。
+拿到物理连接后，只有连接回调内的事务任务偏好实际连接的 EventLoop。
+连接归还后，原借用任务直接等待通知和内存收尾，不额外创建收尾任务。
+shutdown 仍等待房间收尾完成，同房间下一轮仍不能越过未完成的提交后状态更新。
+执行器归属由真实 EventLoop 回归验证，不能仅凭清除 preference 推断。
+
+不可变命令的排序键、操作键、UUID、授权索引键及成功记录指纹十六进制表示
+在调度入队之前准备一次。权限执行上下文在执行时读取，不缓存权限判断结果；
+提交时间、房间序号和结果仍在原来的事务边界生成。消息内容协议未改变，
+房间事务没有合并，连接预算未增加。
+
+### 传输拆包与房间消费者等待
+
+NIO 通道处理器在自己的 EventLoop 上用现有有界解码器拆包，只将完整帧
+交给业务 Actor。半帧保留在传输解码器中，不创建业务处理任务；达到批次上限
+时先排空残留再消费后续 TCP 数据块。认证协商完成后才放宽发送帧限制。
+Data 接口保留原解码器，两种入口复用相同业务分发；连接背压及发送在途预算不变。
+EOF 半帧校验只在完整批次已经排空时执行，业务期间断连留下的合法排队帧不被误报。
+
+房间 trace 新增三段，它们的总和等于 `room_queue_wait`：
+
+- `room_queue_before_consumer_request`：请求入队到消费者启动被请求前的区间。
+- `room_consumer_start_wait`：当前请求等待区间与消费者任务从创建到开始运行的交集。
+- `room_queue_after_consumer_start`：消费者开始运行后，当前请求到实际分发前的区间。
+
+启动等待以外的两类队列区间可能包含既有轮次、屏障和收集窗口，不能直接视为运行时调度
+或数据库执行时间。原消费者仍是同房间唯一轮次执行入口。
+
+### 连接分配等待细分
+
+`owner_pool_assignment_wait` 从池请求发起到获胜分配发布，细分为互不重叠的区间：
+
+| 阶段 | 边界 |
+|---|---|
+| `owner_pool_before_winning_gate` | 池请求 → 获胜 Gate 请求；包括候选探测，换池时还包括原池等待 |
+| `owner_gate_request_preparation` | Gate 请求 → 开始申请 Gate 锁；包括 UUID/Promise 准备 |
+| `owner_gate_lock_wait` | 开始申请锁 → 进入锁内 |
+| `owner_gate_admission` | 进入锁内 → 准入完成 |
+| `owner_gate_capacity_wait` | 准入完成 → 容量批准；排队请求包含真正的容量等待 |
+| `owner_gate_grant_to_promise` | 容量批准 → 准备好完成交付；合并路径随后提交一个 EventLoop 作业 |
+| `owner_gate_delivery_wait` | 完成交付准备 → 获胜回调进入；原路径包含 Promise 投递及 Future 回调登记，合并路径包含单次 EventLoop 交接 |
+| `owner_pool_publish_work` | 回调进入 → 发布分配；包括借用协调器锁及换池取消 |
+
+仅获胜 lease 的时间戳进入统计，丢失竞态的 grant 不重复计数。时间戳随 lease
+传递，不增加 Future 回调；统计在连接结束、watchdog 解除后汇总，避免在交付路径
+逐项记录指标。阶段区间基于同一 ContinuousClock，子阶段总和应等于该请求的
+assignment wait。延后汇总的窗口计数可能与父阶段略有边界差异。
+
+`owner_gate_off_loop_delivery` 与 `owner_gate_on_loop_delivery` 是按批准时是否位于
+该池 EventLoop 分类的子集；它们的 count 用于说明比例，不是额外阶段。
+`owner_gate_callback_registration` 和 `owner_gate_registered_to_callback` 将 delivery
+分为提交后发起回调登记前、以及其后的区间；后段不应直接当成纯 CPU 时间。
+`owner_gate_queued_capacity_wait` 只统计真正入队的获胜请求；
+`owner_pool_peer_before_gate` 只统计换池获胜请求的前缀等待。这些子集不能与父阶段相加。
+
+消息借用器的立即授予与 peer 立即授予使用合并交付：请求状态安装后，单个实际池 EventLoop 作业完成 Gate Promise 并调用借用器。真正排队及通用数据库借用继续使用 Future 路径。指标边界保留，不把合并路径的交付等待误读为独立 Future 回调登记耗时。
+
+### 消息数据库执行资源隔离
+
+启用 `IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED` 后，Gateway 通过 `V2DatabaseWorkloadResources` 分别持有消息与控制数据库资源：两套 Fluent 驱动注册容器、线程池和 EventLoopGroup。消息池使用 `IM_V2_DATABASE_EVENT_LOOP_THREADS` 条循环；前台读／控制、同步、投递、投影、维护及独立路由／权限控制池使用 `IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS` 条控制循环。它们不再共享同一组循环的前缀，连接预算算法不变。关闭隔离的显式共享池模式继续使用原资源布局。
+
+R79 使用两条消息循环、四条消息写连接，另有一条控制循环；数据库 EventLoop 总数从每 Gateway 两条增加到三条，六节点共增加六条。独立资源容器各有自己的两线程 NIOThreadPool；不将“数据库 EventLoop 总数”当作进程总线程数。两组仍共享机器 CPU、内存及 PostgreSQL，不能据此宣称完全没有资源竞争。
+
+公平写调度、Gate、单次实际消息 EventLoop 交付和同房间串行边界保留。事务任务继续只偏好实际借用连接的消息循环；不可变命令排序、身份／指纹准备在借用前完成，连接归还后由全局获取根任务等待内存和结果收尾，没有新增中间 Actor、Task 或 Future 队列。SQL 绑定和依赖数据库结果的计算仍在事务边界内，不声称消息循环只运行裸 I/O。
+
+关闭顺序为上层 Actor／Worker／loan 排空，随后关闭每套驱动、线程池及其所属 EventLoopGroup。资源关闭幂等；其中一套失败仍会尝试关闭另一套。启动或组装失败同样清理两套资源。
+
+
+### 有界详细链路诊断（R87）
+
+服务默认按消息操作 UUID 稳定采样 1/64 的详细链路；Gateway、房间 RPC、房间 Actor 的选择一致。每条请求的阶段计数与质量校验仍为全量。采样不包含的慢请求不产生详细 spans 或等待历史分类，避免拥塞时诊断计算和日志量随慢请求比例增长。维护探针沿用原来选择。
+
+`IM_V2_SEND_PATH_TRACE_MODE=all` 恢复原有全量采集及慢请求日志选择，适用于短时间诊断；压测入口对应 `--candidate-send-path-trace-mode all`。默认参数为 `sampled`，实际模式写入 `evidence.json` 的 `candidateSendPathTraceMode`。与之前全量诊断轮比较时必须注明这个变化；采样 trace 不代表所有请求的分位数，整体延迟仍取负载器报告。
+
+
+### 消息 SQL 模板准备缓存（R90）
+
+仅消息写角色启用自动预备语句缓存，匹配固定消息追加注释前缀。缓存归属物理连接，键包含完整 SQL 和绑定参数类型，每连接最多 16 个模板；库默认关闭、最大允许 64 个。满后使用原未命名查询，连接关闭时随服务端会话释放。首次模板准备有额外往返，后续复用解析结果；计划是否复用仍受 PostgreSQL 默认 auto 策略控制。
+
+`IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED=false` 或压测 `--candidate-message-write-prepared-queries disabled` 关闭此缓存，使用同一二进制比较。证据字段 `candidateMessageWritePreparedQueries` 记录实际选择。BEGIN / COMMIT、超时、取消及提交不确定恢复语义保留。
+
+
+### 二进制 Actor 调用封装诊断
+
+`--candidate-actor-binary-invocations enabled|disabled` 默认 disabled，控制候选所有 Actor 节点的 `IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED`。它替换分布式调用外层 InvocationMessage，并允许明确 opt-in 的 V2ActorSignedPacket 请求参数直接传递 body / signature 原始字节，避免 JSON / Base64 包装。认证 Call / Reply 的身份字段也使用有界二进制封装，UUID 用原始 16 字节；业务 request / response 载荷与 Hello / Grant 保持 JSON。Reply 仅对已验证的二进制 Call 选择二进制消息体，回复外层包装仍用原编码。签名始终覆盖实际传输的消息体，接收始终先验签后解码；证据记录 `candidateActorBinaryInvocations`。升级后的 fork 同时接收原 JSON 与二进制格式，启用出站前所有接收方必须已升级。性能比较必须使用同一二进制分别开关，并保留相同负载节奏、在线数、连接预算和质量门槛。
+
+
+权限控制池可通过 `--candidate-policy-control-connections N` 单独对照（每节点控制 EventLoop 的连接数，默认4），证据字段为 `candidatePolicyControlConnectionsPerNode`。服务端对应可选环境变量 `IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP`，未设置时保留原有预算推导；设置后仍须满足进程总连接预算校验。该选项不改变消息写池或前台读池容量。比较时保持在线数、负载节奏、消息连接预算、测量时长和质量门槛不变；冷加载排队下降本身不代表吞吐容量通过。
+
+
+### 失败后的有界报告收集
+
+`--loader-report-drain-seconds`默认120秒，可设1—600。首次loader非零退出后，服务继续运行，其他loader按原工作负载结束并写报告；后续失败不延长期限。原总超时、服务异常退出和质量门槛保持生效，任何loader非零仍令整轮失败。`candidate/loader-report-collection.json`（或baseline目录）记录失败分片、期限是否超时及缺失报告。期限到达时执行原清理，报告可能仍不完整，不保证挂死loader生成报告。
+
+失败分片退出后实际负载可能降低，因此报告齐全的失败轮也不作为容量通过证据。连接warmup仅保证既有连接/房间条件，不保证发送权限scope与SQL全warm；发送预热诊断应另列，并记录测量期残留冷读取。3000/3500交替复测与发送预热诊断结果见`docs/reviews/send-throughput-5000-20261008.zh-CN.md`的R138—R143。

@@ -126,7 +126,7 @@ struct V2RoomTurnLaneTests {
         await fixture.executor.waitForStarts(2)
         a.cancel()
         await expectFailure(.outcomeUnknown, from: a)
-        #expect(await fixture.budget.snapshot().commandCount == 2)
+        #expect(fixture.budget.snapshot().commandCount == 2)
         let write = fixture.submit(.init(id: 3, send: false))
         do {
             try await fixture.waitForQueue(1)
@@ -360,7 +360,7 @@ struct V2RoomTurnLaneTests {
         await fixture.executor.waitForStarts(1)
         first.cancel()
         await expectFailure(.outcomeUnknown, from: first)
-        #expect(await fixture.budget.snapshot().commandCount == 1)
+        #expect(fixture.budget.snapshot().commandCount == 1)
         let next = fixture.submit(.init(id: 1, send: false))
         try await fixture.waitForQueue(1)
         #expect(await fixture.executor.starts == [[0]])
@@ -388,9 +388,9 @@ struct V2RoomTurnLaneTests {
         #expect(await fixture.executor.starts == [[0]])
         // A host invokes this only after database fencing and executor shutdown.
         #expect(await fixture.lane.completeRetirement())
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
         #expect(await fixture.lane.completeRetirement())
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
     }
 
     @Test("drain rejects new calls but completes already admitted work")
@@ -418,7 +418,7 @@ struct V2RoomTurnLaneTests {
         let executing = fixture.submit(.init(id: 1, send: false, hold: true), deadline: .now + .milliseconds(100))
         await fixture.executor.waitForStarts(1)
         await expectFailure(.outcomeUnknown, from: executing)
-        #expect(await fixture.budget.snapshot().commandCount == 1)
+        #expect(fixture.budget.snapshot().commandCount == 1)
         #expect(!(await fixture.lane.completeRetirement()))
         await fixture.executor.release()
         try await fixture.waitForBudget(0)
@@ -433,7 +433,7 @@ struct V2RoomTurnLaneTests {
         } catch {
             #expect(error as? V2RoomCallFailure == .notAccepted(.invalidRequest))
         }
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
         #expect(await fixture.executor.starts.isEmpty)
     }
 
@@ -474,11 +474,11 @@ struct V2RoomTurnLaneTests {
         await fixture.executor.waitForStarts(1)
         let reserved = Task { try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3)) }
         try await fixture.waitForQueue(1)
-        #expect(await fixture.budget.snapshot().reservationCount == 1)
+        #expect(fixture.budget.snapshot().reservationCount == 1)
         reserved.cancel()
         await expectFailure(.notAccepted(.cancelled), from: reserved)
         try await fixture.waitForBudget(1)
-        #expect(await fixture.budget.snapshot().reservationCount == 0)
+        #expect(fixture.budget.snapshot().reservationCount == 0)
         await fixture.executor.release()
         #expect(try await first.value == 0)
         try await fixture.waitForBudget(0)
@@ -493,11 +493,11 @@ struct V2RoomTurnLaneTests {
         await expectFailure(.notAccepted(.leaseLost), from: next)
         #expect(await fixture.lane.snapshot().phase == .uncertain)
         #expect(await fixture.lane.snapshot().unresolvedCount == 1)
-        #expect(await fixture.budget.snapshot().reservationCount == 1)
+        #expect(fixture.budget.snapshot().reservationCount == 1)
         #expect(await fixture.executor.starts.isEmpty)
         #expect(!(await fixture.lane.finishReservation(grant, completion: .committed)))
         #expect(await fixture.lane.completeRetirement())
-        #expect(await fixture.budget.snapshot().reservationCount == 0)
+        #expect(fixture.budget.snapshot().reservationCount == 0)
     }
 
     @Test("unknown reservation completion stops queued work and rejects stale dispatch")
@@ -514,7 +514,7 @@ struct V2RoomTurnLaneTests {
             Issue.record("stale grant was acknowledged")
         } catch { #expect(error as? V2RoomCallFailure == .notAccepted(.staleActivation)) }
         #expect(await fixture.lane.completeRetirement())
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
     }
 
     @Test("reservation capacity is shared across every room on the host")
@@ -526,11 +526,11 @@ struct V2RoomTurnLaneTests {
         let grant = try await first.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
         let rejected = Task { try await second.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3)) }
         await expectFailure(.notAccepted(.overloaded), from: rejected)
-        #expect(await budget.snapshot().reservationCount == 1)
+        #expect(budget.snapshot().reservationCount == 1)
         #expect(await first.lane.abortReservation(grant))
         let next = try await second.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
         #expect(await second.lane.abortReservation(next))
-        #expect(await budget.snapshot().commandCount == 0)
+        #expect(budget.snapshot().commandCount == 0)
     }
 
     private func expectFailure<Value: Sendable>(_ expected: V2RoomCallFailure, from task: Task<Value, any Error>) async {
@@ -591,7 +591,7 @@ struct V2RoomTurnLaneTests {
 
         func waitForBudget(_ count: Int) async throws {
             let deadline = ContinuousClock.now + .seconds(3)
-            while await budget.snapshot().commandCount != count {
+            while budget.snapshot().commandCount != count {
                 guard ContinuousClock.now < deadline else { throw WaitFailure.phaseNotReached }
                 await Task.yield()
             }

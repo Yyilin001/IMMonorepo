@@ -35,6 +35,26 @@ struct V2RoomWriteDurableOwnerBatchPath: Sendable {
                     leasedPolicies: policies.count == items.count ? policies : nil, sql: sql)
             }
         }
+        let appends = try reduce(items, rows: rows, usesPreloadedRows: preloadedRows != nil,
+            metrics: sendOperationMetrics)
+        guard appends.count == items.count else { return .init(commits: []) }
+        let persistence = V2RoomWriteDirectBatchPath(strangerMessagePolicy: strangerMessagePolicy)
+        let commits = try await persistence.complete(appends, sql: sql, sendOperationMetrics: sendOperationMetrics, combinedWrite: combinedWrite,
+            prevalidatedDirectMemberships: preloadedRows != nil && combinedWrite != nil)
+        return .init(commits: commits)
+    }
+
+    /// CPU-only reduction shared by explicit transactions and the single-statement path.
+    func reduce(_ items: [Item], rows: [PlainDirectRoomLogBatchPreflightRow],
+        usesPreloadedRows: Bool, metrics sendOperationMetrics: V2SendOperationBatchMetrics? = nil
+    ) throws -> [PreparedDirectRoomLogAppend] {
+        guard !items.isEmpty, items.count <= 256 else { return [] }
+        let ordered = items.map { item in
+            OrderedRoomWriteRequest(originalIndex: item.index, request: item.request,
+                roomID: item.roomID, senderID: item.senderID,
+                cacheKey: .init(roomID: item.roomID, senderID: item.senderID),
+                cachedDirectPolicy: nil, usesRoomAdmissionCredits: false, preflightOrdinal: item.index)
+        }
         let reductionTimer = sendOperationMetrics?.startStage(.ownerReduction)
         defer { reductionTimer?.finish() }
         guard rows.count == items.count else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
@@ -46,7 +66,7 @@ struct V2RoomWriteDurableOwnerBatchPath: Sendable {
         let persistence = V2RoomWriteDirectBatchPath(strangerMessagePolicy: strangerMessagePolicy)
         for (ordinal, item) in items.enumerated() {
             let row = rows[ordinal], request = item.request, room = row.room
-            guard row.ordinal == (preloadedRows == nil ? ordinal : item.index) else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
+            guard row.ordinal == (usesPreloadedRows ? item.index : ordinal) else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
             guard room.kind == "direct", room.capacityProfileID == request.capacityProfile.id,
                   room.frozenAt == nil else { continue }
             if item.accepted == nil {
@@ -118,14 +138,8 @@ struct V2RoomWriteDurableOwnerBatchPath: Sendable {
             if !context.senderHasReplied { replied.insert(direction) }
             projected.insert(direction)
         }
-        // No eligible turn may commit a prefix. Reject the reduced set before
-        // policy/projection mutations if any fresh command was unready/denied;
-        // the Store rolls back and isolates handles with its existing proof.
-        guard appends.count == items.count else { return .init(commits: []) }
-        reductionTimer?.finish()
-        let commits = try await persistence.complete(appends, sql: sql, sendOperationMetrics: sendOperationMetrics, combinedWrite: combinedWrite,
-            prevalidatedDirectMemberships: preloadedRows != nil && combinedWrite != nil)
-        return .init(commits: commits)
+        // All commands must be reducible before any SQL may mutate this room.
+        return appends.count == items.count ? appends : []
     }
 
     private struct AdmissionKey: Hashable {

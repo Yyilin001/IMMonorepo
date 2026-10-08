@@ -8,6 +8,31 @@ import Testing
 
 @Suite("Signed actor sessions bind authority and reject replay")
 struct V2ActorAuthenticationTests {
+    @Test("signed JSON authenticates transmitted bytes independently of key order")
+    func signedBodyKeyOrder() throws {
+        struct Body: Codable, Equatable { let a: Int; let z: String }
+        let key = Curve25519.Signing.PrivateKey()
+        let serviceID = try V2ActorServiceID("key-order-test")
+        let identity = try V2ActorSigningIdentity(serviceID: serviceID, privateKey: key.rawRepresentation)
+        let trust = try V2ActorTrustStore(services: [try .init(serviceID: serviceID,
+            publicKey: key.publicKey.rawRepresentation, permissions: [])])
+        let value = Body(a: 1, z: "消息")
+        let sorted = Data(#"{"a":1,"z":"消息"}"#.utf8)
+        let reversed = Data(#"{"z":"消息","a":1}"#.utf8)
+        for bytes in [sorted, reversed] {
+            let packet = V2ActorSignedPacket(signerID: serviceID, body: bytes,
+                signature: try key.signature(for: bytes))
+            #expect(try trust.verify(packet, as: Body.self, maximumBytes: 1_024).0 == value)
+        }
+        let packet = try identity.sign(value, maximumBytes: 1_024)
+        #expect(try trust.verify(packet, as: Body.self, maximumBytes: 1_024).0 == value)
+        let altered = V2ActorSignedPacket(signerID: serviceID, body: reversed,
+            signature: try key.signature(for: sorted))
+        #expect(throws: V2ActorAuthenticationError.invalidSignature) {
+            try trust.verify(altered, as: Body.self, maximumBytes: 1_024)
+        }
+    }
+
     @Test("remote forward pairs require coordination service authority and exact target host", arguments: [false, true])
     func forwardPairAuthority(allowed: Bool) async throws {
         let fixture = try Fixture(clientPermissions: allowed ? [.roomCoordination] : [.userRoomCalls, .policyMutation])
@@ -653,7 +678,7 @@ struct V2ActorAuthenticationTests {
         }
     }
 
-    @Test("local typed admission retains the canonical signed-body byte ceiling and reply binding")
+    @Test("local typed admission retains the signed-body byte ceiling and reply binding")
     func localSizeAndReplyBinding() async throws {
         let limits = try V2ActorAuthenticationLimits(maximumRequestBytes: 4_096)
         let fixture = try Fixture(limits: limits)
@@ -686,6 +711,46 @@ struct V2ActorAuthenticationTests {
             try fixture.trust.verifyLocalReply(V2ActorLocalPayload(reply), for: try fixture.call(
                 grant: grant, attempt: UUID()), from: fixture.token.host,
                 maximumBytes: limits.maximumReplyBytes)
+        }
+    }
+
+    @Test("binary authenticated calls preserve session authority, replay and expiry", arguments: [false, true])
+    func binarySessionAdmission(binary: Bool) async throws {
+        let clock = TestClock()
+        let fixture = try Fixture(limits: .init(sessionLifetimeMilliseconds: 1_000), clock: clock)
+        let grant = try await fixture.open()
+        let call = try fixture.call(grant: grant)
+        func changed(version: Int = 1, recipient: V2ActorHostIdentity? = nil,
+                     trace: UUID? = nil, caller: UUID? = nil) -> V2ActorAuthenticatedCall {
+            .init(version: version, serviceID: call.serviceID, callerIncarnation: caller ?? call.callerIncarnation,
+                recipient: recipient ?? call.recipient, sessionID: call.sessionID, sequence: call.sequence,
+                attemptID: call.attemptID, traceID: trace ?? call.traceID, remainingBudget: call.remainingBudget,
+                principal: call.principal, request: call.request)
+        }
+        await failure(.unsupportedVersion) {
+            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(changed(version: 2),
+                binary: binary, maximumBytes: 65_536))
+        }
+        await failure(.wrongRecipient) {
+            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(changed(recipient:
+                .init(hostID: call.recipient.hostID, incarnationID: UUID())), binary: binary, maximumBytes: 65_536))
+        }
+        await failure(.sessionExpired) {
+            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(changed(caller: UUID()),
+                binary: binary, maximumBytes: 65_536))
+        }
+        let packet = try fixture.client.signAuthenticated(call, binary: binary, maximumBytes: 65_536)
+        #expect(try await fixture.auth.accept(packet).call == call)
+        await failure(.replay) { _ = try await fixture.auth.accept(packet) }
+        let forbidden = try fixture.call(grant: grant, sequence: 2, principal: .service)
+        await failure(.forbidden) {
+            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(forbidden,
+                binary: binary, maximumBytes: 65_536))
+        }
+        clock.advance(.milliseconds(1_001))
+        await failure(.sessionExpired) {
+            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(fixture.call(grant: grant, sequence: 3),
+                binary: binary, maximumBytes: 65_536))
         }
     }
 

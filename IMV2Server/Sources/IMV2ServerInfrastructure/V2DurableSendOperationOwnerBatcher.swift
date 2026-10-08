@@ -17,6 +17,8 @@ public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetri
             resourceDemandLimit: store.scheduledSendConnectionCapacity ?? configuration.fallbackConnectionCapacity,
             scheduledConnection: { deadline, body in
                 try await store.withScheduledSendConnection(deadline: deadline, body)
+            }, startScheduledConnection: { deadline, body in
+                try store.startScheduledSendConnection(deadline: deadline, body)
             }, scheduledExecute: { executor, prepared in
                 try await executor.execute(prepared, capacityProfile, identifiers, now)
             })
@@ -27,10 +29,11 @@ public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetri
         configuration: V2SendOperationSchedulingConfiguration,
         maximumRetainedBytes: Int, resourceDemandLimit: Int,
         scheduledConnection: @escaping V2ScheduledSendConnection,
+        startScheduledConnection: V2ScheduledSendConnectionStart? = nil,
         scheduledExecute: @escaping V2ScheduledSendExecution) {
         dispatcher = V2PhysicalSendDispatcher(store: store, configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes, capacity: resourceDemandLimit,
-            borrow: scheduledConnection, execute: scheduledExecute)
+            borrow: scheduledConnection, startBorrow: startScheduledConnection, execute: scheduledExecute)
     }
 
     public func execute(_ prepared: V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult] {

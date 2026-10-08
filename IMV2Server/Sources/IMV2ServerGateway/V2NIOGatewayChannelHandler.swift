@@ -21,6 +21,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let foregroundWriteScheduler: V2NIOForegroundWriteScheduler
     private let now: @Sendable () -> NIODeadline
     private let logger = Logger(label: "imv2.gateway.transport")
+    private var decoder: V2FrameDecoder
     private var pending: V2GatewayInboundQueue
     private var processing = false
     /// 通道唯一的请求任务。
@@ -43,7 +44,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let promise: EventLoopPromise<Void>
     }
     private var pendingResponseWrite: PendingResponseWrite?
-    /// 上一次有界解码批次可能仍在字节流中留下后续线路帧。
+    /// 上一次有界解码批次可能仍在传输解码器中留下后续线路帧。
     ///
     /// 必须先排空它们再处理后续 TCP 分片，才能保持应答先进先出。
     private var needsFrameDrain = false
@@ -97,6 +98,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             maximumQueuedInboundChunks > 0
         )
         self.stream = stream
+        self.decoder = .init(limits: stream.frameLimits)
         self.pending = .init(
             maximumBytes: maximumQueuedInboundBytes,
             maximumChunks: maximumQueuedInboundChunks
@@ -294,6 +296,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     }
 
     public func channelInactive(context: ChannelHandlerContext) {
+        // Check EOF only after accepted complete batches have drained. A peer
+        // disconnecting during business work can leave valid queued frames;
+        // discarding them is not evidence of a malformed trailing frame.
+        if closeReason == nil, !processing, pending.isEmpty, !needsFrameDrain {
+            do { try decoder.finish() }
+            catch { closeReason = v2GatewayClosureReason(for: error) }
+        }
         closed = true
         stream.invalidateForegroundAuthorization()
         foregroundWriter?.finish()
@@ -344,18 +353,30 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
               context.channel.isWritable,
               (needsFrameDrain || !pending.isEmpty)
         else { return }
-        processing = true
-        let inbound: Data
-        if needsFrameDrain {
-            needsFrameDrain = false
-            inbound = Data()
-        } else {
-            guard let next = pending.popFirst() else {
-                processing = false
-                return
-            }
-            inbound = next
+        // Decode bounded batches on the channel loop. Partial TCP reads do
+        // not create business tasks or cross the actor boundary.
+        var frames: [V2Frame] = []
+        do {
+            repeat {
+                let inbound: Data
+                if needsFrameDrain {
+                    needsFrameDrain = false
+                    inbound = Data()
+                } else {
+                    guard let next = pending.popFirst() else { return }
+                    inbound = next
+                }
+                frames = try decoder.append(inbound)
+                needsFrameDrain = frames.count == stream.frameLimits.maximumFramesPerAppend
+                    && decoder.hasBufferedBytes
+            } while frames.isEmpty && (needsFrameDrain || !pending.isEmpty)
+        } catch {
+            close(context: context, reason: v2GatewayClosureReason(for: error))
+            return
         }
+        guard !frames.isEmpty else { return }
+        processing = true
+        let inboundFrames = frames
         let stream = stream
         let boundHandler = NIOLoopBound(self, eventLoop: context.eventLoop)
         let boundContext = context.loopBound
@@ -374,10 +395,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         )
                     }.get()
                 }
-                let needsFrameDrain = try await stream.receiveFrames(inbound, authenticationCompleted: {
+                try await stream.receiveDecodedFrames(inboundFrames, authenticationCompleted: { allowsLargeFrames in
                     await withCheckedContinuation { continuation in
                         eventLoop.execute {
                             let handler = boundHandler.value
+                            handler.decoder.setAllowsLargeMessageSendFrames(allowsLargeFrames)
                             handler.authenticationDeadline?.cancel()
                             handler.authenticationDeadline = nil
                             continuation.resume()
@@ -386,8 +408,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                 }, concurrentMessageSendRespond: writeResponse, respond: writeResponse)
                 try Task.checkCancellation()
                 outcome = .success(
-                    authenticated: await stream.isAuthenticated(),
-                    needsFrameDrain: needsFrameDrain
+                    authenticated: await stream.isAuthenticated()
                 )
             } catch {
                 // 公开协议规定请求格式错误或无效时关闭连接。
@@ -419,8 +440,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         processingTask = nil
         processing = false
         switch outcome {
-        case .success(let authenticated, let needsFrameDrain):
-            self.needsFrameDrain = needsFrameDrain
+        case .success(let authenticated):
             if authenticated {
                 authenticationDeadline?.cancel()
                 authenticationDeadline = nil
@@ -1075,7 +1095,7 @@ private enum V2GatewayTransportWriteError: Error {
 }
 
 private enum V2GatewayProcessingOutcome: Sendable {
-    case success(authenticated: Bool, needsFrameDrain: Bool)
+    case success(authenticated: Bool)
     case failure(reason: V2GatewayConnectionClosure)
 }
 

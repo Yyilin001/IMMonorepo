@@ -7,6 +7,7 @@ public enum V2DatabaseLoanSource: String, CaseIterable, Sendable {
     case roomSendInitialization = "room_send_initialization"
     case preparationOwnerRead = "preparation_owner_read"
     case controlReservation = "control_reservation"
+    case policySnapshot = "policy_snapshot"
     case lifecycle, renewal, presence
     case roomWake = "room_wake"
     case routeLookup = "route_lookup"

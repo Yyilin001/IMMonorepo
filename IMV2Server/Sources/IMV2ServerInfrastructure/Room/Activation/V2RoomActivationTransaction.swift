@@ -96,6 +96,32 @@ func v2WithOwnerBatchConnection<Value: Sendable>(database: any Database,
     }
 }
 
+/// Starts a real loan synchronously; the sole owner must await finish before
+/// discarding this handle. Cancellation still waits for physical settlement.
+package final class V2StartedRoomConnection<Value: Sendable>: Sendable {
+    private let claimed = Mutex(false)
+    private let finishBody: @Sendable () async throws -> Value
+    init(_ finish: @escaping @Sendable () async throws -> Value) { finishBody = finish }
+    func finish() async throws -> Value {
+        precondition(claimed.withLock { value in
+            guard !value else { return false }; value = true; return true
+        }, "A started physical loan has exactly one settling owner")
+        return try await finishBody()
+    }
+}
+
+func v2StartOwnerBatchConnection<Value: Sendable>(database: any Database,
+    deadline: ContinuousClock.Instant, metrics: V2SendOperationBatchMetrics?,
+    acquisitionOnly: Bool = false,
+    interrupted: @escaping @Sendable (any Error) -> Void,
+    _ body: @escaping @Sendable (any Database, @escaping @Sendable () -> Bool) async throws -> Value
+) throws -> V2StartedRoomConnection<Value> {
+    try v2StartRoomPhysicalConnection(database: database, deadline: deadline,
+        sendOperationMetrics: metrics, acquisitionOnly: acquisitionOnly, interrupted: interrupted) { borrowed, _, _, state in
+        try await body(borrowed, { state.connectionIsUsable })
+    }
+}
+
 private func v2WithRoomPhysicalConnection<Value: Sendable>(
     database: any Database,
     deadline: ContinuousClock.Instant,
@@ -105,6 +131,21 @@ private func v2WithRoomPhysicalConnection<Value: Sendable>(
     interrupted: @escaping @Sendable (any Error) -> Void = { _ in },
     _ body: @escaping @Sendable (any Database, any TransactionControlDatabase, any SQLDatabase, V2RoomPhysicalTransactionState) async throws -> Value
 ) async throws -> Value {
+    let started = try v2StartRoomPhysicalConnection(database: database, deadline: deadline,
+        sendOperationMetrics: sendOperationMetrics, measureConnectionAcquire: measureConnectionAcquire,
+        acquisitionOnly: acquisitionOnly, interrupted: interrupted, body)
+    return try await started.finish()
+}
+
+private func v2StartRoomPhysicalConnection<Value: Sendable>(
+    database: any Database,
+    deadline: ContinuousClock.Instant,
+    sendOperationMetrics: V2SendOperationBatchMetrics?,
+    measureConnectionAcquire: Bool = true,
+    acquisitionOnly: Bool = false,
+    interrupted: @escaping @Sendable (any Error) -> Void = { _ in },
+    _ body: @escaping @Sendable (any Database, any TransactionControlDatabase, any SQLDatabase, V2RoomPhysicalTransactionState) async throws -> Value
+) throws -> V2StartedRoomConnection<Value> {
     let connectionTimeline = V2OwnerConnectionTimeline.current
     let enteredAt = ContinuousClock.now
     connectionTimeline?.mark("physical_borrow_entered", at: enteredAt)
@@ -180,30 +221,33 @@ private func v2WithRoomPhysicalConnection<Value: Sendable>(
     if let balanced = database as? V2EventLoopBalancedDatabase {
         transactionFuture = balanced.withScheduledConnection(deadline: deadline, acquisitionCancellation: acquisitionCancellation, connectionBody)
     } else { transactionFuture = database.withConnection(connectionBody) }
-    // EventLoopFuture.get() 有意不把 Task 取消传给连接任务。
-    // 直接通知被跟踪的物理连接，
-    // 并在释放前继续等待该 future 完成。
-    let outcome: Result<Value, any Error>
-    do {
-        outcome = .success(try await withTaskCancellationHandler {
-            try await transactionFuture.get()
-        } onCancel: {
-            state.stop(.cancelled)
-            acquisitionCancellation.cancel()
-            interrupted(state.notAcceptedFailure)
-        })
-    } catch {
-        outcome = .failure(error)
+    return V2StartedRoomConnection {
+        defer { timeline?.flushAssignmentTiming() }
+        // EventLoopFuture.get() 有意不把 Task 取消传给连接任务。
+        // 直接通知被跟踪的物理连接，
+        // 并在释放前继续等待该 future 完成。
+        let outcome: Result<Value, any Error>
+        do {
+            outcome = .success(try await withTaskCancellationHandler {
+                try await transactionFuture.get()
+            } onCancel: {
+                state.stop(.cancelled)
+                acquisitionCancellation.cancel()
+                interrupted(state.notAcceptedFailure)
+            })
+        } catch {
+            outcome = .failure(error)
+        }
+        // Acquisition failure (including pool timeout) ends only when the
+        // actual future settles, never when the watchdog or caller stops waiting.
+        connectionTimer?.finish()
+        watchdog.disarm()
+        try await state.settleClose()
+        if state.wasStopped && !state.hadConnection {
+            throw state.notAcceptedFailure
+        }
+        return try outcome.get()
     }
-    // Acquisition failure (including pool timeout) ends only when the
-    // actual future settles, never when the watchdog or caller stops waiting.
-    connectionTimer?.finish()
-    watchdog.disarm()
-    try await state.settleClose()
-    if state.wasStopped && !state.hadConnection {
-        throw state.notAcceptedFailure
-    }
-    return try outcome.get()
 }
 
 /// Available only while the physical loan's callback is alive.
@@ -218,6 +262,88 @@ struct V2BorrowedRoomConnection: Sendable {
 
 enum V2BorrowedRoomConnectionScope {
     @TaskLocal static var current: V2BorrowedRoomConnection?
+}
+
+/// Issued only after a one-room statement returned zero cursor, message and
+/// completion mutations. It permits recovery after ReadyForQuery confirms idle.
+struct V2SingleStatementNoMutation: Error, Sendable {}
+
+/// The body is exactly one atomic statement, with no subsequent durable work.
+/// Result rows alone are insufficient: the implicit transaction must reach its
+/// backend ReadyForQuery before this method returns a committed value.
+func v2ExecuteSingleStatementRoomWrite<Value: Sendable>(
+    connection: V2BorrowedRoomConnection, deadline: ContinuousClock.Instant,
+    metrics: V2SendOperationBatchMetrics?,
+    _ statement: @escaping @Sendable () async throws -> Value
+) async throws -> Value {
+    guard !Task.isCancelled, .now < deadline, connection.isUsable() else {
+        throw V2RoomCallFailure.notAccepted(Task.isCancelled ? .cancelled :
+            (.now >= deadline ? .deadlineExceeded : .unavailable))
+    }
+    let statementTimer = metrics?.startStage(.ownerSingleStatement)
+    defer { statementTimer?.finish() }
+    let state = V2RoomPhysicalTransactionState()
+    state.install(connection: connection.physical)
+    let timer = V2RoomDeadlineTimer(deadline: deadline, eventLoop: connection.physical.eventLoop) {
+        state.stop(.deadline)
+    }
+    defer { timer.disarm() }
+    let outcome: Result<Value, any Error>
+    do {
+        outcome = .success(try await withTaskCancellationHandler {
+            // Dispatching the write can dispatch an implicit COMMIT too. From
+            // this point, closing the socket is never proof of rollback.
+            guard state.beginCommit(deadline: deadline) else { throw state.notAcceptedFailure }
+            let result: Result<Value, any Error>
+            let bodyTimer = metrics?.startStage(.ownerBody)
+            do { result = .success(try await statement()) }
+            catch { result = .failure(error) }
+            bodyTimer?.finish()
+            let confirmationTimer = metrics?.startStage(.ownerCommit)
+            let status: PostgresConnection.ReadyForQueryState
+            do {
+                status = try await connection.physical.confirmReadyForQuery().get()
+                confirmationTimer?.finish()
+            } catch {
+                confirmationTimer?.finish()
+                state.stop(.rollbackFailure)
+                throw V2RoomTransactionOutcomeUnknown()
+            }
+            guard status == .idle else {
+                state.stop(.rollbackFailure)
+                throw V2RoomTransactionOutcomeUnknown()
+            }
+            V2OwnerConnectionTimeline.current?.mark("implicit_ready_confirmed")
+            switch result {
+            case .success(let value):
+                state.confirmCommit()
+                return value
+            case .failure(let error):
+                if error is V2SingleStatementNoMutation {
+                    state.confirmRollback()
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
+                let statementFailed: Bool
+                if let error = error as? PSQLError { statementFailed = error.serverInfo?[.sqlState] != nil }
+                else if let error = error as? PostgresError, case .server = error { statementFailed = true }
+                else { statementFailed = false }
+                if statementFailed {
+                    state.confirmRollback()
+                    if v2PostgresFailureDisposition(error) == .unavailable {
+                        throw V2RoomCallFailure.rolledBack(.unavailable)
+                    }
+                    throw error
+                }
+                // A local decoding/validation failure after a successful SQL
+                // cycle cannot retroactively roll back the implicit commit.
+                state.confirmCommit()
+                throw V2RoomTransactionOutcomeUnknown()
+            }
+        } onCancel: { state.stop(.cancelled) })
+    } catch { outcome = .failure(error) }
+    timer.disarm()
+    try await state.settleClose()
+    return try outcome.get()
 }
 
 /// Execute on an already borrowed connection without a nested pool/future/task bridge.

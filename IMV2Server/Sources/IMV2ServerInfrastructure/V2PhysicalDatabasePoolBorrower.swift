@@ -24,6 +24,7 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
         let timeline: V2OwnerConnectionTimeline?
         let original: V2PhysicalDatabaseLoanRequest
         let promise: EventLoopPromise<Assignment>
+        let onAssignment: (@Sendable (Result<Assignment, any Error>) -> Void)?
         var transferring = false
     }
     private struct State: Sendable {
@@ -44,27 +45,31 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
     }
 
     func request(loanClass: V2PhysicalDatabaseLoanClass,
-        deadline: ContinuousClock.Instant?) -> Request {
+        deadline: ContinuousClock.Instant?,
+        onAssignment: (@Sendable (Result<Assignment, any Error>) -> Void)? = nil) -> Request {
         let id = UUID(), source = V2DatabaseLoanObservationContext.source
         let wait = gates.map(\.maximumWait).min()!
         let boundedDeadline = min(deadline ?? .now + wait, .now + wait)
         let promise = eventLoop.makePromise(of: Assignment.self)
+        let timeline = V2OwnerConnectionTimeline.current
         let admission = state.withLock { value -> Result<Pending, V2PhysicalDatabaseLoanFailure> in
             guard !value.closed else { return .failure(.closed) }
             var selected: (Int, V2PhysicalDatabaseLoanRequest)?
             for offset in 0..<gates.count {
                 let index = (value.cursor + offset) % gates.count
-                if let request = gates[index].requestIfAvailable(loanClass: loanClass, deadline: boundedDeadline) {
+                if let request = gates[index].requestIfAvailable(loanClass: loanClass, deadline: boundedDeadline,
+                    diagnoseAcquisition: timeline != nil, combineImmediateDelivery: true) {
                     selected = (index, request); break
                 }
             }
             let (index, original) = selected ??
-                (value.cursor, gates[value.cursor].request(loanClass: loanClass, deadline: boundedDeadline))
+                (value.cursor, gates[value.cursor].request(loanClass: loanClass, deadline: boundedDeadline,
+                    diagnoseAcquisition: timeline != nil))
             value.cursor = (index + 1) % gates.count
             if let failure = original.immediateFailure { return .failure(failure) }
             let pending = Pending(id: id, index: index, loanClass: loanClass, deadline: boundedDeadline,
-                source: source, timeline: V2OwnerConnectionTimeline.current,
-                original: original, promise: promise, transferring: selected != nil)
+                source: source, timeline: timeline,
+                original: original, promise: promise, onAssignment: onAssignment, transferring: selected != nil)
             value.pending.append(pending, key: id)
             return .success(pending)
         }
@@ -72,11 +77,13 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
         switch admission {
         case .success(let value): pending = value
         case .failure(let failure):
+            onAssignment?(.failure(failure))
             promise.fail(failure)
             return .init(future: promise.futureResult, cancel: {})
         }
-        pending.original.future.whenComplete { [self] result in
-            complete(id, index: pending.index, result: result, transferred: false)
+        let registeredAt = ContinuousClock.now
+        pending.original.whenComplete { [self] result in
+            complete(id, index: pending.index, result: result, transferred: false, registeredAt: registeredAt)
         }
         // A capacity return may have raced original registration.
         schedulePump()
@@ -108,7 +115,8 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
                     let index = (value.cursor + offset) % gates.count
                     guard index != pending.index else { continue }
                     let request = V2DatabaseLoanObservationContext.$source.withValue(pending.source) {
-                        gates[index].requestIfAvailable(loanClass: pending.loanClass, deadline: pending.deadline)
+                        gates[index].requestIfAvailable(loanClass: pending.loanClass, deadline: pending.deadline,
+                            diagnoseAcquisition: pending.timeline != nil, combineImmediateDelivery: true)
                     }
                     guard let request else { continue }
                     // Replacing the record in place must preserve FIFO order.
@@ -122,14 +130,17 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
             return result
         }
         for (pending, index, request) in transfers {
-            request.future.whenComplete { [self] result in
-                complete(pending.id, index: index, result: result, transferred: true)
+            let registeredAt = ContinuousClock.now
+            request.whenComplete { [self] result in
+                complete(pending.id, index: index, result: result, transferred: true, registeredAt: registeredAt)
             }
         }
     }
 
     private func complete(_ id: UUID, index: Int,
-        result: Result<V2PhysicalDatabaseLoanLease, any Error>, transferred: Bool) {
+        result: Result<V2PhysicalDatabaseLoanLease, any Error>, transferred: Bool,
+        registeredAt: ContinuousClock.Instant) {
+        let callbackAt = ContinuousClock.now
         let (pending, drains) = state.withLock { value -> (Pending?, [CheckedContinuation<Void, Never>]) in
             let pending = value.pending.remove(id)
             let drains = value.closed && value.pending.isEmpty ? value.drains : []
@@ -150,8 +161,16 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
             if let started = pending.timeline?.marker("pool_request_started") {
                 pending.timeline?.record(.ownerPoolAssignmentWait, from: started, to: now)
             }
-            pending.promise.succeed(.init(index: index, lease: lease))
-        case .failure(let error): pending.promise.fail(error)
+            pending.timeline?.deferAssignmentTiming(lease.timing, registeredAt: registeredAt,
+                callbackAt: callbackAt, publishedAt: now, transferred: transferred)
+            let assignment = Assignment(index: index, lease: lease)
+            // The winning gate's callback runs on its own pool loop. Scheduled
+            // Sendable work enters that pool directly, outside borrower locks.
+            pending.onAssignment?(.success(assignment))
+            pending.promise.succeed(assignment)
+        case .failure(let error):
+            pending.onAssignment?(.failure(error))
+            pending.promise.fail(error)
         }
         for drain in drains { drain.resume() }
     }

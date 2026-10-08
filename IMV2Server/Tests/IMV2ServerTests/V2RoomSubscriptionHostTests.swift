@@ -10,6 +10,52 @@ import IMV2ServerInfrastructure
 
 struct V2RoomSubscriptionHostTests {
     private enum HeadRepairTimeout: Error { case expired }
+    @Test func independentRenewalUsesOnlyAnExistingActivatedOwner() async throws {
+        let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
+        let token = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
+        let source = HostCheckSource(room: room, owner: token.owner, user: user)
+        let host = V2RoomSubscriptionHost(checkInterval: .seconds(3600), dirtyChanges: { _, _, _, _ in
+            .init(changes: [], nextCursor: nil)
+        })
+        try await host.configure(sendBatch: { batch, _, _ in
+            .init(receipts: Array(Set(batch.deliveries.map(\.fence))).map { fence in
+                .init(fence: fence, result: .appliedThrough(batch.deliveries.last { $0.fence == fence }!.deliverySequence))
+            })
+        }, maximumCalls: 1)
+        let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room, owner: token.owner,
+            activation: token, deadline: .now + .seconds(30), trackedUserIDs: [user])
+        let peer = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "gateway", serviceID: "gateway", incarnationID: UUID()),
+            endpointReference: Data([1]), address: "127.0.0.1", port: 9000)
+        let grant = try await owner.subscribe(gateway: peer.identity, userID: user, token: token, deadline: .now + .seconds(30))
+        let command = V2RoomSubscriptionRenewCommand(roomID: room, actorUserID: user, gatewayDescriptor: peer,
+            expectedFence: grant.fence, appliedControlSequence: 1)
+        await #expect(throws: V2RoomSubscriptionOwnerError.catchUpRequired) {
+            try await host.renew(command: command, token: token, activationValidUntil: .now + .seconds(30), deadline: .now + .seconds(30))
+        }
+        try await host.register(owner, token: token)
+        await host.checkChanges()
+        await #expect(throws: V2RoomSubscriptionOwnerError.catchUpRequired) {
+            try await host.renew(command: command, token: token, activationValidUntil: .now + .seconds(30), deadline: .now + .seconds(30))
+        }
+        let pump = try #require(await host.currentPump())
+        #expect(try await owner.activate(to: pump, descriptor: peer, userID: user, fence: grant.fence,
+            token: token, deadline: .now + .seconds(30)))
+        let snapshots = await source.snapshotCount, reads = await source.readCount
+        var result: V2RoomSubscriptionRenewal?
+        for _ in 0..<100 {
+            do {
+                result = try await host.renew(command: command, token: token,
+                    activationValidUntil: .now + .seconds(30), deadline: .now + .seconds(30))
+                break
+            } catch V2RoomSubscriptionOwnerError.catchUpRequired { try await Task.sleep(for: .milliseconds(1)) }
+        }
+        let renewed = try #require(result)
+        #expect(renewed.fence == grant.fence && renewed.appliedControlSequence == 1)
+        #expect(renewed.remainingLeaseMilliseconds > 0 && renewed.remainingLeaseMilliseconds <= 15_000)
+        #expect(await source.snapshotCount == snapshots)
+        #expect(await source.readCount == reads)
+        await host.close()
+    }
     @Test(arguments: [Int64(0), Int64(1)])
     func committedHeadLagDoesNotInvalidateAnUnchangedPermissionCut(controlVersion: Int64) async throws {
         let room = try RoomID("renewal-head-lag"), user = try UserID("user")
@@ -293,12 +339,14 @@ private actor HostCheckSource: V2RoomSubscriptionSource {
     private var failNext = false
     private(set) var failures = 0
     private(set) var readCount = 0
+    private(set) var snapshotCount = 0
     init(room: RoomID, owner: V2RoomDataOwner, user: UserID) { self.room = room; self.owner = owner; self.user = user }
     func currentHead() -> UInt64 { head }
     func setHead(_ value: UInt64) { head = value }
     func commitWithoutNotificationAndFailFirstRead() { head = 1; failNext = true }
     func snapshot(roomID: RoomID, owner: V2RoomDataOwner, trackedUserIDs: Set<UserID>) async throws -> V2RoomSubscriptionSourceSnapshot {
-        .init(roomID: room, owner: self.owner, highWatermark: head, remainingLeaseMilliseconds: 60_000,
+        snapshotCount += 1
+        return .init(roomID: room, owner: self.owner, highWatermark: head, remainingLeaseMilliseconds: 60_000,
             members: trackedUserIDs.map { .init(userID: $0, memberRevision: 0, authorized: true) })
     }
     func read(roomID: RoomID, owner: V2RoomDataOwner, afterRoomSequence: UInt64, trackedUserIDs: Set<UserID>, limit: Int) async throws -> V2RoomSubscriptionSourcePage {

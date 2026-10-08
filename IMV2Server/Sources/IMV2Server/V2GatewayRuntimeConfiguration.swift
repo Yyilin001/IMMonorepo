@@ -73,7 +73,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
     public let databaseWorkloadPoolIsolationEnabled: Bool
-    /// Optional cap for non-message pool handles; omitted uses all configured loops.
+    /// Control/background group size when pool isolation is enabled.
+    /// In shared mode this remains the cap for non-message pool handles.
     public let databaseNonMessagePoolEventLoopThreads: Int
     public func databasePoolEventLoopCount(for role: V2PostgresWorkloadPoolBudget.Role) -> Int {
         role == .messageWrite ? databasePolicy.eventLoopThreads : databaseNonMessagePoolEventLoopThreads
@@ -311,9 +312,16 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             }
             databaseNonMessagePoolEventLoopThreads = count
         } else { databaseNonMessagePoolEventLoopThreads = databasePolicy.eventLoopThreads }
-        directSendControlConnectionsPerEventLoop = databaseWorkloadPoolIsolationEnabled
-            ? databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop
-            : databasePolicy.maximumConnectionsPerEventLoop
+        if let raw = Self.optional("IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP", environment: environment) {
+            guard let count = Int(raw), count > 0 else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP")
+            }
+            directSendControlConnectionsPerEventLoop = count
+        } else {
+            directSendControlConnectionsPerEventLoop = databaseWorkloadPoolIsolationEnabled
+                ? databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop
+                : databasePolicy.maximumConnectionsPerEventLoop
+        }
         tls = try .init(
             host: try Self.required("IM_V2_TLS_HOST", environment: environment),
             port: try Self.integer("IM_V2_TLS_PORT", environment: environment),

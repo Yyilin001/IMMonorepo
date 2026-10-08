@@ -58,4 +58,34 @@ struct V2SendPathTraceTests {
         #expect(value.durationMilliseconds >= 200)
         #expect(value.spans.first?.startMilliseconds == 0)
     }
+    @Test("stable operation sampling agrees across segments and rejects slow unsampled traces")
+    func stableSampling() throws {
+        let selected = "03000000-0000-0000-0000-000000000001"
+        let skipped = "04000000-0000-0000-0000-000000000001"
+        #expect(V2SendPathTrace.Collection.sampledOperations.includes([selected]))
+        #expect(!V2SendPathTrace.Collection.sampledOperations.includes([skipped]))
+        #expect(!V2SendPathTrace.Collection.sampledOperations.includes(["invalid"]))
+        #expect(V2SendPathTrace.Collection.sampledOperations.includes([skipped, selected]))
+        let snapshots = Mutex<[V2SendPathTrace.Snapshot]>([])
+        V2SendPathTrace.installSink({ value in snapshots.withLock { $0.append(value) } },
+                                  collection: .sampledOperations)
+        defer { V2SendPathTrace.installSink(nil) }
+        #expect(V2SendPathTrace.shouldCollect(operations: [selected]))
+        #expect(!V2SendPathTrace.shouldCollect(operations: [skipped]))
+        for operation in [selected, skipped] {
+            let gateway = V2SendPathTrace(operations: [], segment: "gateway")
+            gateway.mark("before_decode")
+            gateway.setOperation(operation)
+            gateway.record("slow", from: .now - .seconds(1))
+            gateway.finish()
+            let room = V2SendPathTrace(operations: [operation], segment: "room_actor")
+            room.record("slow", from: .now - .seconds(1))
+            room.finish()
+        }
+        let values = snapshots.withLock { $0 }
+        #expect(values.count == 2)
+        #expect(values.allSatisfy { $0.operations == [selected] })
+        #expect(values.first?.spans.first?.stage == "before_decode")
+    }
+
 }

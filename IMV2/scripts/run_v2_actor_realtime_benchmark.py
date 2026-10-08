@@ -30,6 +30,36 @@ import time
 import uuid
 import urllib.request
 
+
+class LoaderFailureReportDrain:
+    """Keep owned services alive for peer reports, without accepting a failed run."""
+
+    def __init__(self, seconds):
+        if not 1 <= seconds <= 600:
+            raise ValueError('loader report drain must be between 1 and 600 seconds')
+        self.seconds = seconds
+        self.started = None
+        self.failed_ordinals = set()
+        self.timed_out = False
+
+    def observe(self, codes, now):
+        failed = {index for index, code in enumerate(codes) if code not in (None, 0)}
+        if failed and self.started is None:
+            self.started = now
+        self.failed_ordinals.update(failed)
+        self.timed_out = (self.started is not None and now >= self.started + self.seconds
+                          and any(code is None for code in codes))
+        return self.timed_out
+
+    def evidence(self, reported_ordinals, expected):
+        missing = sorted(set(range(expected)) - set(reported_ordinals))
+        return dict(firstFailureObserved=self.started is not None,
+                    failedLoaderOrdinals=sorted(self.failed_ordinals),
+                    deadlineSeconds=self.seconds, timedOut=self.timed_out,
+                    reportCount=expected-len(missing), missingReportOrdinals=missing,
+                    allReportsPresent=not missing,
+                    semantics='report collection only; any failed loader still fails quality')
+
 ROOT = Path(__file__).resolve().parents[2]
 NODES = 6
 PARTS = 12
@@ -206,11 +236,15 @@ def gateway_env(args, kind, database, index, actors, manifest):
         IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(actor/f'{kind}.json'),
         IM_V2_IDLE_TIMEOUT_MS='600000', IM_V2_LOG_LEVEL='notice' if app_canary_enabled(args) else 'warning')
     if kind == 'candidate':
-        # Vary only message capacity; keep all other role budgets unchanged.
+        values['IM_V2_SEND_PATH_TRACE_MODE'] = getattr(args, 'candidate_send_path_trace_mode', 'sampled')
+        values['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'] = 'true' if getattr(args, 'candidate_actor_binary_invocations', 'disabled') == 'enabled' else 'false'
+        values['IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED'] = 'true' if getattr(args, 'candidate_message_write_prepared_queries', 'enabled') == 'enabled' else 'false'
+        # Keep non-message workload roles fixed; the dedicated policy pool can vary independently.
         node_message_connections = getattr(args, 'candidate_message_write_connections', 4)
         loops = getattr(args, 'candidate_event_loop_threads', 1)
         message_connections = node_message_connections // loops
-        values.update(IM_V2_DATABASE_EVENT_LOOP_THREADS=str(loops),
+        values.update(IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP=str(getattr(args, 'candidate_policy_control_connections', 4)),
+                      IM_V2_DATABASE_EVENT_LOOP_THREADS=str(loops),
                       IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS='1',
                       IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED='true',
                       IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP=str(message_connections),
@@ -1953,6 +1987,7 @@ def run_revision(args, kind, actors, counts, manifest):
     partition_canary = None
     actor_proxy = None
     service_stop_deadline = None
+    loader_report_drain = LoaderFailureReportDrain(getattr(args, 'loader_report_drain_seconds', 120))
     app_expected_killed = set()
     stop_monitor = threading.Event()
     def start(command, name, environment=None):
@@ -2205,7 +2240,11 @@ def run_revision(args, kind, actors, counts, manifest):
             if any(p.poll() is not None and not (restart_canary and restart_canary.permitted_exit(p))
                    for p in service_processes):
                 raise RuntimeError('Gateway/Account/edge/broker exited during workload')
-            if any(p.poll() not in (None, 0) for p in loaders): raise RuntimeError('Loader failed; cancelling incomplete workload; evidence retained')
+            first_failure = loader_report_drain.started is None
+            if loader_report_drain.observe([p.poll() for p in loaders], time.monotonic()):
+                raise TimeoutError('loader failure report collection deadline exceeded')
+            if first_failure and loader_report_drain.started is not None:
+                print(f'{kind}: loader failed; collecting peer reports for at most {loader_report_drain.seconds}s; run remains failed', flush=True)
             if time.monotonic()>deadline: raise TimeoutError('workload timeout; evidence retained')
             if not barrier_released and all((directory/f'part-{i}-ready.json').exists() for i in range(PARTS)):
                 ready_parts=[json.loads((directory/f'part-{i}-ready.json').read_text()) for i in range(PARTS)]
@@ -2243,6 +2282,7 @@ def run_revision(args, kind, actors, counts, manifest):
             if not restart_canary.recovered:
                 raise RuntimeError('restart_canary_did_not_complete')
         failure_stage = 'report_aggregation'
+        loader_report_drain.observe([p.poll() for p in loaders], time.monotonic())
         reports=[json.loads((directory/f'report-{i}.json').read_text()) for i in range(PARTS) if (directory/f'report-{i}.json').exists()]
         expected_wire = 45 if kind == 'baseline' else CANDIDATE_WIRE_VERSION
         expected_algorithm = args.loader_algorithm_source_sha256
@@ -2304,6 +2344,9 @@ def run_revision(args, kind, actors, counts, manifest):
             result['productQualityPassed'] = result['qualityPassed']
             result.update(fixtureCleanupPending=True, fixtureQualified=False, qualityPassed=False)
         private_json(directory/'result.json',result)
+        if loader_report_drain.started is not None:
+            failure_stage = 'workload'
+            raise RuntimeError('loader failed; bounded peer report collection completed')
         if not actor_proxy: print(json.dumps(dict(kind=kind,**result)),flush=True)
         return result
     except BaseException as error:
@@ -2356,6 +2399,9 @@ def run_revision(args, kind, actors, counts, manifest):
             processes=[dict(ordinal=index, exitCode=proc.returncode,
                             terminationRequested=proc.pid in service_cleanup_requested)
                        for index, proc in enumerate(cleanup_services)]))
+        private_json_snapshot(directory/'loader-report-collection.json',
+            loader_report_drain.evidence(
+                [index for index in range(PARTS) if (directory/f'report-{index}.json').exists()], PARTS))
         if app_canary_enabled(args) and result is not None:
             result['appFixtureCleanupPassed'] = result.get('fixtureCleanupPassed') is True
             exit_failures = sum(proc.returncode != 0 and not (proc.pid in app_expected_killed and proc.returncode == -signal.SIGKILL) and not (proc.pid in app_cleanup_requested
@@ -2447,8 +2493,16 @@ def main():
     parser.add_argument('--kind',choices=('baseline','candidate','both'),default='both')
     parser.add_argument('--candidate-event-loop-threads', type=int, choices=(1, 2), default=1,
                         help='candidate infrastructure/message EventLoops; non-message pools keep one loop')
+    parser.add_argument('--candidate-actor-binary-invocations', choices=('enabled', 'disabled'), default='disabled',
+                        help='Opt into binary distributed invocation framing on all candidate nodes')
+    parser.add_argument('--candidate-message-write-prepared-queries', choices=('enabled', 'disabled'), default='enabled',
+                        help='candidate bounded per-connection message SQL shape cache')
+    parser.add_argument('--candidate-send-path-trace-mode', choices=('sampled', 'all'), default='sampled',
+                        help='candidate detailed diagnostics: stable 1/64 operation sample or all slow requests')
     parser.add_argument('--candidate-message-write-connections', type=int, default=4,
                         help='candidate-only total message connections per node; divided across selected loops (default: 4)')
+    parser.add_argument('--candidate-policy-control-connections', type=int, default=4,
+                        help='candidate-only policy control connections per node (one control loop); default: 4')
     parser.add_argument('--candidate-authorization-mode', choices=('memory', 'legacy'), default='memory',
                         help='candidate uses memory policy owners by default; legacy explicitly reproduces the old path')
     parser.add_argument('--scenario',type=Path,default=ROOT/'IMV2/load-scenarios/high-active-50000-uuid-ab-5000.json')
@@ -2464,6 +2518,8 @@ def main():
                         help='sample fixed synchronous recovery spans separately; does not change load or quality gates')
     parser.add_argument('--account-port',type=int,default=18544);parser.add_argument('--https-port',type=int,default=18643)
     parser.add_argument('--timeout-seconds',type=int,default=1800)
+    parser.add_argument('--loader-report-drain-seconds', type=int, choices=range(1, 601), default=120,
+                        help='bounded peer report collection after a loader fails; quality still fails')
     diagnostic_mode = parser.add_mutually_exclusive_group()
     diagnostic_mode.add_argument('--allow-small-canary',action='store_true',help='small population is expressly excluded from capacity acceptance')
     diagnostic_mode.add_argument('--allow-scaled-diagnostic',action='store_true',help='scaled iteration workload; quality checks remain enabled, never formal capacity acceptance')
@@ -2496,6 +2552,8 @@ def main():
         parser.error('message connections must divide evenly across candidate EventLoops')
     if not 1 <= args.candidate_message_write_connections <= 247:
         parser.error('candidate message connections must be in 1...247 (total workload capacity <=256)')
+    if not 1 <= args.candidate_policy_control_connections <= 64:
+        parser.error('candidate policy control connections must be in 1...64; process ceiling is checked at startup')
     if args.app_journal_trim_canary and not args.app_room_progress_canary:
         parser.error('--app-journal-trim-canary requires --app-room-progress-canary')
     if args.room_host_auto_target and args.room_host_restart_canary is None:
@@ -2583,10 +2641,14 @@ def main():
                   loaderBinarySHA256=sha(args.loader_binary),loaderContract=loader_contract,
                   benchmarkWireVersions=dict(baseline=45,candidate=CANDIDATE_WIRE_VERSION),
                   authorizationModes=dict(baseline='legacy', candidate=args.candidate_authorization_mode),
+                  candidatePolicyControlConnectionsPerNode=args.candidate_policy_control_connections,
                   candidateMessageWriteConnectionsPerEventLoop=args.candidate_message_write_connections // args.candidate_event_loop_threads,
                   candidateMessageWriteConnectionsPerNode=args.candidate_message_write_connections,
                   candidateEventLoopThreads=args.candidate_event_loop_threads,
                   candidateDBTaskExecutor='event_loop',
+                  candidateSendPathTraceMode=args.candidate_send_path_trace_mode,
+                  candidateMessageWritePreparedQueries=args.candidate_message_write_prepared_queries,
+                  candidateActorBinaryInvocations=args.candidate_actor_binary_invocations,
                   messageTransport='tcp',messageRecoveryTransport='tcp_query',
                   accountHTTPConnectionsPerHostSoftLimit=256,scenarioStartBarrier=not app_canary_enabled(args),
                   explicitLocalSourcePorts=not app_canary_enabled(args) and args.realtime_host_restart_canary is None and args.actor_partition_canary is None and args.room_host_restart_canary is None,

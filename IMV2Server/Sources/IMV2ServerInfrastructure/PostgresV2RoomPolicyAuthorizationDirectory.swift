@@ -51,7 +51,7 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
     init(database: any Database, endpoint: String, maximumRooms: Int,
          maximumCreations: Int = 16, maximumRevocations: Int = 32,
          databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
-         currentLoader: (@Sendable (V2RoomActivationToken, UUID, UUID?) async throws -> V2CurrentRoomPolicySnapshot)? = nil,
+         currentLoader: (@Sendable (V2RoomActivationToken, UUID, UUID?, Bool) async throws -> V2CurrentRoomPolicySnapshot)? = nil,
          loader: @escaping @Sendable (V2RoomActivationToken, V2DirectSendControlPair, UUID, UUID) async throws -> V2RegisteredDirectPolicySnapshot,
          accountLoader: (@Sendable (V2RoomActivationToken, UUID, UUID, UUID) async throws -> V2RegisteredAccountPolicySnapshot)? = nil) {
         let fence = PostgresV2RoomPolicyLeaseFence(database: database, databaseWorkAdmission: databaseWorkAdmission)
@@ -62,13 +62,20 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
                 if initialization.kind == "direct", let state = initialization.directState {
                     return PostgresV2RoomPolicyAuthorizationRegistry(activation: token,
                         participants: (state.lower, state.higher), endpoint: endpoint, fence: fence,
-                        currentLoader: { sender, recipient in try await current(token, sender, recipient) })
+                        currentLoader: { sender, recipient in
+                            // Positive reply facts restored for this exact activation
+                            // are monotonic. Unknown/negative facts keep the full loader.
+                            let replied = recipient.map { user in
+                                user == state.lower ? state.lowerReplied : (user == state.higher && state.higherReplied)
+                            } ?? false
+                            return try await current(token, sender, recipient, replied)
+                        })
                 }
                 guard initialization.kind == "group", let accountLoader else {
                     throw V2PolicyAuthorizationLifecycleError.invalidTarget
                 }
                 return PostgresV2RoomPolicyAuthorizationRegistry(activation: token, endpoint: endpoint, fence: fence,
-                    currentLoader: { sender, recipient in try await current(token, sender, recipient) },
+                    currentLoader: { sender, recipient in try await current(token, sender, recipient, false) },
                     accountLoader: { sender, registration, activation in
                         try await accountLoader(token, sender, registration, activation)
                     })
@@ -89,7 +96,7 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
                         if kind.room_kind == "group" {
                             guard let accountLoader else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
                             let loadCurrentAccount: (@Sendable (UUID, UUID?) async throws -> V2CurrentRoomPolicySnapshot)?
-                            if let currentLoader { loadCurrentAccount = { sender, recipient in try await currentLoader(token, sender, recipient) } }
+                            if let currentLoader { loadCurrentAccount = { sender, recipient in try await currentLoader(token, sender, recipient, false) } }
                             else { loadCurrentAccount = nil }
                             return PostgresV2RoomPolicyAuthorizationRegistry(activation: token,
                                 endpoint: endpoint, fence: fence,
@@ -108,7 +115,7 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
                         if let currentLoader {
                             return PostgresV2RoomPolicyAuthorizationRegistry(activation: token,
                                 participants: (pair.lower_user_id, pair.higher_user_id), endpoint: endpoint, fence: fence,
-                                currentLoader: { sender, recipient in try await currentLoader(token, sender, recipient) })
+                                currentLoader: { sender, recipient in try await currentLoader(token, sender, recipient, false) })
                         }
                         return PostgresV2RoomPolicyAuthorizationRegistry(activation: token,
                             participants: (pair.lower_user_id, pair.higher_user_id), endpoint: endpoint, fence: fence,

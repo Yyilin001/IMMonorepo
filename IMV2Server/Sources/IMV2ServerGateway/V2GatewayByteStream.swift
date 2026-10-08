@@ -343,7 +343,7 @@ public actor V2GatewayByteStream {
     }
 
     private var decoder: V2FrameDecoder
-    private let frameLimits: V2FrameLimits
+    let frameLimits: V2FrameLimits
     private let session: V2GatewaySession
     private let handler: any V2GatewayCommandHandler
     private let connectionID: UUID
@@ -531,9 +531,28 @@ public actor V2GatewayByteStream {
         concurrentMessageSendRespond: (@Sendable (V2Frame) async throws -> Void)? = nil,
         respond: (V2Frame) async throws -> Void
     ) async throws -> Bool {
+        let inbound: [V2Frame]
         do {
             guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
-            let inbound = try decoder.append(bytes)
+            inbound = try decoder.append(bytes)
+        }
+        catch { await failReceivingFrames(); throw error }
+        try await receiveDecodedFrames(inbound,
+            authenticationCompleted: { _ in await authenticationCompleted?() },
+            concurrentMessageSendRespond: concurrentMessageSendRespond, respond: respond)
+        return inbound.count == frameLimits.maximumFramesPerAppend && decoder.hasBufferedBytes
+    }
+
+    /// NIO owns wire framing on its EventLoop; only complete frames cross into
+    /// the business actor. Data-based callers retain their decoder above.
+    func receiveDecodedFrames(
+        _ inbound: [V2Frame],
+        authenticationCompleted: (@Sendable (Bool) async -> Void)? = nil,
+        concurrentMessageSendRespond: (@Sendable (V2Frame) async throws -> Void)? = nil,
+        respond: (V2Frame) async throws -> Void
+    ) async throws {
+        do {
+            guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
             for frame in inbound {
 
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
@@ -612,9 +631,9 @@ public actor V2GatewayByteStream {
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 let newlyAuthenticated = try await registerAuthenticatedDeviceIfNeeded()
                 if newlyAuthenticated {
-                    decoder.setAllowsLargeMessageSendFrames(
-                        await session.authenticatedMessageSendOperationsEnabled())
-                    await authenticationCompleted?()
+                    let allowsLargeFrames = await session.authenticatedMessageSendOperationsEnabled()
+                    decoder.setAllowsLargeMessageSendFrames(allowsLargeFrames)
+                    await authenticationCompleted?(allowsLargeFrames)
                 }
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 try await updateHybridGroupSubscription(
@@ -647,22 +666,19 @@ public actor V2GatewayByteStream {
                     throw rejection
                 }
             }
-            // 一次完整的解码配额可能留下有效的完整帧。
-            // NIO 所有者在消费后续 TCP 数据块前安排一次续处理，
-            // 保持单连接的线路顺序。末尾的不完整帧至多造成一次空排空，
-            // 并继续留在缓冲区，等待下一次实际传输读取。
-            return inbound.count == frameLimits.maximumFramesPerAppend && decoder.hasBufferedBytes
         } catch {
-            // 分帧失败可能在缓冲区留下无效前缀。会话关闭会阻止后续命令；
-            // 重置解析器还可防止之后的接收再次抛出过期的分帧数据。
-            decoder = .init(limits: frameLimits)
-            beginClosing()
-            await drainMessageSends()
-            await session.close()
-            await unregisterAuthenticatedDevice()
-            await drainRecoveryOutboundWork()
+            await failReceivingFrames()
             throw error
         }
+    }
+
+    private func failReceivingFrames() async {
+        decoder = .init(limits: frameLimits)
+        beginClosing()
+        await drainMessageSends()
+        await session.close()
+        await unregisterAuthenticatedDevice()
+        await drainRecoveryOutboundWork()
     }
 
     /// 必须在底层 TLS 通道到达 EOF 时调用。

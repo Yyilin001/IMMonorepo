@@ -72,7 +72,14 @@ public class Serialization {
     internal init(settings systemSettings: ClusterSystemSettings, system: ClusterSystem) {
         var settings = systemSettings.serialization
 
-        settings.register(InvocationMessage.self, serializerID: .foundationJSON)
+        let binaryInvocationID: Serialization.SerializerID = .specializedWithTypeHint
+        settings.register(InvocationMessage.self, serializerID:
+            settings.binaryDistributedInvocations ? binaryInvocationID : .foundationJSON)
+        settings.registerInbound(InvocationMessage.self, serializerID: .foundationJSON)
+        settings.registerInbound(InvocationMessage.self, serializerID: binaryInvocationID)
+        settings.registerSpecializedSerializer(InvocationMessage.self, serializerID: binaryInvocationID) {
+            BinaryInvocationSerializer($0)
+        }
 
         // ==== Declare mangled names of some known popular types // TODO: hardcoded mangled name until we have _mangledTypeName
         //        settings.register(Bool.self, hint: "b", serializerID: .specializedWithTypeHint)

@@ -57,13 +57,28 @@ public struct V2PhysicalDatabaseLoanMetricsSnapshot: Equatable, Sendable {
     public init() {}
 }
 
+/// Immutable timestamps carried by the winning loan. No Future callback or
+/// scheduling hop is added for diagnosis; losing peer grants are not counted.
+package struct V2PhysicalDatabaseLoanTiming: Sendable {
+    let requestedAt: ContinuousClock.Instant
+    let lockRequestedAt: ContinuousClock.Instant
+    let lockEnteredAt: ContinuousClock.Instant
+    let admittedAt: ContinuousClock.Instant
+    let grantedAt: ContinuousClock.Instant
+    let promiseSubmittedAt: ContinuousClock.Instant
+    let wasQueued: Bool
+    let grantedOnEventLoop: Bool
+}
+
 public final class V2PhysicalDatabaseLoanLease: Sendable {
     public let deadline: ContinuousClock.Instant
     public let observation: V2DatabaseLoanObservation
+    package let timing: V2PhysicalDatabaseLoanTiming?
     private let released = Mutex(false)
     private let completion: @Sendable () -> Void
-    fileprivate init(deadline: ContinuousClock.Instant, observation: V2DatabaseLoanObservation, completion: @escaping @Sendable () -> Void) {
-        self.deadline = deadline; self.observation = observation; self.completion = completion
+    fileprivate init(deadline: ContinuousClock.Instant, observation: V2DatabaseLoanObservation,
+                     timing: V2PhysicalDatabaseLoanTiming? = nil, completion: @escaping @Sendable () -> Void) {
+        self.deadline = deadline; self.observation = observation; self.timing = timing; self.completion = completion
     }
     public func release() {
         let shouldRelease = released.withLock { value in
@@ -75,12 +90,41 @@ public final class V2PhysicalDatabaseLoanLease: Sendable {
 public struct V2PhysicalDatabaseLoanRequest: Sendable {
     public let future: EventLoopFuture<V2PhysicalDatabaseLoanLease>
     package let immediateFailure: V2PhysicalDatabaseLoanFailure?
+    private let immediateDelivery: ImmediateDelivery?
     private let cancellation: @Sendable () -> Void
     private let transferCancellation: @Sendable () -> Void
-    fileprivate init(future: EventLoopFuture<V2PhysicalDatabaseLoanLease>, cancellation: @escaping @Sendable () -> Void, transferCancellation: (@Sendable () -> Void)? = nil, immediateFailure: V2PhysicalDatabaseLoanFailure? = nil) {
+    fileprivate init(future: EventLoopFuture<V2PhysicalDatabaseLoanLease>, cancellation: @escaping @Sendable () -> Void, transferCancellation: (@Sendable () -> Void)? = nil, immediateFailure: V2PhysicalDatabaseLoanFailure? = nil, immediateDelivery: ImmediateDelivery? = nil) {
+        self.immediateDelivery = immediateDelivery
         self.future = future; self.cancellation = cancellation
         self.transferCancellation = transferCancellation ?? cancellation
         self.immediateFailure = immediateFailure
+    }
+    /// Registers after borrower state is installed. Immediate grants combine
+    /// Promise completion and delivery in one job on the actual pool loop.
+    package func whenComplete(_ callback: @escaping @Sendable (Result<V2PhysicalDatabaseLoanLease, any Error>) -> Void) {
+        if let immediateDelivery { immediateDelivery.register(callback) }
+        else { future.whenComplete(callback) }
+    }
+    fileprivate final class ImmediateDelivery: Sendable {
+        let eventLoop: any EventLoop
+        let promise: EventLoopPromise<V2PhysicalDatabaseLoanLease>
+        let lease: V2PhysicalDatabaseLoanLease
+        private let registered = Mutex(false)
+        init(eventLoop: any EventLoop, promise: EventLoopPromise<V2PhysicalDatabaseLoanLease>, lease: V2PhysicalDatabaseLoanLease) {
+            self.eventLoop = eventLoop; self.promise = promise; self.lease = lease
+        }
+        func register(_ callback: @escaping @Sendable (Result<V2PhysicalDatabaseLoanLease, any Error>) -> Void) {
+            let first = registered.withLock { value in
+                if value { return false }; value = true; return true
+            }
+            guard first else { promise.futureResult.whenComplete(callback); return }
+            // Always enqueue: selection may still have a borrower lock on its
+            // stack. Neither completion nor a lease return may re-enter it.
+            eventLoop.execute { [self] in
+                promise.succeed(lease)
+                callback(.success(lease))
+            }
+        }
     }
     /// Cancels only a queued request. An already granted loan belongs to its actual operation.
     public func cancel() { cancellation() }
@@ -95,6 +139,14 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
         let deadline: ContinuousClock.Instant
         let promise: EventLoopPromise<V2PhysicalDatabaseLoanLease>
         let observation: V2DatabaseLoanObservation
+        let admissionTiming: AdmissionTiming?
+    }
+    private struct AdmissionTiming: Sendable {
+        let requestedAt: ContinuousClock.Instant
+        let lockRequestedAt: ContinuousClock.Instant
+        let lockEnteredAt: ContinuousClock.Instant
+        let admittedAt: ContinuousClock.Instant
+        let wasQueued: Bool
     }
     private struct State: Sendable {
         var metrics = V2PhysicalDatabaseLoanMetricsSnapshot()
@@ -129,14 +181,17 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
         request(loanClass: loanClass, deadline: deadline).future
     }
     public func request(loanClass: V2PhysicalDatabaseLoanClass,
-                        deadline: ContinuousClock.Instant? = nil) -> V2PhysicalDatabaseLoanRequest {
+                        deadline: ContinuousClock.Instant? = nil,
+                        diagnoseAcquisition: Bool = false) -> V2PhysicalDatabaseLoanRequest {
         let startedAt = ContinuousClock.now
         let source = V2DatabaseLoanObservationContext.source
         let limit = startedAt + policy.maximumWait
         let selectedDeadline = deadline.map { min($0, limit) } ?? limit
         let id = UUID(), promise = eventLoop.makePromise(of: V2PhysicalDatabaseLoanLease.self)
         enum Admission { case granted(Waiter, ContinuousClock.Instant), queued(Waiter), rejected(V2PhysicalDatabaseLoanFailure) }
+        let lockRequestedAt = diagnoseAcquisition ? ContinuousClock.now : nil
         let admission: Admission = state.withLock { value in
+            let lockEnteredAt = diagnoseAcquisition ? ContinuousClock.now : nil
             let failure: V2PhysicalDatabaseLoanFailure?
             let immediate = canGrantImmediately(loanClass, value)
             if value.closed { failure = .closed }
@@ -150,7 +205,9 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
             // Only admitted bounded requests obtain live observation tickets.
             // This registry never acquires the gate mutex in the reverse order.
             let waiter = Waiter(id: id, loanClass: loanClass, deadline: selectedDeadline, promise: promise,
-                                observation: observations.make(source: source, at: startedAt))
+                                observation: observations.make(source: source, at: startedAt),
+                admissionTiming: lockEnteredAt.map { .init(requestedAt: startedAt,
+                    lockRequestedAt: lockRequestedAt ?? startedAt, lockEnteredAt: $0, admittedAt: .now, wasQueued: !immediate) })
             if immediate {
                 grant(loanClass, &value)
                 return .granted(waiter, .now)
@@ -183,20 +240,30 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
     /// Used when selecting among this database's EventLoop pools; a failed
     /// candidate probe consumes neither a ticket nor a rejection counter.
     package func requestIfAvailable(loanClass: V2PhysicalDatabaseLoanClass,
-        deadline: ContinuousClock.Instant? = nil) -> V2PhysicalDatabaseLoanRequest? {
+        deadline: ContinuousClock.Instant? = nil,
+        diagnoseAcquisition: Bool = false, combineImmediateDelivery: Bool = false) -> V2PhysicalDatabaseLoanRequest? {
         let startedAt = ContinuousClock.now
         let selectedDeadline = min(deadline ?? startedAt + policy.maximumWait, startedAt + policy.maximumWait)
         let source = V2DatabaseLoanObservationContext.source
-        let waiter = state.withLock { value -> Waiter? in
+        let lockRequestedAt = diagnoseAcquisition ? ContinuousClock.now : nil
+        let admitted = state.withLock { value -> (Waiter, ContinuousClock.Instant)? in
+            let lockEnteredAt = diagnoseAcquisition ? ContinuousClock.now : nil
             guard !value.closed, selectedDeadline > .now, canGrantImmediately(loanClass, value) else { return nil }
             let waiter = Waiter(id: UUID(), loanClass: loanClass, deadline: selectedDeadline,
                 promise: eventLoop.makePromise(of: V2PhysicalDatabaseLoanLease.self),
-                observation: observations.make(source: source, at: startedAt))
+                observation: observations.make(source: source, at: startedAt),
+                admissionTiming: lockEnteredAt.map { .init(requestedAt: startedAt,
+                    lockRequestedAt: lockRequestedAt ?? startedAt, lockEnteredAt: $0, admittedAt: .now, wasQueued: false) })
             grant(loanClass, &value)
-            return waiter
+            return (waiter, .now)
         }
-        guard let waiter else { return nil }
-        succeed(waiter, at: .now)
+        guard let (waiter, grantedAt) = admitted else { return nil }
+        if combineImmediateDelivery {
+            let lease = makeLease(waiter, at: grantedAt)
+            return .init(future: waiter.promise.futureResult, cancellation: {},
+                immediateDelivery: .init(eventLoop: eventLoop, promise: waiter.promise, lease: lease))
+        }
+        succeed(waiter, at: grantedAt)
         return .init(future: waiter.promise.futureResult, cancellation: {})
     }
 
@@ -262,11 +329,20 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
         value.metrics.classes[loanClass, default: .init()].rejected = old == .max ? old : old + 1
     }
     private func succeed(_ waiter: Waiter, at: ContinuousClock.Instant) {
+        waiter.promise.succeed(makeLease(waiter, at: at))
+    }
+    private func makeLease(_ waiter: Waiter, at: ContinuousClock.Instant) -> V2PhysicalDatabaseLoanLease {
         waiter.observation.granted(at: at)
-        waiter.promise.succeed(.init(deadline: waiter.deadline, observation: waiter.observation, completion: { [self] in
+        let timing = waiter.admissionTiming.map { admission in
+            V2PhysicalDatabaseLoanTiming(requestedAt: admission.requestedAt,
+                lockRequestedAt: admission.lockRequestedAt, lockEnteredAt: admission.lockEnteredAt, admittedAt: admission.admittedAt,
+                grantedAt: at, promiseSubmittedAt: .now, wasQueued: admission.wasQueued,
+                grantedOnEventLoop: eventLoop.inEventLoop)
+        }
+        return .init(deadline: waiter.deadline, observation: waiter.observation, timing: timing, completion: { [self] in
             waiter.observation.finish()
             release(waiter.loanClass)
-        }))
+        })
     }
     private func remove(_ id: UUID, failure: V2PhysicalDatabaseLoanFailure, recordRejection: Bool = true) {
         let removed = state.withLock { value -> Waiter? in

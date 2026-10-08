@@ -145,6 +145,16 @@ public struct V2ActorAuthenticatedReply: Codable, Equatable, Sendable {
     public let attemptID: UUID
     public let response: V2ActorRPCResponse
 
+    init(version: Int, host: V2ActorHostIdentity, sessionID: UUID, sequence: UInt64,
+         attemptID: UUID, response: V2ActorRPCResponse) {
+        self.version = version
+        self.host = host
+        self.sessionID = sessionID
+        self.sequence = sequence
+        self.attemptID = attemptID
+        self.response = response
+    }
+
     public init(call: V2ActorAuthenticatedCall, response: V2ActorRPCResponse) {
         self.version = V2ActorSessionHello.protocolVersion
         self.host = call.recipient

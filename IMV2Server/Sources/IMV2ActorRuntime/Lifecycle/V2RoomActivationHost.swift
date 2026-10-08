@@ -252,14 +252,22 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
 
     public nonisolated func invoke(token: V2RoomActivationToken, encodedRequest: Data,
                                   deadline: ContinuousClock.Instant) async throws -> Response {
-        if factory.pureRoomLogPull != nil {
+        if factory.pureRoomLogPull != nil || factory.pureSubscriptionRenew != nil {
             guard !encodedRequest.isEmpty, encodedRequest.count <= configuration.maximumRequestBytes else {
                 throw V2RoomCallFailure.notAccepted(.invalidRequest)
             }
-            if let decoded = try? JSONDecoder().decode(Request.self, from: encodedRequest),
-               let request = decoded as? V2RoomRequest, case .roomLog(.pull) = request {
-                return try await invokePureRead(token: token, encodedRequest: encodedRequest,
-                    request: decoded, deadline: deadline)
+            if let decoded = try? V2DecodedRoomInvocation<Request>(decoding: encodedRequest) {
+                if factory.pureRoomLogPull != nil,
+                   let request = decoded.request as? V2RoomRequest, case .roomLog(.pull) = request {
+                    return try await invokePureRead(token: token, encodedRequest: encodedRequest,
+                        request: decoded.request, deadline: deadline)
+                }
+                if factory.pureSubscriptionRenew != nil,
+                   let request = decoded.request as? V2RoomRequest, case .roomSubscription(.renew) = request {
+                    return try await invokePureRenew(token: token, encodedRequest: encodedRequest,
+                                                     request: decoded.request, deadline: deadline)
+                }
+                return try await executionHandle(token: token).invoke(decodedInvocation: decoded, deadline: deadline)
             }
         }
         return try await executionHandle(token: token).invoke(encodedRequest: encodedRequest, deadline: deadline)
@@ -272,11 +280,28 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         if let request = request as? V2RoomRequest, request.roomID != token.roomID {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
-        return try await invokePureRoomLogPull(entry: entry, token: token, encodedRequest: encodedRequest,
+        return try await invokePinnedRead(entry: entry, token: token, encodedRequest: encodedRequest,
             request: request, deadline: deadline, execute: execute)
     }
 
-    private func invokePureRoomLogPull(
+    private func invokePureRenew(token: V2RoomActivationToken, encodedRequest: Data,
+                                 request: Request, deadline: ContinuousClock.Instant) async throws -> Response {
+        guard let concrete = request as? V2RoomRequest, concrete.roomID == token.roomID,
+              case .roomSubscription(.renew) = concrete,
+              let execute = factory.pureSubscriptionRenew else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        let entry = try readyEntry(token)
+        guard let validUntil = entry.executionAuthority?.deadline() else {
+            throw V2RoomCallFailure.notAccepted(.leaseLost)
+        }
+        return try await invokePinnedRead(entry: entry, token: token, encodedRequest: encodedRequest,
+            request: request, deadline: deadline, execute: { token, request, deadline in
+                await execute(token, request, deadline, validUntil)
+            })
+    }
+
+    private func invokePinnedRead(
         entry: Entry, token: V2RoomActivationToken, encodedRequest: Data,
         request: Request, deadline: ContinuousClock.Instant,
         execute: @Sendable (V2RoomActivationToken, Request, ContinuousClock.Instant) async -> V2RoomTransactionCompletion<Response>
@@ -284,11 +309,11 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         guard clock.now < deadline, !Task.isCancelled else {
             throw V2RoomCallFailure.notAccepted(Task.isCancelled ? .cancelled : .deadlineExceeded)
         }
-        // Retain the exact lifecycle while crossing budget isolation. The same
+        // Retain the exact lifecycle while executing the read. The same
         // count/bytes limits apply to reads and queued write-lane submissions.
         entry.inFlightCalls += 1
         defer { entry.inFlightCalls -= 1 }
-        let permit = try await budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
+        let permit = try budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
         do {
             guard entries[token.roomID] === entry, try readyEntry(token) === entry else {
                 throw V2RoomCallFailure.notAccepted(.staleActivation)
@@ -297,14 +322,14 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
                 throw V2RoomCallFailure.notAccepted(Task.isCancelled ? .cancelled : .deadlineExceeded)
             }
         } catch {
-            await budget.release(permit)
+            budget.release(permit)
             throw error
         }
         // No separate Task, timeout release, or write-executor invalidation.
-        // A caller cancellation cannot return this permit before actual SELECT
+        // A caller cancellation cannot return this permit before the read/proof
         // execution and its owned callback have settled.
         let completion = await execute(token, request, deadline)
-        await budget.release(permit)
+        budget.release(permit)
         switch completion {
         case .committed(let value):
             // Graceful drain closes new admission but permits an already owned
@@ -320,7 +345,7 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
             return value
         case .rolledBack(let reason): throw V2RoomCallFailure.rolledBack(reason)
         // An unknown callback remains unknown even after retirement/deadline;
-        // SELECT uncertainty never poisons the separate write executor.
+        // Read/proof uncertainty never poisons the separate write executor.
         case .outcomeUnknown: throw V2RoomCallFailure.outcomeUnknown
         }
     }

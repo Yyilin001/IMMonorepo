@@ -768,7 +768,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner, controlDatabase: control,
                 policyOwners: directory, endpoint: "room-b", maximumRooms: 1, usesCurrentState: true)
             let host = PostgresV2RoomPolicyAuthorizationDirectory(database: owner, endpoint: "room-b-scalar", maximumRooms: 1,
-                currentLoader: { _, sender, recipient in
+                currentLoader: { _, sender, recipient, _ in
                     let recipient = try #require(recipient)
                     let states = try await directory.registrationStates(scopes: [.account(sender), .account(recipient),
                         .pair(sender, recipient), .stranger(recipient)])
@@ -1300,7 +1300,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let mutation = try await policyDomainCommand(kind: kind, database: control)
             try await withRoomActivation(database: owner, roomID: room.roomID, shardID: "room-b") { token in
                 let host = PostgresV2RoomPolicyAuthorizationDirectory(database: owner, endpoint: "room-b", maximumRooms: 1,
-                    currentLoader: { _, sender, recipient in
+                    currentLoader: { _, sender, recipient, _ in
                         let recipient = try #require(recipient)
                         let scopes: [V2PolicyAuthorizationScope] = [.account(sender), .account(recipient), .pair(sender, recipient)]
                         var states = try await directory.registrationStates(scopes: scopes)

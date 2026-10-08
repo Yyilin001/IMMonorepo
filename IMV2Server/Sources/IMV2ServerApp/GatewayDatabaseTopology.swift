@@ -1,3 +1,4 @@
+import Foundation
 import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
@@ -77,11 +78,17 @@ struct GatewayDatabaseTopology {
 
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        resources: V2DatabaseResources,
+        resources: V2DatabaseWorkloadResources,
         logger: Logger
     ) async throws -> Self {
-        let databaseEventLoops = Array(resources.eventLoopGroup.makeIterator())
-        guard databaseEventLoops.count == configuration.databasePolicy.eventLoopThreads else {
+        let workloads = resources
+        let resources = workloads.control
+        let allControlEventLoops = Array(resources.eventLoopGroup.makeIterator())
+        let controlEventLoops = Array(allControlEventLoops.prefix(configuration.databaseNonMessagePoolEventLoopThreads))
+        let expectedControlLoops = configuration.databaseWorkloadPoolIsolationEnabled
+            ? configuration.databaseNonMessagePoolEventLoopThreads : configuration.databasePolicy.eventLoopThreads
+        guard allControlEventLoops.count == expectedControlLoops,
+              !configuration.databaseWorkloadPoolIsolationEnabled || workloads.messageWrite != nil else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         let physicalDatabaseURLs = Array(Set(
@@ -98,6 +105,12 @@ struct GatewayDatabaseTopology {
                 : [.foreground]
         for (urlIndex, url) in physicalDatabaseURLs.enumerated() {
             for role in databaseRoles {
+                let roleResources = workloads.resources(for: role)
+                let roleEventLoops = Array(roleResources.eventLoopGroup.makeIterator()).prefix(configuration.databasePoolEventLoopCount(for: role))
+                guard roleEventLoops.count == configuration.databasePoolEventLoopCount(for: role) ||
+                    !configuration.databaseWorkloadPoolIsolationEnabled else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
                 let identifier: DatabaseID = role == .foreground && url == configuration.databaseURL
                     ? .psql
                     : DatabaseID(string: "gateway-\(role.rawValue)-pool-\(urlIndex)")
@@ -110,19 +123,21 @@ struct GatewayDatabaseTopology {
                         (role == .maintenance ? min(1, max(0, capacity - 1)) : 0),
                     maximumQueued: configuration.foregroundWriteDatabaseWorkMaximumQueued,
                     maximumWait: .milliseconds(configuration.databasePolicy.poolTimeoutMilliseconds))
-                resources.databases.use(
+                roleResources.databases.use(
                     try postgresDatabaseConfiguration(
                         url: url,
                         policy: configuration.databasePolicy,
                         maximumConnectionsPerEventLoop: capacity,
-                        sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil
+                        sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil,
+                        prepareMessageQueries: role == .messageWrite
+                            && ProcessInfo.processInfo.environment["IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED"] != "false"
                     ),
                     as: identifier
                 )
                 let eventLoopPool = try V2EventLoopDatabasePool(
-                    databases: resources.databases, logger: logger,
+                    databases: roleResources.databases, logger: logger,
                     identifier: identifier,
-                    eventLoops: Array(databaseEventLoops.prefix(configuration.databasePoolEventLoopCount(for: role))), loanPolicy: loanPolicy,
+                    eventLoops: Array(roleEventLoops), loanPolicy: loanPolicy,
                     sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil
                 )
                 // 逐一验证每个 EventLoop 所属连接池的会话 GUC。
@@ -150,7 +165,6 @@ struct GatewayDatabaseTopology {
               let maintenanceDatabase = databaseForRole(for: .maintenance, url: configuration.databaseURL)
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
 
-        let controlEventLoops = Array(databaseEventLoops.prefix(configuration.databaseNonMessagePoolEventLoopThreads))
         // 独立控制连接持有路由围栏，数据连接先提交源端再投递到当前归属。
         // 即使关闭工作类别隔离也不能合并这两个池；总连接数已在配置阶段计入预算。
         let userStateRouteDatabaseID = DatabaseID(string: "gateway-user-state-route")
@@ -294,9 +308,14 @@ private func postgresDatabaseConfiguration(
     url: String,
     policy: V2PostgresRuntimePolicy,
     maximumConnectionsPerEventLoop: Int,
-    sessionTimeouts: V2RoomActivationSQLTimeouts? = nil
+    sessionTimeouts: V2RoomActivationSQLTimeouts? = nil,
+    prepareMessageQueries: Bool = false
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
+    if prepareMessageQueries {
+        configuration.coreConfiguration.options.preparedQueryCacheCapacity = 16
+        configuration.coreConfiguration.options.preparedQuerySQLPrefixes = ["/* imv2_plain_direct_append */"]
+    }
     configuration.coreConfiguration.options.connectTimeout = .milliseconds(
         Int64(policy.connectTimeoutMilliseconds)
     )

@@ -22,12 +22,31 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case ownerReadyWait = "owner_ready_wait"
     case ownerSelectRoom = "owner_select_room"
     case ownerTicketTaskWait = "owner_ticket_task_wait"
+    /// Scheduling selection to synchronous registration of the actual loan.
+    case ownerTicketRegistrationWait = "owner_ticket_registration_wait"
     case ownerTaskToPoolRequest = "owner_task_to_pool_request"
     case ownerTaskToStoreEnter = "owner_task_to_store_enter"
     case ownerStoreToPhysicalEnter = "owner_store_to_physical_enter"
     case ownerPhysicalToPoolRequest = "owner_physical_to_pool_request"
     /// Request registration through pool assignment publication, including gate wait.
     case ownerPoolAssignmentWait = "owner_pool_assignment_wait"
+    /// Non-overlapping children of assignment wait, using the winning gate.
+    /// Before-gate includes failed probes and original wait before a peer wins.
+    case ownerPoolBeforeWinningGate = "owner_pool_before_winning_gate"
+    case ownerGateRequestPreparation = "owner_gate_request_preparation"
+    case ownerGateLockWait = "owner_gate_lock_wait"
+    case ownerGateAdmission = "owner_gate_admission"
+    case ownerGateCapacityWait = "owner_gate_capacity_wait"
+    case ownerGateGrantToPromise = "owner_gate_grant_to_promise"
+    case ownerGateDeliveryWait = "owner_gate_delivery_wait"
+    case ownerPoolPublishWork = "owner_pool_publish_work"
+    /// Subsets of delivery wait; these must not be added to the parent.
+    case ownerGateOffLoopDelivery = "owner_gate_off_loop_delivery"
+    case ownerGateOnLoopDelivery = "owner_gate_on_loop_delivery"
+    case ownerGateCallbackRegistration = "owner_gate_callback_registration"
+    case ownerGateRegisteredToCallback = "owner_gate_registered_to_callback"
+    case ownerGateQueuedCapacityWait = "owner_gate_queued_capacity_wait"
+    case ownerPoolPeerBeforeGate = "owner_pool_peer_before_gate"
     case ownerPoolAssignmentCallbackWait = "owner_pool_assignment_callback_wait"
     /// Driver borrowing after the actual pool assignment callback starts.
     case ownerPoolToDriverWait = "owner_pool_to_driver_wait"
@@ -49,6 +68,8 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case ownerWriteFuture = "owner_write_future"
     case ownerCommitFuture = "owner_commit_future"
     case ownerSetup = "owner_setup"
+    /// Whole one-statement implicit transaction, including backend confirmation.
+    case ownerSingleStatement = "owner_single_statement"
     case ownerBody = "owner_body"
     case ownerCommit = "owner_commit"
     case ownerRollback = "owner_rollback"

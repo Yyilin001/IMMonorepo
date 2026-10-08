@@ -54,11 +54,11 @@ struct V2RoomSubscriptionNetworkTests {
         try await system.shutdown().wait()
     }
 
-    @Test("signed room callbacks commit actual gateway authority over TCP and reject retired node identity")
-    func remoteRoomSubscriptionAuthority() async throws {
+    @Test("signed room callbacks commit actual gateway authority over TCP and reject retired node identity", arguments: [false, true])
+    func remoteRoomSubscriptionAuthority(binary: Bool) async throws {
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
         let keys = try Keys()
-        let callerSystem = await makeSystem(name: "room-subscription-caller", port: callerPort)
+        let callerSystem = await makeSystem(name: "room-subscription-caller", port: callerPort, binary: binary)
         var peerSystem = await makeSystem(name: "room-subscription-peer", port: peerPort)
         var callerHandle: V2RealtimeTransportHandle?
         var peerHandle: V2RealtimeTransportHandle?
@@ -329,9 +329,10 @@ struct V2RoomSubscriptionNetworkTests {
         if let failure { throw failure }
     }
 
-    private func makeSystem(name: String, port: Int) async -> ClusterSystem {
+    private func makeSystem(name: String, port: Int, binary: Bool = false) async -> ClusterSystem {
         var settings = ClusterSystemSettings(name: name, host: "127.0.0.1", port: port)
         settings.threadPoolSize = 1; settings.downingStrategy = .none; settings.onDownAction = .none
+        settings.serialization.binaryDistributedInvocations = binary
         settings.serialization.registerInbound(V2ActorAuthenticationError.self)
         settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
         return await ClusterSystem(name, settings: settings)

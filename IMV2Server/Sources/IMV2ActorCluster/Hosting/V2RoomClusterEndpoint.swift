@@ -196,7 +196,8 @@ public actor V2RoomClusterInboundService {
         let maximumBytes: Int
         if isBoundedBatch(verified.call.request) { maximumBytes = min(262_144, limits.maximumReplyBytes) }
         else { maximumBytes = limits.maximumReplyBytes }
-        return try signer.sign(reply, maximumBytes: maximumBytes)
+        return try signer.signAuthenticated(reply, binary: V2ActorAuthenticatedBodyFraming.recognizes(packet.body),
+            maximumBytes: maximumBytes)
     }
 
     func exchangeLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,
@@ -230,6 +231,9 @@ public actor V2RoomClusterInboundService {
         switch verified.call.request {
         case .invoke(_, .messaging(.sendOperation(let command))):
             guard let operation = try? command.identity.operation.rawOperationID else {
+                return try await exchangeVerified(verified, boundToken: boundToken)
+            }
+            guard V2SendPathTrace.shouldCollect(operations: [operation]) else {
                 return try await exchangeVerified(verified, boundToken: boundToken)
             }
             trace = V2SendPathTrace(operations: [operation], segment: "room_rpc")
@@ -436,8 +440,8 @@ public actor V2RoomClusterInboundService {
             V2SendPathTrace.current?.mark("receiver_host_return")
             return .result(result)
         case .subscriptionRenewBatch(let items):
-            // Bounded same-host fanout enters ordinary room lanes; the physical
-            // lease-proof broker coalesces their reads without bypassing fencing.
+            // Bounded fanout uses Host lifecycle pins for pure renewal when
+            // configured. Other factories retain their ordinary room lanes.
             let results = await withTaskGroup(of: (Int, V2RoomSubscriptionRenewBatchOutcome).self) { group in
                 for (index, item) in items.enumerated() {
                     group.addTask { [host] in

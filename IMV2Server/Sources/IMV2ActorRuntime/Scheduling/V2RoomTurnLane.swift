@@ -79,6 +79,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private var unresolved: [V2RoomCommandPermit] = []
     private var reservation: HeldReservation?
     private var consumer: Task<Void, Never>?
+    private var consumerRequestedAt: ContinuousClock.Instant?
+    private var consumerStartedAt: ContinuousClock.Instant?
     // One timestamp, written only at the existing actual activity boundaries.
     // The Host can cheaply rule out a not-yet-idle lane without an actor hop;
     // retirement still uses this lane's atomic admission/ownership check.
@@ -121,6 +123,17 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         encodedRequest: Data,
         deadline: ContinuousClock.Instant
     ) async throws -> Response {
+        try await submit(encodedRequest: encodedRequest, decodedRequest: nil, deadline: deadline)
+    }
+
+    func submit(decodedInvocation: V2DecodedRoomInvocation<Request>,
+                deadline: ContinuousClock.Instant) async throws -> Response {
+        try await submit(encodedRequest: decodedInvocation.encodedRequest,
+                         decodedRequest: decodedInvocation.request, deadline: deadline)
+    }
+
+    private func submit(encodedRequest: Data, decodedRequest: Request?,
+                        deadline: ContinuousClock.Instant) async throws -> Response {
         V2SendPathTrace.current?.mark("lane_submit_enter")
         let requestID = UUID()
         return try await withTaskCancellationHandler {
@@ -129,27 +142,30 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
             pendingAdmissions += 1
             defer { pendingAdmissions -= 1 }
-            let permit = try await budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
-            // 准入曾等待另一个 Actor；须重新检查全部本地条件。
+            let permit = try budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
+            // Synchronous admission still consumes time; recheck cancellation and deadline.
             guard phase == .ready, !Task.isCancelled, clock.now < deadline else {
                 let failure = phase != .ready ? rejection() : V2RoomCallFailure.notAccepted(
                     Task.isCancelled ? .cancelled : .deadlineExceeded
                 )
-                await budget.release(permit)
+                budget.release(permit)
                 throw failure
             }
             let request: Request
-            do { request = try JSONDecoder().decode(Request.self, from: permit.encodedRequest) }
+            do {
+                if let decodedRequest { request = decodedRequest }
+                else { request = try JSONDecoder().decode(Request.self, from: permit.encodedRequest) }
+            }
             catch {
-                await budget.release(permit)
+                budget.release(permit)
                 throw V2RoomCallFailure.notAccepted(.invalidRequest)
             }
             if case .profileVisibility = classify(request), permit.byteCount > 64 * 1_024 {
-                await budget.release(permit)
+                budget.release(permit)
                 throw V2RoomCallFailure.notAccepted(.invalidRequest)
             }
             guard nextOrdinal < UInt64.max else {
-                await budget.release(permit)
+                budget.release(permit)
                 throw V2RoomCallFailure.notAccepted(.overloaded)
             }
             nextOrdinal += 1
@@ -179,7 +195,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
 
     /// The activity check and admission cutoff share the Lane's isolation.
     /// A Host snapshot from before a suspended/newly completed turn cannot
-    /// retire this lane; even admission awaiting the shared budget prevents it.
+    /// retire this lane; an admission in progress also prevents it.
     public func beginIdleDrain(ifLastActivityAtOrBefore cutoff: ContinuousClock.Instant) -> Bool {
         guard phase == .ready, pendingAdmissions == 0,
               queue.isEmpty, executing.isEmpty, unresolved.isEmpty, reservation == nil,
@@ -200,12 +216,12 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             let bytes = try JSONEncoder().encode(grant)
             pendingAdmissions += 1
             defer { pendingAdmissions -= 1 }
-            let permit = try await budget.acquireReservation(roomID: token.roomID, encodedRequest: bytes)
+            let permit = try budget.acquireReservation(roomID: token.roomID, encodedRequest: bytes)
             guard phase == .ready, !Task.isCancelled, clock.now < boundedDeadline, nextOrdinal < UInt64.max else {
                 let failure = phase != .ready ? rejection() : V2RoomCallFailure.notAccepted(
                     Task.isCancelled ? .cancelled : .deadlineExceeded
                 )
-                await budget.release(permit)
+                budget.release(permit)
                 throw failure
             }
             nextOrdinal += 1
@@ -246,7 +262,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         reservation = nil
         forgetDeadline(held.entry.id)
         lastActivity = clock.now
-        await budget.release(held.entry.permit)
+        budget.release(held.entry.permit)
         startConsumerIfNeeded()
         return true
     }
@@ -267,7 +283,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             await rejectQueued(reason: .leaseLost)
             await onUncertain(token)
         } else {
-            await budget.release(held.entry.permit)
+            budget.release(held.entry.permit)
             startConsumerIfNeeded()
         }
         return true
@@ -300,7 +316,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         await rejectQueued(reason: .retired)
         let permits = unresolved
         unresolved.removeAll()
-        for permit in permits { await budget.release(permit) }
+        for permit in permits { budget.release(permit) }
         return true
     }
 
@@ -356,10 +372,13 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
     private func startConsumerIfNeeded() {
         guard consumer == nil, reservation == nil, !queue.isEmpty,
               phase == .ready || phase == .draining else { return }
+        consumerRequestedAt = clock.now
+        consumerStartedAt = nil
         consumer = Task { await self.consume() }
     }
 
     private func consume() async {
+        consumerStartedAt = clock.now
         while phase == .ready || phase == .draining {
             guard !queue.isEmpty else { break }
             // This is the only room sequencer. Durable sends normally collect
@@ -438,9 +457,18 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                       case .messaging(.sendOperation(let command)) = request else { return nil }
                 return try? command.identity.operation.rawOperationID
             }
-            let trace = V2SendPathTrace.enabled && !operationIDs.isEmpty
+            let trace = V2SendPathTrace.shouldCollect(operations: operationIDs) && !operationIDs.isEmpty
                 ? V2SendPathTrace(operations: operationIDs, segment: "room_actor") : nil
-            trace?.record("room_queue_wait", from: head.admittedAt)
+            let dispatchedAt = clock.now
+            trace?.record("room_queue_wait", from: head.admittedAt, to: dispatchedAt)
+            // Split only the actual startup overlap. The remainder includes
+            // preceding turns, barriers and optional collection; it is not
+            // assumed to be actor scheduling delay.
+            let startupEnd = min(dispatchedAt, max(head.admittedAt, consumerStartedAt ?? head.admittedAt))
+            let startupBegin = min(startupEnd, max(head.admittedAt, consumerRequestedAt ?? head.admittedAt))
+            trace?.record("room_consumer_start_wait", from: startupBegin, to: startupEnd)
+            trace?.record("room_queue_before_consumer_request", from: head.admittedAt, to: startupBegin)
+            trace?.record("room_queue_after_consumer_start", from: startupEnd, to: dispatchedAt)
             trace?.mark("turn_execute_dispatch")
             let completion = await V2RoomTurnScope.$roomID.withValue(token.roomID) {
                 await V2SendPathTrace.$current.withValue(trace) { await execute(turn) }
@@ -452,6 +480,8 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             trace?.finish()
         }
         consumer = nil
+        consumerRequestedAt = nil
+        consumerStartedAt = nil
     }
 
     private func finish(_ completion: V2RoomTransactionCompletion<[Response]>) async {
@@ -485,7 +515,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             await rejectQueued(reason: .leaseLost)
             await onUncertain(token)
         } else {
-            for entry in entries { await budget.release(entry.permit) }
+            for entry in entries { budget.release(entry.permit) }
         }
     }
 
@@ -494,7 +524,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             forgetDeadline(entry.id)
             entry.continuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             entry.reservationContinuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
-            await budget.release(entry.permit)
+            budget.release(entry.permit)
         } else if let index = executing.firstIndex(where: { $0.id == id }) {
             // 只让调用方退出，不中断 SQL。保留许可和独占轮次，
             // 直到执行器报告实际事务结果。
@@ -519,7 +549,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             forgetDeadline(entry.id)
             entry.continuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
             entry.reservationContinuation?.resume(throwing: V2RoomCallFailure.notAccepted(reason))
-            await budget.release(entry.permit)
+            budget.release(entry.permit)
         }
     }
 

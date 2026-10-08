@@ -18,6 +18,8 @@ public typealias V2RoomSendPreparation = @Sendable ([V2MessageSendOperationComma
 
 package typealias V2ScheduledSendConnection = @Sendable (ContinuousClock.Instant,
     @escaping @Sendable (V2OwnerConnectionExecutor) async throws -> V2ScheduledSendOutcome?) async throws -> V2ScheduledSendOutcome?
+package typealias V2ScheduledSendConnectionStart = @Sendable (ContinuousClock.Instant,
+    @escaping @Sendable (V2OwnerConnectionExecutor) async throws -> V2ScheduledSendOutcome?) throws -> V2StartedRoomConnection<V2ScheduledSendOutcome?>
 package typealias V2ScheduledSendExecution = @Sendable (V2OwnerConnectionExecutor,
     V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult]
 

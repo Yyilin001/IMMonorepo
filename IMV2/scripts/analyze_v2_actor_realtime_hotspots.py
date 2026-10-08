@@ -17,7 +17,7 @@ import sys
 METRIC = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{.*\})?\s+([^\s]+)')
 PREFIXES = ('im_v2_database_loan_', 'im_v2_database_work_', 'im_v2_gateway_message_send_', 'im_v2_gateway_commands_',
             'im_v2_gateway_command_duration_', 'im_v2_gateway_message_operation_internal_failures_', 'im_v2_send_operation_', 'im_v2_send_preparation_',
-            'im_v2_room_actor_', 'im_v2_actor_realtime_', 'im_v2_gateway_event_loop_lag_')
+            'im_v2_room_actor_', 'im_v2_room_subscription_', 'im_v2_actor_realtime_', 'im_v2_gateway_event_loop_lag_')
 
 
 def read_jsonl(path):
@@ -310,6 +310,66 @@ def host_resources(rows, start, end):
                 coverage='host-wide; CPU intervals entirely inside phase; VM and swap remain raw snapshots')
 
 
+READY_CATEGORIES = (
+    'ready_pool_fully_borrowed_sum', 'ready_slots_full_return_pending_sum',
+    'ready_slots_full_task_pending_sum', 'ready_slots_full_pool_request_pending_sum',
+    'ready_slots_full_assignment_pending_sum', 'ready_slots_full_callback_pending_sum',
+    'ready_slots_full_driver_pending_sum', 'ready_slots_full_mixed_pending_sum',
+    'ready_slots_full_unknown_pending_sum', 'ready_slot_available_sum',
+    'ready_diagnostic_history_missing_sum', 'ready_slots_full_borrow_pending_sum')
+
+
+def ready_wait_traces(directory, start, end):
+    """Per-request resource partitions, never inference from average pool usage."""
+    paths = sorted(directory.glob('gateway-*.log'))
+    rows, invalid, incomplete, outside = [], 0, 0, 0
+    decoder = json.JSONDecoder()
+    for path in paths:
+        with path.open(errors='replace') as log:
+            for line in log:
+                if 'send_path=' not in line:
+                    continue
+                try:
+                    trace, _ = decoder.raw_decode(line.split('send_path=', 1)[1])
+                    if trace.get('segment') != 'room_actor':
+                        continue
+                    at = trace['startedAtUnixMilliseconds'] / 1000
+                    stages = collections.defaultdict(float)
+                    for span in trace['spans']:
+                        value = span['durationMilliseconds']
+                        if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                            raise ValueError('invalid span')
+                        stages[span['stage']] += value
+                    wait = stages.get('owner_ready_wait')
+                    if wait is None or wait < 20:
+                        continue
+                    if at < start or at + trace['durationMilliseconds'] / 1000 > end:
+                        outside += 1
+                        continue
+                    parts = {key: stages.get(key, 0) for key in READY_CATEGORIES}
+                    if abs(sum(parts.values()) - wait) > 0.02:
+                        incomplete += 1
+                        continue
+                    rows.append(dict(node=path.stem, operations=trace.get('operations', []),
+                                     waitMilliseconds=wait, partition=parts))
+                except (ValueError, TypeError, KeyError):
+                    invalid += 1
+    def distribution(values):
+        values = sorted(values)
+        def percentile(p):
+            return values[max(0, math.ceil(len(values) * p) - 1)] if values else None
+        return dict(count=len(values), meanMilliseconds=sum(values)/len(values) if values else None,
+                    p50Milliseconds=percentile(.5), p95Milliseconds=percentile(.95),
+                    p99Milliseconds=percentile(.99), totalMilliseconds=sum(values))
+    return dict(status='observed' if rows else 'no_complete_slow_request_partitions',
+                scope='logged room traces with ready wait >=20ms, wholly inside phase; slow-biased sample, not all messages',
+                semantics='categories partition waiting to driver entry; mixed/unknown/history missing are not a unique cause; slot available does not prove a physical connection is idle',
+                logFiles=len(paths), malformedTraces=invalid, incompletePartitions=incomplete,
+                excludedBoundaryTraces=outside, wait=distribution([r['waitMilliseconds'] for r in rows]),
+                categories={key: distribution([r['partition'][key] for r in rows]) for key in READY_CATEGORIES},
+                longest=sorted(rows, key=lambda r: r['waitMilliseconds'], reverse=True)[:10])
+
+
 def analyze(directory, names):
     reports, problems = [], []
     for path in sorted(directory.glob('report-*.json')):
@@ -365,6 +425,7 @@ def analyze(directory, names):
             phase['gateways'] = gateways(streams['gateway-metrics'], start, end)
             phase['postgres'] = postgres(streams['postgres-metrics'], start, end)
             phase['host'] = host_resources(streams['host-resources'], start, end)
+            phase['readyWaitDiagnosis'] = ready_wait_traces(directory, start, end)
             _, inside, window = select(streams['process-resources'], start, end)
             phase['processes'] = dict(window=window, perPID=cpu_summary(inside),
                 coverage='only unchanged PIDs in adjacent in-phase samples; exited process CPU may be absent',

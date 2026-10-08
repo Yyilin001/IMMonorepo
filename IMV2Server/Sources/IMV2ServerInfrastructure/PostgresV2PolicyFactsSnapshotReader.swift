@@ -22,7 +22,10 @@ struct PostgresV2PolicyFactsSnapshotReader: Sendable {
         let trace = V2SendPathTrace.current
         let startedAt = ContinuousClock.now
         let settledAt = Mutex<ContinuousClock.Instant?>(nil)
-        let future: EventLoopFuture<[Row]> = sql.raw("""
+        // Capture the source while the physical loan request is constructed.
+        // This adds no task or query and uses the pool's existing stage timings.
+        let future: EventLoopFuture<[Row]> = V2DatabaseLoanObservationContext.$source.withValue(.policySnapshot) {
+            sql.raw("""
             WITH requested AS (
                 SELECT * FROM unnest(\(bind: scopes.map(\.key))::text[],
                     \(bind: inputs.map { $0.0 })::text[], \(bind: inputs.map { $0.1 })::uuid[],
@@ -49,6 +52,7 @@ struct PostgresV2PolicyFactsSnapshotReader: Sendable {
             LEFT JOIN \(unsafeRaw: schema).special_accounts special ON input.kind='account' AND special.account_user_id=input.first_user
             ORDER BY input.position
             """).all(decoding: Row.self)
+        }
         let observed = future.always { _ in
             let endedAt = ContinuousClock.now
             settledAt.withLock { $0 = endedAt }

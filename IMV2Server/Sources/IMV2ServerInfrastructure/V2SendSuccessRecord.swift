@@ -4,11 +4,12 @@ import IMV2Core
 /// Execution-local metadata is appended to the original immutable completion
 /// INSERT. It is not a second result write and carries no authorization.
 enum V2SendSuccessMetadata {
-    struct Entry: Sendable {
+    /// Immutable command material, prepared before a connection is borrowed.
+    struct Prepared: Sendable {
         let room: UUID, sender: UUID, operation: UUID
         let fingerprint: Data
-        let resolvedAt: UInt64
-        init(_ command: V2MessageSendOperationCommand, now: Date) throws {
+        let fingerprintHex: String
+        init(_ command: V2MessageSendOperationCommand) throws {
             guard let room = command.command.roomID.uuidValue,
                   let sender = command.command.senderUserID.uuidValue,
                   let operation = command.command.clientMessageID.uuidValue else {
@@ -16,6 +17,20 @@ enum V2SendSuccessMetadata {
             }
             self.room = room; self.sender = sender; self.operation = operation
             fingerprint = try command.fingerprint.digest
+            fingerprintHex = fingerprint.map { String(format: "%02x", $0) }.joined()
+        }
+    }
+    struct Entry: Sendable {
+        let room: UUID, sender: UUID, operation: UUID
+        let fingerprint: Data
+        let fingerprintHex: String
+        let resolvedAt: UInt64
+        init(_ command: V2MessageSendOperationCommand, now: Date) throws {
+            try self.init(Prepared(command), now: now)
+        }
+        init(_ prepared: Prepared, now: Date) throws {
+            room = prepared.room; sender = prepared.sender; operation = prepared.operation
+            fingerprint = prepared.fingerprint; fingerprintHex = prepared.fingerprintHex
             let milliseconds = now.timeIntervalSince1970 * 1000
             guard milliseconds.isFinite, milliseconds > 0, milliseconds < Double(Int64.max) else {
                 throw V2MessageOperationValidationError.invalidReceipt
@@ -32,7 +47,7 @@ enum V2SendSuccessMetadata {
             var seen = Set<String>()
             let entries = current.filter { seen.insert("\($0.room):\($0.sender):\($0.operation)").inserted }
             values = "VALUES " + entries.map { entry in
-                let hex = entry.fingerprint.map { String(format: "%02x", $0) }.joined()
+                let hex = entry.fingerprintHex
                 return "('\(entry.room)'::uuid,'\(entry.sender)'::uuid,'\(entry.operation)'::uuid,decode('\(hex)','hex'),\(entry.resolvedAt)::bigint)"
             }.joined(separator: ",")
         }

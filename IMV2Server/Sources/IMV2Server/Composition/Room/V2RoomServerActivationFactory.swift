@@ -313,6 +313,31 @@ public struct V2RoomServerActivationFactory: Sendable {
                     }
                 }
             } catch { return v2RoomDomainCompletion(error) }
+        }, pureSubscriptionRenew: { token, request, deadline, validUntil in
+            guard case .roomSubscription(.renew(let command)) = request,
+                  command.roomID == token.roomID, let resources = owners[token.owner.shardID] else {
+                return .rolledBack(.invalidRequest)
+            }
+            do {
+                try V2RoomSubscriptionCommand.renew(command).validate()
+                let renewal = try await resources.subscriptionHost.renew(command: command, token: token,
+                    activationValidUntil: validUntil, deadline: deadline)
+                return .committed(.roomSubscription(.renewed(renewal)))
+            } catch {
+                if let failure = error as? V2RoomSubscriptionOwnerError {
+                    switch failure {
+                    case .busy: V2RoomSubscriptionOwnerFailureMetrics.shared.record(.busy)
+                    case .catchUpRequired:
+                        V2RoomSubscriptionOwnerFailureMetrics.shared.record(.catchUpRequired)
+                        resources.subscriptionHost.signal(room: token.roomID)
+                        return .committed(.roomSubscription(.failure(.unavailable)))
+                    case .overloaded: V2RoomSubscriptionOwnerFailureMetrics.shared.record(.overloaded)
+                    default: break
+                    }
+                }
+                do { return .committed(.roomSubscription(.failure(try v2RoomSubscriptionFailure(for: error)))) }
+                catch { return v2RoomDomainCompletion(error) }
+            }
         }) { token in
             let instance = V2RoomServerActivation(token: token, resources: owners[token.owner.shardID],
                 safetyActorUserID: safetyActorUserID, now: now, validation: validation)
@@ -888,6 +913,21 @@ package actor V2RoomSubscriptionHost {
         guard remaining > 0 else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
         return .init(activation: token, committedRoomSequence: committedHead,
             roomControlVersion: checkpoint.controlVersion, remainingLeaseMilliseconds: remaining)
+    }
+    /// Only an already activated subscription can renew. Missing entries never
+    /// restore from SQL or create a grant on this independent read path.
+    package func renew(command: V2RoomSubscriptionRenewCommand, token: V2RoomActivationToken,
+                       activationValidUntil: ContinuousClock.Instant,
+                       deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionRenewal {
+        guard !closed, let entry = entries[token.roomID], entry.token == token else {
+            throw V2RoomSubscriptionOwnerError.catchUpRequired
+        }
+        return try await entry.owner.renew(gateway: command.gatewayDescriptor.identity,
+            userID: command.actorUserID, expectedFence: command.expectedFence,
+            appliedControlSequence: command.appliedControlSequence, token: token, deadline: deadline,
+            leaseProof: { token, deadline in
+                try await self.renewalProof(token: token, activationValidUntil: activationValidUntil, deadline: deadline)
+            })
     }
     private func retainHead(token: V2RoomActivationToken, highWatermark: UInt64) {
         guard entries[token.roomID]?.token == token else { return }

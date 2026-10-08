@@ -17,7 +17,7 @@ struct V2RoomReservationCoordinatorTests {
             source: fixture.rooms[0], target: fixture.rooms[0], deadline: .now + .seconds(3)
         ) { .committed($0.count) }
         #expect(one == 1)
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
     }
 
     @Test("opposing pairs wait in the same order and progress after the first SQL finishes")
@@ -48,7 +48,7 @@ struct V2RoomReservationCoordinatorTests {
         await gate.release()
         #expect(try await first.value == 1)
         #expect(try await second.value == 2)
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
     }
 
     @Test("failed second acquisition and ambiguous mark acknowledgement do not dispatch SQL")
@@ -66,7 +66,7 @@ struct V2RoomReservationCoordinatorTests {
             } catch {
                 #expect(error as? V2RoomCallFailure == .notAccepted(.unavailable))
             }
-            #expect(await fixture.budget.snapshot().commandCount == 0)
+            #expect(fixture.budget.snapshot().commandCount == 0)
             for lane in fixture.lanes.values { #expect(await lane.snapshot().phase == .ready) }
         }
     }
@@ -80,12 +80,12 @@ struct V2RoomReservationCoordinatorTests {
             ) { _ in .outcomeUnknown }
             Issue.record("unknown SQL unexpectedly succeeded")
         } catch { #expect(error as? V2RoomCallFailure == .outcomeUnknown) }
-        #expect(await fixture.budget.snapshot().reservationCount == 2)
+        #expect(fixture.budget.snapshot().reservationCount == 2)
         for lane in fixture.lanes.values {
             #expect(await lane.snapshot().phase == .uncertain)
             #expect(await lane.completeRetirement())
         }
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
     }
 
     @Test("lost completion notification keeps a holder closed without erasing committed result")
@@ -101,7 +101,7 @@ struct V2RoomReservationCoordinatorTests {
         #expect(await second.snapshot().hasReservation)
         await second.loseLease()
         #expect(await second.completeRetirement())
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
     }
 
     @Test("a coordinator cannot be entered while an ordinary room turn is held")
@@ -115,7 +115,7 @@ struct V2RoomReservationCoordinatorTests {
             }
             Issue.record("nested coordinator unexpectedly succeeded")
         } catch { #expect(error as? V2RoomCallFailure == .notAccepted(.invalidRequest)) }
-        #expect(await fixture.budget.snapshot().commandCount == 0)
+        #expect(fixture.budget.snapshot().commandCount == 0)
     }
 
     private enum Failure: Error { case phaseNotReached, acknowledgementLost }

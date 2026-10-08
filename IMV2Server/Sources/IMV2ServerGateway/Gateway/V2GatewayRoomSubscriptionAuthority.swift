@@ -1,6 +1,5 @@
 import Foundation
 import Synchronization
-import Crypto
 @preconcurrency import NIOCore
 import IMV2Core
 import IMV2ActorContracts
@@ -586,28 +585,10 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     }
 
     func apply(_ delivery: V2RoomSubscriptionDelivery, authenticatedServiceID: String) -> ApplyResult {
-        // Bounded fingerprints acknowledge lost-ACK batch prefixes without
-        // retaining payloads or repeating socket fanout.
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        guard let encoded = try? encoder.encode(delivery) else { return .invalid }
-        // Codable Set order is unspecified. Canonicalize all JSON arrays
-        // representing recipients while preserving ordered member controls.
-        guard var object = (try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any] else { return .invalid }
-        if var payload = object["payload"] as? [String: Any],
-           var eventCase = payload["event"] as? [String: Any],
-           var event = eventCase["_0"] as? [String: Any],
-           let recipients = event["recipientUserIDs"] as? [Any] {
-            event["recipientUserIDs"] = recipients.sorted {
-                let left = (try? JSONSerialization.data(withJSONObject: $0, options: [.sortedKeys, .fragmentsAllowed])) ?? Data()
-                let right = (try? JSONSerialization.data(withJSONObject: $1, options: [.sortedKeys, .fragmentsAllowed])) ?? Data()
-                return left.lexicographicallyPrecedes(right)
-            }
-            eventCase["_0"] = event; payload["event"] = eventCase; object["payload"] = payload
-        }
-        guard let canonicalData = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return .invalid }
-        let digest = Data(SHA256.hash(data: canonicalData))
+        // Immutable validation and replay hashing do not need the state lock.
+        do { try delivery.validate(maximumMembers: maximumMembersPerRoom) } catch { return .invalid }
+        let digest = V2RoomSubscriptionDeliveryFingerprint.digest(delivery)
         return withState { value in
-            do { try delivery.validate(maximumMembers: maximumMembersPerRoom) } catch { return .invalid }
             let id = delivery.fence.roomID
             guard !value.closed, var room = value.rooms[id], !room.retired, room.fence == delivery.fence,
                   room.serviceID == authenticatedServiceID else { return .stale }

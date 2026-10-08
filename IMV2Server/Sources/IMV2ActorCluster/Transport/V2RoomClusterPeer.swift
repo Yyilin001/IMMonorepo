@@ -686,7 +686,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     static func renewalBatches(_ items: [V2RoomSubscriptionRenewBatchItem],
         template: V2ActorAuthenticatedCall, maximumBytes: Int) throws -> [[V2RoomSubscriptionRenewBatchItem]] {
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
         let empty = V2ActorAuthenticatedCall(version: template.version, serviceID: template.serviceID,
             callerIncarnation: template.callerIncarnation, recipient: template.recipient,
             sessionID: template.sessionID, sequence: template.sequence, attemptID: template.attemptID,
@@ -995,7 +994,8 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
 
     @concurrent private nonisolated func signRequest(_ call: V2ActorAuthenticatedCall,
         maximumBytes: Int) async throws -> V2ActorSignedPacket {
-        try signer.sign(call, maximumBytes: maximumBytes)
+        try signer.signAuthenticated(call, binary: system.settings.serialization.binaryDistributedInvocations,
+            maximumBytes: maximumBytes)
     }
     @concurrent private nonisolated func verifyReply(_ reply: TransportReply,
         for call: V2ActorAuthenticatedCall, maximumBytes: Int) async throws -> V2ActorRPCResponse {

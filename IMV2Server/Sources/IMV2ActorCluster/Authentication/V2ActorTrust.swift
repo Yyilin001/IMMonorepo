@@ -37,9 +37,19 @@ public struct V2ActorSigningIdentity: Sendable {
     public func sign<Body: Encodable>(_ body: Body, maximumBytes: Int) throws -> V2ActorSignedPacket {
         guard maximumBytes > 0 else { throw V2ActorAuthenticationError.invalidConfiguration }
         let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
+        // The receiver verifies the transmitted bytes before decoding; it never
+        // re-encodes the body. Key sorting is not required for authentication.
         let bytes = try encoder.encode(body)
         guard bytes.count <= maximumBytes else { throw V2ActorAuthenticationError.oversized }
+        return .init(signerID: serviceID, body: bytes, signature: try privateKey.signature(for: bytes))
+    }
+
+    func signAuthenticated<Body: V2ActorBinaryAuthenticatedBody>(_ body: Body, binary: Bool,
+        maximumBytes: Int) throws -> V2ActorSignedPacket {
+        guard binary else { return try sign(body, maximumBytes: maximumBytes) }
+        guard maximumBytes > 0 else { throw V2ActorAuthenticationError.invalidConfiguration }
+        let bytes = try body.binaryAuthenticatedBody()
+        guard bytes.count <= min(maximumBytes, 16_777_216) else { throw V2ActorAuthenticationError.oversized }
         return .init(signerID: serviceID, body: bytes, signature: try privateKey.signature(for: bytes))
     }
 }
@@ -86,7 +96,16 @@ public struct V2ActorTrustStore: Sendable {
         guard packet.signature.count == 64,
               service.publicKey.isValidSignature(packet.signature, for: packet.body)
         else { throw V2ActorAuthenticationError.invalidSignature }
-        do { return (try JSONDecoder().decode(type, from: packet.body), service) }
+        do {
+            if V2ActorAuthenticatedBodyFraming.recognizes(packet.body) {
+                guard let codec = type as? any V2ActorBinaryAuthenticatedBody.Type,
+                      let body = try codec.decodeBinaryAuthenticatedBody(packet.body) as? Body else {
+                    throw V2ActorAuthenticationError.invalidRequest
+                }
+                return (body, service)
+            }
+            return (try JSONDecoder().decode(type, from: packet.body), service)
+        }
         catch { throw V2ActorAuthenticationError.invalidRequest }
     }
 

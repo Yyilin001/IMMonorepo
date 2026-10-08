@@ -45,7 +45,7 @@ struct GatewayComposition {
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         localMediaConfiguration: V2LocalFilesystemMediaRuntimeConfiguration?,
-        resources: V2DatabaseResources,
+        resources: V2DatabaseWorkloadResources,
         app: Application,
         logger: Logger
     ) async throws -> Self {

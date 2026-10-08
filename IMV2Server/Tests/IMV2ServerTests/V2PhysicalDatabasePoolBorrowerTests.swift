@@ -1,10 +1,124 @@
 import Foundation
+import IMV2ServerApplication
+import IMV2ServerContracts
 import NIOCore
 import Synchronization
 import Testing
 @testable import IMV2ServerInfrastructure
 
 struct V2PhysicalDatabasePoolBorrowerTests {
+    @Test("immediately granted capacity can wait for the EventLoop before publication")
+    func grantedCapacityWaitsForLoop() async throws {
+        let resources = makeV2DatabaseTestResources()
+        let loop = resources.eventLoopGroup.next()
+        let gate = V2PhysicalDatabaseLoanGate(eventLoop: loop, policy: try .init(
+            maximumConnections: 1, reservedRenewalConnections: 0, maximumQueued: 1, maximumWait: .seconds(5)))
+        let borrower = V2PhysicalDatabasePoolBorrower(gates: [gate], eventLoop: loop)
+        let entered = Mutex(false), unblock = DispatchSemaphore(value: 0)
+        loop.execute { entered.withLock { $0 = true }; unblock.wait() }
+        let timeline = V2OwnerConnectionTimeline(), metrics = V2SendOperationBatchMetrics()
+        timeline.configure(metrics)
+        var request: V2PhysicalDatabasePoolBorrower.Request?
+        do {
+            let deadline = ContinuousClock.now + .seconds(2)
+            while !entered.withLock({ $0 }), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            try #require(entered.withLock { $0 })
+            let pending = V2OwnerConnectionTimeline.$current.withValue(timeline) {
+                timeline.mark("pool_request_started")
+                return borrower.request(loanClass: .ordinary, deadline: .now + .seconds(3))
+            }
+            request = pending
+            // The gate already owns capacity while its NIO loop is held.
+            #expect(gate.snapshot().classes[.ordinary]?.inFlight == 1)
+            #expect(gate.snapshot().classes[.ordinary]?.queued == 0)
+            #expect(timeline.marker("pool_assignment_published") == nil)
+            try await Task.sleep(for: .milliseconds(15))
+            unblock.signal()
+            let assignment = try await pending.future.get()
+            let timing = try #require(assignment.lease.timing)
+            #expect(!timing.wasQueued && !timing.grantedOnEventLoop)
+            timeline.flushAssignmentTiming()
+            let stages = metrics.sendOperationBatchMetricsSnapshot().stages
+            #expect(stages[.ownerGateOffLoopDelivery]?.count == 1)
+            #expect((stages[.ownerGateDeliveryWait]?.totalMilliseconds ?? 0) >= 15)
+            #expect(stages[.ownerGateQueuedCapacityWait]?.count == 0)
+            assignment.lease.release(); borrower.close()
+            await gate.shutdown(); await borrower.waitUntilSettled(); try await resources.shutdown()
+        } catch {
+            unblock.signal(); request?.cancel()
+            if let request, let assignment = try? await request.future.get() { assignment.lease.release() }
+            borrower.close(); await gate.shutdown(); await borrower.waitUntilSettled()
+            try await resources.shutdown(); throw error
+        }
+    }
+    @Test("combined immediate delivery completes once on its physical loop")
+    func combinedImmediateDelivery() async throws {
+        let resources = makeV2DatabaseTestResources()
+        let loop = resources.eventLoopGroup.next()
+        let gate = V2PhysicalDatabaseLoanGate(eventLoop: loop, policy: try .init(
+            maximumConnections: 1, reservedRenewalConnections: 0, maximumQueued: 1, maximumWait: .seconds(5)))
+        let request = try #require(gate.requestIfAvailable(loanClass: .ordinary,
+            combineImmediateDelivery: true))
+        let first = loop.makePromise(of: Bool.self), second = loop.makePromise(of: Bool.self)
+        request.whenComplete { result in
+            switch result {
+            case .success: first.succeed(loop.inEventLoop)
+            case .failure(let error): first.fail(error)
+            }
+        }
+        request.whenComplete { result in
+            switch result {
+            case .success: second.succeed(loop.inEventLoop)
+            case .failure(let error): second.fail(error)
+            }
+        }
+        // A granted lease survives queued-only cancellation until its owner
+        // returns it; repeated registration never grants a second loan.
+        request.cancel()
+        let lease = try await request.future.get()
+        #expect(try await first.futureResult.get())
+        #expect(try await second.futureResult.get())
+        #expect(gate.snapshot().classes[.ordinary]?.granted == 1)
+        lease.release(); lease.release()
+        #expect(gate.snapshot().classes[.ordinary]?.inFlight == 0)
+        await gate.shutdown(); try await resources.shutdown()
+    }
+    @Test("scheduled assignment enters the selected peer loop without a facade callback")
+    func assignmentCallbackUsesSelectedLoop() async throws {
+        let resources = makeV2DatabaseTestResources(eventLoopThreads: 2)
+        let facade = resources.eventLoopGroup.next(), peer = resources.eventLoopGroup.next()
+        let policy = try V2PhysicalDatabaseLoanPolicy(maximumConnections: 1,
+            reservedRenewalConnections: 0, maximumQueued: 1, maximumWait: .seconds(5))
+        let gates = [facade, peer].map { V2PhysicalDatabaseLoanGate(eventLoop: $0, policy: policy) }
+        let borrower = V2PhysicalDatabasePoolBorrower(gates: gates, eventLoop: facade)
+        let held = try await gates[0].acquire(loanClass: .ordinary).get()
+        let observed = peer.makePromise(of: Bool.self)
+        let callbacks = Mutex(0)
+        let request = borrower.request(loanClass: .ordinary, deadline: .now + .seconds(3), onAssignment: { result in
+            callbacks.withLock { $0 += 1 }
+            switch result {
+            case .success(let assignment): observed.succeed(assignment.index == 1 && peer.inEventLoop && !facade.inEventLoop)
+            case .failure(let error): observed.fail(error)
+            }
+        })
+        do {
+            #expect(try await observed.futureResult.get())
+            let assignment = try await request.future.get()
+            #expect(callbacks.withLock { $0 } == 1)
+            assignment.lease.release()
+            held.release(); borrower.close()
+            for gate in gates { await gate.shutdown() }
+            await borrower.waitUntilSettled(); try await resources.shutdown()
+        } catch {
+            request.cancel(); held.release(); borrower.close()
+            if let assignment = try? await request.future.get() { assignment.lease.release() }
+            for gate in gates { await gate.shutdown() }
+            await borrower.waitUntilSettled(); try await resources.shutdown()
+            throw error
+        }
+    }
     @Test("repeated capacity notifications keep a constant callback path")
     func repeatedCapacityNotifications() async throws {
         let resources = makeV2DatabaseTestResources()

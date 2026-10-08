@@ -19,6 +19,14 @@ final class V2OwnerConnectionTimeline: Sendable {
         var spans: [Span] = []
         var trace: V2SendPathTrace?
         var enqueuedAt: ContinuousClock.Instant?
+        var assignmentTiming: AssignmentTiming?
+    }
+    private struct AssignmentTiming: Sendable {
+        let loan: V2PhysicalDatabaseLoanTiming
+        let registeredAt: ContinuousClock.Instant
+        let callbackAt: ContinuousClock.Instant
+        let publishedAt: ContinuousClock.Instant
+        let transferred: Bool
     }
     private let state = Mutex(State())
     func configure(_ metrics: V2SendOperationBatchMetrics?) {
@@ -27,9 +35,45 @@ final class V2OwnerConnectionTimeline: Sendable {
     }
     func mark(_ name: String, at: ContinuousClock.Instant = .now) { state.withLock { $0.markers[name] = at } }
     func marker(_ name: String) -> ContinuousClock.Instant? { state.withLock { $0.markers[name] } }
+    func deferAssignmentTiming(_ timing: V2PhysicalDatabaseLoanTiming?,
+        registeredAt: ContinuousClock.Instant, callbackAt: ContinuousClock.Instant,
+        publishedAt: ContinuousClock.Instant, transferred: Bool) {
+        guard let timing else { return }
+        state.withLock { $0.assignmentTiming = .init(loan: timing, registeredAt: registeredAt,
+            callbackAt: callbackAt, publishedAt: publishedAt, transferred: transferred) }
+    }
+    /// Emit counters after the SQL loan settles, off the assignment/driver path.
+    /// All intervals use original instants, so late reporting does not inflate them.
+    func flushAssignmentTiming() {
+        let context = state.withLock { s in
+            let value = (s.assignmentTiming, s.markers["pool_request_started"])
+            s.assignmentTiming = nil
+            return value
+        }
+        guard let d = context.0, let start = context.1 else { return }
+        let t = d.loan
+        record(.ownerPoolBeforeWinningGate, from: start, to: t.requestedAt)
+        record(.ownerGateRequestPreparation, from: t.requestedAt, to: t.lockRequestedAt)
+        record(.ownerGateLockWait, from: t.lockRequestedAt, to: t.lockEnteredAt)
+        record(.ownerGateAdmission, from: t.lockEnteredAt, to: t.admittedAt)
+        record(.ownerGateCapacityWait, from: t.admittedAt, to: t.grantedAt)
+        record(.ownerGateGrantToPromise, from: t.grantedAt, to: t.promiseSubmittedAt)
+        record(.ownerGateDeliveryWait, from: t.promiseSubmittedAt, to: d.callbackAt)
+        record(.ownerPoolPublishWork, from: d.callbackAt, to: d.publishedAt)
+        record(t.grantedOnEventLoop ? .ownerGateOnLoopDelivery : .ownerGateOffLoopDelivery,
+            from: t.promiseSubmittedAt, to: d.callbackAt)
+        let registered = min(d.callbackAt, max(t.promiseSubmittedAt, d.registeredAt))
+        record(.ownerGateCallbackRegistration, from: t.promiseSubmittedAt, to: registered)
+        record(.ownerGateRegisteredToCallback, from: registered, to: d.callbackAt)
+        if t.wasQueued { record(.ownerGateQueuedCapacityWait, from: t.admittedAt, to: t.grantedAt) }
+        if d.transferred { record(.ownerPoolPeerBeforeGate, from: start, to: t.requestedAt) }
+    }
     func resourceWindow() -> V2OwnerResourceWaitDiagnosis.Window {
         state.withLock { .init(created: requestedAt, borrowed: $0.markers["driver_entered"],
-            returned: $0.markers["pool_returned"], released: $0.markers["scheduler_release_entered"]) }
+            returned: $0.markers["pool_returned"], released: $0.markers["scheduler_release_entered"],
+            taskStarted: $0.markers["ticket_entry_started"] ?? $0.markers["ticket_task_started"], poolRequested: $0.markers["pool_request_started"],
+            assignmentPublished: $0.markers["pool_assignment_published"],
+            assignmentCallback: $0.markers["pool_assignment_callback_entered"], hasAcquisitionMarkers: true) }
     }
     func record(_ stage: V2SendOperationStage, from start: ContinuousClock.Instant, to end: ContinuousClock.Instant = .now) {
         let span = Span(stage: stage, start: start, end: max(start, end))

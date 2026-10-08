@@ -1,3 +1,4 @@
+import Foundation
 import IMV2ServerApplication
 import IMV2ServerContracts
 import IMV2ServerGateway
@@ -25,7 +26,7 @@ struct GatewayPreparedAssembly {
     /// 这里的失败无需清理 Actor 或 Broker；数据库连接池仍由 `GatewayInfrastructure` 持有。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        resources: V2DatabaseResources,
+        resources: V2DatabaseWorkloadResources,
         app: Application,
         logger: Logger
     ) async throws -> Self {
@@ -99,7 +100,9 @@ struct GatewayPreparedAssembly {
         let readReceiptBatcher = V2AggregatedReadReceiptBatchMetrics(
             owners: roomOwners.physicalResources.values.map(\.receiptBatchMetrics))
         let schedulingRegistry = frontdoor.connectionRegistry
-        V2SendPathTraceLogging.install()
+        V2SendPathTraceLogging.install(collection:
+            ProcessInfo.processInfo.environment["IM_V2_SEND_PATH_TRACE_MODE"] == "all"
+                ? .all : .sampledOperations)
         V2VaporMetricsRoutes.register(on: app, telemetry: frontdoor.prometheusTelemetry,
             connectionMetrics: frontdoor.connectionRegistry, transportMetrics: frontdoor.transportMetrics,
             durableWorkMetrics: ownerMaintenance.durableWorkMetrics,
@@ -159,6 +162,7 @@ private func v2LoanObservationMetrics(
         case .roomSendInitialization: sourceLabel = .roomSendInitialization
         case .preparationOwnerRead: sourceLabel = .preparationOwnerRead
         case .controlReservation: sourceLabel = .controlReservation
+        case .policySnapshot: sourceLabel = .policySnapshot
         case .lifecycle: sourceLabel = .lifecycle
         case .renewal: sourceLabel = .renewal
         case .presence: sourceLabel = .presence

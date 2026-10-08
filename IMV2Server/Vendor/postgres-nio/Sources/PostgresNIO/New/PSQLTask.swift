@@ -2,6 +2,7 @@ import Logging
 import NIOCore
 
 enum HandlerTask: Sendable {
+    case confirmReadyForQuery(EventLoopPromise<PostgresConnection.ReadyForQueryState>)
     case extendedQuery(ExtendedQueryContext)
     case closeCommand(CloseCommandContext)
     case startListening(NotificationListener)
@@ -10,11 +11,14 @@ enum HandlerTask: Sendable {
 }
 
 enum PSQLTask {
+    case confirmReadyForQuery(EventLoopPromise<PostgresConnection.ReadyForQueryState>)
     case extendedQuery(ExtendedQueryContext)
     case closeCommand(CloseCommandContext)
 
     func failWithError(_ error: PSQLError) {
         switch self {
+        case .confirmReadyForQuery(let promise):
+            promise.fail(error)
         case .extendedQuery(let extendedQueryContext):
             switch extendedQueryContext.query {
             case .unnamed(_, let eventLoopPromise):
@@ -132,4 +136,3 @@ final class CloseCommandContext: Sendable {
         self.promise = promise
     }
 }
-

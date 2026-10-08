@@ -255,6 +255,9 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         let psqlTask: PSQLTask
 
         switch handlerTask {
+        case .confirmReadyForQuery(let confirmation):
+            defer { promise?.succeed(()) }
+            psqlTask = .confirmReadyForQuery(confirmation)
         case .closeCommand(let command):
             psqlTask = .closeCommand(command)
         case .extendedQuery(let query):
@@ -477,6 +480,11 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
             }
         case .fireEventReadyForQuery:
             context.fireUserInboundEventTriggered(PSQLEvent.readyForQuery)
+        case .confirmReadyForQuery(let promise, let status, let next):
+            promise.succeed(status)
+            self.run(next, with: context)
+        case .failReadyForQueryConfirmation(let promise, let error):
+            promise.fail(error)
         case .closeConnection(let promise):
             if context.channel.isActive {
                 // The normal, graceful termination procedure is that the frontend sends a Terminate

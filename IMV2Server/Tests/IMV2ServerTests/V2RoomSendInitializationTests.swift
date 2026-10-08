@@ -39,7 +39,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let directory = PostgresV2RoomPolicyAuthorizationDirectory(database: database,
                 endpoint: "initialization-test", maximumRooms: 4,
-                currentLoader: { _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget },
+                currentLoader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget },
                 loader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget },
                 accountLoader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget })
             try await directory.install(initialization)

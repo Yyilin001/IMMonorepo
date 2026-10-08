@@ -3,13 +3,15 @@ import IMV2ServerContracts
 import Foundation
 import SQLKit
 
-// 仅在 Store 借用的事务中完成成员资格检查后调用。
-// 此组件既不拥有事务，也不负责额度结算。
+// Membership and policy are validated before this atomic room append.
+// The caller selects an explicit transaction or an owned implicit commit cycle.
 enum PlainDirectRoomLogBatchWritePath {
     static func persist(
         inputs: [PlainRoomLogMessageInput],
         sql: any SQLDatabase,
-        operationReceipts: [V2DurableSendBatchPermanentReceipt]? = nil
+        operationReceipts: [V2DurableSendBatchPermanentReceipt]? = nil,
+        implicitConnection: V2BorrowedRoomConnection? = nil,
+        metrics: V2SendOperationBatchMetrics? = nil
     ) async throws {
         let completionCTE = roomLogSendCompletionCTE(isGroup: false,
             recipientFromInput: inputs.allSatisfy({ $0.directRecipientID != nil }), metadataFromInput: true)
@@ -48,7 +50,7 @@ enum PlainDirectRoomLogBatchWritePath {
         if let operationReceipts {
             try PostgresV2DurableSendBatchReceipts().validateAcknowledgments(operationReceipts, messages: inputs)
         }
-        guard let row = try await sql.raw("""
+        let statement: SQLQueryString = """
             /* imv2_plain_direct_append */
             WITH typed_input(
                 ordinal, room_id, message_id, fingerprint_version, request_fingerprint,
@@ -118,18 +120,34 @@ enum PlainDirectRoomLogBatchWritePath {
                    -- callers still reject a partial set append.
                    (SELECT count(*) FROM message_insert) AS event_count,
                    (SELECT count(*) FROM completion_insert) AS completion_count
-            """).first() else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        let mutation = try row.decode(model: RoomLogMessageMutationRow.self)
-        guard try row.decode(column: "completion_count", as: Int64.self) == expectedCount,
-              mutation.roomCount == expectedRoomCount,
-              mutation.admissionCount == expectedRoomCount,
-              mutation.messageCount == expectedCount,
-              mutation.reviewCount == 0,
-              mutation.mediaCount == 0,
-              mutation.mentionCount == 0,
-              mutation.eventCount == expectedCount
-        else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
+            """
+        let execute: @Sendable () async throws -> Void = {
+            guard let row = try await sql.raw(statement).first() else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            let mutation = try row.decode(model: RoomLogMessageMutationRow.self)
+            let completionCount = try row.decode(column: "completion_count", as: Int64.self)
+            if implicitConnection != nil, expectedRoomCount == 1,
+               mutation.roomCount == 0, mutation.messageCount == 0, mutation.eventCount == 0, completionCount == 0 {
+                throw V2SingleStatementNoMutation()
+            }
+            guard completionCount == expectedCount,
+                  mutation.roomCount == expectedRoomCount,
+                  mutation.admissionCount == expectedRoomCount,
+                  mutation.messageCount == expectedCount,
+                  mutation.reviewCount == 0,
+                  mutation.mediaCount == 0,
+                  mutation.mentionCount == 0,
+                  mutation.eventCount == expectedCount
+            else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+        }
+        if let implicitConnection {
+            try await v2ExecuteSingleStatementRoomWrite(connection: implicitConnection,
+                deadline: V2RoomSQLDeadline.boundedTransactionDeadline(), metrics: metrics) {
+                try await v2MeasureSendOperationStage(.ownerMessagePersistence, metrics: metrics, execute)
+            }
+        } else {
+            try await execute()
         }
     }
 }
