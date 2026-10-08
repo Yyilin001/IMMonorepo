@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Disposable native HTTPS/account/gateway smoke. Never reads .env or changes trust stores."""
-import argparse, base64, collections, http.client, http.server, json, os, re, secrets, signal, socket, ssl
+import argparse, base64, collections, hashlib, http.client, http.server, json, os, re, secrets, signal, socket, ssl
 import shlex, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 import yaml
@@ -54,6 +54,9 @@ def main():
     root=Path(tempfile.mkdtemp(prefix='imv2-native-e2e-'))
     processes=[]; logs=[]; pg_started=False; edge=None
     http_responses=collections.Counter(); http_lock=threading.Lock()
+    app_refresh_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY') == 'true'
+    refresh_diagnostics=dict(armed=False,injected=0,refreshResponses=0,coldRestore=False,coldFreshDeviceReads=0)
+    refresh_digest=[None]  # Process-private comparison only; never exported.
     ports={key:port() for key in ['pg','account','edge','gateway','actor_gateway','actor_account','metrics']}
     if ui_requested: ports.update(edge=8443,gateway=7443)
     if args.multi_device_ui: ports['operator']=port()
@@ -115,6 +118,20 @@ def main():
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0 <= length <= 1024*1024: self.send_error(413);return
                 body=self.rfile.read(length)
+                path=urllib.parse.urlsplit(self.path).path
+                with http_lock:
+                    request_is_cold=refresh_diagnostics['coldRestore']
+                if app_refresh_mode and path.startswith('/__fixture__/app-refresh-'):
+                    with http_lock:
+                        if self.command == 'POST' and path == '/__fixture__/app-refresh-arm':
+                            refresh_diagnostics['armed']=True
+                        elif self.command == 'POST' and path == '/__fixture__/app-refresh-cold':
+                            refresh_diagnostics['coldRestore']=True
+                        elif not (self.command == 'GET' and path == '/__fixture__/app-refresh-status'):
+                            self.send_error(404);return
+                        diagnostic=json.dumps(refresh_diagnostics).encode()
+                    self.send_response(200);self.send_header('Content-Type','application/json')
+                    self.send_header('Content-Length',str(len(diagnostic)));self.end_headers();self.wfile.write(diagnostic);return
                 # Never forward user-supplied edge authorization/address proof.
                 headers={k:v for k,v in self.headers.items() if k.lower() not in {'host','connection','transfer-encoding','x-im-v2-account-edge-authorization','x-im-v2-account-client-address'}}
                 headers['X-IM-V2-Account-Edge-Authorization']=account_env['IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64']
@@ -122,10 +139,22 @@ def main():
                 connection=http.client.HTTPConnection('127.0.0.1',ports['account'],timeout=30)
                 try:
                     connection.request(self.command,self.path,body,headers);response=connection.getresponse();data=response.read(1024*1024+1)
+                    status=response.status
                     with http_lock:
-                        http_responses[(self.command, urllib.parse.urlsplit(self.path).path, response.status)] += 1
+                        if app_refresh_mode and self.command == 'POST' and path == '/v2/device-credentials/refresh' and status == 200:
+                            refresh_digest[0]=hashlib.sha256(json.loads(data)['accessToken'].encode()).digest()
+                            refresh_diagnostics['refreshResponses']+=1
+                        if app_refresh_mode and self.command == 'GET' and path == '/v2/devices' and status == 200:
+                            if refresh_diagnostics['armed']:
+                                refresh_diagnostics['armed']=False;refresh_diagnostics['injected']+=1
+                                status=401;data=b'{}'
+                            elif request_is_cold and refresh_digest[0] is not None:
+                                authorization=self.headers.get('Authorization','')
+                                if authorization.startswith('Bearer ') and hashlib.sha256(authorization[7:].encode()).digest() == refresh_digest[0]:
+                                    refresh_diagnostics['coldFreshDeviceReads']+=1
+                        http_responses[(self.command, path, status)] += 1
                     if len(data)>1024*1024: self.send_error(502);return
-                    self.send_response(response.status)
+                    self.send_response(status)
                     for k,v in response.getheaders():
                         if k.lower() not in {'connection','transfer-encoding','content-length'}: self.send_header(k,v)
                     self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
@@ -160,6 +189,12 @@ def main():
             ui_log=(root/'two-install-ui.log').open('wb');logs.append(ui_log)
             ui_source=REPO/'IMApp/Scripts/verify_local_account_two_install_e2e.sh'
             success_marker='local two-install direct-and-group-message E2E: pass'
+            if args.two_install_ui and app_refresh_mode:
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
+                success_marker='local App credential refresh E2E: pass'
+            if args.two_install_ui and os.environ.get('IMAPP_LOCAL_TWO_INSTALL_DIRECT_EDIT_ONLY') == 'true':
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
+                success_marker='local direct edit cold restoration E2E: pass'
             if args.group_join_ui:
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_ONLY']='true'
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])

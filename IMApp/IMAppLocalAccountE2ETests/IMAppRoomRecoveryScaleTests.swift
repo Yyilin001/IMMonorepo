@@ -85,7 +85,8 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                         stage = "verification"
                         var cursor: String?, rooms: Set<RoomID> = []
                         repeat {
-                            let page = try await transport.userRoomDirectory(cursor: cursor, pageSize: 100)
+                            let page = try await readVerificationDirectory(transport: transport, cursor: cursor,
+                                deadline: recoveryDeadline)
                             for entry in page.rooms {
                                 XCTAssertTrue(rooms.insert(entry.roomID).inserted)
                                 let messages = try await store.messages(in: entry.roomID)
@@ -170,6 +171,20 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
         }
     }
 
+    private func readVerificationDirectory(transport: V2ProtobufSyncTransport, cursor: String?,
+                                          deadline: ContinuousClock.Instant) async throws -> V2ClientUserRoomPage {
+        while true {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
+            do { return try await transport.userRoomDirectory(cursor: cursor, pageSize: 100) }
+            catch V2RealtimeTransportError.server(code: "RATE_LIMITED", retryable: true,
+                                                 retryAfterSeconds: let seconds, currentRevision: _) {
+                print("IMV2_TLS_ROOM_VERIFICATION_RATE_LIMIT retryAfter=\(seconds)")
+                try await Task.sleep(for: .seconds(max(1, seconds)))
+            }
+        }
+    }
+
     private func verifyOnlineChange(connection: V2TLSFrameConnection, coordinator: V2RealtimeSessionCoordinator, auth: V2AuthSession, account: LocalE2EAccountCredentials,
                                     store: GRDBV2LocalSyncStore, roomID: RoomID, count: Int, expectedMessageCount: Int = 2, dropTail: Bool = false) async throws {
         let session = try await coordinator.connect()
@@ -183,8 +198,9 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
         let source: any V2AccountRoomChangeSource = dropTail ? loss : connection
         let runner = V2RoomRecoveryRunner(engine: engine, source: source, personalSync: personal,
             integrityInterval: { dropTail ? 5 : 3600 })
-        _ = try await transport.subscribeToGroupEvents(roomID: roomID,
+        let subscription = try await transport.subscribeToGroupEvents(roomID: roomID,
             afterRoomSequence: try await store.groupEventCursor(roomID: roomID))
+        print("IMV2_TLS_ROOM_ONLINE_SUBSCRIBED head=\(subscription.highWatermark)")
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { try await runner.run(userID: account.userID) }
             group.addTask {
@@ -194,6 +210,8 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                         print("IMV2_TLS_ROOM_ONLINE_HINT head=\(hint.highWatermark) dropTail=\(dropTail)")
                         try await runner.retainOnlineRoomHead(roomID: hint.roomID,
                             highWatermark: hint.highWatermark, userID: account.userID)
+                    } else {
+                        print("IMV2_TLS_ROOM_ONLINE_OTHER_ROOM_HINT head=\(hint.highWatermark)")
                     }
                 }
             }
@@ -203,6 +221,11 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                     guard ContinuousClock.now < readyDeadline else { throw V2RealtimeTransportError.unexpectedResponse }
                     try await Task.sleep(for: .milliseconds(20))
                 }
+                // Establish the selected foreground room at the measured live
+                // boundary after account recovery, before arming fault injection.
+                let active = try await transport.subscribeToGroupEvents(roomID: roomID,
+                    afterRoomSequence: try await store.groupEventCursor(roomID: roomID))
+                print("IMV2_TLS_ROOM_ONLINE_ACTIVE head=\(active.highWatermark)")
                 let deadline = ContinuousClock.now.advanced(by: .seconds(30))
                 if dropTail { await loss.arm() }
                 print("IMV2_TLS_ROOM_ONLINE_SEND_BEGIN expectedMessages=\(expectedMessageCount) dropTail=\(dropTail)")
@@ -218,6 +241,11 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                     guard ContinuousClock.now < deadline else {
                         let cursor = try await store.groupEventCursor(roomID: roomID)
                         print("IMV2_TLS_ROOM_ONLINE_TIMEOUT expectedMessages=\(expectedMessageCount) actualMessages=\(messages.count) cursor=\(cursor) dropTail=\(dropTail)")
+                        // Read diagnostics without applying them: manual catch-up must
+                        // never turn a missing live notification into a passing test.
+                        let page = try await transport.pullGroupEvents(roomID: roomID,
+                            afterRoomSequence: cursor, pageSize: 100)
+                        print("IMV2_TLS_ROOM_ONLINE_SERVER_TAIL next=\(page.nextRoomSequence) hasMore=\(page.hasMore)")
                         throw V2RealtimeTransportError.unexpectedResponse
                     }
                     try await Task.sleep(for: .milliseconds(20))
@@ -225,11 +253,13 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                 if dropTail {
                     let dropped = await loss.droppedCount
                     let forwarded = await loss.forwardedCount
-                    XCTAssertGreaterThan(dropped, 0, "The intended real TLS notification was not dropped")
-                    XCTAssertEqual(forwarded, 0, "Another notification could have triggered recovery")
+                    guard dropped > 0, forwarded == 0 else {
+                        print("IMV2_TLS_ROOM_TAIL_INJECTION_FAILED dropped=\(dropped) forwardedTarget=\(forwarded)")
+                        throw V2RealtimeTransportError.unexpectedResponse
+                    }
                     print("IMV2_TLS_ROOM_TAIL_DROPPED count=\(dropped)")
                 }
-                print("IMV2_TLS_ROOM_ONLINE_PASSED rooms=\(count) directoryPosition=\(min(129, count))")
+                print("IMV2_TLS_ROOM_ONLINE_PASSED rooms=\(count) selectedRoomIDRank=\(min(129, count))")
                 if ProcessInfo.processInfo.environment["IMV2_ROOM_RECOVERY_SECONDARY_PORT"] != nil {
                     print("IMV2_TLS_ROOM_CROSS_GATEWAY_PASSED rooms=\(count)")
                 }
@@ -303,7 +333,9 @@ private actor RecoveryTailLossSource: V2AccountRoomChangeSource, V2GroupEventAva
                 droppedCount += 1
                 continue
             }
-            if armed { forwardedCount += 1 }
+            // Unrelated rooms and the initial subscription baseline cannot
+            // reveal this room's new tail. Count only relevant replacement wakes.
+            if armed, change.roomID == roomID, change.highWatermark >= targetHead { forwardedCount += 1 }
             return change
         }
     }
@@ -324,11 +356,28 @@ private func controlRecoveryBroker(action: String) async throws {
 func sendRecoveryOnlineMessage(transport: V2ProtobufSyncTransport, connection: V2TLSFrameConnection, auth: V2AuthSession,
                                account: LocalE2EAccountCredentials,
                                roomID: RoomID, deadline: ContinuousClock.Instant) async throws {
-    // Send and recovery share the authenticated TCP connection and persisted operation identity.
+    // Use an actual second Gateway when requested, preserving the original
+    // receiver connection and its notification consumer.
     let clientID = try ClientMessageID(UUID().uuidString.lowercased())
     guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
     _ = try await V2HTTPRequestDeadline.run(until: deadline, service: "accountAPI") {
-        try await account.sendMessage(roomID: roomID, clientMessageID: clientID, text: "tls-scale-online", auth: auth, connection: connection, transport: transport)
+        if let port = ProcessInfo.processInfo.environment["IMV2_ROOM_RECOVERY_SECONDARY_PORT"].flatMap(UInt16.init) {
+            let sender = V2TLSFrameConnection(endpoint: try .init(host: "localhost", port: port),
+                frameLimits: try .init(maximumPayloadBytes: 65536, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]))
+            do {
+                let credentials = try await auth.realtimeCredentials()
+                let session = try await sender.connectAndAuthenticate(accessToken: credentials.accessToken,
+                    deviceID: credentials.deviceID, supportedCapabilityProfiles: ["base"])
+                try await auth.requireAuthenticatedEpoch(XCTUnwrap(credentials.sessionEpoch))
+                let accepted = try await account.sendMessage(roomID: roomID, clientMessageID: clientID,
+                    text: "tls-scale-online", auth: auth, connection: sender,
+                    transport: V2ProtobufSyncTransport(wire: sender, protocolVersion: session.protocolVersion))
+                await sender.disconnect()
+                return accepted
+            } catch { await sender.disconnect(); throw error }
+        }
+        return try await account.sendMessage(roomID: roomID, clientMessageID: clientID,
+            text: "tls-scale-online", auth: auth, connection: connection, transport: transport)
     }
 }
 

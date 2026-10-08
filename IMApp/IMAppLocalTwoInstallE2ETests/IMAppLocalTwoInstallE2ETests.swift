@@ -188,10 +188,11 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.tabBars.buttons["我的"].exists,
             "账户菜单不能遗留在会话详情页并遮挡消息输入与发送操作。"
         )
-        try auditOrdinaryChatSurface(in: app)
+        let editOnly = ProcessInfo.processInfo.environment["IMAPP_DIRECT_EDIT_ONLY"] == "1"
+        if !editOnly { try auditOrdinaryChatSurface(in: app) }
         // The conversation detail is app-rendered rather than UIKit Form
         // chrome, so its visible message/composer state can also gate contrast.
-        try app.performAccessibilityAudit(for: [.contrast])
+        if !editOnly { try app.performAccessibilityAudit(for: [.contrast]) }
         let send = app.buttons["v2.message.send"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
@@ -274,7 +275,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let originalMessageText = messageBody.label
         editText.tap()
         // The affected simulator runtime truncates a single typeText call to
-        // its first character. One appended character is enough to exercise
+        // its first character. One inserted character is enough to exercise
         // the real edit command without bypassing the editable UI.
         editText.typeText("x")
         let saveEdit = app.buttons["v2.message.edit-save"]
@@ -295,6 +296,16 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         wait(for: [projectionChanged], timeout: 30)
         XCTAssertTrue(messageRow.waitForExistence(timeout: 5))
+        if ProcessInfo.processInfo.environment["IMAPP_DIRECT_EDIT_ONLY"] == "1" {
+            XCTAssertEqual(messageBody.label, "x" + originalMessageText)
+            XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+            // Keep the same audits, after independent business execution. Their
+            // failures remain failures and cannot satisfy the PG/receiver gates.
+            try auditOrdinaryChatSurface(in: app)
+            try app.performAccessibilityAudit(for: [.contrast])
+            // Keep the actual sender alive for the driver's independent commit check.
+            return
+        }
         messageBody.press(forDuration: 1)
         let withdraw = app.buttons.matching(
             NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.withdraw.\(messageID)", "撤回")
@@ -315,6 +326,67 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let withdrawalApplied = expectation(for: NSPredicate(format: "label == %@", "消息已撤回"),
             evaluatedWith: messageBody)
         wait(for: [withdrawalApplied], timeout: 30)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    private func openRealDeviceListAfterCredentialRotation() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let mine = app.tabBars.buttons["我的"]
+        XCTAssertTrue(mine.waitForExistence(timeout: 20) && mine.isHittable)
+        mine.tap()
+        let devices = app.buttons["v2.device-sessions.open"]
+        XCTAssertTrue(devices.waitForExistence(timeout: 10) && devices.isHittable)
+        devices.tap()
+        let rawID = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_REFRESH_DEVICE_ID"])
+        let deviceID = try XCTUnwrap(UUID(uuidString: rawID)).uuidString
+        let row = app.descendants(matching: .any).matching(identifier: "v2.device-sessions.row." + deviceID).firstMatch
+        // HTTP authorization rotates after a 401 without replaying the rejected
+        // business request. Retry via the ordinary read refresh control.
+        for _ in 0..<3 {
+            if row.waitForExistence(timeout: 10) { break }
+            let refresh = app.buttons["v2.device-sessions.refresh"]
+            XCTAssertTrue(refresh.waitForExistence(timeout: 10) && refresh.isHittable)
+            refresh.tap()
+        }
+        XCTAssertTrue(row.exists)
+        XCTAssertFalse(app.buttons["v2.password.submit"].exists)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testRealAppRotatesCredentialsAfterBusinessHTTPUnauthorized() throws {
+        try openRealDeviceListAfterCredentialRotation()
+    }
+
+    @MainActor
+    func testRealAppColdRestoreUsesRotatedCredentials() throws {
+        try openRealDeviceListAfterCredentialRotation()
+    }
+
+    @MainActor
+    func testReceiverColdRestoreProjectsIndependentEditBeforeWithdrawal() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let conversation = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.direct.")
+        ).firstMatch
+        XCTAssertTrue(conversation.waitForExistence(timeout: 30) && conversation.isHittable)
+        conversation.tap()
+        let expected = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_DIRECT_EDIT_EXPECTED"])
+        let rawMessageID = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_DIRECT_EDIT_MESSAGE_ID"])
+        let messageID = try XCTUnwrap(UUID(uuidString: rawMessageID)).uuidString
+        let body = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier == %@ AND (label == %@ OR label == %@)",
+            "v2.message.body.\(messageID)", expected, "xtwo-install-direct-ui"))
+        XCTAssertTrue(body.firstMatch.waitForExistence(timeout: 30), "另一安装须恢复编辑后的权威正文，不能只显示原文本或待发送内容。")
+        XCTAssertEqual(body.count, 1)
+        XCTAssertEqual(app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "消息已撤回")).count, 0)
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }

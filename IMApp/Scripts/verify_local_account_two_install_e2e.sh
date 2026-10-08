@@ -114,6 +114,10 @@ receiver_public_handle="twor${scenario_suffix:0:20}"
 sender_account_handle="twos_${scenario_suffix:0:20}"
 sender_public_handle="twos${scenario_suffix:0:20}"
 message="two-install-${scenario_suffix:0:16}"
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_DIRECT_EDIT_ONLY:-false}" == true ]]; then
+  export TEST_RUNNER_IMAPP_DIRECT_EDIT_ONLY=1
+  export TEST_RUNNER_IMAPP_DIRECT_EDIT_EXPECTED="x${message}"
+fi
 receiver_self_group_title="自测群${scenario_suffix:0:6}"
 receiver_group_title="跨装群${scenario_suffix:0:6}"
 group_message="two-install-group-${scenario_suffix:0:16}"
@@ -282,8 +286,8 @@ run_stage() {
   # Continue only when no business assertion or other failure was recorded;
   # the aggregate still exits 1 after all available functional stages.
   if [[ "${xcode_status}" -ne 0 && "${failed_test_count}" == "1" && "${total_test_count}" == "1" ]] &&
-     jq --exit-status '(.testFailures | length) > 0 and all(.testFailures[]; .failureText == "Dynamic Type font sizes are partially unsupported" or .failureText == "Text clipped" or .failureText == "Hit area is too small")' <<<"${test_summary}" >/dev/null &&
-     jq --exit-status '([.. | objects | select(.isAssociatedWithFailure == true) | .title // ""] | all(. == "" or . == "Dynamic Type font sizes are partially unsupported" or . == "Text clipped" or . == "Hit area is too small")) and ([.. | objects | .title?] | any(. == "two-install-functional-stage-complete"))' <<<"${test_activities}" >/dev/null; then
+     jq --exit-status '(.testFailures | length) > 0 and all(.testFailures[]; .failureText == "Dynamic Type font sizes are partially unsupported" or .failureText == "Text clipped" or .failureText == "Hit area is too small" or .failureText == "Contrast failed")' <<<"${test_summary}" >/dev/null &&
+     jq --exit-status '([.. | objects | select(.isAssociatedWithFailure == true) | .title // ""] | all(. == "" or . == "Dynamic Type font sizes are partially unsupported" or . == "Text clipped" or . == "Hit area is too small" or . == "Contrast failed")) and ([.. | objects | .title?] | any(. == "two-install-functional-stage-complete"))' <<<"${test_activities}" >/dev/null; then
     audit_failure_count=$((audit_failure_count + 1))
     printf 'retained accessibility audit failure; continuing functional stages: %s\n' "${test_name}" >&2
     return 0
@@ -352,6 +356,39 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-display-name 'Two install receiver' \
   -v2-ui-testing-group-title "${receiver_self_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
+
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY:-false}" == true ]]; then
+  [[ "${external_stack}" == true ]] || { printf '%s\n' 'credential refresh mode requires the owned native stack.' >&2; exit 1; }
+  : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
+  refresh_facts() {
+    local phase="$1"
+    /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -c "SELECT json_build_object('devices',count(*),'deviceID',min(s.device_id::text),'generation',max(s.family_generation),'refreshOperations',(SELECT count(*) FROM im_v2.device_credential_operations o JOIN im_v2.account_password_credentials p USING(user_id) WHERE p.account_handle='${receiver_account_handle}' AND o.operation_kind='refresh'),'history',(SELECT count(*) FROM im_v2.device_refresh_token_history h JOIN im_v2.account_password_credentials p USING(user_id) WHERE p.account_handle='${receiver_account_handle}'))::text FROM im_v2.device_refresh_sessions s JOIN im_v2.account_password_credentials p USING(user_id) WHERE p.account_handle='${receiver_account_handle}'" > "${result_directory}/${phase}-credential-facts.json"
+  }
+  refresh_control() {
+    curl --fail --silent --show-error --cacert "${local_ca}" --request POST --data '' "https://localhost:8443/__fixture__/app-refresh-$1" > "${result_directory}/$1-refresh-control.json"
+  }
+  refresh_facts before
+  jq --exit-status '.devices == 1 and .generation == 1 and .refreshOperations == 0 and .history == 0' "${result_directory}/before-credential-facts.json" >/dev/null
+  export TEST_RUNNER_IMAPP_REFRESH_DEVICE_ID="$(jq --raw-output '.deviceID' "${result_directory}/before-credential-facts.json")"
+  refresh_control arm
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testRealAppRotatesCredentialsAfterBusinessHTTPUnauthorized
+  refresh_facts rotated
+  jq --exit-status '.devices == 1 and .generation == 2 and .refreshOperations == 1 and .history == 1' "${result_directory}/rotated-credential-facts.json" >/dev/null
+  refresh_control cold
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testRealAppColdRestoreUsesRotatedCredentials
+  refresh_facts cold
+  jq --exit-status '.devices == 1 and .generation == 2 and .refreshOperations == 1 and .history == 1' "${result_directory}/cold-credential-facts.json" >/dev/null
+  curl --fail --silent --show-error --cacert "${local_ca}" 'https://localhost:8443/__fixture__/app-refresh-status' > "${result_directory}/refresh-status.json"
+  jq --exit-status '.injected == 1 and .refreshResponses == 1 and .coldFreshDeviceReads > 0' "${result_directory}/refresh-status.json" >/dev/null
+  if [[ "${audit_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'App credential refresh stages complete; retained accessibility failure.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local App credential refresh E2E: pass'
+  exit 0
+fi
 
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_ONLY:-false}" == true ]]; then
   [[ "${external_stack}" == true ]] || { printf '%s\n' 'group join mode requires the owned native stack.' >&2; exit 1; }
@@ -482,6 +519,25 @@ launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-direct-target "@${receiver_public_handle}" \
   -v2-ui-testing-message "${message}"
 run_stage "${sender_simulator_id}" testSenderOpensDirectConversationAndSendsFromIndependentInstallation
+
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_DIRECT_EDIT_ONLY:-false}" == true ]]; then
+  : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
+  for attempt in {1..120}; do
+    /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -c "SELECT json_build_object('count',count(*),'messageID',min(message_id::text),'revision',max(content_revision),'withdrawn',coalesce(bool_or(withdrawn_at IS NOT NULL),false),'editedEvents',(SELECT count(*) FROM im_v2.room_events WHERE event_type='message.edited'))::text FROM im_v2.messages" > "${result_directory}/edited-message-facts.json"
+    if jq --exit-status '.count == 1 and .revision == 2 and .withdrawn == false and .editedEvents == 1' "${result_directory}/edited-message-facts.json" >/dev/null; then break; fi
+    sleep 0.25
+  done
+  jq --exit-status '.count == 1 and .revision == 2 and .withdrawn == false and .editedEvents == 1' "${result_directory}/edited-message-facts.json" >/dev/null
+  export TEST_RUNNER_IMAPP_DIRECT_EDIT_MESSAGE_ID="$(jq --raw-output '.messageID' "${result_directory}/edited-message-facts.json")"
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testReceiverColdRestoreProjectsIndependentEditBeforeWithdrawal
+  if [[ "${audit_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'direct edit stages complete; retained accessibility failure.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local direct edit cold restoration E2E: pass'
+  exit 0
+fi
 
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_READ_RECEIPT_ONLY:-false}" == true ]]; then
   launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"

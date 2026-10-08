@@ -2789,7 +2789,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 |---|---|---|---|
 | OP-01 | sendMessage | 真实TCP提交/幂等/恢复通过；真实App发送及双方消息恢复通过 | extendedLiveResourcesR4, twoInstallUIR13 |
 | OP-02 | withdrawMessage | 真实HTTPS撤回/历史事件及App发送端提交、接收端撤回恢复通过；PG已撤回修订3 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
-| OP-03 | editMessage | 真实HTTPS编辑/恢复/历史回读及App普通编辑提交通过；PG message.edited与修订3，跨安装编辑中间态另待验 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
+| OP-03 | editMessage | 真实HTTPS编辑/恢复及独立两安装普通UI编辑中间态冷恢复通过；PG唯一原消息修订2、未撤回，原消息ID与精确正文一致 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13, directEditUIR5 |
 | OP-04 | reaction | 真实HTTPS表情增删/恢复/回读及App普通表情提交通过；PG message.reaction_changed | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
 | OP-05 | readReceipt | 真实TCP已读提交、读者列表及隐私开关过滤通过；真实App私聊阅读→发送端冷启动同消息对方已读通过；App群主原消息读者页真实成员+已读通过 | extendedLiveResourcesR7, peerReadUIR1, groupReadUIR2 |
 | OP-06 | directRoom | 真实HTTPS打开私聊通过；双向重复打开同房间已核对 | extendedLiveResourcesR9 |
@@ -2837,12 +2837,12 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
 | EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
 | EX-18 | 在线状态与输入提示 | 真实在线状态通过；typing安装确认后开始/停止通过；冷订阅ACK后立即发送曾丢失 | extendedLiveResourcesR9, extendedLiveResourcesR10 |
-| EX-19 | 通知丢失补偿 | 真实跨Gateway故意丢尾通知后周期补偿通过；50房间投影与游标一致 | liveAccountUIR8 |
-| EX-20 | 断线重连 | 真实50房间冷补拉5.95秒、重连补拉1.28秒，跨Gateway在线更新与通知丢失补偿通过；大规模及App自动重连另待验 | liveAccountUIR8 |
+| EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标通过；R13功能通过但驱动清理失败已修正，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
+| EX-20 | 断线重连 | 1000房间冷补拉122.62秒/重连11.34秒及真实跨Gateway在线更新R13通过；R12在线超时保留，不宣称稳定性；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
 | EX-22 | 后台上传下载 | 真实慢上传期间同账号TCP发送/恢复/补拉与SQLite投影继续通过；iOS系统后台上传/下载与挂起恢复待验 | extendedLiveResourcesR12 |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；未验证外部APNs和真机实际推送 | liveAccountUIR6 |
-| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area失败；新增冷启动邀请深链接未打开申请页；批准入群后发送已提交但正文未即时投影，正常冷启动可恢复原消息 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1 |
+| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area/Contrast审计失败；新增冷启动邀请深链接未打开申请页；批准入群后发送已提交但正文未即时投影，正常冷启动可恢复原消息 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1 |
 
 <!-- acceptance-matrix-end -->
 
@@ -3033,3 +3033,52 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 修正4个清理测试的夹具：成功回执之后，使用实际同步导入器应用匹配的权威投影，再验证历史清理。未修改生产清理条件；投影未收敛、未知结果、依赖和物理资源仍受保护。相关41项测试、5个套件通过，日志 /tmp/imv2-acceptance-client-retention-r2-20261009.log。首次编译缺少try已修正。
 - 新增真实TLS/TCP发送、本地SQLite保存、权威房间事件拉取、8天后清理、SQLite重开及服务器原结果查询验证。R17夹具误用同一账号作为两名成员，触发成员主键冲突；已改为两个真实注册账号，R18新增用例通过。日志 /tmp/imv2-acceptance-live-resources-r18-20261009/client.log。
 - R18整套运行仍退出1，唯一失败是已知群头像上传HTTP422；慢资源用例未启用。没有把整套验收或此前全量客户端回归标为通过。两份脚本bash语法、Python解析和git diff --check通过。
+
+### 20261009-room-scale-r9（1000房间恢复通过，在线更新失败）
+
+- 使用当前84612bf8原生服务、隔离PG、两个Gateway及专用iOS27模拟器，执行真实TLS客户端生产恢复流程。账号注册后夹具预置1000非空房间，后续所有读取及在线发送使用生产协议，没有将SQL种数据等同公开建群验收。
+- 首轮本地列表23.361秒就绪、完整补拉121.589秒；重连列表0.020秒就绪、完整补拉12.317秒。两轮都逐房核对唯一预置正文、游标1、目录去重和总数1000。
+- 后续按房间ID排序选取的第129个房间在线发送确认后，30秒窗口内本地仍messages1/cursor1，未出现新正文；online-change阶段失败，未进入故意丢尾通知场景。不能把两轮补拉通过扩大为较大规模实时链路或通知补偿通过，根因尚未定位。
+- XCTest终态2通过、1失败、1未启用的独立后台重试场景跳过；两项App设备撤销通过。驱动exit1，专用模拟器删除、隔离进程及数据库清理完成。证据 /tmp/imv2-acceptance-room-scale-r9-20261009/app.log、app-summary.json、app.xcresult、scale-resource-samples.json及cleanup.log；启动日志 /tmp/imv2-acceptance-room-scale-r9-20261009.log。
+
+- R9后续源代码核对：虽然启动两个Gateway，sendRecoveryOnlineMessage仍复用接收连接，不能证明跨Gateway发送；此前跨Gateway标记仅检查环境变量存在，证据不足。R9失败为实际同Gateway在线更新失败。R10改为在第二端口实际认证独立发送连接，并在超时时只读拉取服务端尾部、打印水位，不应用诊断页面、不把手动补拉计为通过。此前R8的跨Gateway在线发送结论同样撤回，保留其实际恢复与通知丢失证据。
+
+### 20261009-room-scale-r10（真实跨Gateway在线更新通过，丢尾注入失败）
+
+- 实际连接第二Gateway并完成TLS认证后，使用持久化命令/回执提交新消息。接收连接取得目标房间head2，SQLite新正文和游标2均一致，实际跨Gateway在线阶段通过。1000房间冷补拉121.846秒、重连11.406秒。
+- 随后丢尾场景虽然恢复到3条消息/游标3，目标通知丢弃数为0；122条其他房间提示被旧夹具误计为替代唤醒。XCTest两条断言失败，整轮exit1，不因日志中的通过字符串标为通过。故障未注入，不能证明丢尾补偿。
+- 保留两端房间订阅固定指标before/online.prom及app.log、app-summary.json、app.xcresult。两项App设备撤销通过，专用模拟器和服务已清理。R11在恢复完成后重新建立目标详情房间订阅，仅计目标房间新水位的丢弃/转发，并在故障前置不满足时立即抛错，避免继续打印通过标记。
+
+### 20261009-room-scale-r11（只读验收触发限流）
+
+- 本轮终态exit1，XCTest两项App设备撤销通过、规模用例失败、独立后台用例未启用跳过。恢复请求结束后，逐房验证的目录读取收到RATE_LIMITED/retryAfter1，原夹具未重试而直接退出；两轮验证和在线故障场景未完成，不计通过。
+- 新增只读目录验证重试，仅处理明确可重试RATE_LIMITED并等待服务端retryAfter，使用原恢复deadline及取消检查；不关闭生产限流、不更改SQL或消息逻辑。诊断复测继续保留实际第二Gateway连接、恢复后详情订阅和严格目标丢弃计数。
+- 证据 /tmp/imv2-acceptance-room-scale-r11-20261009/app.log、app-summary.json、app.xcresult、cleanup.log；专用模拟器及隔离服务已清理。R9/R10失败与局部通过证据保留，未覆盖为整体验收通过。
+
+### 20261009-room-scale-r12（消息已持久化，实时提示缺失）
+
+- 修正夹具后本轮终态exit1：两项App设备撤销通过，规模用例失败，独立后台场景未启用跳过。1000房间完整冷补拉122.771秒、重连11.345秒，逐房唯一预置正文及游标1、总数与去重通过。
+- 普通订阅与恢复后重新订阅均返回目标head1；独立第二Gateway TLS认证/持久化提交及原结果查询确认成功，但30秒内接收端messages1/cursor1，未记录目标提示。失败诊断只读拉取服务端尾部next2/hasMorefalse，未应用该页面，证明新消息存在但实时链路未推进本地状态。
+- R10相同规模实际跨Gateway阶段曾通过，因此不能宣称实时容量稳定；R12后续丢尾场景未执行。当前无法区分服务端提示发送与客户端消费的具体根因。驱动新增清理前两Gateway固定房间订阅阶段指标保存，成功或失败均保留，诊断失败只写错误类型、不改变验收结果。
+- 证据 /tmp/imv2-acceptance-room-scale-r12-20261009/app.log、app-summary.json、app.xcresult及cleanup.log；专用模拟器及隔离进程已清理。新增Python驱动解析和git diff --check通过。
+
+### 20261009-room-scale-r13（真实丢尾补偿功能通过，驱动清理失败已修复）
+
+- XCTest3项通过、0失败、独立后台未启用跳过1项。1000房间完整冷补拉122.621秒，重连11.341秒；两轮逐房正文、游标、目录总数和去重核对通过。实际第二Gateway独立TLS发送后接收head2，正文/游标2通过。下一阶段目标尾通知实际丢弃2次、无目标新水位替代转发，客户端自行恢复3条消息/游标3，真实丢尾补偿通过。HTTP/PG驱动业务断言通过，不是仅凭日志标记。
+- 两端固定订阅指标已保存primary-subscription-final.prom、secondary-subscription-final.prom。主Gateway有headOffered12/headEnqueueAccepted4、socketResponseBusy187、renewalAccepted15475、renewalCallOverloaded944；第二Gateway有pumpBindRefused4。指标为整轮进程计数，不能据此单独归因R12失败，也不能将本轮通过当成稳定性证明。
+- 本次新增诊断变量data覆盖原数据库目录，导致最终pg_ctl清理使用错误参数，驱动exit1；已重命名subscription_metrics_text。专用模拟器和Gateway已退出，遗留的本轮PG postmaster由原隔离目录及端口确认，目录已删除不能使用pg_ctl，使用其fast-stop信号并确认进程及端口消失。既有5432数据库未触碰。cleanup-repair.log保存修复过程。整轮不能报告exit0。
+- 证据 /tmp/imv2-acceptance-room-scale-r13-20261009/app-summary.json、app.log、app.xcresult、http-summary.json、两端subscription-final.prom及cleanup-repair.log。R9/R10/R11/R12失败记录保留；Python解析和git diff --check通过，生产实现未变。
+
+### 20261009-direct-edit-ui-r1-r4（补跨安装编辑中间态，夹具诊断）
+
+- 新增普通UI发送/表情/编辑后不撤回的专门流程。驱动保持发送端运行，独立PG要求唯一原消息revision2、edited事件1、未撤回；另一安装正常冷启动必须定位该服务器原消息ID的精确编辑正文，不能用待发送文本替代。
+- R1在发送前DynamicType审计中止，未执行编辑；R2实际编辑committed/finished，但测试错误假设光标在末尾，实际在开头插入x。R3精确前缀x编辑及功能标记通过，审计出现Hit area/DynamicType/Text clipped/Contrast，原驱动拒绝Contrast而未继续接收验证。原始失败分别保留，不计跨安装通过。专门流程仍执行原审计，移动到功能标记后；驱动只在全为固定审计失败且功能标记存在时继续，整体仍exit1，不免除PG或接收端断言。
+- R4独立PG确认唯一原消息revision2/editedEvent1/未撤回。接收端失败层级树已有同一UUID权威正文xtwo-install-direct-ui；App元素UUID大写，PG字符串小写导致精确定位超时。R5先解析UUID统一格式，继续精确核对身份和正文。R4不计自动验收通过。
+- 日志 /tmp/imv2-acceptance-direct-edit-ui-r1-20261009.log 至 /tmp/imv2-acceptance-direct-edit-ui-r4-20261009.log。R4结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.BT0EYH，含edited-message-facts.json、两安装工作状态和完整活动；附件 /tmp/imv2-direct-edit-r4-receiver-attachments。四轮均终态exit1，隔离服务停止、两范围清理完成；当前R5运行中，生产实现未改。
+
+### 20261009-direct-edit-ui-r5（跨独立安装编辑中间态通过，审计失败保留）
+
+- 三个业务阶段均有功能完成标记：真实App接收账号注册/自建群，另一安装普通UI打开私聊、发送、表情、编辑；独立PG等待唯一原消息revision2/editedEvent1/未撤回；接收端正常冷启动和普通刷新，使用PG原消息ID解析UUID定位权威正文，精确文本为插入x后的原文本，唯一正文、没有撤回元素。接收端专门测试通过13.919秒，未再次发送消息。
+- 终态PG仍唯一原消息、内容修订2、未撤回；SQLite发送端editMessage committed/finished，接收端使用自身同步投影。两端没有复制数据库或注入消息。
+- 五测试3通过、2审计失败、0跳过：业务接收冷恢复通过，两范围清理通过，注册与发送端保留DynamicType/Hit area/Text clipped/Contrast审计失败。整体exit1，不称整轮全绿；OP03中间态待验已补齐，EX24审计失败仍保留。
+- 日志 /tmp/imv2-acceptance-direct-edit-ui-r5-20261009.log；结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.QDaZMK，含all-stage-summary.json、完整活动、edited-message-facts.json与两安装工作状态；终态PG事实 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-4b2uua1j/message-facts.json。隔离服务和两个范围均已清理。bash语法、Python解析、git diff --check通过。

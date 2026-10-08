@@ -1193,6 +1193,27 @@ def main():
                                     if meter.is_alive():
                                         raise RuntimeError('resource sampler did not stop')
                                     (output / 'scale-resource-samples.json').write_text(json.dumps(scale_resource_samples, indent=2) + '\n')
+                        if args.room_recovery_scale is not None:
+                            # Capture fixed, non-identifying delivery stages before
+                            # either success or failure tears down the owned stack.
+                            metric_ports = [('primary', metrics_port)]
+                            if args.multi_gateway:
+                                metric_ports.append(('secondary', int(secondary_config['IM_V2_METRICS_PORT'])))
+                            for role, metric_port in metric_ports:
+                                connection = http.client.HTTPConnection('127.0.0.1', metric_port, timeout=8)
+                                try:
+                                    connection.request('GET', '/metrics')
+                                    response = connection.getresponse()
+                                    subscription_metrics_text = response.read().decode()
+                                    if response.status != 200:
+                                        raise RuntimeError('subscription metrics unavailable')
+                                    lines = [line for line in subscription_metrics_text.splitlines()
+                                             if line.startswith('im_v2_room_subscription_')]
+                                    (output / (role + '-subscription-final.prom')).write_text('\n'.join(lines) + '\n')
+                                except Exception as error:
+                                    (output / (role + '-subscription-diagnostic-error.txt')).write_text(type(error).__name__ + '\n')
+                                finally:
+                                    connection.close()
                         app_summary = json.loads(subprocess.check_output(['xcrun', 'xcresulttool', 'get',
                             'test-results', 'summary', '--path', str(output / 'app.xcresult'), '--compact'],
                             env=environment, text=True))
