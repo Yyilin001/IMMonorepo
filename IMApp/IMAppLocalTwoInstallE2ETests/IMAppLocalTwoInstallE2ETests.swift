@@ -389,19 +389,33 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         tapConversationTool("v2.group.members", from: "v2.conversation.detail.tools", in: app, timeout: 30)
         let sheet = app.collectionViews["v2.group.members.sheet"]
         XCTAssertTrue(sheet.waitForExistence(timeout: 30))
-        var seen = Set<String>(), loadCount = 0, backwards = false
+        var seen = Set<String>(), verifiedIdentifiers = Set<String>(), loadCount = 0, backwards = false
         for iteration in 0..<150 {
-            let rows = sheet.descendants(matching: .any).matching(NSPredicate(format: "identifier MATCHES %@", "v2\\.group\\.member\\.[0-9A-Fa-f-]{36}"))
+            let rows = sheet.descendants(matching: .any).matching(NSPredicate(format: "identifier MATCHES %@ AND NOT (identifier IN %@)", "v2\\.group\\.member\\.[0-9A-Fa-f-]{36}", Array(verifiedIdentifiers)))
             for row in rows.allElementsBoundByIndex {
                 let rawKey = String(row.identifier.dropFirst("v2.group.member.".count))
                 let key = try XCTUnwrap(UUID(uuidString: rawKey)).uuidString
                 let name = try XCTUnwrap(expected[key], "目录不应显示夹具集合之外的成员：\(key)。")
+                // Overlapping viewports deliberately revisit rows. Once an
+                // original ID/name pair is verified, avoid another remote
+                // accessibility query for that same pair on every drag.
+                if seen.contains(key) { continue }
                 // The production avatar/name combines its accessibility
                 // children into one named element, rather than a StaticText.
-                if row.descendants(matching: .any).matching(NSPredicate(format: "label == %@", name)).firstMatch.exists { seen.insert(key) }
+                let nameElement = row.descendants(matching: .any).matching(NSPredicate(format: "label == %@", name)).firstMatch
+                // Names are loaded asynchronously. Wait for the exact name of
+                // a visible new row before advancing past its viewport.
+                if nameElement.exists || (row.isHittable && nameElement.waitForExistence(timeout: 2)) {
+                    seen.insert(key)
+                    verifiedIdentifiers.insert(row.identifier)
+                }
             }
             if iteration.isMultiple(of: 10) {
                 XCTContext.runActivity(named: "directory-progress-seen-\(seen.count)-loads-\(loadCount)") { _ in }
+                if expected.count - seen.count <= 10 {
+                    let missing = expected.keys.filter { !seen.contains($0) }.sorted().map { "\($0):\(expected[$0]!)" }.joined(separator: ",")
+                    XCTContext.runActivity(named: "directory-unverified-\(missing)") { _ in }
+                }
             }
             let more = app.buttons["v2.group.members.load-more"]
             if seen.count == expected.count && !more.exists { break }
@@ -411,8 +425,10 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
                 XCTAssertLessThanOrEqual(loadCount, 2)
             } else {
                 let last = expected.keys.sorted().last!
-                let lastRow = sheet.descendants(matching: .any).matching(NSPredicate(format: "identifier ==[c] %@", "v2.group.member.\(last)")).firstMatch
-                if !more.exists && lastRow.exists && lastRow.isHittable { backwards = true }
+                // A partially visible last row can be hittable before its
+                // name has entered the verified viewport. Finish the actual
+                // last ID/name pair before reversing over any missed rows.
+                if !more.exists && seen.contains(last) { backwards = true }
                 // A full flick can skip rows between accessibility snapshots.
                 // Keep adjacent viewports overlapping and stop momentum before
                 // checking the next original member/name pairs.
@@ -421,15 +437,19 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
                 start.press(forDuration: 0.01, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
             }
         }
-        let hierarchy = XCTAttachment(string: app.debugDescription)
-        hierarchy.name = "large-directory-verified-\(seen.count)-members"
-        hierarchy.lifetime = .keepAlways
-        add(hierarchy)
+        // Preserve the exact verified set without another expensive full-App
+        // accessibility snapshot after hundreds of individual name queries.
+        let verified = XCTAttachment(string: seen.sorted().map { "\($0):\(expected[$0]!)" }.joined(separator: "\n"))
+        verified.name = "large-directory-verified-\(seen.count)-members"
+        verified.lifetime = .keepAlways
+        add(verified)
         XCTAssertEqual(seen, Set(expected.keys), "必须显示全部原成员ID及对应精确名称。")
         XCTAssertEqual(loadCount, 2, "258成员应通过真实加载更多读取3页。")
         XCTAssertFalse(app.buttons["v2.group.members.load-more"].exists)
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
-        app.terminate()
+        // The stage driver terminates the old process when launching the next
+        // fixture. XCTest also owns teardown; repeating terminate here can
+        // stall after all assertions and obscure the actual directory result.
     }
 
     @MainActor

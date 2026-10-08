@@ -132,6 +132,7 @@ build_products_directory="$(xcodebuild -showBuildSettings -json \
   | jq --raw-output 'map(select(.target == "IMApp"))[0].buildSettings.BUILT_PRODUCTS_DIR')"
 app_bundle="${build_products_directory}/IMApp.app"
 cleanup_attempted=false
+background_fixture_directory=""
 audit_failure_count=0
 withdrawal_failure_count=0
 receiver_original_increase_contrast=""
@@ -241,6 +242,15 @@ run_stage() {
   local failed_test_count
   local passed_test_count
   local total_test_count
+  local execution_allowance=300
+  # Hundreds of genuine, remote accessibility checks are functional evidence;
+  # the generic five-minute budget can cut off a progressing full-directory
+  # scan. Keep its exact member assertions, with a bounded dedicated budget.
+  case "${test_name}" in
+    testFirstInstallationColdRestoresLargeMemberDirectory|testSecondInstallationLogsInAndReadsLargeMemberDirectory|testSecondInstallationColdRestoresLargeMemberDirectory)
+      execution_allowance=600
+      ;;
+  esac
 
   printf 'running local two-install stage=%s simulator=%s\n' "${test_name}" "${simulator_id}"
   local xcode_status=0
@@ -248,15 +258,15 @@ run_stage() {
     -quiet \
     -collect-test-diagnostics never \
     -test-timeouts-enabled YES \
-    -default-test-execution-time-allowance 300 \
-    -maximum-test-execution-time-allowance 300 \
+    -default-test-execution-time-allowance "${execution_allowance}" \
+    -maximum-test-execution-time-allowance "${execution_allowance}" \
     -project "${project_file}" \
     -scheme "${scheme}" \
     -configuration Debug \
     -destination "platform=iOS Simulator,id=${simulator_id}" \
     -only-testing:"${test_class}/${test_name}" \
     -resultBundlePath "${result_bundle}" &
-  local test_pid="$!" deadline=$((SECONDS + 360))
+  local test_pid="$!" deadline=$((SECONDS + execution_allowance + 60))
   while kill -0 "${test_pid}" 2>/dev/null; do
     if ((SECONDS >= deadline)); then
       printf 'two-install stage exceeded wall-clock deadline: %s\n' "${test_name}" >&2
@@ -332,6 +342,9 @@ cleanup() {
     run_stage "${sender_simulator_id}" testCleansOnlyRequestedIndependentInstallationScope || true
   fi
   restore_accessibility_profile || restore_status=1
+  if [[ -n "${background_fixture_directory}" && "${background_fixture_directory}" == */"File Provider Storage/IMV2-Background-${scenario_suffix}" ]]; then
+    rm -rf -- "${background_fixture_directory}"
+  fi
   if [[ "${keep_result_bundle}" == true ]]; then
     printf 'preserving local two-install result bundles: %s\n' "${result_directory}" >&2
   else
@@ -356,6 +369,42 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-display-name 'Two install receiver' \
   -v2-ui-testing-group-title "${receiver_self_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
+
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY:-false}" == true ]]; then
+  [[ "${external_stack}" == true ]] || exit 1
+  : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
+  : "${IMAPP_BACKGROUND_FIXTURE_TOKEN:?owned fixture token required}"
+  # This Xcode's advertised individual-group form returns usage/117. Select
+  # the exact group from the supported tab-separated inventory instead.
+  provider="$(xcrun simctl get_app_container "${receiver_simulator_id}" com.apple.DocumentsApp groups | /usr/bin/python3 -c 'import sys; rows=[line.rstrip("\n").split("\t",1) for line in sys.stdin]; paths=[row[1] for row in rows if len(row)==2 and row[0]=="group.com.apple.FileProvider.LocalStorage"]; assert len(paths)==1; print(paths[0])')"
+  background_fixture_directory="${provider}/File Provider Storage/IMV2-Background-${scenario_suffix}"
+  /usr/bin/python3 - "${repo_root}" "${background_fixture_directory}" "${receiver_simulator_id}" <<'PY'
+import pathlib, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / 'IMV2/scripts'))
+from v2_native_background_upload_gate import BACKGROUND_FIXTURE_BYTES
+directory = pathlib.Path(sys.argv[2]).resolve()
+assert sys.argv[3] in directory.parts and directory.parent.name == 'File Provider Storage'
+assert directory.name.startswith('IMV2-Background-')
+directory.mkdir(exist_ok=False)
+(directory / 'background-upload.txt').write_bytes(BACKGROUND_FIXTURE_BYTES)
+PY
+  export TEST_RUNNER_IMAPP_BACKGROUND_FIXTURE_TOKEN="${IMAPP_BACKGROUND_FIXTURE_TOKEN}"
+  export TEST_RUNNER_IMAPP_BACKGROUND_GROUP_TITLE="${receiver_self_group_title}"
+  export TEST_RUNNER_IMAPP_BACKGROUND_FILE_FOLDER="IMV2-Background-${scenario_suffix}"
+  export TEST_RUNNER_IMAPP_BACKGROUND_MESSAGE_TEXT="background-upload-${scenario_suffix}"
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testRealAppUploadsAttachmentWhileSuspended
+  /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -v ON_ERROR_STOP=1 -c "SELECT json_build_object('count',count(*),'messageID',min(message_id::text),'withdrawn',coalesce(bool_or(withdrawn_at IS NOT NULL),false),'completedUploads',(SELECT count(*) FROM im_v2.resource_upload_sessions WHERE state='completed'),'availableMedia',(SELECT count(*) FROM im_v2.media_objects WHERE state='available'))::text FROM im_v2.messages" > "${result_directory}/background-message-facts.json"
+  jq --exit-status '.count == 1 and .withdrawn == false and .completedUploads == 1 and .availableMedia == 1' "${result_directory}/background-message-facts.json" >/dev/null
+  export TEST_RUNNER_IMAPP_BACKGROUND_MESSAGE_ID="$(jq --raw-output '.messageID' "${result_directory}/background-message-facts.json")"
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testRealAppColdRestoresBackgroundAttachment
+  curl --fail --silent --show-error --cacert "${local_ca}" --header "X-Background-Fixture: ${IMAPP_BACKGROUND_FIXTURE_TOKEN}" 'https://localhost:8443/__fixture__/background-upload/state' > "${result_directory}/background-upload-observation.json"
+  jq --exit-status '.hits == 1 and .completed == 1 and .status >= 200 and .status < 300 and .readBytes == 524288 and .checksumMatches and .released and .durableActiveMappings == 1 and (.expired | not)' "${result_directory}/background-upload-observation.json" >/dev/null
+  if [[ "${audit_failure_count}" -gt 0 ]]; then printf '%s\n' 'App native background upload stages complete; retained accessibility failure.' >&2; exit 1; fi
+  printf '%s\n' 'local App native background upload E2E: pass'
+  exit 0
+fi
 
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_MEMBER_DIRECTORY_ONLY:-false}" == true ]]; then
   [[ "${external_stack}" == true ]] || exit 1

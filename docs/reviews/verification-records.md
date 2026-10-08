@@ -2833,14 +2833,14 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-12 | 离线发送持久化与重放 | 群R3/R4自动重放正文/PG/原工作committed通过；私聊R14失败：needsAttention且PG无q，整体未通过 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4 |
 | EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
 | EX-14 | 多设备已读 | 已验证：同账号两设备progress/单条群用户已读与跨设备隐私暂停；独立接收阅读后私聊发送端冷恢复对方已读；群主读者页显示真实独立阅读成员与已读，PG一致 | multiDeviceUIR2, multiDeviceUIR4, peerReadUIR1, groupReadUIR2 |
-| EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；App遍历超时，跨安装恢复待验 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3 |
+| EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；首次App冷恢复258人通过；第二安装258人断言完成但退出超时，跨安装冷恢复未执行 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3, appLargeDirectoryUIR4, appLargeDirectoryUIR6 |
 | EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
 | EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
 | EX-18 | 在线状态与输入提示 | 真实在线状态通过；typing安装确认后开始/停止通过；冷订阅ACK后立即发送曾丢失 | extendedLiveResourcesR9, extendedLiveResourcesR10 |
 | EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标通过；R13功能通过但驱动清理失败已修正，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
 | EX-20 | 断线重连 | 1000房间冷补拉122.62秒/重连11.34秒及真实跨Gateway在线更新R13通过；R12在线超时保留，不宣称稳定性；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
-| EX-22 | 后台上传下载 | 真实慢上传期间TCP及SQLite投影通过；系统后台上传/挂起恢复待验；下载当前仅前台实现，无系统后台下载 | extendedLiveResourcesR12, backgroundDownloadSourceAudit |
+| EX-22 | 后台上传下载 | 前台慢上传期间TCP及SQLite投影通过；App实际挂起后后台授权PUT512KiB/校验/204已观察，整资源任务及原消息冷恢复待验；无系统后台下载 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5 |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；未验证外部APNs和真机实际推送 | liveAccountUIR6 |
 | EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area/Contrast审计失败；新增冷启动邀请深链接未打开申请页；批准入群后发送已提交但正文未即时投影，正常冷启动可恢复原消息 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1 |
 
@@ -3144,3 +3144,43 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 整页flick存在跳过相邻快照之间成员行的风险。保持258人逐原ID与精确名字断言，改为当前成员sheet内慢速短拖动、前后视口重叠并停惯性；采用本机XCUIAutomation公有坐标拖动API。R4实际启动，exec会话83757，日志 /tmp/imv2-acceptance-app-large-directory-ui-r4-20261009.log；尚无结论。
 
 - R4已编译并进入首次真实App冷恢复成员遍历，exec会话83757仍运行；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.g5OKBC，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-dnf20c2u。矩阵EX15明确列出App遍历超时与R3证据，直到新结果证明才更新；不将失败藏在待验分类后。
+
+- R4首次安装正常冷恢复已通过：原258个成员UUID与对应精确名称全部核对，实际加载更多2次/3页，1测试通过、0失败/跳过，摘要时长262.547秒；证据 /tmp/imv2-app-large-directory-r4-first-summary.json 和 /tmp/imv2-app-large-directory-r4-first-activities.json。第二安装真实密码登录读取正在运行，后续正常冷恢复未完成；不能据首次通过关闭跨安装待验。
+
+- R4终态exit1：第二安装真实登录后读取3页、核对253/258个成员，5分钟执行超时；最后活动是反向短拖动与远程无障碍查询。证据 /tmp/imv2-app-large-directory-r4-second-summary.json 和 /tmp/imv2-app-large-directory-r4-second-activities.json。后续冷恢复未执行，两安装清理通过，owned stack stopped。不能将首次安装通过扩展成跨安装通过。测试遍历对已验ID仍重复查询名字；下一轮仅跳过已经精确验证的ID/name组合并记录末尾未验集合，完整258断言和原时间限制保持不变。
+
+- R5已实际启动（exec会话98882、进程28050），注册功能完成并保留原审计失败，进入首次冷恢复；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.q2BNlX，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-bvk92r_l，日志 /tmp/imv2-acceptance-app-large-directory-ui-r5-20261009.log。当前仅运行证据，不计通过。
+
+- R5终态exit1：首次遍历5分钟超时，最后251/258，3页已加载；未验集合按夹具UUID排序为第64及253..258行，明确末尾6行未核对。测试使用末行isHittable作为反向条件，早于实际名字核对。摘要 /tmp/imv2-app-large-directory-r5-first-summary.json、活动 /tmp/imv2-app-large-directory-r5-first-activities.json；两范围清理结束且owned stack stopped。保留R4首次通过，不声称稳定。下一轮只排除已验行的重复AX查询，对可见新行等待精确名称2秒，并以末行ID/name已验才反向；完整258断言、两次加载更多和原5分钟上限不变。
+
+- R6实际启动且已编译进入首次冷恢复（exec会话85992，xcode进程30498）；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.bfqMLq，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-u_yvtzi8，日志 /tmp/imv2-acceptance-app-large-directory-ui-r6-20261009.log。未有终态，不计通过。
+
+- R6首次冷恢复终态通过：完整258原成员ID/name、加载更多2次/3页、功能完成标记均通过，1测试0失败0跳过，xcode elapsed298.030秒。摘要 /tmp/imv2-app-large-directory-r6-first-summary.json 与活动 /tmp/imv2-app-large-directory-r6-first-activities.json。第二安装真实登录读取已开始，仍须独立核对，不能提前判跨安装通过。
+
+- R6终态exit1：首次通过；第二安装实际已核对258/258、两次加载更多、最终集合/名称断言及功能标记完成，但随后Terminate App发生5分钟超时，XCTest整项仍Failed，后续第二安装冷恢复未执行。5测试3通过2失败0跳过（含原注册审计），两范围清理通过、owned stack stopped。完整汇总 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.bfqMLq/all-stage-summary.json；第二安装摘要 /tmp/imv2-app-large-directory-r6-second-summary.json、活动 /tmp/imv2-app-large-directory-r6-second-activities.json。测试末尾去除昂贵全App快照，改存精确已验ID/name集合；去除重复App terminate，脚本每阶段launch --terminate-running-process仍确保冷启动。原集合和时间上限不变，后续真实重跑验证。
+
+- R7已启动，exec会话54045，日志 /tmp/imv2-acceptance-app-large-directory-ui-r7-20261009.log。不得用R6的功能标记替代整项Passed，仍实际重跑三个目录阶段。
+
+### 20261009-app-native-background-upload-preparation（已准备，未验收）
+
+- 新增独占后台上传模式，只准备本轮Files本地提供方目录内512KiB普通文件；App经系统文件选择器、既有附件准备及消息发送入口推进，未注入业务消息、凭据或已上传资源。测试要求观察真实后台授权PUT开始、Home后实际runningBackgroundSuspended，再释放本轮有界网络观察；真实provider仍验证签名并持久化，观察输出只含字节/校验/完成状态计数。
+- 后续必须验证真实服务端唯一原消息、completed上传与available媒体，正常冷启动App同原UUID正文及附件。失败时仅清理随机测试范围和自身Files目录，网络等待180秒有界。Shell/Python语法、diff检查通过；新增UI测试已随R6清理阶段编译，但尚未运行后台功能，不作为EX22通过证据。原系统后台下载实现缺口保留。
+
+- R7终态exit1：首次遍历末次progress231/258、真实3页已加载，随后仍在向下短拖动，统一5分钟预算截断。未达到全部集合断言，不能算通过；第二安装及冷恢复未执行。2清理通过、2失败（含注册审计）、0跳过，owned stack stopped。摘要 /tmp/imv2-app-large-directory-r7-first-summary.json、活动 /tmp/imv2-app-large-directory-r7-first-activities.json、完整汇总 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.RDSzY3/all-stage-summary.json。
+- 5分钟为脚本统一观察预算，不是用户要求的功能时延指标；258成员的逐行远程AX核对已实际接近此预算。仅三个大目录用例调整为600秒有界执行，驱动总观察2400秒；其他用例300秒不变。原全部成员ID/名称、实际3页、真实两设备登录和正常冷恢复范围均不变。此调整不宣称客户端或服务端性能提升，历史超时继续保留。后台真实链路先执行，随后使用明确目录预算复测跨安装冷恢复。
+
+- 后台R1实际执行后终态exit1：普通注册建群功能完成，原审计失败保留；准备Files文件时simctl单组容器形式返回usage/117（帮助虽列出此形式），未进入附件测试。groups清单形式已实际读出唯一FileProvider.LocalStorage容器，驱动改为精确解析该清单，保留拥有设备和目录边界校验。两范围清理通过、owned stack stopped。日志 /tmp/imv2-acceptance-app-native-background-upload-ui-r1-20261009.log，结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.OY8Mf5。此为测试文件准备失败，不算真实上传业务失败，EX22仍待验。
+
+- 后台R2已实际进入testRealAppUploadsAttachmentWhileSuspended（exec41825、xcode36189），Files清单准备文件成功。结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.MjQ5i9，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-rjuhb0jc；日志 /tmp/imv2-acceptance-app-native-background-upload-ui-r2-20261009.log。网络等待释放前只读核对本次mediaID的active系统任务映射与awaitingBackground任务，不读取凭据或原请求BLOB。此轮未终态，不计通过。
+
+- 后台R2终态exit1：新测试错误地用TextView查找v2.message.draft，实际现有实现及其他已通过用例均用TextField；等待15秒失败，还未打开文件选择器或发起上传。摘要 /tmp/imv2-app-native-background-upload-r2-summary.json、活动 /tmp/imv2-app-native-background-upload-r2-activities.json；服务观察backgroundRequests0/foregroundHits0、持久化映射0。两范围清理通过、owned stack stopped，本轮Files随机目录已删除。仅修正新测试输入框定位，不改生产UI；此失败不算业务上传失败。
+
+- 后台R3已启动，exec会话64445，日志 /tmp/imv2-acceptance-app-native-background-upload-ui-r3-20261009.log。输入框定位修正后仍必须通过普通系统文件选择器和完整挂起/映射/字节/持久化/冷恢复链路；未有终态结论。
+
+- 后台R3终态exit1：已打开普通系统文件选择器，真实FileProvider.LocalStorage根目录有本轮精确文件夹及1项；点击文件夹长名称后仍在根目录，等待background-upload文件名10秒失败，未发起任何上传。完整实际层级 /tmp/imv2-background-upload-r3-attachments/53F43F9E-EF89-4D5B-8395-1EDA3072C8CC.txt 与自留picker附件，摘要 /tmp/imv2-app-native-background-upload-r3-summary.json、活动 /tmp/imv2-app-native-background-upload-r3-activities.json。选择器将文件夹暴露为带Folder后缀的Cell和独立Image图标，下一轮用已观察到的Cell/图标点击，同时避免误点本地位置标题。仍经普通文件选择器，无资源注入；两范围清理及本轮文件删除、owned stack stopped。
+
+- 后台R4终态exit1：普通Files文件夹图标点击已进入目录，background-upload文件Cell存在且可点击；其缩略图Image可点击断言失败，尚未选择文件或请求上传，服务观察仍全0。摘要 /tmp/imv2-app-native-background-upload-r4-summary.json、活动 /tmp/imv2-app-native-background-upload-r4-activities.json。下一轮改用实际已确认可点击的文件Cell，并自留选择前界面；不变更生产导入/上传路径。两范围清理和本轮文件删除通过、owned stack stopped。
+
+- 后台R5已实际启动，exec49817，日志 /tmp/imv2-acceptance-app-native-background-upload-ui-r5-20261009.log，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-aiql5qsd。普通Files文件Cell点击后仍需真实导入、系统任务映射/挂起、字节和原消息冷恢复验证，未有业务通过结论。
+
+- 后台R5终态exit1：真实Files导入512KiB、普通发送、后台授权PUT及App runningBackgroundSuspended断言均已实际执行；释放等待后真实provider返回204，完整524288字节和校验一致。随后durableActiveMappings0断言失败，原消息冷恢复未执行。源码确认URL顶层mediaID是不可变分片ID，grant.mediaID.rawValue才是整资源ID；探针错误使用前者查询SQLite，0不能证明映射缺失。修正为原资源ID和partNumber关联，并用两个不同UUID及隔离SQLite验证查询正确；此探针回归不替代App验收。摘要 /tmp/imv2-app-native-background-upload-r5-summary.json、活动 /tmp/imv2-app-native-background-upload-r5-activities.json、服务 background-upload-observation.json。两范围清理与文件删除完成、owned stack stopped。EX22仅增加已观察局部证据，未判整链路通过。

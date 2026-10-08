@@ -4,6 +4,7 @@ import argparse, base64, collections, hashlib, http.client, http.server, json, o
 import shlex, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 import yaml
+from v2_native_background_upload_gate import NativeBackgroundUploadGate
 
 REPO = Path(__file__).resolve().parents[2]
 PG = Path('/opt/homebrew/opt/postgresql@16/bin')
@@ -28,6 +29,14 @@ def main():
     parser.add_argument('--receiver-simulator',help='Explicitly owned, booted receiver simulator for --two-install-ui.')
     parser.add_argument('--sender-simulator',help='Explicitly owned, booted sender simulator for --two-install-ui.')
     args=parser.parse_args()
+    if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY') == 'true':
+        if not args.two_install_ui:
+            parser.error('native background upload requires --two-install-ui')
+        if any(os.environ.get(name) == 'true' for name in (
+                'IMAPP_LOCAL_TWO_INSTALL_MEMBER_DIRECTORY_ONLY',
+                'IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY',
+                'IMAPP_LOCAL_TWO_INSTALL_DIRECT_EDIT_ONLY')):
+            parser.error('native background upload must run as an independent scenario')
     if not 0 <= args.hold_seconds <= 900: parser.error('hold must be 0...900 seconds')
     if sum([args.two_install_ui,args.multi_device_ui,args.account_switch_ui,args.read_receipt_ui,args.group_read_ui,args.group_join_ui]) > 1: parser.error('UI modes are mutually exclusive')
     ui_requested=args.two_install_ui or args.multi_device_ui or args.account_switch_ui or args.read_receipt_ui or args.group_read_ui or args.group_join_ui
@@ -55,6 +64,9 @@ def main():
     processes=[]; logs=[]; pg_started=False; edge=None
     http_responses=collections.Counter(); http_lock=threading.Lock()
     app_refresh_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY') == 'true'
+    background_upload_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY') == 'true'
+    background_gate=NativeBackgroundUploadGate() if background_upload_mode else None
+    background_fixture_token=secrets.token_hex(32) if background_upload_mode else None
     refresh_diagnostics=dict(armed=False,injected=0,refreshResponses=0,coldRestore=False,coldFreshDeviceReads=0)
     refresh_digest=[None]  # Process-private comparison only; never exported.
     ports={key:port() for key in ['pg','account','edge','gateway','actor_gateway','actor_account','metrics']}
@@ -117,8 +129,21 @@ def main():
             def dispatch(self):
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0 <= length <= 1024*1024: self.send_error(413);return
-                body=self.rfile.read(length)
                 path=urllib.parse.urlsplit(self.path).path
+                if background_gate is not None and path.startswith('/__fixture__/background-upload/'):
+                    if self.headers.get('X-Background-Fixture') != background_fixture_token or length != 0:
+                        self.send_error(403);return
+                    if self.command == 'POST' and path == '/__fixture__/background-upload/release':
+                        container=run(['xcrun','simctl','get_app_container',args.receiver_simulator,'com.stskcxfz.imapp','data'],timeout=5).stdout.decode().strip()
+                        background_gate.capture_durable_mapping(Path(container))
+                        background_gate.release()
+                    elif not (self.command == 'GET' and path == '/__fixture__/background-upload/state'):
+                        self.send_error(404);return
+                    diagnostic=json.dumps(background_gate.snapshot()).encode()
+                    self.send_response(200);self.send_header('Content-Type','application/json')
+                    self.send_header('Content-Length',str(len(diagnostic)));self.end_headers();self.wfile.write(diagnostic);return
+                gated=background_gate is not None and self.command == 'PUT' and path.startswith('/v2/local-media/upload/') and background_gate.claim(self.path,length)
+                body=background_gate.read(self,length) if gated else self.rfile.read(length)
                 with http_lock:
                     request_is_cold=refresh_diagnostics['coldRestore']
                 if app_refresh_mode and path.startswith('/__fixture__/app-refresh-'):
@@ -140,6 +165,7 @@ def main():
                 try:
                     connection.request(self.command,self.path,body,headers);response=connection.getresponse();data=response.read(1024*1024+1)
                     status=response.status
+                    if gated: background_gate.completed(status)
                     with http_lock:
                         if app_refresh_mode and self.command == 'POST' and path == '/v2/device-credentials/refresh' and status == 200:
                             refresh_digest[0]=hashlib.sha256(json.loads(data)['accessToken'].encode()).digest()
@@ -189,6 +215,10 @@ def main():
             ui_log=(root/'two-install-ui.log').open('wb');logs.append(ui_log)
             ui_source=REPO/'IMApp/Scripts/verify_local_account_two_install_e2e.sh'
             success_marker='local two-install direct-and-group-message E2E: pass'
+            if args.two_install_ui and background_upload_mode:
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
+                ui_environment['IMAPP_BACKGROUND_FIXTURE_TOKEN']=background_fixture_token
+                success_marker='local App native background upload E2E: pass'
             if args.two_install_ui and os.environ.get('IMAPP_LOCAL_TWO_INSTALL_MEMBER_DIRECTORY_ONLY') == 'true':
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
                 success_marker='local App member directory E2E: pass'
@@ -237,7 +267,8 @@ def main():
             ui=subprocess.Popen(['bash',str(ui_driver)],
                 env=ui_environment,stdout=ui_log,stderr=subprocess.STDOUT,start_new_session=True)
             try:
-                result=ui.wait(timeout=1800)
+                directory_mode=args.two_install_ui and os.environ.get('IMAPP_LOCAL_TWO_INSTALL_MEMBER_DIRECTORY_ONLY') == 'true'
+                result=ui.wait(timeout=2400 if directory_mode else 1800)
             finally:
                 if ui.poll() is None:
                     os.killpg(ui.pid,signal.SIGTERM)
@@ -253,6 +284,9 @@ def main():
             deadline=time.monotonic()+args.hold_seconds
             while time.monotonic()<deadline and not (root/'stop').exists(): time.sleep(.5)
     finally:
+        if background_gate is not None:
+            (root/'background-upload-observation.json').write_text(json.dumps(background_gate.snapshot(),indent=2)+'\n')
+            background_gate.release()  # Drain only this owned observation on any failed stage.
         if edge: edge.shutdown();edge.server_close()
         with http_lock:
             (root/'http-summary.json').write_text(json.dumps([
