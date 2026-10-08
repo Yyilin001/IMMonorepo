@@ -591,6 +591,8 @@ def main():
                 run(['createdb', *database_arguments, 'im_live_account'])
                 run(['psql', '-X', *database_arguments, '-d', 'im_live_account', '-v', 'ON_ERROR_STOP=1',
                      '-f', str(ROOT / 'IMV2/sql/schema.sql')])
+                run(['psql', '-X', *database_arguments, '-d', 'im_live_account', '-v', 'ON_ERROR_STOP=1',
+                     '-f', str(ROOT / 'IMV2/sql/realtime-change-journal.sql')])
 
                 # Separate authenticated Actor identities share only this disposable
                 # topology/CA. Each process receives its own signing key and listener.

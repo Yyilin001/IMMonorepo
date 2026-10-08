@@ -41,6 +41,7 @@ def main():
         run([PG/'pg_ctl','-D',root/'pg','-l',root/'postgres.log','-o',f'-h 127.0.0.1 -p {ports["pg"]} -k {root}','-w','start']); pg_started=True
         run([PG/'createdb','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','imv2_e2e'])
         run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-f',REPO/'IMV2/sql/schema.sql'])
+        run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-f',REPO/'IMV2/sql/realtime-change-journal.sql'])
         run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-c',f"INSERT INTO im_v2.shard_admission_pools(room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard','{uuid.uuid4()}',1,CURRENT_TIMESTAMP+INTERVAL '1 hour',1000)"])
         run(['python3',REPO/'IMV2/scripts/prepare_v2_room_actor_configuration.py','--output-dir',root/'actors','--host',f'gateway=localhost:{ports["actor_gateway"]}','--caller',f'account=localhost:{ports["actor_account"]}','--shards','rooms-primary'])
         ca=root/'actors/ca/cert.pem'; cert=root/'actors/gateway/tls.pem'; key=root/'actors/gateway/tls.key'
@@ -111,7 +112,7 @@ def main():
                 return json.load(response)
         device=str(uuid.uuid4()).upper();operation=str(uuid.uuid4()).upper();suffix=uuid.uuid4().hex[:20]
         registration=post('/v2/account-auth/password/register',{'accountHandle':'e2e_'+suffix,'publicHandle':'e2e'+suffix,'displayName':'Isolated native E2E','password':'isolated-e2e-password','deviceID':device})
-        cancellation={'deviceID':device,'operationID':operation,'proof':'imv2-cancel-registration-v1.'+base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='),'issueBeforeMilliseconds':int((time.time()+600)*1000)}
+        cancellation={'deviceID':{'rawValue':device},'operationID':operation,'proof':'imv2-cancel-registration-v1.'+base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='),'issueBeforeMilliseconds':int((time.time()+600)*1000)}
         issued=post('/v2/device-credentials',{'accountAssertion':registration['accountAssertion'],'deviceID':device,'operationID':operation,'cancellation':cancellation})
         probe=dict(base,IM_V2_GATEWAY_PROBE_ACCOUNT_BASE_URL=f'https://localhost:{ports["edge"]}',IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=issued['accessToken'],IM_V2_GATEWAY_PROBE_DEVICE_ID=device,
             IM_V2_GATEWAY_PROBE_HOST='127.0.0.1',IM_V2_GATEWAY_PROBE_PORT=str(ports['gateway']),IM_V2_GATEWAY_PROBE_CA_PATH=str(ca),IM_V2_GATEWAY_PROBE_SERVER_NAME='localhost')

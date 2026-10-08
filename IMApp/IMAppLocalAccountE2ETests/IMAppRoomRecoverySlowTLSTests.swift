@@ -34,13 +34,16 @@ extension IMAppRoomRecoveryScaleTests {
             guard !pressureRooms.isEmpty, Set(pressureRooms).count == pressureRooms.count else {
                 throw V2RealtimeTransportError.unexpectedResponse
             }
+            // Room progress is delivered by the Owner subscription. Account
+            // coverage now carries only a resync boundary, never a room head.
+            _ = try await transport.subscribeToGroupEvents(roomID: roomID, afterRoomSequence: 2)
             try await sendRecoveryOnlineMessage(transport: transport, connection: connection, auth: auth, account: account, roomID: roomID,
                 deadline: ContinuousClock.now.advanced(by: .seconds(30)))
             try await withThrowingTaskGroup(of: Void.self) { group in
                 group.addTask {
                     while true {
-                        let notification = try await connection.nextAccountRoomChange()
-                        if case .changed(_, let room, let head) = notification, room == roomID, head == 3 { return }
+                        let notification = try await connection.nextGroupEventAvailabilityHint()
+                        if notification.roomID == roomID, notification.highWatermark == 3 { return }
                     }
                 }
                 group.addTask {

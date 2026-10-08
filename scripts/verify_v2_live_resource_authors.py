@@ -245,6 +245,8 @@ def main():
                 run(['createdb', *database_args, 'im_live_resources'])
                 run(['psql', '-X', *database_args, '-d', 'im_live_resources', '-v', 'ON_ERROR_STOP=1',
                      '-f', str(ROOT / 'IMV2/sql/schema.sql')])
+                run(['psql', '-X', *database_args, '-d', 'im_live_resources', '-v', 'ON_ERROR_STOP=1',
+                     '-f', str(ROOT / 'IMV2/sql/realtime-change-journal.sql')])
                 run([sys.executable, str(ROOT / 'IMV2/scripts/prepare_v2_room_actor_configuration.py'),
                      '--output-dir', str(private / 'actors'), '--host', f'gateway=localhost:{free_port()}',
                      '--caller', f'account=localhost:{free_port()}', '--shards', 'rooms-primary'])
