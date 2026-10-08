@@ -183,8 +183,16 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
         let source: any V2AccountRoomChangeSource = dropTail ? loss : connection
         let runner = V2RoomRecoveryRunner(engine: engine, source: source, personalSync: personal,
             integrityInterval: { dropTail ? 5 : 3600 })
+        _ = try await transport.subscribeToGroupEvents(roomID: roomID,
+            afterRoomSequence: try await store.groupEventCursor(roomID: roomID))
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { try await runner.run(userID: account.userID) }
+            group.addTask {
+                while true {
+                    let hint = try await loss.nextGroupEventAvailabilityHint()
+                    if hint.roomID == roomID { await runner.requestCatchUp() }
+                }
+            }
             group.addTask {
                 let readyDeadline = ContinuousClock.now.advanced(by: .seconds(max(600, count / 5)))
                 while await engine.phase != .live {
@@ -194,8 +202,9 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                 let deadline = ContinuousClock.now.advanced(by: .seconds(30))
                 if dropTail { await loss.arm() }
                 try await sendRecoveryOnlineMessage(transport: transport, connection: connection, auth: auth, account: account, roomID: roomID, deadline: deadline)
-                // No detailed room subscription or manual recovery request. The
-                // account notification must wake the still-running recovery driver.
+                // The current Owner room hint wakes recovery. Dropped hints
+                // never reach requestCatchUp; only the runner's integrity scan
+                // can repair the intentionally missing tail.
                 while true {
                     let messages = try await store.messages(in: roomID)
                     if messages.count == expectedMessageCount, messages.contains(where: { $0.text == "tls-scale-online" }),
@@ -262,7 +271,7 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
 /// Fault injection only after the real TLS inbox has decoded/validated a frame.
 /// Drops all copies of one target wake; never changes a pull response or requests
 /// catch-up. This tests periodic source reconciliation, not transport gap detection.
-private actor RecoveryTailLossSource: V2AccountRoomChangeSource {
+private actor RecoveryTailLossSource: V2AccountRoomChangeSource, V2GroupEventAvailabilityHintSource {
     let connection: V2TLSFrameConnection
     let roomID: RoomID
     let targetHead: UInt64
@@ -274,10 +283,13 @@ private actor RecoveryTailLossSource: V2AccountRoomChangeSource {
     }
     func arm() { armed = true; droppedCount = 0; forwardedCount = 0 }
     func nextAccountRoomChange() async throws -> V2AccountRoomChange {
+        try await connection.nextAccountRoomChange()
+    }
+    func nextGroupEventAvailabilityHint() async throws -> V2GroupEventAvailabilityHint {
         while true {
             try Task.checkCancellation()
-            let change = try await connection.nextAccountRoomChange()
-            if armed, case .changed(_, let room, let head) = change, room == roomID, head == targetHead {
+            let change = try await connection.nextGroupEventAvailabilityHint()
+            if armed, change.roomID == roomID, change.highWatermark == targetHead {
                 droppedCount += 1
                 continue
             }

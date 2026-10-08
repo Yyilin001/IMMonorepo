@@ -19,8 +19,20 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check',action='store_true',help='Check dependencies without starting processes or creating configuration.')
     parser.add_argument('--hold-seconds',type=int,default=0,help='Keep only this isolated stack alive for an additional test window (max 900s).')
+    parser.add_argument('--two-install-ui',action='store_true',help='Run the existing real two-install App scenario against this disposable native stack.')
+    parser.add_argument('--receiver-simulator',help='Explicitly owned, booted receiver simulator for --two-install-ui.')
+    parser.add_argument('--sender-simulator',help='Explicitly owned, booted sender simulator for --two-install-ui.')
     args=parser.parse_args()
     if not 0 <= args.hold_seconds <= 900: parser.error('hold must be 0...900 seconds')
+    if args.two_install_ui:
+        if not args.receiver_simulator or not args.sender_simulator or args.receiver_simulator == args.sender_simulator:
+            parser.error('two-install UI requires two distinct, explicitly selected simulator IDs')
+        if not ssl.HAS_TLSv1_3: parser.error('two-install UI requires a Python runtime with TLS 1.3')
+        # The existing App scenario uses these local endpoints. Refuse an occupied
+        # endpoint instead of sending test traffic to an unrelated running stack.
+        for endpoint in (8443,7443):
+            with socket.socket() as listener:
+                listener.bind(('127.0.0.1',endpoint))
     required=[PG/name for name in ['initdb','pg_ctl','createdb','psql']]
     required += [REPO/'IMV2Server/.build/debug'/name for name in ['IMV2AccountServerApp','IMV2ServerApp','IMV2LocalGatewayProbe']]
     missing=[str(path) for path in required if not path.is_file() or not os.access(path,os.X_OK)]
@@ -34,6 +46,7 @@ def main():
     root=Path(tempfile.mkdtemp(prefix='imv2-native-e2e-'))
     processes=[]; logs=[]; pg_started=False; edge=None
     ports={key:port() for key in ['pg','account','edge','gateway','actor_gateway','actor_account','metrics']}
+    if args.two_install_ui: ports.update(edge=8443,gateway=7443)
     if len(set(ports.values())) != len(ports): raise RuntimeError('port collision; rerun')
     print('isolated E2E root='+str(root),flush=True)
     try:
@@ -83,7 +96,7 @@ def main():
         class Edge(http.server.BaseHTTPRequestHandler):
             protocol_version='HTTP/1.1'
             def log_message(self,*_): pass
-            def do_POST(self):
+            def dispatch(self):
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0 <= length <= 1024*1024: self.send_error(413);return
                 body=self.rfile.read(length)
@@ -93,15 +106,16 @@ def main():
                 headers['X-IM-V2-Account-Client-Address']=self.client_address[0]
                 connection=http.client.HTTPConnection('127.0.0.1',ports['account'],timeout=30)
                 try:
-                    connection.request('POST',self.path,body,headers);response=connection.getresponse();data=response.read(1024*1024+1)
+                    connection.request(self.command,self.path,body,headers);response=connection.getresponse();data=response.read(1024*1024+1)
                     if len(data)>1024*1024: self.send_error(502);return
                     self.send_response(response.status)
                     for k,v in response.getheaders():
                         if k.lower() not in {'connection','transfer-encoding','content-length'}: self.send_header(k,v)
                     self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
                 finally: connection.close()
+            do_GET = do_POST = do_PUT = do_DELETE = dispatch
         edge=http.server.ThreadingHTTPServer(('127.0.0.1',ports['edge']),Edge)
-        server_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);server_tls.minimum_version=ssl.TLSVersion.TLSv1_2;server_tls.load_cert_chain(cert,key)
+        server_tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);server_tls.minimum_version=ssl.TLSVersion.TLSv1_3 if args.two_install_ui else ssl.TLSVersion.TLSv1_2;server_tls.load_cert_chain(cert,key)
         edge.socket=server_tls.wrap_socket(edge.socket,server_side=True)
         threading.Thread(target=edge.serve_forever,daemon=True).start()
         client_tls=ssl.create_default_context(cafile=str(ca))
@@ -121,6 +135,23 @@ def main():
         config={'httpsBaseURL':f'https://localhost:{ports["edge"]}','gatewayHost':'localhost','gatewayPort':ports['gateway'],'caPath':str(ca)}
         (root/'test-endpoints.json').write_text(json.dumps(config))
         print('PASS independent PG + HTTPS registration + credential issue + native TLS gateway authentication',flush=True)
+        if args.two_install_ui:
+            ui_environment=dict(base,IMAPP_LOCAL_TWO_INSTALL_EXTERNAL_STACK='true',IMAPP_LOCAL_TWO_INSTALL_CA_PATH=str(ca),
+                IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID=args.receiver_simulator,
+                IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID=args.sender_simulator,
+                IMAPP_LOCAL_TWO_INSTALL_E2E_KEEP_RESULTS='true')
+            ui_log=(root/'two-install-ui.log').open('wb');logs.append(ui_log)
+            ui=subprocess.Popen(['bash',str(REPO/'IMApp/Scripts/verify_local_account_two_install_e2e.sh')],
+                env=ui_environment,stdout=ui_log,stderr=subprocess.STDOUT,start_new_session=True)
+            try:
+                result=ui.wait(timeout=1800)
+            finally:
+                if ui.poll() is None:
+                    os.killpg(ui.pid,signal.SIGTERM)
+                    try: ui.wait(timeout=30)
+                    except subprocess.TimeoutExpired: os.killpg(ui.pid,signal.SIGKILL);ui.wait()
+            if result != 0: raise RuntimeError('two-install App scenario failed; inspect two-install-ui.log')
+            print('PASS real two-install App messaging, offline recovery and group scenario',flush=True)
         if args.hold_seconds:
             print('test endpoint config='+str(root/'test-endpoints.json'),flush=True)
             deadline=time.monotonic()+args.hold_seconds

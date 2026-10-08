@@ -192,6 +192,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
     parser.add_argument('--slow-resource', action='store_true', help='one opt-in slow signed-byte upload with concurrent typed control and TLS cursor progress')
+    parser.add_argument('--extended-acceptance', action='store_true', help='also run typed message and group operation acceptance against the owned stack')
     args = parser.parse_args()
     if sys.platform != 'darwin':
         raise RuntimeError('this native ClientKit acceptance requires macOS')
@@ -259,7 +260,8 @@ def main():
                      'ACCOUNT_EDGE_AUTHORIZATION_SECRET', 'ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY',
                      'ACCOUNT_ASSERTION_HMAC_KEY', 'GROUP_INVITE_TOKEN_HMAC_KEY', 'LOCAL_MEDIA_SIGNING_KEY')}
                 fixture_token = base64.b64encode(os.urandom(32)).decode()
-                room_id = str(uuid.uuid4())
+                if args.extended_acceptance:
+                    sql("INSERT INTO im_v2.shard_admission_pools (room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard',gen_random_uuid(),1,now()+interval '1 hour',1000) ON CONFLICT DO NOTHING")
 
                 class Proxy(http.server.BaseHTTPRequestHandler):
                     protocol_version = 'HTTP/1.1'
@@ -313,13 +315,14 @@ def main():
                                 self.send_error(403); return
                             actors = json.loads(body)
                             viewer, author = str(uuid.UUID(actors['viewer'])), str(uuid.UUID(actors['author']))
+                            room_id = str(uuid.uuid4())
                             # The only seeded business data is this two-member
                             # large-class room. Messages, uploads, profile binding,
                             # authorization and revocation use real public routes.
                             sql(f"""BEGIN;
                               INSERT INTO im_v2.shard_admission_pools
                                 (room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit)
-                                VALUES('rooms-primary','standard',gen_random_uuid(),1,now()+interval '1 hour',1000);
+                                VALUES('rooms-primary','standard',gen_random_uuid(),1,now()+interval '1 hour',1000) ON CONFLICT DO NOTHING;
                               INSERT INTO im_v2.rooms(room_id,room_shard_id,capacity_profile_id,capacity_class,membership_revision)
                                 VALUES('{room_id}','rooms-primary','standard','large',1);
                               INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at)
@@ -384,7 +387,7 @@ def main():
                     IM_V2_AUTHOR_PRESENTATIONS_ENABLED='true', IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED='true',
                     IM_V2_TLS_HOST='127.0.0.1', IM_V2_TLS_PORT=str(gateway_port),
                     IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(certificate), IM_V2_TLS_PRIVATE_KEY_PATH=str(key),
-                    IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(metrics_port), IM_V2_GATEWAY_NODE_ID='resource-acceptance')
+                    IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(metrics_port), IM_V2_GATEWAY_NODE_ID='gateway')
                 wait_listener(launch('IMV2ServerApp', gateway), gateway_port)
                 account = compose_defaults('account'); account.update(shared)
                 account.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(private / 'actors/account/configuration.json'),
@@ -396,6 +399,8 @@ def main():
                     IMV2_LIVE_ACCOUNT_CA_DER=str(private / 'ca.der'))
                 if args.slow_resource:
                     test_env['IMV2_LIVE_RESOURCE_SLOW_UPLOAD'] = '1'
+                if args.extended_acceptance:
+                    test_env['IMV2_LIVE_EXTENDED_ACCEPTANCE'] = '1'
                 test_filter = 'V2LiveResourceAuthorTests/slowResourceUploadKeepsControlAndCursorProgress' if args.slow_resource else 'V2LiveResourceAuthorTests'
                 with (output / 'client.log').open('w') as log:
                     test = subprocess.Popen(['swift', 'test', '--disable-automatic-resolution', '--no-parallel',
@@ -403,7 +408,7 @@ def main():
                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                     test._owned_process_group = test.pid
                     try:
-                        result = test.wait(timeout=240)
+                        result = test.wait(timeout=600 if args.extended_acceptance else 240)
                     finally:
                         stop(test)
                 text = (output / 'client.log').read_text()

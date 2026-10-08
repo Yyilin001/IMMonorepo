@@ -117,6 +117,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             // alive while the same device restores on the other Gateway.
             _ = try await receiverTransport.startAccountRoomChanges()
             _ = try await receiverTransport.userRoomDirectory(cursor: nil, pageSize: 100)
+            _ = try await receiverTransport.subscribeToGroupEvents(roomID: directRoom.roomID, afterRoomSequence: 0)
             let reconnected = try await restoredReceiverConnection.connectAndAuthenticate(
                 accessToken: receiver.accessToken, deviceID: receiver.deviceID, supportedCapabilityProfiles: ["base"])
             XCTAssertEqual(reconnected.userID, receiverSession.userID)
@@ -182,16 +183,15 @@ final class IMAppLocalAccountUITests: XCTestCase {
             let privateActivities = try await receiverStore.timelineActivities(in: directRoom.roomID)
             XCTAssertTrue(privateActivities.isEmpty)
             if secondaryPort != nil {
+                _ = try await recoveryTransport.subscribeToGroupEvents(roomID: directRoom.roomID, afterRoomSequence: cursor)
                 let online = try await sender.sendMessage(roomID: directRoom.roomID,
                     clientMessageID: .init(UUID().uuidString.lowercased()), text: "cross-gateway-online",
                     media: [], mentions: [], connection: restoredSenderConnection, transport: restoredTransport)
                 try await withThrowingTaskGroup(of: Void.self) { group in
                     group.addTask {
                         while true {
-                            let change = try await restoredReceiverConnection.nextAccountRoomChange()
-                            if case .changed(_, let room, let head) = change,
-                               room == directRoom.roomID, head >= online.roomSequence { return }
-                            if case .resyncRequired = change { throw V2RealtimeTransportError.unexpectedResponse }
+                            let hint = try await restoredReceiverConnection.nextGroupEventAvailabilityHint()
+                            if hint.roomID == directRoom.roomID, hint.highWatermark >= online.roomSequence { return }
                         }
                     }
                     group.addTask {
@@ -413,6 +413,7 @@ private func verifyCrossGatewaySiblingDevice(account: LocalE2EAccountCredentials
         let transport = V2ProtobufSyncTransport(wire: sibling, protocolVersion: session.protocolVersion)
         _ = try await transport.startAccountRoomChanges()
         _ = try await transport.userRoomDirectory(cursor: nil, pageSize: 100)
+        _ = try await transport.subscribeToGroupEvents(roomID: roomID, afterRoomSequence: 0)
         // A real reply establishes mutual messaging before this delivery test;
         // the stranger-message allowance is a separate authorization boundary.
         _ = try await account.sendMessage(roomID: roomID,
@@ -441,9 +442,8 @@ private func waitForRoomChange(_ connection: V2TLSFrameConnection, roomID: RoomI
     try await withThrowingTaskGroup(of: Void.self) { tasks in
         tasks.addTask {
             while true {
-                let change = try await connection.nextAccountRoomChange()
-                if case .changed(_, let room, let head) = change, room == roomID, head >= sequence { return }
-                if case .resyncRequired = change { throw V2RealtimeTransportError.unexpectedResponse }
+                let hint = try await connection.nextGroupEventAvailabilityHint()
+                if hint.roomID == roomID, hint.highWatermark >= sequence { return }
             }
         }
         tasks.addTask {

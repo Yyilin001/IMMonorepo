@@ -639,4 +639,417 @@ private func resourceInvitation(_ client:V2HTTPInvitationOperationClient,account
     let submission=try V2GroupInvitationSubmission(command:.init(intent:intent,admission:admission),secretAuthorization:authorization)
     guard case .receipt(let proof)=try await client.submit(submission),proof.validates(intent:intent) else {throw ResourceLiveFailure.presentation};return proof
 }
+extension V2LiveResourceAuthorTests {
+    @Test("real group avatar upload, byte presentation, removal and original recovery",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func groupAvatarAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let owner = try await fixture.register().credentials
+        let member = try await fixture.register().credentials
+        let room = try await seedRoom(fixture, viewer: member.userID, author: owner.userID)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("source.png")
+        try makeImage(at: source)
+        let bytes = try Data(contentsOf: source)
+        let media = MediaID(uuid: UUID())
+        let credentials = ResourceLiveCredentials(value: owner)
+        let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+        let upload = try V2HTTPResourceUploadClient(endpoint: fixture.url("v2/resource-uploads"), credentials: credentials, transport: http)
+        let checksum = try V2ResourceChecksum(value: SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined())
+        var uploadSession = try await upload.create(.init(operationID: .init(uuid: UUID()), mediaID: media,
+            usage: .groupAvatar(room), contentType: "image/png", byteCount: Int64(bytes.count), checksum: checksum))
+        let limit = ContinuousClock.now + .seconds(45)
+        while let plan = try await upload.target(uploadSession) {
+            guard ContinuousClock.now < limit else { throw ResourceLiveFailure.processing }
+            try await V2URLSessionResourcePlanExecutor(session: fixture.http).upload(fileURL: source, plan: plan)
+            if plan.mode == .httpPut { break }
+            uploadSession = try await upload.status(uploadSession.locator)
+        }
+        uploadSession = try await upload.finalize(uploadSession)
+        while uploadSession.resourceState != .ready {
+            guard ContinuousClock.now < limit, uploadSession.state != .failed, uploadSession.resourceState != .rejected else {
+                throw ResourceLiveFailure.processing
+            }
+            try await Task.sleep(for: .milliseconds(200))
+            uploadSession = try await upload.status(uploadSession.locator)
+        }
+        let commands = try V2HTTPGroupAvatarCommandClient(roomsEndpoint: fixture.url("v2/rooms"),
+            actorUserID: owner.userID, credentials: credentials, transport: http)
+        let ownerViews = try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: fixture.url("v2/rooms"),
+            actorUserID: owner.userID, credentials: credentials, transport: http)
+        let memberViews = try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: fixture.url("v2/rooms"),
+            actorUserID: member.userID, credentials: ResourceLiveCredentials(value: member), transport: http)
+        var before = try await ownerViews.readGroupAvatar(roomID: room)
+        for mutation in [V2GroupAvatarMutation.set(media), .remove] {
+            let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room,
+                expectedRevision: before.state.revision, mutation: mutation)
+            let result = try await commands.submitGroupAvatar(command)
+            guard case .committed(let change) = result.outcome else { throw ResourceLiveFailure.presentation }
+            #expect(change.state.mediaID == mutation.mediaID)
+            #expect(try await commands.submitGroupAvatar(command) == result)
+            #expect(try await commands.recoverGroupAvatar(.init(command: command, action: .query)).result == .committed(change))
+            let visible = try await memberViews.readGroupAvatar(roomID: room)
+            #expect(visible.state == change.state && !visible.canManage)
+            if let avatar = visible.avatar {
+                let output = directory.appendingPathComponent("downloaded.png")
+                try await V2URLSessionMediaByteTransfer(session: fixture.http).download(
+                    target: .init(downloadPlan: avatar.plan), destinationURL: output)
+                try checkAvatar(at: output)
+            } else { #expect(mutation == .remove) }
+            before = try await ownerViews.readGroupAvatar(roomID: room)
+            #expect(before.state == change.state)
+        }
+        print("Live acceptance: group avatar real upload/processing/set/download/remove/recover passed.")
+    }
+
+    @Test("real moderation, member mute and removal with persisted recovery",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func moderationAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let owner = try await fixture.register().credentials
+        let member = try await fixture.register().credentials
+        let room = try await seedRoom(fixture, viewer: member.userID, author: owner.userID)
+        let socket = try connection(authorSupplements: false)
+        let memberSocket = try connection(authorSupplements: false)
+        do {
+            let session = try await authenticate(socket, owner)
+            let memberSession = try await authenticate(memberSocket, member)
+            let transport = V2ProtobufSyncTransport(wire: socket, protocolVersion: session.protocolVersion)
+            let memberTransport = V2ProtobufSyncTransport(wire: memberSocket, protocolVersion: memberSession.protocolVersion)
+            let sender = V2ProtobufMessageSendOperationClient(transport: memberTransport, connection: memberSocket)
+            let sent = try await resourceSend(fixture, client: sender, account: member, roomID: room,
+                clientMessageID: .init(uuid: UUID()), text: "Acceptance moderation target", media: [], mentions: [])
+            let credentials = ResourceLiveCredentials(value: owner)
+            let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+            let moderation = try V2HTTPMessageModerationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let baseline = try await moderation.baseline(roomID: room, messageID: sent.messageID)
+            let intent = try V2MessageModerationIntent(roomID: room, actorUserID: owner.userID, operationID: .init(uuid: UUID()),
+                messageID: sent.messageID, reasonCode: .init("acceptance"), expectedMessageRevision: baseline.messageRevision,
+                expectedMembershipRevision: baseline.membershipRevision, confirmedUntilMilliseconds: liveAcceptanceDeadline())
+            guard case .admitted(let admission) = try await moderation.admit(intent) else { throw ResourceLiveFailure.presentation }
+            let result = try await moderation.submit(.init(intent: intent, admission: admission))
+            guard case .receipt(let receipt) = result, receipt.validates(intent: intent), case .redacted = receipt.outcome else {
+                throw ResourceLiveFailure.presentation
+            }
+            #expect(try await moderation.recover(intent, action: .query) == result)
+            let administration = try V2HTTPMemberAdministrationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            for action in [V2MemberAdministrationAction.mute(untilMilliseconds: liveAcceptanceDeadline()), .remove] {
+                let current = try await transport.fetchRolePolicyBaseline(roomID: room)
+                let intent = try V2MemberAdministrationIntent(roomID: room, actorUserID: owner.userID,
+                    operationID: .init(uuid: UUID()), targetUserID: member.userID, action: action, reasonCode: .init("acceptance"),
+                    expectedMembershipRevision: current.membershipRevision, confirmedUntilMilliseconds: liveAcceptanceDeadline())
+                guard case .admitted(let admission) = try await administration.admit(intent) else { throw ResourceLiveFailure.presentation }
+                let command = try V2MemberAdministrationCommand(intent: intent, admission: admission)
+                let result = try await administration.submit(command)
+                guard case .receipt(let receipt) = result, receipt.validates(command: command), case .applied = receipt.outcome else {
+                    throw ResourceLiveFailure.presentation
+                }
+                #expect(try await administration.recover(command, action: .query) == result)
+                let forbidden = try V2MessageSendOperationCommand(command: .init(roomID: room, senderUserID: member.userID,
+                    clientMessageID: .init(uuid: UUID()), text: "Must be rejected after policy change", limits: .init(maxUTF8Bytes: 4096)),
+                    firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+                guard case .receipt(let denial) = try await sender.submit(forbidden), case .rejected = denial.outcome else {
+                    Issue.record("Muted or removed member could still send"); throw ResourceLiveFailure.presentation
+                }
+            }
+            let roster = try await transport.listRoomMembers(roomID: room, cursor: nil, pageSize: 20)
+            #expect(!roster.members.contains { $0.userID == member.userID })
+            await memberSocket.disconnect(); await socket.disconnect()
+        } catch { await memberSocket.disconnect(); await socket.disconnect(); throw error }
+        print("Live acceptance: moderation, mute/remove original recovery and post-change send denial passed.")
+    }
+
+    @Test("real message edit, reaction, personal preferences, pin and withdrawal",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func messageOperationAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let author = try await fixture.register().credentials
+        let viewer = try await fixture.register().credentials
+        let room = try await seedRoom(fixture, viewer: viewer.userID, author: author.userID)
+        let socket = try connection(authorSupplements: false)
+        let reader = try connection(authorSupplements: false)
+        do {
+            let session = try await authenticate(socket, author)
+            let readerSession = try await authenticate(reader, viewer)
+            let transport = V2ProtobufSyncTransport(wire: socket, protocolVersion: session.protocolVersion)
+            let viewerTransport = V2ProtobufSyncTransport(wire: reader, protocolVersion: readerSession.protocolVersion)
+            let sendClient = V2ProtobufMessageSendOperationClient(transport: transport, connection: socket)
+            let send = try V2MessageSendOperationCommand(command: .init(roomID: room, senderUserID: author.userID,
+                clientMessageID: .init(uuid: UUID()), text: "Acceptance original", limits: .init(maxUTF8Bytes: 4096)),
+                firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            let submitted = try await sendClient.submit(send)
+            guard case .receipt(let original) = submitted, case .accepted(let sent) = original.outcome else {
+                throw ResourceLiveFailure.presentation
+            }
+            #expect(try await sendClient.submit(send) == submitted)
+            #expect(try await sendClient.recover(.init(identity: send.identity, fingerprint: send.fingerprint,
+                domainFingerprint: send.command.fingerprint, action: .query)) == submitted)
+            let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+            let credentials = ResourceLiveCredentials(value: author)
+            let mutations = try V2HTTPMessageMutationOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let edit = try V2MessageEditOperationCommand(command: .init(roomID: room, actorUserID: author.userID,
+                operationID: .init(uuid: UUID()), messageID: sent.messageID, expectedMessageRevision: 1,
+                text: "Acceptance edited", maximumUTF8Bytes: 4096), firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            let edited = try await mutations.submit(.edit(edit))
+            guard case .receipt(let editProof) = edited, case .committed(let editCommit) = editProof.outcome else {
+                throw ResourceLiveFailure.presentation
+            }
+            #expect(editCommit.messageRevision == 2)
+            #expect(try await mutations.recover(.init(identity: edit.identity, fingerprint: edit.fingerprint, action: .query)) == edited)
+            let reactions = try V2HTTPMessageReactionOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            for action in [V2MessageReactionAction.add, .remove] {
+                let baseline = try await reactions.snapshot(roomID: room, messageID: sent.messageID, reaction: "👍")
+                let command = try V2MessageReactionOperationCommand(command: .init(roomID: room, actorUserID: author.userID,
+                    operationID: .init(uuid: UUID()), messageID: sent.messageID, reaction: "👍", action: action),
+                    expectedReactionRevision: baseline.revision, firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+                let result = try await reactions.submit(command)
+                guard case .receipt(let receipt) = result, case .committed(let committed) = receipt.outcome else {
+                    throw ResourceLiveFailure.presentation
+                }
+                #expect(committed.targetState == (action == .add ? .present : .absent))
+                #expect(try await reactions.recover(.init(identity: command.identity, fingerprint: command.fingerprint, action: .query)) == result)
+                let persisted = try await reactions.snapshot(roomID: room, messageID: sent.messageID, reaction: "👍")
+                #expect(persisted.targetState == committed.targetState && persisted.revision == baseline.revision + 1)
+            }
+            let conversation = try V2ConversationStateCommand(operationID: .init(uuid: UUID()), roomID: room,
+                isPinned: true, isArchived: false, muteUntil: nil, expectedRevision: .init(rawValue: 0)!,
+                firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            let conversationProof = try await transport.setConversationState(command: conversation)
+            guard case .committed(.conversationState(let state)) = conversationProof.outcome else { throw ResourceLiveFailure.presentation }
+            #expect(state.isPinned && !state.isArchived)
+            #expect(try await transport.setConversationState(command: conversation) == conversationProof)
+            let favorite = try V2MessageFavoriteCommand(operationID: .init(uuid: UUID()), roomID: room, messageID: sent.messageID,
+                isFavorited: true, expectedRevision: .init(rawValue: 0)!, firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            let favoriteProof = try await transport.setMessageFavorite(command: favorite)
+            guard case .committed(.messageFavorite(let value)) = favoriteProof.outcome else { throw ResourceLiveFailure.presentation }
+            #expect(value.isFavorited)
+            #expect(try await transport.setMessageFavorite(command: favorite) == favoriteProof)
+            let capabilities = try V2HTTPGroupCapabilityOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let baseline = try await capabilities.pinBaseline(roomID: room, messageID: sent.messageID)
+            let pinned = try await acceptCapability(capabilities, owner: author.userID, room: room,
+                action: .pin(messageID: sent.messageID, isPinned: true, expectedRoomSequence: baseline.roomSequence))
+            guard case .pinned(_, let isPinned, _) = pinned else { throw ResourceLiveFailure.presentation }
+            #expect(isPinned)
+            let history = try await viewerTransport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 100)
+            #expect(history.events.contains { $0.roomSequence == editCommit.roomSequence })
+            let editedPayloads = history.events.compactMap { try? JSONSerialization.jsonObject(with: $0.payload) as? [String: Any] }
+            #expect(editedPayloads.contains { $0["text"] as? String == "Acceptance edited" })
+            let targetRoom = try await seedRoom(fixture, viewer: viewer.userID, author: author.userID)
+            let forwarding = try V2HTTPForwardPlanOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let forward = try V2ForwardPlanOperationCommand(actorUserID: author.userID,
+                command: .init(operationID: .init(uuid: UUID()), sources: [.init(roomID: room, messageID: sent.messageID, revision: .init(2))],
+                    targetRoomIDs: [targetRoom]), firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            var forwarded = try await forwarding.submit(forward)
+            let forwardLimit = ContinuousClock.now + .seconds(45)
+            while true {
+                if case .receipt = forwarded { break }
+                guard ContinuousClock.now < forwardLimit else { throw ResourceLiveFailure.processing }
+                try await Task.sleep(for: .milliseconds(100))
+                forwarded = try await forwarding.recover(forward, action: .query)
+            }
+            guard case .receipt(let resolved) = forwarded, resolved.validates(command: forward),
+                  case .completed(let summary) = resolved.receipt.outcome else { throw ResourceLiveFailure.presentation }
+            #expect(summary.succeededItemCount == 1 && summary.rejectedItemCount == 0)
+            #expect(try await forwarding.recover(forward, action: .query) == forwarded)
+            let copied = try await viewerTransport.pullGroupEvents(roomID: targetRoom, afterRoomSequence: 0, pageSize: 100)
+            let copiedPayloads = copied.events.compactMap { try? JSONSerialization.jsonObject(with: $0.payload) as? [String: Any] }
+            #expect(copiedPayloads.contains { $0["text"] as? String == "Acceptance edited" })
+            try await resourceWithdraw(fixture, account: author, roomID: room, messageID: sent.messageID, expectedMessageRevision: 2)
+            let after = try await viewerTransport.pullGroupEvents(roomID: room, afterRoomSequence: history.nextRoomSequence, pageSize: 100)
+            let withdrawalPayloads = after.events.compactMap { try? JSONSerialization.jsonObject(with: $0.payload) as? [String: Any] }
+            #expect(withdrawalPayloads.contains { $0["event_type"] as? String == "message.withdrawn" })
+            await reader.disconnect(); await socket.disconnect()
+        } catch { await reader.disconnect(); await socket.disconnect(); throw error }
+        print("Live acceptance: TCP send idempotency/recovery, edit, reaction add/remove, conversation preference, favorite, pin, forward, history and withdrawal passed.")
+    }
+
+    @Test("real group creation, announcement, permission, role and membership recovery",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func groupOperationAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let owner = try await fixture.register().credentials
+        let member = try await fixture.register().credentials
+        let newcomer = try await fixture.register().credentials
+        let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+        let credentials = ResourceLiveCredentials(value: owner)
+        let creation = try V2HTTPGroupCreationOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+        let audience = try V2GroupCreationAudience.canonical([member.userID], actorUserID: owner.userID)
+        let intent = try V2GroupCreationIntent(identity: .init(accountID: owner.userID, scope: .account(owner.userID),
+            operation: .groupRoom(.init(uuid: UUID()))), title: "Functional acceptance", capacityClass: .standard,
+            initialMemberCount: audience.count, audienceDigest: V2GroupCreationAudience.digest(audience),
+            firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+        guard case .progress = try await creation.begin(intent),
+              case .progress = try await creation.append(.init(intent: intent, offset: 0, memberUserIDs: audience)) else {
+            throw ResourceLiveFailure.presentation
+        }
+        var result = try await creation.finalize(intent)
+        let limit = ContinuousClock.now + .seconds(45)
+        while case .progress = result {
+            guard ContinuousClock.now < limit else { throw ResourceLiveFailure.processing }
+            try await Task.sleep(for: .milliseconds(100))
+            result = try await creation.recover(intent, action: .query)
+        }
+        guard case .receipt(let proof) = result, proof.validates(intent: intent),
+              case .created(let room, _, _, _) = proof.outcome else { throw ResourceLiveFailure.presentation }
+        #expect(try await creation.recover(intent, action: .query) == result)
+        let socket = try connection(authorSupplements: false)
+        do {
+            let session = try await authenticate(socket, owner)
+            let transport = V2ProtobufSyncTransport(wire: socket, protocolVersion: session.protocolVersion)
+            let initial = try await transport.fetchRolePolicyBaseline(roomID: room)
+            let capabilities = try V2HTTPGroupCapabilityOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            let announcement = try await acceptCapability(capabilities, owner: owner.userID, room: room,
+                action: .announcement(body: "Acceptance announcement", expectedRevision: 0))
+            guard case .announcement(let body, let revision, _) = announcement else { throw ResourceLiveFailure.presentation }
+            #expect(body == "Acceptance announcement" && revision == 1)
+            let permissions = initial.memberPermissions.symmetricDifference([.pinMessages])
+            _ = try await acceptCapability(capabilities, owner: owner.userID, room: room,
+                action: .rolePermissions(role: .member, permissions: permissions, expectedRevision: initial.permissionRevision))
+            let changed = try await transport.fetchRolePolicyBaseline(roomID: room)
+            #expect(changed.memberPermissions == permissions && changed.permissionRevision == initial.permissionRevision + 1)
+            _ = try await acceptCapability(capabilities, owner: owner.userID, room: room,
+                action: .memberRole(targetUserID: member.userID, role: .admin, expectedMembershipRevision: changed.membershipRevision))
+            let roster = try await transport.listRoomMembers(roomID: room, cursor: nil, pageSize: 20)
+            #expect(roster.members.contains { $0.userID == member.userID && $0.role == .admin })
+            let membership = try V2HTTPMembershipOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
+            for action in [V2RoomMembershipAction.add, .remove] {
+                let before = try await transport.fetchRolePolicyBaseline(roomID: room)
+                let change = try V2MembershipIntent(roomID: room, actorUserID: owner.userID, operationID: .init(uuid: UUID()),
+                    targetUserID: newcomer.userID, action: action, expectedMembershipRevision: before.membershipRevision,
+                    confirmedUntilMilliseconds: liveAcceptanceDeadline())
+                guard case .admitted(let admission) = try await membership.admit(change) else { throw ResourceLiveFailure.presentation }
+                let command = try V2MembershipOperationCommand(intent: change, admission: admission)
+                let applied = try await membership.submit(command)
+                guard case .receipt(let receipt) = applied, receipt.validates(command: command), case .changed = receipt.outcome else {
+                    throw ResourceLiveFailure.presentation
+                }
+                #expect(try await membership.recover(command, action: .query) == applied)
+                let current = try await transport.listRoomMembers(roomID: room, cursor: nil, pageSize: 20)
+                #expect(current.members.contains { $0.userID == newcomer.userID } == (action == .add))
+            }
+            await socket.disconnect()
+        } catch { await socket.disconnect(); throw error }
+        print("Live acceptance: group creation, announcement, permissions, role, membership add/remove and original recovery passed.")
+    }
+
+    private func acceptCapability(_ client: V2HTTPGroupCapabilityOperationClient, owner: UserID, room: RoomID,
+                                  action: V2GroupCapabilityAction) async throws -> V2GroupCapabilityValue {
+        let reference: V2OperationReference
+        let scope: V2OperationScope
+        switch action {
+        case .pin(let message, _, _): reference = .pinnedMessage(.init(uuid: UUID())); scope = .message(room, message)
+        case .announcement: reference = .groupAnnouncement(.init(uuid: UUID())); scope = .room(room)
+        case .rolePermissions: reference = .groupPermission(.init(uuid: UUID())); scope = .room(room)
+        case .memberRole: reference = .groupRole(.init(uuid: UUID())); scope = .room(room)
+        }
+        let intent = try V2GroupCapabilityIntent(identity: .init(accountID: owner, scope: scope, operation: reference),
+            action: action, confirmedUntilMilliseconds: liveAcceptanceDeadline())
+        guard case .admitted(let admission) = try await client.admit(intent) else { throw ResourceLiveFailure.presentation }
+        let command = try V2GroupCapabilityCommand(intent: intent, admission: admission)
+        let result = try await client.submit(command)
+        guard case .receipt(let receipt) = result, receipt.validates(command: command),
+              case .applied(let value) = receipt.outcome else { throw ResourceLiveFailure.presentation }
+        #expect(try await client.recover(command, action: .query) == result)
+        return value
+    }
+
+    @Test("real account preferences persist and recover their original outcomes",
+          arguments: [V2OperationKind.strangerMessagePreference, .userAddPreference, .readReceiptPreference, .liveActivityPreference])
+    func accountPreferenceAcceptance(kind: V2OperationKind) async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let account = try await fixture.register().credentials
+        let client = try V2HTTPAccountPreferenceOperationClient(baseURL: fixture.url(""),
+            credentials: ResourceLiveCredentials(value: account), transport: V2URLSessionMediaEdgeHTTPTransport(session: fixture.http))
+        let initial = try await client.baseline(kind: kind)
+        let reference: V2OperationReference
+        let values: [V2AccountPreferenceValue]
+        switch kind {
+        case .strangerMessagePreference:
+            reference = .strangerMessagePreference(.init(uuid: UUID()))
+            values = [.strangerMessage(.deny), .strangerMessage(.allow)]
+        case .userAddPreference:
+            reference = .userAddPreference(.init(uuid: UUID()))
+            values = [.userAdd(.deny), .userAdd(.allow)]
+        case .readReceiptPreference:
+            reference = .readReceiptPreference(.init(uuid: UUID()))
+            values = [.readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: false),
+                      .readReceipt(allowsDirectReadReceipts: true, allowsGroupReadReceipts: true)]
+        case .liveActivityPreference:
+            reference = .liveActivityPreference(.init(uuid: UUID()))
+            values = [.liveActivity(allowsOnlinePresence: false, allowsTypingIndicators: false),
+                      .liveActivity(allowsOnlinePresence: true, allowsTypingIndicators: true)]
+        default: throw ResourceLiveFailure.presentation
+        }
+        let value = try #require(values.first { $0 != initial.value })
+        let command = try V2AccountPreferenceCommand(identity: .init(accountID: account.userID,
+            scope: .account(account.userID), operation: reference), value: value,
+            expectedRevision: initial.revision, firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+        let submitted = try await client.submit(command)
+        guard case .receipt(let receipt) = submitted, case .applied = receipt.outcome else {
+            Issue.record("Preference change was not applied: \(kind.rawValue)"); return
+        }
+        #expect(receipt.validates(command: command))
+        #expect(try await client.recover(command, action: .query) == submitted)
+        #expect(try await client.submit(command) == submitted)
+        let persisted = try await client.baseline(kind: kind)
+        #expect(persisted.ownerUserID == account.userID && persisted.value == value)
+        #expect(persisted.revision == initial.revision + 1)
+        print("Live acceptance: \(kind.rawValue) submit/replay/recover/persisted read passed.")
+    }
+
+    @Test("real relationship removal, block reversal and contact alias recovery")
+    func socialAndAliasAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let owner = try await fixture.register().credentials
+        let peer = try await fixture.register().credentials
+        let client = try V2HTTPSocialOperationClient(baseURL: fixture.url(""), credentials: ResourceLiveCredentials(value: owner),
+            transport: V2URLSessionMediaEdgeHTTPTransport(session: fixture.http))
+        try await resourceRelationship(fixture, account: owner, target: peer.userID, action: .request)
+        try await resourceRelationship(fixture, account: peer, target: owner.userID, action: .accept)
+        let accepted = try await client.baseline(targetUserID: peer.userID)
+        #expect(accepted.relationshipState == .accepted)
+        let names = try V2HTTPNameOperationClient(endpoint: fixture.url("v2/profile-presentations"), credentials: ResourceLiveCredentials(value: owner),
+            transport: V2URLSessionPushEndpointHTTPTransport(session: fixture.http))
+        var baseline = try await names.contactSnapshot(owner: owner.userID, target: peer.userID)
+        for name: String? in ["Acceptance contact", nil] {
+            let command = try V2ContactAliasUpdateCommand(ownerUserID: owner.userID, targetUserID: peer.userID,
+                operationID: .init(uuid: UUID()), expectedRevision: baseline.value?.revision, remarkName: name,
+                firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            let receipt = try await names.submit(command)
+            guard case .committed(let saved) = receipt.outcome else { Issue.record("Alias change was not committed"); return }
+            #expect(receipt.validates(command) && saved.remarkName == name)
+            #expect(try await names.recover(.init(identity: command.identity, fingerprint: command.fingerprint, action: .query)) == .receipt(receipt))
+            baseline = try await names.contactSnapshot(owner: owner.userID, target: peer.userID)
+            #expect(baseline.value == saved)
+        }
+        try await resourceRelationship(fixture, account: owner, target: peer.userID, action: .remove)
+        #expect(try await client.baseline(targetUserID: peer.userID).relationshipState == .none)
+        for action in [V2UserBlockAction.block, .unblock] {
+            let before = try await client.baseline(targetUserID: peer.userID)
+            let command = try V2SocialOperationCommand(identity: .init(accountID: owner.userID,
+                scope: .userPair(owner.userID, peer.userID), operation: .userBlock(.init(uuid: UUID()))),
+                action: .userBlock(action), expectedRevision: before.blockRevision,
+                firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            let result = try await client.submit(command)
+            guard case .receipt(let receipt) = result,
+                  case .applied(.userBlock(let blocked, _)) = receipt.outcome else { Issue.record("Block change was not applied"); return }
+            #expect(blocked == (action == .block) && receipt.validates(command: command))
+            #expect(try await client.recover(command, action: .query) == result)
+            #expect(try await client.baseline(targetUserID: peer.userID).isBlocked == blocked)
+        }
+        print("Live acceptance: relationship request/accept/remove, contact alias set/clear/recover, block/unblock persisted reads passed.")
+    }
+}
+
+private func liveAcceptanceDeadline() -> UInt64 {
+    UInt64(Date().timeIntervalSince1970 * 1_000) + 120_000
+}
 #endif

@@ -132,8 +132,10 @@ def main() -> None:
                              shardIDs=shards, userBucketIDs=user_buckets, gatewayNodeIDs=[name]))
     peers = [dict(hostID=host_ids[name], serviceID=name, address=address, port=port,
                   shardIDs=shards, maximumRooms=10000) for name, address, port in args.hosts]
+    # Only Gateway hosts run realtime discovery/voting. A caller such as Account
+    # remains trusted for RPC, but must not create an unreachable quorum vote.
     realtime_peers = [dict(nodeID=name, serviceID=name, address=address, port=port)
-                      for name, address, port in sorted(nodes)]
+                      for name, address, port in sorted(args.hosts)]
     placement = None
     if args.policy_partitions is not None:
         ordered_hosts = sorted(host_names)
@@ -144,11 +146,15 @@ def main() -> None:
     for name, address, port in nodes:
         directory = root / name
         visible = Path(args.mount_root) if args.mount_root else directory
+        # Caller configurations retain their required local identity. Gateway
+        # hosts share only the Gateway voter roster; callers do not vote there.
+        local_realtime_peers = realtime_peers if name in host_names else realtime_peers + [
+            dict(nodeID=name, serviceID=name, address=address, port=port)]
         document = dict(name="imv2-room-actors", address=address,
             port=port, threadPoolSize=2, serviceID=name, hostID=host_ids.get(name),
             signingKeyPath=str(visible / "signing.key"), certificatePath=str(visible / "tls.pem"),
             privateKeyPath=str(visible / "tls.key"), trustRootPath=str(visible / "ca.pem"),
-            services=services, peers=peers, realtimePeers=realtime_peers)
+            services=services, peers=peers, realtimePeers=local_realtime_peers)
         if placement is not None:
             document["policyPlacement"] = placement
         write_json(directory / "configuration.json", document)
