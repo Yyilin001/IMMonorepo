@@ -484,10 +484,11 @@ private func assertDirectMessageIsRestricted(sender: LocalE2EAccountCredentials,
         }
         XCTAssertTrue(try proof.validates(identity: command.identity, fingerprint: command.fingerprint))
         XCTAssertEqual(proof.outcome, .rejected(.directPolicyDenied))
-        guard case .receipt(let replay) = try await client.recover(.init(identity: command.identity, fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query)) else {
-            XCTFail("Restricted message must recover its original proof"); return
-        }
-        XCTAssertEqual(replay, proof)
+        // Rejections are returned on this request and intentionally not persisted.
+        // Recovery must not invent a successful or durable rejected send.
+        let recovered = try await client.recover(.init(identity: command.identity, fingerprint: command.fingerprint,
+            domainFingerprint: command.command.fingerprint, action: .query))
+        XCTAssertEqual(recovered, .unresolved)
         }
     } catch { XCTFail("Restricted message must return a bound authorization proof: \(error)") }
 }

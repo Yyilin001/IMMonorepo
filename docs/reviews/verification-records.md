@@ -2758,8 +2758,8 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | 真实账号 SDK | 5 项、2 套件通过 | 真实注册/登录前置、刷新、远端设备撤销、当前退出、TLS 不可信保留会话、撤销重试 | `/tmp/imv2-acceptance-live-account-20261008/client.log` |
 | 最小原生全栈 | 通过 | 独立 PG、HTTPS 注册/发凭据、真实 TLS Gateway 认证 | `/tmp/imv2-acceptance-native-smoke-fixed2-20261008.log` |
 | 服务端七库真实 PG 全量尝试 | 退出 1，主测试包 signal 5 中止；其他测试目标也报告失败 | 不能声称全量完成；集成夹具也不替代真实 App 操作 | `/tmp/imv2-acceptance-server-full-20261008.log` |
-| 真实账号 App / Gateway 联调 | 构建锁已释放，启动独立服务 | 尚无本轮 App 联调通过结论 | `/tmp/imv2-acceptance-live-account-ui-r2-20261008/` |
-| 真实资源、作者、授权联调 | 构建锁已释放，启动独立服务 | 尚无本轮资源联调通过结论 | `/tmp/imv2-acceptance-live-resources-20261008/` |
+| 真实账号 App / Gateway 联调 | R6两项撤销App及1项headless入口通过 | R5私聊持久提示和房间在线恢复失败仍保留 | `/tmp/imv2-acceptance-live-account-ui-r6-20261008/` |
+| 真实资源、作者、授权联调 | R10完整启用套件仅群头像422失败 | 已安装typing开始/停止、消息/群/关系/设置/资源和搜索通过；冷订阅丢失仍列出 | `/tmp/imv2-acceptance-live-resources-extended-r10-20261008/` |
 
 已确认的失败与解释边界：
 
@@ -2785,65 +2785,102 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 
 <!-- acceptance-matrix-start -->
 
-完整待验矩阵（执行中；“待真实验收”不等于通过）：
+完整验收矩阵（执行中；真实 SDK 通过不自动代表 App 页面通过）：
 
 | 编号 | 功能 | 当前结果 | 证据索引 |
 | --- | --- | --- | --- |
-| OP-01 | 消息发送 | 待真实验收 | 待回收 |
-| OP-02 | 撤回消息 | 待真实验收 | 待回收 |
-| OP-03 | 编辑消息 | 待真实验收 | 待回收 |
-| OP-04 | 消息表情 | 待真实验收 | 待回收 |
-| OP-05 | 已读回执 | 待真实验收 | 待回收 |
-| OP-06 | 打开唯一私聊 | 待真实验收 | 待回收 |
-| OP-07 | 群创建 | 待真实验收 | 待回收 |
-| OP-08 | 成员加入/退出 | 待真实验收 | 待回收 |
-| OP-09 | 消息管理删除 | 待真实验收 | 待回收 |
-| OP-10 | 成员禁言 | 待真实验收 | 待回收 |
-| OP-11 | 管理移除成员 | 待真实验收 | 待回收 |
+| OP-01 | 消息发送 | 真实TCP提交/幂等/成功恢复通过；App消息投影待验 | extendedLiveResourcesR4 |
+| OP-02 | 撤回消息 | 真实HTTPS撤回及历史事件通过；跨安装同步待验 | extendedLiveResourcesR4 |
+| OP-03 | 编辑消息 | 真实HTTPS编辑/恢复/历史回读通过；跨安装同步待验 | extendedLiveResourcesR4 |
+| OP-04 | 消息表情 | 真实HTTPS表情增加/移除/恢复/回读通过 | extendedLiveResourcesR4 |
+| OP-05 | 已读回执 | 真实TCP已读提交、读者列表及隐私开关过滤通过 | extendedLiveResourcesR7 |
+| OP-06 | 打开唯一私聊 | 真实HTTPS打开私聊通过；双向重复打开同房间已核对 | extendedLiveResourcesR9 |
+| OP-07 | 群创建 | 真实群创建begin/append/finalize/recover通过 | extendedLiveResourcesR4 |
+| OP-08 | 成员加入/退出 | 真实成员添加/移除及roster回读通过；主动退出待验 | extendedLiveResourcesR4 |
+| OP-09 | 消息管理删除 | 真实管理删除和原结果恢复通过 | extendedLiveResourcesR4 |
+| OP-10 | 成员禁言 | 真实禁言/恢复及后续TCP拒绝通过 | extendedLiveResourcesR4 |
+| OP-11 | 管理移除成员 | 真实成员移除/恢复/roster及后续TCP拒绝通过 | extendedLiveResourcesR4 |
 | OP-12 | 陌生消息设置 | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
 | OP-13 | 好友请求设置 | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
 | OP-14 | 已读公开设置 | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
 | OP-15 | 在线/输入隐私设置 | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
-| OP-16 | 好友关系 | 待真实验收 | 待回收 |
-| OP-17 | 拉黑/解除 | 待真实验收 | 待回收 |
-| OP-18 | 会话置顶/归档/静音 | 待真实验收 | 待回收 |
-| OP-19 | 消息收藏 | 待真实验收 | 待回收 |
-| OP-20 | 群消息置顶 | 待真实验收 | 待回收 |
-| OP-21 | 群公告 | 待真实验收 | 待回收 |
-| OP-22 | 群角色权限 | 待真实验收 | 待回收 |
-| OP-23 | 成员角色 | 待真实验收 | 待回收 |
-| OP-24 | 消息转发 | 待真实验收 | 待回收 |
-| OP-25 | 个人资料更新 | 待真实验收 | 待回收 |
-| OP-26 | 联系人备注 | 待真实验收 | 待回收 |
-| OP-27 | 群昵称 | 待真实验收 | 待回收 |
-| OP-28 | 群邀请 | 待真实验收 | 待回收 |
-| OP-29 | 申请加入群 | 待真实验收 | 待回收 |
-| OP-30 | 群申请处理 | 待真实验收 | 待回收 |
-| OP-31 | 资源上传 | 待真实验收 | 待回收 |
-| OP-32 | 群头像 | 待真实验收 | 待回收 |
+| OP-16 | 好友关系 | 真实好友申请/接受/删除及回读通过 | extendedLiveResourcesR4 |
+| OP-17 | 拉黑/解除 | 真实拉黑/解除/恢复及关系回读通过 | extendedLiveResourcesR4 |
+| OP-18 | 会话置顶/归档/静音 | 真实TCP置顶/归档/静音及重放通过；跨安装同步待验 | extendedLiveResourcesR7 |
+| OP-19 | 消息收藏 | 真实TCP收藏/重放通过 | extendedLiveResourcesR4 |
+| OP-20 | 群消息置顶 | 真实群置顶/恢复通过 | extendedLiveResourcesR4 |
+| OP-21 | 群公告 | 真实公告提交/恢复通过 | extendedLiveResourcesR4 |
+| OP-22 | 群角色权限 | 真实成员权限调整/恢复通过 | extendedLiveResourcesR4 |
+| OP-23 | 成员角色 | 真实管理员角色调整/恢复/roster通过 | extendedLiveResourcesR4 |
+| OP-24 | 消息转发 | 真实转发计划/恢复/目标历史内容通过 | extendedLiveResourcesR4 |
+| OP-25 | 个人资料更新 | 真实个人资料更新、头像绑定及授权展示通过 | extendedLiveResourcesR7 |
+| OP-26 | 联系人备注 | 真实备注设置/清空/恢复/回读通过 | extendedLiveResourcesR4 |
+| OP-27 | 群昵称 | 真实群昵称设置/清空/恢复、事件版本及目录租约通过 | extendedLiveResourcesR7 |
+| OP-28 | 群邀请 | 真实邀请创建/撤销及列表回读通过 | extendedLiveResourcesR9 |
+| OP-29 | 申请加入群 | 真实入群申请提交/取消、审核可见性通过 | extendedLiveResourcesR9 |
+| OP-30 | 群申请处理 | 真实Owner批准入群及申请人TCP成员列表通过；拒绝决定待验 | extendedLiveResourcesR9 |
+| OP-31 | 资源上传 | 真实个人头像/消息附件上传处理、下载和撤回授权收敛通过；后台与群头像另列 | extendedLiveResourcesR7 |
+| OP-32 | 群头像 | 失败：真实上传创建返回422；服务端明确拒绝groupAvatar用途 | extendedLiveResourcesR4 |
 | EX-01 | 注册与登录 | 真实SDK通过；本轮App联调待完成 | liveAccountSDK, nativeSmoke |
 | EX-02 | 凭据刷新 | 真实SDK通过；本轮App联调待完成 | liveAccountSDK, nativeSmoke |
 | EX-03 | 当前设备登出 | 真实SDK通过；本轮App联调待完成 | liveAccountSDK, nativeSmoke |
-| EX-04 | 远程设备撤销 | 真实SDK通过；本轮App联调待完成 | liveAccountSDK, nativeSmoke |
+| EX-04 | 远程设备撤销 | 真实SDK及App远端撤销、回到登录和重启保留终止态通过 | liveAccountUIR4 |
 | EX-05 | 账号封禁 | 待真实验收 | 待回收 |
 | EX-06 | 账号切换与冷启动 | 待真实验收 | 待回收 |
 | EX-07 | 陌生消息拒绝/允许 | 待真实验收 | 待回收 |
-| EX-08 | 拉黑后即时授权失效 | 待真实验收 | 待回收 |
-| EX-09 | 私聊唯一性 | 待真实验收 | 待回收 |
+| EX-08 | 拉黑后即时授权失效 | 真实拉黑后发送拒绝及恢复unresolved通过；失败：发送者持久限制提示缺失 | liveAccountUIR5 |
+| EX-09 | 私聊唯一性 | 双方各自操作打开私聊得到同一房间通过；并发创建唯一性待验 | extendedLiveResourcesR9 |
 | EX-10 | 实时收发与历史恢复 | 待真实验收 | 待回收 |
 | EX-11 | 发送结果不确定后恢复 | 待真实验收 | 待回收 |
 | EX-12 | 离线发送持久化与重放 | 待真实验收 | 待回收 |
 | EX-13 | 多设备编辑撤回同步 | 待真实验收 | 待回收 |
 | EX-14 | 多设备已读 | 待真实验收 | 待回收 |
-| EX-15 | 目录分页与权限过滤 | 待真实验收 | 待回收 |
-| EX-16 | 消息搜索 | 待真实验收 | 待回收 |
-| EX-17 | 资源下载与撤销 | 待真实验收 | 待回收 |
-| EX-18 | 在线状态与输入提示 | 待真实验收 | 待回收 |
-| EX-19 | 通知丢失补偿 | 待真实验收 | 待回收 |
-| EX-20 | 断线重连 | 待真实验收 | 待回收 |
+| EX-15 | 目录分页与权限过滤 | 真实群昵称分页租约和权限过滤通过；大目录和跨安装恢复待验 | extendedLiveResourcesR7 |
+| EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
+| EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
+| EX-18 | 在线状态与输入提示 | 真实在线状态通过；typing安装确认后开始/停止通过；冷订阅ACK后立即发送曾丢失 | extendedLiveResourcesR9, extendedLiveResourcesR10 |
+| EX-19 | 通知丢失补偿 | 丢尾通知阶段未执行：前置online-change失败unexpectedResponse | liveAccountUIR5 |
+| EX-20 | 断线重连 | 真实50房间初次补拉5.85秒、重连补拉1.27秒通过；随后online-change失败 | liveAccountUIR5 |
 | EX-21 | 本地持久化清理 | 串行回归失败；部分夹具缺少投影收敛前置，需进一步核对 | clientSerial |
 | EX-22 | 后台上传下载 | 待真实验收 | 待回收 |
-| EX-23 | Push端点与唤醒 | 待真实验收 | 待回收 |
-| EX-24 | UI主流程 | 11项隔离UI场景通过；完整真实业务UI待验 | app |
+| EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；未验证外部APNs和真机实际推送 | liveAccountUIR6 |
+| EX-24 | UI主流程 | 11项隔离UI通过；真实双安装首场景Dynamic Type审计失败，后续主流程尚未执行 | twoInstallUIR3 |
 
 <!-- acceptance-matrix-end -->
+
+2026-10-08 后续真实联调回收：
+
+- R4 资源扩展真实用例中，消息、群创建和管理、禁言与移除、四类设置、好友与备注独立用例通过。主资源用例因消费订阅初始水位而出现两条断言，已改为等待对应房间消息水位，R5 复验中；不删断言。
+- 群头像上传创建实际返回 422。`V2ResourceService.create` 明确抛出 `unsupportedCapability`，capabilities 也未公告群头像用途。当前属于未打通的业务功能，保留失败，不以其他头像上传替代。
+- 账号 App R4 两项撤销 UI 场景通过；私聊限制场景仍要求恢复被拒绝消息。生产仅查询成功完成记录，拒绝结果按既定设计不持久化；测试更新为验证拒绝 proof 和恢复 unresolved，尚待复验。
+- 两个新建、独立 iPhone 17 模拟器的真实双安装 App 场景已启动，结果待回收。
+
+2026-10-08 R7/R9 与真实双安装回收：
+
+- R7 主资源、管理、消息、群、四类设置、关系用例通过；完整启用套件仍退出 1，仅群头像上传 422。新增真实 TLS 历史至 SQLite 的搜索准备/索引维护验证：编辑旧文本不再命中，撤回后编辑文本也不再命中。置顶、归档、静音及幂等重放通过。
+- R9 加测邀请撤销和批准入群，通过真实申请人 TCP roster 校验成员；此轮主资源用例通过。新增双向打开唯一私聊得到相同房间、在线状态读取通过；开始输入提交确认后，接收端 8 秒内未收到 typing=true，保留失败。不能根据源码中停止事件期限问题推定本次超时发生在 typing=false，日志明确停在 true。
+- 双安装 R2 的 Xcode 栈等待 `collectSimulatorDiagnostics`，保留采样并终止本轮拥有的 Xcode。驱动新增 `-collect-test-diagnostics never` 与每项 300 秒超时；R3 9 秒内回收真实失败：`Dynamic Type font sizes are partially unsupported`。没有跳过审计或将后续双安装步骤计为通过；清理两安装随机作用域后关闭本轮服务。
+- R5 App 联调启动，包含私聊限制新拒绝恢复边界、50 房间跨 Gateway 丢尾通知补偿与 headless Push 入口；尚待终态。所有失败轮次仍保留。
+
+本轮证据索引：
+
+| 索引 | 原始证据 |
+| --- | --- |
+| extendedLiveResourcesR7 | `/tmp/imv2-acceptance-live-resources-extended-r7-20261008/client.log` |
+| extendedLiveResourcesR9 | `/tmp/imv2-acceptance-live-resources-extended-r9-20261008/client.log` |
+| twoInstallUIR3 | `/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.41X8dh/` |
+| liveAccountUIR5 | `/tmp/imv2-acceptance-live-account-ui-r5-20261008/` |
+
+R3 无障碍失败附件进一步定位到空会话页的“暂无会话”标题和装饰图。源码使用 SwiftUI `ContentUnavailableView`（`V2ConversationUI.swift`），附件说明为该 AccessibilityNode 字号不可调整；尚未做默认/放大字号的真实视觉对比，因此不能判定为 App 自定义字体错误或直接排除审计。附件保留于 `/tmp/imv2-acceptance-two-install-r3-attachments-20261008/`。
+
+R5 私聊联调已越过拒绝恢复断言，但随后失败：期望一条可持久恢复的发送者单侧限制提示，SQLite 实际为 0 条。与“不持久化拒绝操作回执”属于不同观察项；仍保留这个断言，不能把恢复 unresolved 通过视为完整限制提示 UI 通过。生产消息 Owner 对 denied 正文执行 rollback，旧单侧提示写入点仍存在，是否为优化时丢失独立业务副作用需继续核对。
+
+R5 已结束并清理独立服务/模拟器：两项撤销 App 用例通过；私聊持久提示缺失、50 房间恢复抛 unexpectedResponse 两项失败。headless 入口因驱动在 App 失败处退出而未执行，不能计通过。已单独启动不含上述故障场景的 R6 来核对该入口；并不替代或覆盖 R5 的失败。
+
+R5 恢复阶段细分日志：50 房间初始补拉完成 5.8505 秒、第二周期重连补拉完成 1.2707 秒；明确失败阶段为 `online-change`，后续 `silent-tail` 注入尚未执行。只将已完成的两周期列为通过，丢尾通知补偿仍无通过证据。
+
+R10 输入提示定位已启动：协议 `V2RealtimeCoverageState` 明确区分 Subscribe ACK 与安装完成通知；本轮先观察真实 `.typing` coverage 安装状态，再发送开始/停止事件，用于区分安装迟到与已安装后的投递故障。R9 的冷订阅超时仍保留，不能用安装后通过覆盖初始丢失。房间恢复测试新增发送前/确认后、收到 hint 和超时时实际消息数/游标日志，下一次将细分 `online-change` 的失败。
+
+R10 已终态：9个测试函数（慢上传未启用），启用项仅群头像422失败；观察真实typing coverage从recovering到ready后，开始/停止均收到。R6已退出0：两个撤销App测试通过、headless Push入口1项通过且没有跳过。headless入口并不证明外部APNs真实投递。R7房间定位与R11真实Operator封禁验收已启动。
+
+双安装驱动保留审计失败，同时继续业务覆盖：仅允许唯一失败文本为已记录的Dynamic Type审计时继续下一阶段，其他断言和其他失败立即停止；审计失败计数>0在最终返回1。测试只在审计调用作用域内允许XCTest继续，所有审计类别和失败仍在xcresult中，未将审计转为通过或skip。

@@ -186,7 +186,12 @@ struct V2LiveResourceAuthorTests {
             let directSent = try await resourceSend(fixture, client: .init(transport: authorTransport, connection: authorConnection), account:author,roomID: directRoom.roomID,
                 clientMessageID: .init(uuid: UUID()), text: "A direct author with an avatar", media: [], mentions: [])
             print("Live resource stage: awaiting direct availability hint.")
-            let directHint = try await bounded { try await viewerConnection.nextGroupEventAvailabilityHint() }
+            let directHint = try await bounded {
+                while true {
+                    let value = try await viewerConnection.nextGroupEventAvailabilityHint()
+                    if value.roomID == directRoom.roomID, value.highWatermark >= directSent.roomSequence { return value }
+                }
+            }
             print("Live resource stage: received direct availability hint.")
             #expect(directHint.roomID == directRoom.roomID && directHint.highWatermark == directSent.roomSequence)
             // No history pull or profile HTTP read occurs between this send and
@@ -212,7 +217,12 @@ struct V2LiveResourceAuthorTests {
             let sent = try await resourceSend(fixture, client: .init(transport: authorTransport, connection: authorConnection), account:author,roomID: room, clientMessageID: .init(uuid: UUID()),
                 text: "An author with a new avatar", media: [], mentions: [])
             print("Live resource stage: awaiting group availability hint.")
-            let hint = try await bounded { try await viewerConnection.nextGroupEventAvailabilityHint() }
+            let hint = try await bounded {
+                while true {
+                    let value = try await viewerConnection.nextGroupEventAvailabilityHint()
+                    if value.roomID == room, value.highWatermark >= sent.roomSequence { return value }
+                }
+            }
             print("Live resource stage: received group availability hint.")
             #expect(hint.roomID == room && hint.highWatermark == 2)
             print("Live resource stage: awaiting group author presentation delta.")
@@ -245,7 +255,13 @@ struct V2LiveResourceAuthorTests {
             try #require(received.entries.count == 1)
             guard case .presentation(let value, let optionalAvatar, let presentationDeadline, let avatarDeadline) = received.entries[0],
                   let avatar = optionalAvatar else {
-                Issue.record("History author did not produce an authorized avatar")
+                let reason: String
+                switch received.entries[0] {
+                case .retryable: reason = "retryable"
+                case .unavailable: reason = "unavailable"
+                case .presentation: reason = "presentation-without-avatar"
+                }
+                Issue.record("History author did not produce an authorized avatar: \(reason)")
                 throw ResourceLiveFailure.presentation
             }
             let key = V2ProfileViewLookupKey(userID: author.userID, context: .room(room))
@@ -481,7 +497,28 @@ struct V2LiveResourceAuthorTests {
         #expect(cancelled.outcome == .applied(.requestCancelled(requestID:request.requestID)))
         let after = try await readReviewPage(ownerProfiles, keys: [request.presentationKey])
         #expect(after.unavailable == [request.presentationKey] && after.presentations.isEmpty)
-        print("Live resource: join requests carry applicant IDs only; owner review authorizes a nonmember, ordinary membership does not, and cancellation stops new issuance.")
+        let resubmitted = try await resourceInvitation(applicantOperations, account: applicant, room: room,
+            action: .submit(inviteID: inviteID, tokenDigest: bearer.tokenDigest, note: "Approval fixture"), authorization: bearer)
+        guard case .applied(.requestSubmitted(let secondRequest, _)) = resubmitted.outcome else { throw ResourceLiveFailure.presentation }
+        let reviewBaseline = try await ownerOperations.baseline(roomID: room)
+        let approved = try await resourceInvitation(ownerOperations, account: manager, room: room,
+            action: .decide(requestID: secondRequest, decision: .approve, expectedMembershipRevision: reviewBaseline.membershipRevision))
+        guard case .applied(.requestDecided(let decided, let decision, let revision)) = approved.outcome else { throw ResourceLiveFailure.presentation }
+        #expect(decided == secondRequest && decision == .approve && revision == reviewBaseline.membershipRevision + 1)
+        let memberConnection = try connection(authorSupplements: false)
+        do {
+            let session = try await authenticate(memberConnection, applicant)
+            let transport = V2ProtobufSyncTransport(wire: memberConnection, protocolVersion: session.protocolVersion)
+            let roster = try await transport.listRoomMembers(roomID: room, cursor: nil, pageSize: 100)
+            #expect(roster.members.contains { $0.userID == applicant.userID })
+            await memberConnection.disconnect()
+        } catch { await memberConnection.disconnect(); throw error }
+        let finalBaseline = try await ownerOperations.baseline(roomID: room)
+        let revoked = try await resourceInvitation(ownerOperations, account: manager, room: room,
+            action: .revoke(inviteID: inviteID, expectedMembershipRevision: finalBaseline.membershipRevision))
+        #expect(revoked.outcome == .applied(.inviteRevoked(inviteID: inviteID)))
+        #expect(try await ownerInvites.activeInvites(roomID: room).allSatisfy { $0.inviteID != inviteID })
+        print("Live resource: join request cancellation, owner approval, actual member roster and invitation revocation passed.")
     }
 
     private func readReviewPage(_ client: V2HTTPProfilePresentationClient,
@@ -823,6 +860,14 @@ extension V2LiveResourceAuthorTests {
             guard case .committed(.conversationState(let state)) = conversationProof.outcome else { throw ResourceLiveFailure.presentation }
             #expect(state.isPinned && !state.isArchived)
             #expect(try await transport.setConversationState(command: conversation) == conversationProof)
+            let muteUntil = Date().addingTimeInterval(600)
+            let archived = try V2ConversationStateCommand(operationID: .init(uuid: UUID()), roomID: room,
+                isPinned: false, isArchived: true, muteUntil: muteUntil, expectedRevision: state.revision,
+                firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            let archivedProof = try await transport.setConversationState(command: archived)
+            guard case .committed(.conversationState(let archivedState)) = archivedProof.outcome else { throw ResourceLiveFailure.presentation }
+            #expect(!archivedState.isPinned && archivedState.isArchived && archivedState.muteUntil != nil)
+            #expect(try await transport.setConversationState(command: archived) == archivedProof)
             let favorite = try V2MessageFavoriteCommand(operationID: .init(uuid: UUID()), roomID: room, messageID: sent.messageID,
                 isFavorited: true, expectedRevision: .init(rawValue: 0)!, firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
             let favoriteProof = try await transport.setMessageFavorite(command: favorite)
@@ -839,6 +884,16 @@ extension V2LiveResourceAuthorTests {
             #expect(history.events.contains { $0.roomSequence == editCommit.roomSequence })
             let editedPayloads = history.events.compactMap { try? JSONSerialization.jsonObject(with: $0.payload) as? [String: Any] }
             #expect(editedPayloads.contains { $0["text"] as? String == "Acceptance edited" })
+            let searchDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            try FileManager.default.createDirectory(at: searchDirectory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: searchDirectory) }
+            let searchStore = try GRDBV2LocalSyncStore(databaseURL: searchDirectory.appendingPathComponent("search.sqlite"),
+                installationBinding: .init(value: UUID()), userID: viewer.userID)
+            _ = try await searchStore.applyGroupEventPage(history)
+            try await searchStore.prepareMessageSearchIndex()
+            while try await searchStore.processPendingMessageSearchIndexJobs() > 0 { try Task.checkCancellation() }
+            #expect(try await searchStore.searchMessages(.init(query: "Acceptance edited", scope: .room(room))).hits.map(\.messageID) == [sent.messageID])
+            #expect(try await searchStore.searchMessages(.init(query: "Acceptance original", scope: .room(room))).hits.isEmpty)
             let targetRoom = try await seedRoom(fixture, viewer: viewer.userID, author: author.userID)
             let forwarding = try V2HTTPForwardPlanOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
             let forward = try V2ForwardPlanOperationCommand(actorUserID: author.userID,
@@ -863,6 +918,11 @@ extension V2LiveResourceAuthorTests {
             let after = try await viewerTransport.pullGroupEvents(roomID: room, afterRoomSequence: history.nextRoomSequence, pageSize: 100)
             let withdrawalPayloads = after.events.compactMap { try? JSONSerialization.jsonObject(with: $0.payload) as? [String: Any] }
             #expect(withdrawalPayloads.contains { $0["event_type"] as? String == "message.withdrawn" })
+            _ = try await searchStore.applyGroupEventPage(after)
+            while try await searchStore.processPendingMessageSearchIndexJobs() > 0 { try Task.checkCancellation() }
+            #expect(try await searchStore.searchMessages(.init(query: "Acceptance edited", scope: .room(room))).hits.isEmpty)
+            try await searchStore.close()
+            print("Live acceptance: real TLS history to SQLite search; edit removes old text and withdrawal removes search hit.")
             await reader.disconnect(); await socket.disconnect()
         } catch { await reader.disconnect(); await socket.disconnect(); throw error }
         print("Live acceptance: TCP send idempotency/recovery, edit, reaction add/remove, conversation preference, favorite, pin, forward, history and withdrawal passed.")
@@ -1051,5 +1111,114 @@ extension V2LiveResourceAuthorTests {
 
 private func liveAcceptanceDeadline() -> UInt64 {
     UInt64(Date().timeIntervalSince1970 * 1_000) + 120_000
+}
+extension V2LiveResourceAuthorTests {
+    @Test("real direct-room uniqueness, online presence and typing delivery",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func liveActivityAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let author = try await fixture.register().credentials
+        let viewer = try await fixture.register().credentials
+        _ = try await resourceRelationship(fixture, account: author, target: viewer.userID, action: .request)
+        _ = try await resourceRelationship(fixture, account: viewer, target: author.userID, action: .accept)
+        let first = try await resourceOpenDirect(fixture, account: author, target: viewer.userID)
+        let repeated = try await resourceOpenDirect(fixture, account: viewer, target: author.userID)
+        #expect(first.roomID == repeated.roomID)
+        for account in [author, viewer] {
+            let preferences = try V2HTTPAccountPreferenceOperationClient(baseURL: fixture.url(""),
+                credentials: ResourceLiveCredentials(value: account), transport: V2URLSessionMediaEdgeHTTPTransport(session: fixture.http))
+            let baseline = try await preferences.baseline(kind: .liveActivityPreference)
+            let command = try V2AccountPreferenceCommand(identity: .init(accountID: account.userID,
+                scope: .account(account.userID), operation: .liveActivityPreference(.init(uuid: UUID()))),
+                value: .liveActivity(allowsOnlinePresence: true, allowsTypingIndicators: true),
+                expectedRevision: baseline.revision, firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            guard case .receipt(let proof) = try await preferences.submit(command), case .applied = proof.outcome else {
+                throw ResourceLiveFailure.presentation
+            }
+        }
+        let authorSocket = try connection(authorSupplements: false)
+        let viewerSocket = try connection(authorSupplements: false)
+        do {
+            let authorSession = try await authenticate(authorSocket, author)
+            let viewerSession = try await authenticate(viewerSocket, viewer)
+            let authorTransport = V2ProtobufSyncTransport(wire: authorSocket, protocolVersion: authorSession.protocolVersion)
+            let viewerTransport = V2ProtobufSyncTransport(wire: viewerSocket, protocolVersion: viewerSession.protocolVersion)
+            try await authorTransport.setPresencePublicationMode(.allowWhenAuthorized)
+            let presence = try await viewerTransport.subscribePresence(roomID: first.roomID)
+            #expect(presence.roomID == first.roomID && presence.targetUserID == author.userID && presence.isOnline)
+            #expect(presence.expiresAt > Date())
+            print("Live acceptance stage: direct-room uniqueness and online presence verified.")
+            try await viewerTransport.subscribeTyping(roomID: first.roomID)
+            // Subscribe ACK and confirmed acceleration coverage are separate
+            // protocol boundaries. Observe the actual installation witness.
+            let coverage = await viewerSocket.realtimeCoverageChanges()
+            _ = try await bounded {
+                for await state in coverage {
+                    if state.scope == .typing {
+                        print("Live acceptance stage: typing coverage status=\(state.status.rawValue) reason=\(state.reason.rawValue)")
+                    }
+                    if state.scope == .typing, state.scopeID.lowercased() == first.roomID.rawValue.lowercased(), state.subscriptionInstalled { return state }
+                }
+                throw ResourceLiveFailure.timeout
+            }
+            print("Live acceptance stage: typing coverage installed.")
+            for isTyping in [true, false] {
+                try await authorTransport.setTyping(roomID: first.roomID, isTyping: isTyping)
+                print("Live acceptance stage: awaiting typing state \(isTyping).")
+                let event = try await bounded {
+                    while true {
+                        if case .typing(let state) = try await viewerSocket.nextLiveActivityEvent(),
+                           state.roomID == first.roomID, state.userID == author.userID, state.isTyping == isTyping { return state }
+                    }
+                }
+                if isTyping { #expect(event.expiresAt > Date()) }
+                print("Live acceptance stage: received typing state \(isTyping).")
+            }
+            try await viewerTransport.unsubscribeTyping(roomID: first.roomID)
+            try await viewerTransport.unsubscribePresence(roomID: first.roomID)
+            await authorSocket.disconnect(); await viewerSocket.disconnect()
+        } catch { await authorSocket.disconnect(); await viewerSocket.disconnect(); throw error }
+        print("Live acceptance: both directions open the same direct room; authorized presence and typing start/stop delivered on real TLS.")
+    }
+}
+extension V2LiveResourceAuthorTests {
+    @Test("real operator account disable ends HTTP sessions and rejects login and TLS authentication",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func accountDisableAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let account = try await fixture.register()
+        let store = LiveAccountCredentialStore(account.credentials)
+        let session = try fixture.session(store)
+        _ = try await session.restoreState()
+        let devices = try await fixture.devices(session)
+        #expect(try await devices.list(cursor: nil, pageSize: 10).sessions.count == 1)
+        let socket = try connection(authorSupplements: false)
+        _ = try await authenticate(socket, account.credentials)
+        await socket.disconnect()
+        var request = URLRequest(url: fixture.url("__fixture__/disable-account"))
+        request.httpMethod = "POST"
+        request.setValue(try #require(ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_FIXTURE_TOKEN"]), forHTTPHeaderField: "X-Resource-Fixture")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["operationID": UUID().uuidString,
+            "userID": account.credentials.userID.rawValue, "reason": "policy_enforcement"])
+        var disabledAt: Int64?
+        for expected in ["disabled", "idempotent"] {
+            let (data, response) = try await fixture.http.data(for: request)
+            try #require((response as? HTTPURLResponse)?.statusCode == 200)
+            let result = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(result["outcome"] as? String == expected)
+            let timestamp = try #require(result["disabledAtMilliseconds"] as? Int64)
+            if let disabledAt { #expect(timestamp == disabledAt) } else { disabledAt = timestamp }
+        }
+        await #expect(throws: (any Error).self) { try await devices.list(cursor: nil, pageSize: 10) }
+        #expect(await session.currentState() == .unauthenticated)
+        #expect(await store.load() == nil)
+        await #expect(throws: (any Error).self) { try await fixture.login(account.handle) }
+        await #expect(throws: (any Error).self) { try await authenticate(socket, account.credentials) }
+        await socket.disconnect()
+        print("Live acceptance: actual Operator disable/replay, HTTP session termination, credential removal and login/TLS rejection passed.")
+    }
 }
 #endif

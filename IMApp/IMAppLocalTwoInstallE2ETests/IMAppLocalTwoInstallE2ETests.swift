@@ -837,6 +837,12 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
 
     @MainActor
     private func auditOrdinaryChatSurface(in app: XCUIApplication) throws {
+        // Preserve every XCTest audit issue while allowing later functional
+        // assertions in this stage to run. The driver retains an overall
+        // failure even when this is the only issue and continues other stages.
+        let previous = continueAfterFailure
+        continueAfterFailure = true
+        defer { continueAfterFailure = previous }
         // UIKit-owned navigation and form chrome is not app-controlled for
         // contrast. The remaining categories keep the signed-in list and
         // composer usable for Dynamic Type and VoiceOver users.

@@ -190,7 +190,11 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
             group.addTask {
                 while true {
                     let hint = try await loss.nextGroupEventAvailabilityHint()
-                    if hint.roomID == roomID { await runner.requestCatchUp() }
+                    if hint.roomID == roomID {
+                        print("IMV2_TLS_ROOM_ONLINE_HINT head=\(hint.highWatermark) dropTail=\(dropTail)")
+                        try await runner.retainOnlineRoomHead(roomID: hint.roomID,
+                            highWatermark: hint.highWatermark, userID: account.userID)
+                    }
                 }
             }
             group.addTask {
@@ -201,7 +205,9 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                 }
                 let deadline = ContinuousClock.now.advanced(by: .seconds(30))
                 if dropTail { await loss.arm() }
+                print("IMV2_TLS_ROOM_ONLINE_SEND_BEGIN expectedMessages=\(expectedMessageCount) dropTail=\(dropTail)")
                 try await sendRecoveryOnlineMessage(transport: transport, connection: connection, auth: auth, account: account, roomID: roomID, deadline: deadline)
+                print("IMV2_TLS_ROOM_ONLINE_SEND_CONFIRMED")
                 // The current Owner room hint wakes recovery. Dropped hints
                 // never reach requestCatchUp; only the runner's integrity scan
                 // can repair the intentionally missing tail.
@@ -209,7 +215,11 @@ final class IMAppRoomRecoveryScaleTests: XCTestCase {
                     let messages = try await store.messages(in: roomID)
                     if messages.count == expectedMessageCount, messages.contains(where: { $0.text == "tls-scale-online" }),
                        try await store.groupEventCursor(roomID: roomID) == UInt64(expectedMessageCount) { break }
-                    guard ContinuousClock.now < deadline else { throw V2RealtimeTransportError.unexpectedResponse }
+                    guard ContinuousClock.now < deadline else {
+                        let cursor = try await store.groupEventCursor(roomID: roomID)
+                        print("IMV2_TLS_ROOM_ONLINE_TIMEOUT expectedMessages=\(expectedMessageCount) actualMessages=\(messages.count) cursor=\(cursor) dropTail=\(dropTail)")
+                        throw V2RealtimeTransportError.unexpectedResponse
+                    }
                     try await Task.sleep(for: .milliseconds(20))
                 }
                 if dropTail {

@@ -125,6 +125,7 @@ build_products_directory="$(xcodebuild -showBuildSettings -json \
   | jq --raw-output 'map(select(.target == "IMApp"))[0].buildSettings.BUILT_PRODUCTS_DIR')"
 app_bundle="${build_products_directory}/IMApp.app"
 cleanup_attempted=false
+audit_failure_count=0
 receiver_original_increase_contrast=""
 sender_original_increase_contrast=""
 receiver_original_content_size=""
@@ -234,21 +235,34 @@ run_stage() {
   local total_test_count
 
   printf 'running local two-install stage=%s simulator=%s\n' "${test_name}" "${simulator_id}"
+  local xcode_status=0
   xcodebuild test \
     -quiet \
+    -collect-test-diagnostics never \
+    -test-timeouts-enabled YES \
+    -maximum-test-execution-time-allowance 300 \
     -project "${project_file}" \
     -scheme "${scheme}" \
     -configuration Debug \
     -destination "platform=iOS Simulator,id=${simulator_id}" \
     -only-testing:"${test_class}/${test_name}" \
-    -resultBundlePath "${result_bundle}"
+    -resultBundlePath "${result_bundle}" || xcode_status="$?"
 
   test_summary="$(xcrun xcresulttool get test-results summary --path "${result_bundle}" --compact)"
   test_result="$(jq --raw-output '.result' <<<"${test_summary}")"
   failed_test_count="$(jq --raw-output '.failedTests' <<<"${test_summary}")"
   passed_test_count="$(jq --raw-output '.passedTests' <<<"${test_summary}")"
   total_test_count="$(jq --raw-output '.totalTestCount' <<<"${test_summary}")"
-  if [[ "${test_result}" != "Passed" || "${failed_test_count}" != "0" || "${passed_test_count}" != "1" || "${total_test_count}" != "1" ]]; then
+  # This exact known audit issue is retained as a failed stage, not waived.
+  # Continue only when no business assertion or other failure was recorded;
+  # the aggregate still exits 1 after all available functional stages.
+  if [[ "${xcode_status}" -ne 0 && "${failed_test_count}" == "1" && "${total_test_count}" == "1" ]] &&
+     jq --exit-status '(.testFailures | length) > 0 and all(.testFailures[]; .failureText == "Dynamic Type font sizes are partially unsupported")' <<<"${test_summary}" >/dev/null; then
+    audit_failure_count=$((audit_failure_count + 1))
+    printf 'retained accessibility audit failure; continuing functional stages: %s\n' "${test_name}" >&2
+    return 0
+  fi
+  if [[ "${xcode_status}" -ne 0 || "${test_result}" != "Passed" || "${failed_test_count}" != "0" || "${passed_test_count}" != "1" || "${total_test_count}" != "1" ]]; then
     printf 'local two-install stage mismatch: stage=%s result=%s passed=%s failed=%s total=%s\n' \
       "${test_name}" "${test_result}" "${passed_test_count}" "${failed_test_count}" "${total_test_count}" >&2
     return 1
@@ -338,5 +352,9 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-e2e-scope "${receiver_scope}"
 run_stage "${receiver_simulator_id}" testReceiverRestoresIndependentGroupMemberReply
 
+if [[ "${audit_failure_count}" -gt 0 ]]; then
+  printf 'local two-install functional stages completed; overall FAILED with %s retained accessibility audit stage(s).\n' "${audit_failure_count}" >&2
+  exit 1
+fi
 printf '%s\n' 'local two-install direct-and-group-message E2E: pass'
 printf '%s\n' 'scope: two different booted simulators independently register real App installations; the receiver is terminated before the sender opens a direct room and sends through the ordinary UI, then restores its scoped Keychain/SQLite state to create a group containing the sender and send a group message with @all through the ordinary composer. The sender then restores the same SQLite state with a DEBUG-only unavailable realtime endpoint, submits one ordinary direct message and must receive the durable-retry UI feedback. A normal sender restore replays that exact queued message before it projects the group message with its mention summary and replies through the ordinary composer. The receiver finally restores only its own scope and projects both the group reply and the queued direct message after authenticated realtime catch-up. This does not cover APNs, production deployment, or capacity.'

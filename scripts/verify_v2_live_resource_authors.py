@@ -206,7 +206,10 @@ def main():
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(('IMV2_', 'IM_V2_'))}
     with (output / 'build.log').open('w') as log:
-        for product in ('IMV2AccountServerApp', 'IMV2ServerApp', 'IMV2ResourceImageWorker'):
+        products = ['IMV2AccountServerApp', 'IMV2ServerApp', 'IMV2ResourceImageWorker']
+        if args.extended_acceptance:
+            products.append('IMV2OperatorServerApp')
+        for product in products:
             subprocess.run(['swift', 'build', '--disable-automatic-resolution', '--jobs', '4', '--product', product],
                            cwd=ROOT / 'IMV2Server', env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
     binary = Path(subprocess.check_output(['swift', 'build', '--show-bin-path'], cwd=ROOT / 'IMV2Server',
@@ -219,6 +222,7 @@ def main():
         private = Path(directory)
         private.chmod(0o700)
         database_port, account_port, gateway_port, metrics_port = [free_port() for _ in range(4)]
+        operator_port = free_port() if args.extended_acceptance else None
         database_args = ['-h', '127.0.0.1', '-p', str(database_port), '-U', 'postgres']
         started_postgres, proxy, proxy_thread = False, None, None
         slow_gate = SlowUploadGate() if args.slow_resource else None
@@ -258,7 +262,8 @@ def main():
                 secrets = {'IM_V2_' + key + '_BASE64': base64.b64encode(os.urandom(32)).decode() for key in
                     ('ACCESS_TOKEN_HMAC_KEY', 'CREDENTIAL_REPLAY_ENVELOPE_KEY', 'PUSH_ENDPOINT_ENVELOPE_KEY',
                      'ACCOUNT_EDGE_AUTHORIZATION_SECRET', 'ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY',
-                     'ACCOUNT_ASSERTION_HMAC_KEY', 'GROUP_INVITE_TOKEN_HMAC_KEY', 'LOCAL_MEDIA_SIGNING_KEY')}
+                     'ACCOUNT_ASSERTION_HMAC_KEY', 'GROUP_INVITE_TOKEN_HMAC_KEY', 'LOCAL_MEDIA_SIGNING_KEY',
+                     'OPERATOR_REPLAY_BEARER_TOKEN', 'OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN')}
                 fixture_token = base64.b64encode(os.urandom(32)).decode()
                 if args.extended_acceptance:
                     sql("INSERT INTO im_v2.shard_admission_pools (room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard',gen_random_uuid(),1,now()+interval '1 hour',1000) ON CONFLICT DO NOTHING")
@@ -310,6 +315,25 @@ def main():
                         if slow_gate is not None and self.command == 'PUT' and re.fullmatch(r'/v2/local-media/upload/[0-9a-fA-F-]{36}', path):
                             self._slow_claimed = slow_gate.claim(self.connection)
                         body = slow_gate.read(self, length) if self._slow_claimed else self.rfile.read(length)
+                        if self.path == '/__fixture__/disable-account' and self.command == 'POST':
+                            if operator_port is None or self.headers.get('X-Resource-Fixture') != fixture_token:
+                                self.send_error(403); return
+                            command = json.loads(body)
+                            if set(command) != {'operationID', 'userID', 'reason'} or command['reason'] != 'policy_enforcement':
+                                self.send_error(400); return
+                            command['operationID'] = str(uuid.UUID(command['operationID']))
+                            command['userID'] = str(uuid.UUID(command['userID']))
+                            operator = http.client.HTTPConnection('127.0.0.1', operator_port, timeout=20)
+                            try:
+                                operator.request('POST', '/internal/v2/accounts/disable', json.dumps(command),
+                                    {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + secrets['IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64']})
+                                result = operator.getresponse(); payload = result.read()
+                                with counts_lock: counts[('POST', '/internal/v2/accounts/disable', result.status)] += 1
+                                self.send_response(result.status); self.send_header('Content-Type', 'application/json')
+                                self.send_header('Content-Length', str(len(payload))); self.end_headers(); self.wfile.write(payload)
+                            finally:
+                                operator.close()
+                            return
                         if self.path == '/__fixture__/room' and self.command == 'POST':
                             if self.headers.get('X-Resource-Fixture') != fixture_token:
                                 self.send_error(403); return
@@ -393,6 +417,11 @@ def main():
                 account.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(private / 'actors/account/configuration.json'),
                                IM_V2_ACCOUNT_LISTEN_HOST='127.0.0.1', IM_V2_ACCOUNT_LISTEN_PORT=str(account_port))
                 wait_listener(launch('IMV2AccountServerApp', account), account_port)
+                if args.extended_acceptance:
+                    operator = compose_defaults('operator'); operator.update(shared)
+                    operator.pop('IMV2_ROOM_ACTOR_CONFIGURATION_FILE', None)
+                    operator.update(IM_V2_OPERATOR_REPLAY_LISTEN_HOST='127.0.0.1', IM_V2_OPERATOR_REPLAY_LISTEN_PORT=str(operator_port))
+                    wait_listener(launch('IMV2OperatorServerApp', operator), operator_port)
                 print('Owned PostgreSQL, separate Actor nodes, HTTPS resources and TLS Gateway ready.', flush=True)
                 test_env = dict(environment, IMV2_LIVE_RESOURCE_GATEWAY_PORT=str(gateway_port),
                     IMV2_LIVE_RESOURCE_FIXTURE_TOKEN=fixture_token, IMV2_LIVE_ACCOUNT_HTTPS_URL=base_url,
