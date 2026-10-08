@@ -109,13 +109,17 @@ END $$;
 CREATE OR REPLACE FUNCTION im_v2.capture_realtime_change() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE r jsonb; oldr jsonb; kind text; id text; ck text; seq bigint; rv bigint; uv bigint; dev uuid; source uuid; oe bigint;
 BEGIN
+ -- Sequence-only sends do not invalidate authorization. Compare typed fields
+ -- before materializing either whole row as JSONB on this hot path.
+ IF TG_TABLE_NAME='rooms' AND TG_OP='UPDATE' THEN
+  IF NEW.owner_epoch IS NOT DISTINCT FROM OLD.owner_epoch
+   AND NEW.membership_revision IS NOT DISTINCT FROM OLD.membership_revision
+   AND NEW.group_permission_revision IS NOT DISTINCT FROM OLD.group_permission_revision
+   AND NEW.frozen_at IS NOT DISTINCT FROM OLD.frozen_at THEN RETURN NULL; END IF;
+ END IF;
  IF TG_OP='DELETE' THEN r:=to_jsonb(OLD); ELSE r:=to_jsonb(NEW); END IF;
  IF TG_OP='UPDATE' THEN oldr:=to_jsonb(OLD); END IF;
  IF TG_TABLE_NAME='rooms' THEN
-  IF TG_OP='UPDATE' AND r->>'owner_epoch'=oldr->>'owner_epoch'
-   AND r->>'membership_revision'=oldr->>'membership_revision'
-   AND r->>'group_permission_revision'=oldr->>'group_permission_revision'
-   AND (r->>'frozen_at') IS NOT DISTINCT FROM (oldr->>'frozen_at') THEN RETURN NULL; END IF;
   kind:='roomEvents'; id:=r->>'room_id'; ck:='room.authorization.changed';
   INSERT INTO im_v2.realtime_control_versions(topic_kind,topic_id,version) VALUES(kind,id,1)
    ON CONFLICT(topic_kind,topic_id) DO UPDATE SET version=im_v2.realtime_control_versions.version+1 RETURNING version INTO rv;

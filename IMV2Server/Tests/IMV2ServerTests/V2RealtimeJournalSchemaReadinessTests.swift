@@ -7,6 +7,34 @@ import FluentKit
 @Suite("Journal source schema contract", .serialized)
 struct V2RealtimeJournalSchemaReadinessTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func sequenceUpdatesSkipControlChangesButAuthorizationUpdatesRemainDurable() async throws {
+        try await withUserEventDatabase { database, sql, schema in
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+            let source = try String(contentsOf: root.appending(path: "IMV2/sql/realtime-change-journal.sql"), encoding: .utf8)
+                .replacingOccurrences(of: "im_v2", with: schema)
+            for statement in postgresStatements(in: source) where !statement.isEmpty && statement != "BEGIN" && statement != "COMMIT" {
+                try await sql.raw("\(unsafeRaw: statement)").run()
+            }
+            let room = UUID()
+            try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room),'source','standard')").run()
+            struct Version: Decodable { let version: Int64 }
+            func version() async throws -> Int64 {
+                try #require(try await sql.raw("SELECT version FROM \(unsafeRaw: schema).realtime_control_versions WHERE topic_kind='roomEvents' AND topic_id=\(bind: room.uuidString.lowercased())").first(decoding: Version.self)).version
+            }
+            let initial = try await version()
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence=1,timeline_sequence=1 WHERE room_id=\(bind: room)").run()
+            #expect(try await version() == initial)
+            for assignment in ["owner_epoch=owner_epoch+1", "membership_revision=membership_revision+1", "group_permission_revision=group_permission_revision+1", "frozen_at=clock_timestamp(),frozen_by_user_id=gen_random_uuid()", "frozen_at=NULL,frozen_by_user_id=NULL"] {
+                let before = try await version()
+                try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET \(unsafeRaw: assignment) WHERE room_id=\(bind: room)").run()
+                #expect(try await version() == before + 1)
+            }
+            try await V2RealtimeJournalSchemaReadiness.verify(database: database, schema: schema)
+        }
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func canonicalCaptureIsRepeatableAndRejectsDisabledTriggers() async throws {
         try await withUserEventDatabase { database, sql, schema in
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()

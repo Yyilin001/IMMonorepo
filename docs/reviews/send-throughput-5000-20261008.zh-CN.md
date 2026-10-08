@@ -1,5 +1,7 @@
 # 10,000 在线 / 3,500 msg/s 优化记录（原目标 5,000，2026-10-08）
 
+**最新 R147：同一已提交实现测试1500档，90000消息全部ACK、零overflow / 最终失败 / SERVER_BUSY，写调度1.669ms、房间队列4.378ms；各分片客户端P95 63—69ms，整机CPU约64.50%。详见文末。**
+
 **最新优化 R145 / R146：移除房间发送内存热路径的共享Actor跳转，两轮原3000均通过；写调度均值7.676 / 7.472ms，内存状态读取0.01086 / 0.01152ms。相对紧邻R144排队与客户端尾延迟改善，但仍有归还锁入口和连接回调任务启动长尾，未验证稳定3500。见文末。**
 
 **最新 R138—R143：生产实现不变，原场景3000 / 3500各两轮均通过；发送预热诊断3000通过、3500失败。失败轮保留12/12报告，仍有19次overflow和4条重试耗尽。结论是存在通过能力与明显波动，尚无稳定3500的证明，详细对照见文末。**
@@ -845,3 +847,189 @@ R145完整慢请求分区281条（boundary excluded1 / incomplete0），R146见�
 另一条R146采样gateway2操作01847A38-7805-46D1-9084-94B48F0DA537：driver→首SQL214.310ms，driver_callback_task_wait210.871ms，runtime_state仅0.004ms，SQL future5.251ms。该残留长尾是连接回调已到达后异步任务未及时开始，不能再归因共享房间内存Actor或数据库执行214ms。下一步定位该EventLoop作业队列及Mutex持有方时序，而非继续增加写连接。
 
 证据：/tmp/imv2-r144-r146-performance.json；/tmp/imv2-resource-10k3000-20261008-r145和r146；各轮hotspots / verification日志；/tmp/imv2-r145-final-tests.log、postgres-tests.log、release-server.log、release-account.log。此次未运行3500档。
+
+
+## R147：当前实现1500档
+
+用户要求测试1500。源码main072a8a51、Release沿用R145/R146，10000在线 / 6节点 / 每节点6写连接 / 2消息DB EventLoop / 同一夹具独立恢复 / 原10Hz / 60秒 / sampled tracing不变，仅发送速率3000→1500；同步20/s不变。完整测量60.007秒，90000发送和阶段/最终ACK，runner1499.827ACK/s；12/12报告、overflow / abandoned / workloadFailed / SERVER_BUSY / heartbeatMissed均0。全部10000前台视图追平，owned PG消息 / completion各90000、操作metadata missing / mismatch0。服务cleanup settled=true / forcedKill0，验证PG关闭。未改生产代码。
+
+| 指标 | R147 1500档 | R146 3000档 |
+|---|---:|---:|
+| 房间队列均值ms | 4.378 | 9.480 |
+| 写调度均值ms | 1.669 | 7.472 |
+| 实际借连接ms | 0.475 | 0.613 |
+| driver→首SQL ms | 0.355 | 0.646 |
+| 内存房间状态ms | 0.00697 | 0.01152 |
+| 单语句周期ms | 2.586 | 3.684 |
+| SQL Future ms | 2.525 | 3.576 |
+| 连接返回→额度释放ms | 0.01279 | 0.03645 |
+| 各分片消息P50 ms | 25—27 | 61—64 |
+| 各分片消息P95 ms | 63—69 | 269—294 |
+| 各分片消息P99 ms | 130—151 | 471—525 |
+| 消息最大延迟ms | 371.23 | 1721.18 |
+| SERVER_BUSY次数 | 0 | 106 |
+| 整机CPU使用率 | 64.50% | 96.99% |
+
+权限冷SQL完成计数9454，Future平均5.732ms，完成→Swift resume1.436ms，权限状态整体均值1.230ms；并非纯热测试。六Gateway CPU合计约6.067核，PG约1.757核，12loaders约0.200核；Gateway各进程峰值RSS之和约4.72GiB（非同时峰值、非总物理内存）。主机CPU由11个完全位于阶段内的区间加权，user54.095% / system10.406% / idle35.500%。
+
+阶段均值由6节点counter加权，人口/采样范围不同，不相加当端到端；客户端分位数为12分片各自值的最小—最大，非全局分位数。1500慢调度>=20ms完整trace仅4条，不从这么小的样本推断稳定长尾分布。相同代码降负载后队列及SQL周期显著缩短，支持等待受负载影响，不能把倍率改善当新代码收益或据此确认CPU唯一因果。
+
+证据/tmp/imv2-resource-10k1500-20261008-r147；/tmp/imv2-r147-hotspots.json、performance-stages.json、verification.log。本轮测试正常结束，所有owned服务和验证PG已关闭。
+
+
+## R148：当前实现1000档
+
+同main072a8a51和R145 Release，10000在线、6节点、每节点6写连接、2消息DB EventLoop、10Hz突发、60秒；仅速率1500→1000，同步20/s不变。首次临时runner引用错误场景路径，在读取场景阶段即退出，服务和负载尚未启动；保留/tmp/imv2-r148-preflight-error.log后修正并执行本轮。
+
+完整60秒，59988发送、阶段/最终ACK均59988（12分片速率取整），999.791 ACK/s，12/12报告，qualityPassed=true；失败、队列溢出/放弃、SERVER_BUSY、heartbeatMissed均0。10000前台视图全部追平；PG消息/completion各59988，操作metadata missing/mismatch均0；测试服务和验证PG已关闭。
+
+| 指标 | R148 1000 | R147 1500 | R146 3000 |
+|---|---:|---:|---:|
+| 房间队列均值ms | 3.467 | 4.378 | 9.480 |
+| 写连接调度均值ms | 0.964 | 1.669 | 7.472 |
+| 实际借连接ms | 0.570 | 0.475 | 0.613 |
+| driver→首SQL ms | 0.345 | 0.355 | 0.646 |
+| 房间内存状态ms | 0.00682 | 0.00697 | 0.01152 |
+| 单语句周期ms | 2.550 | 2.586 | 3.684 |
+| SQL Future ms | 2.485 | 2.525 | 3.576 |
+| 连接归还→调度额度释放ms | 0.01095 | 0.01279 | 0.03645 |
+| 分片消息P50 ms | 19—21 | 25—27 | 61—64 |
+| 分片消息P95 ms | 40—44 | 63—69 | 269—294 |
+| 分片消息P99 ms | 67—85 | 130—151 | 471—525 |
+| 消息最大延迟ms | 215.55 | 371.23 | 1721.18 |
+| 整机CPU使用率 | 51.75% | 64.50% | 96.99% |
+
+1000档权限冷SQL计数8775，Future均值4.092ms、恢复0.808ms，权限状态整体1.029ms；并非完全热权限负载。11个阶段内CPU区间加权user43.124%、system8.628%、idle48.249%。没有完整>=20ms慢写调度trace，不能因此证明所有请求均小于20ms。阶段均值按6节点计数加权、不同人口不能相加；客户端分位数范围为12分片各自值的最小—最大，非全局分位数。借连接均值比1500略高，未随负载单调下降；单语句周期与1500接近，下降主要体现于排队及端到端长尾，不是本轮新代码收益。
+
+证据/tmp/imv2-resource-10k1000-20261008-r148、/tmp/imv2-r148-hotspots.json、performance-stages.json、verification.log。
+
+
+## R149：1秒5000 msg/s短突发
+
+用户要求“瞬时5000”，按1秒5000msg/s执行；沿用10Hz，即约10批、每批500条，非同一时刻一次提交5000条。main072a8a51/R145 Release、10000在线、6节点、每节点6写连接、2消息DB EventLoop及原夹具保持不变。未增加发送权限预热，所以包含首次权限初始化。
+
+runner exit0，12报告，qualityPassed=true；实际发送4992条（分片整数取整），阶段内ACK2511，最终4992ACK，SERVER_BUSY32次，最终失败/队列溢出/放弃/heartbeatMissed均0。10000前台视图最终追平，PG消息/completion各4992，metadata missing/mismatch均0。服务cleanup settled=true、验证PG已关闭。质量检查通过表示允许排空后全部成功，不代表1秒内成功处理5000条，不能作为持续5000容量证明。runner acknowledgedMessagesPerSecond=2495.690由各分片阶段内ACK/各自实测时长加总，仅描述这1秒窗口内的确认速率；最终4992包含排空，不将其当作阶段内5000ACK/s。
+
+全突发含排空的12分片消息P50范围486—525ms、P95 825—943ms、P99 923—1174ms，最大1567.43ms。使用report顶层messageLatency，以涵盖阶段结束后的ACK；phase消息延迟只含阶段内完成的2511条，会截断慢尾。各分片scenarioDrain观测811—1397ms，从各自阶段结束开始计时，含排空轮询粒度；并非精确全局最后ACK时间。
+
+短于5秒指标采样间隔，阶段内counter样本不足。以下改用从启动首份指标到排空后末份指标的增量（本轮只有一个消息阶段），覆盖完整突发和排空；不是严格1秒窗口均值，不能同60秒窗口当同人口直接比较。
+
+| 阶段 | 完整运行计数加权均值ms | 完成计数 |
+|---|---:|---:|
+| 房间队列等待 | 133.586 | 3967 |
+| 写连接调度等待 | 66.706 | 3967 |
+| 实际借连接 | 1.070 | 3967 |
+| driver→首SQL | 0.897 | 3967 |
+| 内存房间状态 | 0.02537 | 4992 |
+| 单语句周期 | 7.882 | 3967 |
+| SQL Future | 7.672 | 3967 |
+| 连接归还→额度释放 | 0.11863 | 3967 |
+| 权限Owner状态 | 87.338 | 4379 |
+| 权限冷SQL Future | 82.543 | 3731 |
+| 权限冷SQL恢复 | 12.390 | 3731 |
+
+阶段计数可按执行轮次/不同人口统计，与4992条消息不同；不能相加当客户端延迟。短突发中权限冷加载、房间排队和写调度明显增大，但尚不能分离纯热路径容量。1秒窗口不足以用现有5秒资源采样给出可靠的突发CPU平均。
+
+证据/tmp/imv2-resource-10k5000burst-20261008-r149、/tmp/imv2-r149-scenario-burst-5000.json、hotspots.json、performance-stages.json、verification.log。
+
+
+## R152：单条发送低负载成本
+
+用户要求测一条消息成本。生产源码/Release未改，仍10000在线、6Gateway、6写连接/节点、2消息DB loop，128字节负载、两目标ring。临时runner保留12loader，仅report-0速率缩放1，其余1e-9保证按整数调度实际0条；persona share0.0012在834连接worker中按最大余数分配1个sender，其余idle。先8秒一条cold-room-a，再8秒一条cold-room-b，然后20秒20条hot-single，关闭主动sync/重连。trace collection all但生产日志sink仍只输出慢或采样trace，不宣称逐条完整trace。报告确认其余11loader消息发送总数0，sender共22条全部ACK、WIRE_SUBMIT22、无busy/重试/失败/溢出/心跳漏。PG messages/completions22，metadata missing/mismatch0；10000前台视图最终一致，cleanup settled=true，验证PG已关闭。
+
+R150尝试单loader承载10000连接，bootstrap failed1导致无法全员ready，未开始有效消息测量，终止owned loader后cleanup settled=true；R151其它loader scale0被参数校验拒绝，未有效测量，清理完成。这两轮记录保留，均不计入性能结果。R150另有临时import路径预检错误，启动服务前修正。
+
+客户端cold-room-a单条19.54ms、cold-room-b单条16.00ms。hot20条P50 5ms、P95 23ms、P99 31ms、最大31.22ms；20样本不足以推断稳定P99。冷热为同一发送者两目标，仍需与未来不同路径/不同房间分布区别。
+
+| 阶段 | 首条冷发送ms | 热发送阶段均值ms |
+|---|---:|---:|
+| 房间队列 | 0.03988 | 0.08165 |
+| 写连接调度 | 0.109 | 0.20615 |
+| 实际借连接 | 0.04983 | 0.18659 |
+| driver→首SQL | 0.41383 | 0.31509 |
+| 内存房间状态 | 0.00383 | 0.00604 |
+| 单语句写入完整周期 | 5.14933 | 2.43279 |
+| SQL Future（上述子阶段） | 5.03371 | 2.37396 |
+| 权限Owner状态 | 5.14679 | 0.04706 |
+
+首条成本从只有1次完成的累计counter快照取得；它还触发2次权限冷SQL，Future平均2.928ms。热阶段是现有5秒metrics采样窗口counter增量，包含18次完成，客户端报告包含完整20条；热阶段未观察新增冷SQL。表中阶段人口和嵌套关系不同，不能相加当端到端延迟。客户端完整耗时还包含收发、路由、准备、首次状态初始化和ACK调度等，没有逐条统一时序不能精确分摊剩余差额。
+
+单语句写入仍含驱动/网络/SQL/索引及触发器/隐式提交/回包与EventLoop处理；约2.43ms是wall-clock周期，不是纯PG执行或CPU时间。owner_commit均值0.00723ms是已有隐式事务确认，不是整个实际提交成本。现有5秒整机CPU采样不能测出一条消息CPU时间；也不能用10000在线心跳/后台总CPU除以1msg/s估算单消息CPU成本。
+
+证据/tmp/imv2-resource-10k-single-20261008-r152、/tmp/imv2-r152-scenario-single.json、single-runner.py、hotspots.json、single-message-cost.json、verification.log。本轮是成本诊断，不是容量证明。
+
+
+## R153—R155：全发送房间预热后3000稳定性验证
+
+用户要求房间预热后能否稳定3000。服务端main072a8a51/R145 Release未改，10000在线、6Gateway、每节点6写连接/2消息DB EventLoop、128字节消息、测量10Hz及原persona随机发送、同步20/s不变。修改仅压测器：Phase可选sendSelection（weighted_random默认不变、round_robin轮询全slots用于覆盖预热），刷新算法SHA并Release构建IMV2GatewayLoadGenerator成功23.90秒。round_robin忽略persona发送权重，刻意覆盖所有在线客户端；测量恢复weighted_random，因此预热改变活跃房间覆盖与运行历史，不能将差异单独归因于缓存冷热。未改失败阈值/并发上限/队列上限/报告收集规则。
+
+各轮独立恢复原fixture，预热1000/s×30秒轮询、10秒无主动发送消化，再3000/s×180秒。每轮预热29988条全部ACK；DB按消息created_at与测量开始时间切分，确认10000发送者、5000房间、10000发送者/房间组合预热；各轮测量入库的组合均有预热记录（未预热组合0）。每轮测量counter权限冷SQL新增0。预热期间每个worker2499次发送，覆盖其833/834连接多轮；默认availability_hint发送选择当前active room，不能误称已向fixture两目标房间各自发送，实际测量房间覆盖以DB组合验证为准。
+
+| 指标 | R153 | R154 | R155 |
+|---|---:|---:|---:|
+| 测量观测公共窗口秒 | 90.001 | 180.009 | 180.002 |
+| 测量阶段跑满 | 否 | 是 | 是 |
+| 测量发送 | 269022 | 539959 | 539854 |
+| 测量阶段内ACK | 266179 | 539395 | 539575 |
+| 测量最终ACK（排空/结束后） | 267040 | 539945 | 539805 |
+| 客户端发送队列溢出 | 954 | 41 | 146 |
+| 客户端发送队列放弃 | 12 | 0 | 0 |
+| TCP_DEFERRED_RETRY_EXHAUSTED | 528 | 14 | 49 |
+| TCP_OUTCOME_UNKNOWN_CONNECTION_CLOSED | 1466 | 0 | 0 |
+| SERVER_BUSY wire次数 | 18223 | 8042 | 15140 |
+| 房间队列均值ms | 70.297 | 27.216 | 37.657 |
+| 写调度均值ms | 115.554 | 43.885 | 63.879 |
+| 实际借连接ms | 1.072 | 0.947 | 1.039 |
+| 单语句周期ms | 7.810 | 6.465 | 7.130 |
+| 分片阶段消息P50 ms | 293—344 | 172—186 | 256—292 |
+| 分片阶段消息P95 ms | 2472—2889 | 1047—1242 | 1482—1676 |
+| 分片阶段消息P99 ms | 4921—5252 | 1963—2265 | 2424—2840 |
+| 整机CPU使用率 | 97.228% | 99.593% | 99.790% |
+| 压测通过 | 否 | 否 | 否 |
+
+R153约90秒触发workload failure guard（TCP_DEFERRED_RETRY_EXHAUSTED），之后连接关闭带来额外outcome unknown，不能将全部连接关闭错误当作最初原因；12报告保留，但失败后停止发送，不作为持续180秒容量样本。R154/R155跑满仍因溢出、重试失败未通过，跑完≠稳定通过。各轮无关的最初连接预热仍通过，失败属于测量消息负载，不混同R150/R151启动失败。
+
+PG messages/completions分别297687/569933/569793，两表匹配、metadata missing/mismatch均0。R154/R155等于含预热的最终ACK；R153比最终ACK总数297028多659条，说明存在入库但客户端结果不确定的消息，不能称所有发送均成功或仅靠数据库记录宣称未丢消息。三轮owned服务cleanup settled=true，验证PG均关闭。未走正常成功路径的前台最终验证不能推断全部10000前台视图已追平。
+
+阶段均值6节点counter加权、人口不一致且有嵌套，不相加当端到端；客户端分位数是12分片各自范围，并且仅阶段内完成消息，失败/未完成请求不在延迟分位数中。整机CPU为测量内相邻采样区间加权，包含PG、压测器、六Gateway、其它服务及系统。确认全覆盖预热和无权限冷SQL，足以否定“冷加载是此次失败的必要原因”，但尚不能精确归因CPU、投递恢复放大、数据库执行或调度中的唯一瓶颈。与此前60秒未全覆盖预热轮不同，不能宣称预热本身导致负优化或计算因果提升百分比。
+
+结论：当前配置下，房间真实发送预热后仍未达到零失败稳定3000msg/s。本次是三轮可复核诊断，非长期生产容量认证。证据/tmp/imv2-resource-10k3000-roomwarm-20261008-r153/r154/r155，各轮hotspots、verification和roomwarm-coverage日志；/tmp/imv2-r153-r155-roomwarm-performance.json；/tmp/imv2-room-prewarm-loader-build.log。
+
+
+## 写放大核对与序号触发器优化（R156—R157）
+
+检查普通无引用私聊的单语句路径：每批按房间更新 rooms 游标，插入 messages 和 message_send_completions；消息语句级触发器按房间合并推进 realtime_dirty_room_heads，后台确认再清 pending。普通 message_row 消息不逐条写 room_events、realtime_change_outbox 或 realtime_change_journal。成功记录已只有一份，不能重复执行已经完成的旧回执表删除。两张内容/成功表的生命周期不同，保留内容清理后的发送身份与结果。
+
+R155 留存数据库累计插入消息及成功记录各569793行，rooms更新490745次/HOT481333次（98.08%），dirty head更新541882次/HOT474411次（87.55%）。messages包含9个索引，普通无引用消息维护7个，加成功记录主键共8个Btree条目。两表含索引分配空间约630.72MiB，索引约312.59MiB。两个摘要索引在该负载扫描0次、合计约89MiB，但 PostgresV2RoomLatestVisibleStore 的最新候选及授权历史回退实际使用它们，已有长历史执行计划测试要求保留最新候选索引；本轮未删除。统计包含初始化/预热/验证，空间不是实际写入字节或WAL，也不能换算为耗时份额。证据 /tmp/imv2-r155-write-amplification-audit.json。
+
+实际改动：capture_realtime_change 在 rooms UPDATE 分支先比较原生 owner_epoch、membership_revision、group_permission_revision、frozen_at；只更新序号时直接退出，不再先构造 NEW/OLD 整行JSONB。其余表、房间INSERT/DELETE及真实控制变化继续原流程。更新 V2RealtimeJournalSchemaReadiness 函数源哈希至9ac9e0b999285c37e8d169a676c33cfb；没有减少持久化行数、删除索引或弱化CAS通知恢复保护。
+
+独立disposable PostgreSQL运行V2RealtimeJournalSchemaReadinessTests共4项全部通过，包括新增序号不递增控制版本、Owner/成员/权限版本及冻结/解冻仍递增版本。最初新增测试的冻结输入未同步frozen_by_user_id，违反已有rooms_check；修正合法测试输入后通过。可重复安装、禁用触发器拒绝、缺失revision++拒绝等原测试通过。Release IMV2ServerApp构建通过193.73秒，git diff --check通过。原压测器round_robin改动延续R153—R155，本轮没有修改它或阈值。
+
+
+两轮独立恢复原fixture、同配置重测：10000在线/6Gateway/每节点6写连接/2消息DB EventLoop/128字节消息；round_robin1000/s预热30秒、消化10秒，恢复原persona weighted_random3000/s测量180秒，同步20/s、10Hz突发不变。测量每轮540000条，含预热最终569988条全部ACK；两轮qualityPassed、capacityCompleted、steadyStateCompleted、drained全部true、runner退出0、12份报告完整。相对于R155观测如下：
+
+| 指标 | R155优化前 | R156 | R157 |
+|---|---:|---:|---:|
+| 测量持续秒 | 180.002 | 180.003 | 180.003 |
+| 测量发送 | 539854 | 540000 | 540000 |
+| 测量阶段内ACK | 539575 | 539360 | 539816 |
+| 测量最终ACK | 539805 | 540000 | 540000 |
+| 房间排队均值ms | 37.657 | 10.561 | 9.275 |
+| 写调度均值ms | 63.879 | 12.068 | 10.034 |
+| 借连接均值ms | 1.039 | 0.700 | 0.666 |
+| 单语句周期均值ms | 7.130 | 4.304 | 4.020 |
+| 分片消息P50 ms | 256—292 | 65—69 | 60—66 |
+| 分片消息P95 ms | 1482—1676 | 340—359 | 317—338 |
+| 分片消息P99 ms | 2424—2840 | 568—612 | 523—592 |
+| 队列溢出 | 146 | 0 | 0 |
+| 重试耗尽 | 49 | 0 | 0 |
+| 测量SERVER_BUSY wire次数 | 15140 | 371 | 274 |
+| 整机CPU使用率 | 99.790% | 97.745% | 96.975% |
+| 通过 | 否 | 是 | 是 |
+
+R156/R157数据库分别messages/completions各569988行，operation_metadata_missing=0、mismatched=0。预热数据库覆盖10000发送者/5000房间/10000发送者房间组合，测量9852组合均预热（未预热0），测量权限冷SQL计数两轮均0。owned服务cleanup settled=true/forcedKillCount=0，验证启动的PG均finally关闭。
+
+对比R155，单语句周期观测下降39.6%/43.6%，房间排队下降72.0%/75.4%，写调度下降81.1%/84.3%。这是历史基线与两轮改动后同配置的观测差异，未做交错恢复旧SQL的随机A/B，不能全部作为两次JSONB转换的独立耗时；整机仍接近CPU饱和，少量开销/重试减少可能产生非线性排队改善，尚未证明唯一原因。没有新增行级/WAL实测，也没有消除消息索引与dirty head写放大。两轮各180秒通过，不宣称长期生产稳定容量或3500能力。阶段均值计数加权且嵌套，不直接相加；P50/P95/P99为12分片范围，非总体分位数。
+
+证据：/tmp/imv2-resource-10k3000-roomwarm-20261008-r156、r157；/tmp/imv2-r156-performance.json、/tmp/imv2-r157-performance.json；各轮hotspots/db-verification/roomwarm-coverage JSON；/tmp/imv2-write-amplification-tests-r156.log、/tmp/imv2-write-amplification-release-r156.log。保留改动，未自动提交或推送。

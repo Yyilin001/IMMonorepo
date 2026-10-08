@@ -400,7 +400,15 @@ private struct LoadScenario: Decodable, Sendable {
     }
 
     struct Phase: Decodable, Sendable {
+        enum SendSelection: String, Decodable, Sendable {
+            case weightedRandom = "weighted_random"
+            case roundRobin = "round_robin"
+        }
+
         let name: String
+        /// A deterministic sweep is useful for warming every sender's room
+        /// before a measured phase retains the normal weighted workload.
+        let sendSelection: SendSelection?
         let durationSeconds: Int
         let messagesPerSecond: Double
         let roomLogReadsPerSecond: Double
@@ -1622,6 +1630,7 @@ private struct LoadRun: Sendable {
             let phaseStarted = NIODeadline.now()
             var completedTicks = 0
             var messageCarry = 0.0
+            var roundRobinSendIndex = 0
             var roomLogCarry = 0.0
             var syncCarry = 0.0
             var readReceiptCarry = 0.0
@@ -1662,7 +1671,16 @@ private struct LoadRun: Sendable {
                     roomSyncStateCarry -= Double(roomSyncStateCount)
                     roomLatestVisibleCarry -= Double(roomLatestVisibleCount)
                     reconnectCarry -= Double(reconnectCount)
-                    for _ in 0..<messageCount { assignments.pick(kind: .send, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent()) }
+                    for _ in 0..<messageCount {
+                        let channel: Channel?
+                        if phase.sendSelection == .roundRobin, !slots.isEmpty {
+                            channel = slots[roundRobinSendIndex % slots.count].channel
+                            roundRobinSendIndex += 1
+                        } else {
+                            channel = assignments.pick(kind: .send, random: &random)
+                        }
+                        channel?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent())
+                    }
                     for _ in 0..<roomLogCount { assignments.pick(kind: .roomLogRead, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomLogReadEvent()) }
                     for _ in 0..<syncCount { assignments.pick(kind: .syncPull, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSyncPullEvent()) }
                     for _ in 0..<readReceiptCount { assignments.pick(kind: .readReceipt, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioReadReceiptEvent()) }
@@ -2473,7 +2491,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "a2ad6fe2136668e717b3d712a0b80dfbd794a8ae970fcb906ca65c55d629183d"
+    static let algorithmSourceSHA256 = "145a9f42c570c65270f579c44cce5708bd14e46c03682908ed130ba1690fded5"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     static let maximumMessageWireAttempts = 5
