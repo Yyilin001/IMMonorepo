@@ -21,12 +21,15 @@ def main():
     parser.add_argument('--hold-seconds',type=int,default=0,help='Keep only this isolated stack alive for an additional test window (max 900s).')
     parser.add_argument('--two-install-ui',action='store_true',help='Run the existing real two-install App scenario against this disposable native stack.')
     parser.add_argument('--multi-device-ui',action='store_true',help='Run real same-account multi-device App stages and owned Operator snapshot reset.')
+    parser.add_argument('--account-switch-ui',action='store_true',help='Run real App sign-out, account switching and cold restoration isolation.')
+    parser.add_argument('--read-receipt-ui',action='store_true',help='Run independent App direct delivery and peer-read cold restoration.')
+    parser.add_argument('--group-read-ui',action='store_true',help='Run independent App group readers presentation after actual member reading.')
     parser.add_argument('--receiver-simulator',help='Explicitly owned, booted receiver simulator for --two-install-ui.')
     parser.add_argument('--sender-simulator',help='Explicitly owned, booted sender simulator for --two-install-ui.')
     args=parser.parse_args()
     if not 0 <= args.hold_seconds <= 900: parser.error('hold must be 0...900 seconds')
-    if args.two_install_ui and args.multi_device_ui: parser.error('UI modes are mutually exclusive')
-    ui_requested=args.two_install_ui or args.multi_device_ui
+    if sum([args.two_install_ui,args.multi_device_ui,args.account_switch_ui,args.read_receipt_ui,args.group_read_ui]) > 1: parser.error('UI modes are mutually exclusive')
+    ui_requested=args.two_install_ui or args.multi_device_ui or args.account_switch_ui or args.read_receipt_ui or args.group_read_ui
     if ui_requested:
         if not args.receiver_simulator or not args.sender_simulator or args.receiver_simulator == args.sender_simulator:
             parser.error('two-install UI requires two distinct, explicitly selected simulator IDs')
@@ -156,6 +159,21 @@ def main():
             ui_log=(root/'two-install-ui.log').open('wb');logs.append(ui_log)
             ui_source=REPO/'IMApp/Scripts/verify_local_account_two_install_e2e.sh'
             success_marker='local two-install direct-and-group-message E2E: pass'
+            if args.group_read_ui:
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_GROUP_READ_ONLY']='true'
+                success_marker='local group readers E2E: pass'
+            if args.read_receipt_ui:
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_READ_RECEIPT_ONLY']='true'
+                success_marker='local direct peer-read E2E: pass'
+            if args.account_switch_ui:
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_ACCOUNT_SWITCH_ONLY']='true'
+                switch_suffix=uuid.uuid4().hex[:18]
+                switch_handle='switch_'+switch_suffix
+                post('/v2/account-auth/password/register',{'accountHandle':switch_handle,
+                    'publicHandle':'switch'+switch_suffix,'displayName':'Switch B',
+                    'password':'localpassword','deviceID':str(uuid.uuid4()).upper()})
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_SWITCH_SECOND_HANDLE']=switch_handle
+                success_marker='local account-switch isolation E2E: pass'
             if args.multi_device_ui:
                 ui_source=REPO/'IMApp/Scripts/verify_local_account_multi_device_e2e.sh'
                 ui_environment.update(IMAPP_LOCAL_MULTI_DEVICE_EXTERNAL_STACK='true',IMAPP_LOCAL_MULTI_DEVICE_CA_PATH=str(ca),

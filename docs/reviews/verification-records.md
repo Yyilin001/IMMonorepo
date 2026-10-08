@@ -2791,17 +2791,17 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-02 | withdrawMessage | 真实HTTPS撤回/历史事件及App发送端提交、接收端撤回恢复通过；PG已撤回修订3 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
 | OP-03 | editMessage | 真实HTTPS编辑/恢复/历史回读及App普通编辑提交通过；PG message.edited与修订3，跨安装编辑中间态另待验 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
 | OP-04 | reaction | 真实HTTPS表情增删/恢复/回读及App普通表情提交通过；PG message.reaction_changed | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
-| OP-05 | readReceipt | 真实TCP已读提交、读者列表及隐私开关过滤通过 | extendedLiveResourcesR7 |
+| OP-05 | readReceipt | 真实TCP已读提交、读者列表及隐私开关过滤通过；真实App私聊阅读→发送端冷启动同消息对方已读通过；App群主原消息读者页真实成员+已读通过 | extendedLiveResourcesR7, peerReadUIR1, groupReadUIR2 |
 | OP-06 | directRoom | 真实HTTPS打开私聊通过；双向重复打开同房间已核对 | extendedLiveResourcesR9 |
 | OP-07 | groupRoom | 真实SDK群创建/恢复及App普通UI建群、成员核对、群消息双向收发和@all投影通过 | extendedLiveResourcesR4, twoInstallUIR14 |
 | OP-08 | membership | 真实成员添加/移除及roster回读通过；主动退出未实现：命令禁止self target，未发现独立退出入口 | extendedLiveResourcesR4, membershipExitSourceInspection |
 | OP-09 | moderation | 真实管理删除和原结果恢复通过 | extendedLiveResourcesR4 |
 | OP-10 | memberMute | 真实禁言/恢复及后续TCP拒绝通过 | extendedLiveResourcesR4 |
 | OP-11 | moderatedMemberRemoval | 真实成员移除/恢复/roster及后续TCP拒绝通过 | extendedLiveResourcesR4 |
-| OP-12 | strangerMessagePreference | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
-| OP-13 | userAddPreference | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
-| OP-14 | readReceiptPreference | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
-| OP-15 | liveActivityPreference | 真实HTTPS提交/重放/恢复/版本回读通过；对应App页面待验 | extendedLiveResourcesR2 |
+| OP-12 | strangerMessagePreference | 真实HTTPS提交/重放/恢复/版本回读通过；App设置提交及同账号第二设备恢复通过 | extendedLiveResourcesR2, multiDeviceUIR4 |
+| OP-13 | userAddPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App普通开关提交、另一安装冷恢复及独立PG关闭策略一致通过 | extendedLiveResourcesR2, multiDeviceUIR5 |
+| OP-14 | readReceiptPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App设置提交及同账号第二设备恢复通过 | extendedLiveResourcesR2, multiDeviceUIR4 |
+| OP-15 | liveActivityPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App普通开关提交、另一安装冷恢复及独立PG关闭策略一致通过 | extendedLiveResourcesR2, multiDeviceUIR5 |
 | OP-16 | relationship | 真实好友申请/接受/删除及回读通过 | extendedLiveResourcesR4 |
 | OP-17 | userBlock | 真实拉黑/解除/恢复及关系回读通过 | extendedLiveResourcesR4 |
 | OP-18 | conversationPreference | 真实TCP置顶/归档/静音及重放通过；跨安装同步待验 | extendedLiveResourcesR7 |
@@ -2821,18 +2821,18 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-32 | groupAvatar | 失败：真实上传创建返回422；服务端明确拒绝groupAvatar用途 | extendedLiveResourcesR4 |
 | EX-01 | 注册与登录 | 真实SDK及App密码注册/密码登录通过；同账号两安装设备列表>=2已核对 | liveAccountSDK, nativeSmoke, multiDeviceUIR1 |
 | EX-02 | 凭据刷新 | 真实SDK通过；本轮App联调待完成 | liveAccountSDK, nativeSmoke |
-| EX-03 | 当前设备登出 | 真实SDK通过；本轮App联调待完成 | liveAccountSDK, nativeSmoke |
+| EX-03 | 当前设备登出 | 真实SDK退出通过；App首次退出失败，两次均停待凭据删除；普通重试后可完成退出和账号切换 | liveAccountSDK, accountSwitchUIR1, accountSwitchUIR4 |
 | EX-04 | 远程设备撤销 | 真实SDK及App远端撤销、回到登录和重启保留终止态通过 | liveAccountUIR4 |
-| EX-05 | 账号封禁 | 真实Operator封禁与幂等重放、HTTP凭据清除、登录/TLS重新认证拒绝通过；已连接TCP即时终止待验 | extendedLiveResourcesR11 |
-| EX-06 | 账号切换与冷启动 | 待真实验收 |  |
-| EX-07 | 陌生消息拒绝/允许 | 待真实验收 |  |
+| EX-05 | 账号封禁 | 通过：真实Operator封禁/幂等、原已认证TCP在8秒观察边界内由服务端终止、HTTP凭据清除、登录及TLS重新认证拒绝 | extendedLiveResourcesR16 |
+| EX-06 | 账号切换与冷启动 | 账号切换及冷启动投影隔离通过：A→B→A，双方各自群/消息恢复且互不可见；退出各需手动重试，EX03失败单列 | accountSwitchUIR4 |
+| EX-07 | 陌生消息拒绝/允许 | 通过：无好友关系私聊预热发送成功；同一TLS连接策略关闭后新发送directPolicyDenied、重新允许后成功 | extendedLiveResourcesR16 |
 | EX-08 | 拉黑后即时授权失效 | 真实拉黑后发送拒绝及恢复unresolved通过；失败：发送者持久限制提示缺失 | liveAccountUIR5 |
-| EX-09 | 私聊唯一性 | 双方各自操作打开私聊得到同一房间通过；并发创建唯一性待验 | extendedLiveResourcesR9 |
+| EX-09 | 私聊唯一性 | 通过：双方并发首次创建及后续重新打开均得到同一私聊房间；真实HTTPS回执核对 | extendedLiveResourcesR16 |
 | EX-10 | 实时收发与历史恢复 | 真实App私聊提交/撤回恢复及群消息双向收发/@all投影通过；离线自动重放失败单列 | twoInstallUIR13, twoInstallUIR14 |
 | EX-11 | 发送结果不确定后恢复 | 通过：真实App丢ACK前独立PG确认原提交，跨Gateway自动重连、原身份恢复、双端游标与SQLite重开一致 | appACKCutR5 |
-| EX-12 | 离线发送持久化与重放 | 失败：离线UI安全保存，但原sendMessage耗尽5次运输不可用重试后needsAttention，重启连接恢复未自动发送，PG无q | twoInstallUIR14 |
-| EX-13 | 多设备编辑撤回同步 | 待真实验收 |  |
-| EX-14 | 多设备已读 | 待真实验收 |  |
+| EX-12 | 离线发送持久化与重放 | 群R3/R4自动重放正文/PG/原工作committed通过；私聊R14失败：needsAttention且PG无q，整体未通过 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4 |
+| EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
+| EX-14 | 多设备已读 | 已验证：同账号两设备progress/单条群用户已读与跨设备隐私暂停；独立接收阅读后私聊发送端冷恢复对方已读；群主读者页显示真实独立阅读成员与已读，PG一致 | multiDeviceUIR2, multiDeviceUIR4, peerReadUIR1, groupReadUIR2 |
 | EX-15 | 目录分页与权限过滤 | 真实群昵称分页租约和权限过滤通过；大目录和跨安装恢复待验 | extendedLiveResourcesR7 |
 | EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
 | EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
@@ -2939,3 +2939,25 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 同账号多设备 R1：两台安装实际登录同账号，设备页>=2断言通过。关闭设备页仍在“我的”，测试直接找会话菜单失败，附件 `/tmp/imv2-multi-r1-device-attachments/37102867-F560-4D44-9A71-44236E12E304.txt` 显示我的tab Selected。补普通消息tab切换，R2复验；尚不能算多设备编辑/已读通过。服务和安装范围清理完成。
 
 同账号R2：第二设备群消息通过，第一设备编辑committed。独立PG事实 `3|1|2|1|3|2`＝roomHead3/messageCount1/revision2/userReadReceiptCount1/readThrough3/deviceProgressCount2，记录 `/tmp/imv2-multi-r2-group-progress-facts.txt`。设置测试无设置HTTP/工作，辅助树证实外层Switch为整行370宽、内层原生Switch63宽，tap整行中心未切换，45s等待value0失败。R3改点唯一内层真实Switch，保留实际值和提交验证。
+
+同账号R3六个业务阶段完成：设置跨设备恢复、群离线原工作attempt5 committed、第二设备撤回提交均通过；PG两消息/head5，原消息revision3 withdrawn。随后Operator重置404因驱动将scope误当deviceID。R4用初次注册与第二设备登录前后设备集合差异核对真实ID，q断言仅匹配消息正文；不将待发送文本视为已送达。R14私聊离线失败证据继续保留，不以群单轮成功覆盖。
+
+同账号R4已退出1且清理完成：8个业务阶段全部完成，注册保留Dynamic Type审计失败，其他7个业务用例及2个范围清理用例通过，0跳过。q只匹配v2.message.body正文，原离线工作attempt5 committed；第二设备撤回后第一设备正式投影通过；Operator真实设备快照重置后撤回/离线消息重建通过。PG两消息/head5、原消息revision3 withdrawn；策略两项关闭、用户级已读1、设备progress2。证据：`/tmp/imv2-multi-r4-preference-progress-facts.json`、`im-v2-local-multi-device-e2e.nojmxp/all-stage-summary.json`、`imv2-native-e2e-952lpux1/message-facts.json`。EX13通过，EX12仍保留私聊R14真实失败，EX14不扩大为尚未验证的对端已读显示。
+
+扩展资源R16：原生隔离PG、Actor节点、HTTPS资源和TLS Gateway真实联调；10个实际测试函数9通过、1失败，另slow专用测试未启用跳过（不作本轮通过证据）；参数化账号偏好4种通过。唯一失败群头像上传422，保留OP32。新增EX05原已认证TCP不主动断开、Operator封禁后8秒观察边界内服务端结束、随后HTTP凭据/登录/TLS拒绝通过；EX07无好友关系私聊scope先预热，同TLS策略deny返回directPolicyDenied、allow后成功；EX09双方不同操作并发首次建房和再次打开回执同房间。进程96833退出1、独立服务清理。证据 `/tmp/imv2-acceptance-live-resources-r16-20261009/client.log`、`summary.json`。编译预检opt-in未开启导致跳过，仅作编译通过，未算验收。
+
+账号切换R1失败已清理：A注册建群及恢复通过，普通退出点击后30秒无登录表单，UI停正在完成退出登录/v2.sign-out.pending.retry，B未执行。附件 `/tmp/imv2-account-switch-r1-all-attachments/33EF30C6-12CD-4319-AED8-64F3FCC8D8A3.txt`。源码V2RootView账号页onDisappear取消signOutTask，V2AppStore清理中检查取消后进入待凭据删除，属尚未独立证明的原因候选。R2通过正常重试按钮继续账号隔离，每次重试记录明确活动，首次退出失败继续保留EX03，不以补偿后成功覆盖。
+
+账号切换R2/R3均退出1并清理：普通退出重试可回到登录，开始填写B但未提交。R3录像真实显示iOS“使用强密码？”系统弹层遮挡，滚动不足以处理；纠正此前单纯键盘/滚动判断。证据 `/tmp/imv2-account-switch-r3-last.png`（从实际xcresult录像提取），结果 `im-v2-local-two-install-e2e.0HKOHN`。EX06尚未完成，EX03首次退出失败继续保留，下一轮需处理实际系统弹层，不关闭或绕过业务验收。
+
+账号切换R4真实用例1通过、0失败、0跳过：B以公开注册API准备，实际App普通A→B→A密码登录、两账号各自建群发消息、B冷恢复及A重登/冷恢复自身消息存在、另一账号会话/正文不可见。完整活动两次手动退出重试，首次退出失败继续EX03；不把补偿成功计成普通退出正常。PG两群/两群主/两房间/两消息，消息revision1、head2。注册DynamicType失败仍使总驱动exit1；服务/范围已清理。证据 `/tmp/imv2-account-switch-r4-summary.json`、`/tmp/imv2-account-switch-r4-postgres-facts.json`、`im-v2-local-two-install-e2e.rh9sPD/account-switch-activities.json`。EX06隔离完成，EX03仍失败。
+
+私聊已读UI R1四阶段业务完成：接收端普通恢复/阅读及发送端冷启动原消息旁“对方已读”2用例通过；注册和发送各保留DynamicType审计失败；2范围清理通过，0跳过。PG1私聊/1消息/双方用户读记录2，证据 `/tmp/imv2-peer-read-r1-postgres-facts.json`、`im-v2-local-two-install-e2e.Ty7lbn/all-stage-summary.json`。总驱动退出1、服务/范围清理。不将独立peer-read模式计为消息编辑/撤回通过；EX14仍保留群读者UI待验。
+
+群读者UI R1仍执行中：Sender原建房/发送/已读SQLite全部committed attempt1，PG原消息revision1/未撤回；没有reaction/edit/withdraw工作，尚未进入群场景。当前UI测试停滞于后续私聊控制操作，不能记发送业务失败或群读者通过。证据 `/tmp/imv2-group-read-r1-sender-work-live.json`、`/tmp/imv2-group-read-r1-sender-live.png`，专属会话39401持续存活，等待既有阶段墙钟守卫。下一轮原始脚本已准备group-only路径，只完成必要私聊发送/阅读，然后真实群创建/成员阅读/群主读者断言；当前执行冻结副本未改。
+
+群读者R1明确终止：完整活动长按正文/点击反应入口后“App animations complete notification not received”，XCTest等待空闲直到5分钟执行期限，功能完成标记缺失。摘要仅DynamicType不足以继续，保留失败。Sender建房/发送/已读committed，未创建变更工作，群阶段未执行，服务/范围清理。R2改用group专用路径，已有修改/撤回验证独立保留；不修改实时驱动副本。同步修正表格分类：私聊已读UI证据属于OP05(readReceipt)，从OP06(directRoom)移回；OP12/14已验证App设置的旧“待验”字样移除。
+
+群读者UI R2完整回收：六业务阶段功能完成（注册/发送各保留DynamicType，其余4业务用例通过），2范围清理通过，0跳过。群主长按原群消息打开已读详情，真实独立成员Two install sender及value已读断言通过；PG不同读者2、最低readThrough2，终态群2条消息/head3；总驱动退出1、服务/范围清理。证据 `/tmp/imv2-group-read-r2-postgres-facts.json`、`im-v2-local-two-install-e2e.1v4JgE/all-stage-summary.json`、`imv2-native-e2e-o69rrtn3/message-facts.json`。EX14与OP05补群读者UI证据；私聊修改/撤回未在本轮执行，不扩大结论。
+
+同账号隐私R5八业务阶段功能完成：7独立业务用例通过、注册DynamicType失败保留；2范围清理通过，0跳过。普通UI关闭允许他人添加我/在线状态/正在输入，另一安装冷恢复三个开关0值；PG独立userAddDenied1/liveActivityBothDisabled1/strangerDenied1/groupReadDisabled1。原编辑/群离线/撤回/Operator快照重建继续通过。总退出1、服务及范围清理。OP13/15 App待验补齐；本轮并未测试新的好友申请拒绝或在线/typing对端传播，不扩大为这些边界验证。证据 `/tmp/imv2-multi-r5-policy-facts.json`、`im-v2-local-multi-device-e2e.IT2TlZ/all-stage-summary.json`。

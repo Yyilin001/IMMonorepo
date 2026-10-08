@@ -171,7 +171,7 @@ stage_second_device_snapshot_reset() {
   fi
   [[ -n "${operator_token}" ]] || { printf '%s\n' 'missing local operator bearer token.' >&2; return 1; }
   operation_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-  body="$(jq --null-input --compact-output --arg operationID "${operation_id}" --arg userID "${user_id}" --arg deviceID "${second_scope}" '{operationID: $operationID, userID: $userID, deviceID: $deviceID}')"
+  body="$(jq --null-input --compact-output --arg operationID "${operation_id}" --arg userID "${user_id}" --arg deviceID "${second_device_id}" '{operationID: $operationID, userID: $userID, deviceID: $deviceID}')"
   if [[ "${external_stack}" == true ]]; then
     response="$(IMAPP_OPERATOR_BODY="${body}" /usr/bin/python3 - <<'PY'
 import os, urllib.request, urllib.parse
@@ -221,10 +221,14 @@ launch "${first_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-
   -v2-ui-testing-account-handle "${account_handle}" -v2-ui-testing-public-handle "${public_handle}" \
   -v2-ui-testing-display-name 'Multi-device owner' -v2-ui-testing-group-title "${group_title}"
 run_stage "${first_simulator_id}" testReceiverRegistersIndependentInstallation
+first_device_id="$(postgres_scalar "SELECT device_id FROM im_v2.auth_devices WHERE user_id = (SELECT user_id FROM im_v2.account_password_credentials WHERE account_handle = '${account_handle}') AND revoked_at IS NULL")"
+[[ "${first_device_id}" =~ ^[0-9a-fA-F-]{36}$ ]] || { printf '%s\n' 'expected exactly one registered first-device identity.' >&2; exit 1; }
 
 launch "${second_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-e2e-scope "${second_scope}" \
   -v2-ui-testing-local-password localpassword -v2-ui-testing-account-handle "${account_handle}"
 run_stage "${second_simulator_id}" testSameAccountSecondInstallationListsDevicesAndSendsToSharedGroup
+second_device_id="$(postgres_scalar "SELECT device_id FROM im_v2.auth_devices WHERE user_id = (SELECT user_id FROM im_v2.account_password_credentials WHERE account_handle = '${account_handle}') AND device_id <> '${first_device_id}' AND revoked_at IS NULL")"
+[[ "${second_device_id}" =~ ^[0-9a-fA-F-]{36}$ ]] || { printf '%s\n' 'expected exactly one independently registered second-device identity.' >&2; exit 1; }
 
 launch "${first_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${first_scope}"
 run_stage "${first_simulator_id}" testSameAccountFirstInstallationProjectsEditsAndChangesPreference

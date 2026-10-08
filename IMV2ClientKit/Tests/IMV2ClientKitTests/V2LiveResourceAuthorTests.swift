@@ -1136,9 +1136,12 @@ extension V2LiveResourceAuthorTests {
         let viewer = try await fixture.register().credentials
         _ = try await resourceRelationship(fixture, account: author, target: viewer.userID, action: .request)
         _ = try await resourceRelationship(fixture, account: viewer, target: author.userID, action: .accept)
-        let first = try await resourceOpenDirect(fixture, account: author, target: viewer.userID)
-        let repeated = try await resourceOpenDirect(fixture, account: viewer, target: author.userID)
+        // Both new operations race before either side has a room projection.
+        async let authorOpening = resourceOpenDirect(fixture, account: author, target: viewer.userID)
+        async let viewerOpening = resourceOpenDirect(fixture, account: viewer, target: author.userID)
+        let (first, repeated) = try await (authorOpening, viewerOpening)
         #expect(first.roomID == repeated.roomID)
+        #expect(try await resourceOpenDirect(fixture, account: author, target: viewer.userID).roomID == first.roomID)
         for account in [author, viewer] {
             let preferences = try V2HTTPAccountPreferenceOperationClient(baseURL: fixture.url(""),
                 credentials: ResourceLiveCredentials(value: account), transport: V2URLSessionMediaEdgeHTTPTransport(session: fixture.http))
@@ -1197,6 +1200,55 @@ extension V2LiveResourceAuthorTests {
     }
 }
 extension V2LiveResourceAuthorTests {
+    @Test("real stranger policy updates affect an already warm private-room sender",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func strangerPolicyAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let author = try await fixture.register().credentials
+        let viewer = try await fixture.register().credentials
+        // No friend request/acceptance is performed for these two accounts.
+        let room = try await resourceOpenDirect(fixture, account: author, target: viewer.userID).roomID
+        let socket = try connection(authorSupplements: false)
+        do {
+            let session = try await authenticate(socket, author)
+            let transport = V2ProtobufSyncTransport(wire: socket, protocolVersion: session.protocolVersion)
+            let sender = V2ProtobufMessageSendOperationClient(transport: transport, connection: socket)
+            _ = try await resourceSend(fixture, client: sender, account: author, roomID: room,
+                clientMessageID: .init(uuid: UUID()), text: "Warm stranger scope", media: [], mentions: [])
+            let policy = try V2HTTPAccountPreferenceOperationClient(baseURL: fixture.url(""),
+                credentials: ResourceLiveCredentials(value: viewer), transport: V2URLSessionMediaEdgeHTTPTransport(session: fixture.http))
+            for allows in [false, true] {
+                let baseline = try await policy.baseline(kind: .strangerMessagePreference)
+                let change = try V2AccountPreferenceCommand(identity: .init(accountID: viewer.userID,
+                    scope: .account(viewer.userID), operation: .strangerMessagePreference(.init(uuid: UUID()))),
+                    value: .strangerMessage(allows ? .allow : .deny), expectedRevision: baseline.revision,
+                    firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+                guard case .receipt(let updated) = try await policy.submit(change),
+                      updated.validates(command: change), case .applied = updated.outcome else {
+                    throw ResourceLiveFailure.presentation
+                }
+                let command = try V2MessageSendOperationCommand(command: .init(roomID: room,
+                    senderUserID: author.userID, clientMessageID: .init(uuid: UUID()),
+                    text: "Send after stranger policy change", limits: .init(maxUTF8Bytes: 4096)),
+                    firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+                guard case .receipt(let result) = try await sender.submit(command),
+                      try result.validates(identity: command.identity, fingerprint: command.fingerprint) else {
+                    throw ResourceLiveFailure.presentation
+                }
+                switch result.outcome {
+                case .accepted: #expect(allows)
+                case .rejected(let reason):
+                    #expect(!allows)
+                    #expect(reason == .directPolicyDenied)
+                case .closed: throw ResourceLiveFailure.presentation
+                }
+            }
+            await socket.disconnect()
+        } catch { await socket.disconnect(); throw error }
+        print("Live acceptance: warm stranger scope denied after policy change and accepted after reversal on the same TLS connection.")
+    }
+
     @Test("real operator account disable ends HTTP sessions and rejects login and TLS authentication",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
     func accountDisableAcceptance() async throws {
@@ -1210,7 +1262,6 @@ extension V2LiveResourceAuthorTests {
         #expect(try await devices.list(cursor: nil, pageSize: 10).sessions.count == 1)
         let socket = try connection(authorSupplements: false)
         _ = try await authenticate(socket, account.credentials)
-        await socket.disconnect()
         var request = URLRequest(url: fixture.url("__fixture__/disable-account"))
         request.httpMethod = "POST"
         request.setValue(try #require(ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_FIXTURE_TOKEN"]), forHTTPHeaderField: "X-Resource-Fixture")
@@ -1226,6 +1277,15 @@ extension V2LiveResourceAuthorTests {
             let timestamp = try #require(result["disabledAtMilliseconds"] as? Int64)
             if let disabledAt { #expect(timestamp == disabledAt) } else { disabledAt = timestamp }
         }
+        // No local disconnect or HTTP session teardown may manufacture this
+        // observation: the already authenticated physical socket must end.
+        _ = try await bounded {
+            while await socket.authenticatedConnectionID() != nil {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            return true
+        }
+        print("Live acceptance: pre-existing authenticated TLS connection ended after Operator disable.")
         await #expect(throws: (any Error).self) { try await devices.list(cursor: nil, pageSize: 10) }
         #expect(await session.currentState() == .unauthenticated)
         #expect(await store.load() == nil)

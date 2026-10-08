@@ -104,6 +104,9 @@ for simulator_id in "${receiver_simulator_id}" "${sender_simulator_id}"; do
 done
 
 scenario_suffix="$(uuidgen | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_READ_RECEIPT_ONLY:-false}" == true || "${IMAPP_LOCAL_TWO_INSTALL_GROUP_READ_ONLY:-false}" == true ]]; then
+  export TEST_RUNNER_IMAPP_DIRECT_READ_RECEIPT_ONLY=1
+fi
 receiver_scope="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 sender_scope="$(uuidgen | tr '[:upper:]' '[:lower:]')"
 receiver_account_handle="twor_${scenario_suffix:0:20}"
@@ -350,6 +353,21 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-group-title "${receiver_self_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
 
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_ACCOUNT_SWITCH_ONLY:-false}" == true ]]; then
+  export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_SCOPE="${receiver_scope}"
+  export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_FIRST_HANDLE="${receiver_account_handle}"
+  export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_FIRST_GROUP="${receiver_self_group_title}"
+  export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_SECOND_HANDLE="${IMAPP_LOCAL_TWO_INSTALL_SWITCH_SECOND_HANDLE:?registered account B required}"
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testAccountSwitchAndColdRestoreKeepProjectionsIsolated
+  if [[ "${audit_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'account-switch functional stages complete; retained accessibility failure.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local account-switch isolation E2E: pass'
+  exit 0
+fi
+
 launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-live-local-account \
   -v2-ui-testing-e2e-scope "${sender_scope}" \
@@ -362,6 +380,19 @@ launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-message "${message}"
 run_stage "${sender_simulator_id}" testSenderOpensDirectConversationAndSendsFromIndependentInstallation
 
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_READ_RECEIPT_ONLY:-false}" == true ]]; then
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testReceiverProjectsDirectMessageAndReportsRead
+  launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${sender_scope}"
+  run_stage "${sender_simulator_id}" testSenderColdRestoreProjectsPeerRead
+  if [[ "${audit_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'direct peer-read functional stages complete; retained accessibility failure.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local direct peer-read E2E: pass'
+  exit 0
+fi
+
 launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-live-local-account \
   -v2-ui-testing-restore-local-account \
@@ -370,7 +401,11 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-group-members "@${sender_public_handle}" \
   -v2-ui-testing-message "${group_message}" \
   -v2-ui-testing-message-mentions "${group_message_mentions}"
-run_stage "${receiver_simulator_id}" testReceiverRestoresScopedInstallationAndProjectsOfflineMessageThenSendsGroupMessage
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_READ_ONLY:-false}" == true ]]; then
+  run_stage "${receiver_simulator_id}" testReceiverProjectsDirectMessageAndReportsRead
+else
+  run_stage "${receiver_simulator_id}" testReceiverRestoresScopedInstallationAndProjectsOfflineMessageThenSendsGroupMessage
+fi
 
 launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-live-local-account \
@@ -381,6 +416,19 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-message "${group_message}" \
   -v2-ui-testing-message-mentions "${group_message_mentions}"
 run_stage "${receiver_simulator_id}" testReceiverCreatesIndependentGroupAndSendsMessage
+
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_READ_ONLY:-false}" == true ]]; then
+  launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${sender_scope}"
+  run_stage "${sender_simulator_id}" testSenderRestoresIndependentGroupAndProjectsMessage
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testGroupOwnerProjectsActualMemberReadReceipts
+  if [[ "${audit_failure_count}" -gt 0 || "${withdrawal_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'group readers functional stages complete; retained acceptance failures.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local group readers E2E: pass'
+  exit 0
+fi
 
 launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-live-local-account \

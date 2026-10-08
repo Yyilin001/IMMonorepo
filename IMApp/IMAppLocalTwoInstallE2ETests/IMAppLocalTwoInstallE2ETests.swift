@@ -218,6 +218,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             NSPredicate(format: "identifier == %@", "v2.message.body.\(messageID)")
         ).firstMatch
         XCTAssertTrue(messageBody.exists && messageBody.isHittable)
+        if ProcessInfo.processInfo.environment["IMAPP_DIRECT_READ_RECEIPT_ONLY"] == "1" {
+            // The peer-read scenario retains the accepted message; mutation
+            // acceptance is independently exercised by the ordinary mode.
+            XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+            app.terminate()
+            return
+        }
         messageBody.press(forDuration: 1)
         let reactionPicker = app.buttons.matching(
             NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.reaction-picker.\(messageID)", "表情回应")
@@ -601,7 +608,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         directConversation.tap()
         let replayedOfflineMessage = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "q")
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "q")
         ).firstMatch
         let replayedOfflineMessageAppeared = replayedOfflineMessage.waitForExistence(timeout: 30)
         if !replayedOfflineMessageAppeared {
@@ -724,6 +731,20 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let groupReceiptsDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: groupReceiptsDisabled, evaluatedWith: groupReadReceipts, handler: nil)
         waitForExpectations(timeout: 45)
+        for identifier in ["v2.privacy.allow-being-added", "v2.privacy.share-online-presence", "v2.privacy.share-typing-indicators"] {
+            let toggle = app.switches[identifier]
+            XCTAssertTrue(toggle.waitForExistence(timeout: 15))
+            for _ in 0..<3 where !toggle.isHittable { app.swipeUp() }
+            let enabled = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: toggle)
+            wait(for: [enabled], timeout: 30)
+            XCTAssertTrue(toggle.isHittable)
+            XCTAssertEqual(toggle.value as? String, "1")
+            let control = toggle.switches.firstMatch
+            XCTAssertTrue(control.exists && control.isHittable)
+            control.tap()
+            let disabled = expectation(for: NSPredicate(format: "value == %@", "0"), evaluatedWith: toggle)
+            wait(for: [disabled], timeout: 45)
+        }
         let done = app.buttons["v2.privacy.done"]
         XCTAssertTrue(done.isHittable)
         done.tap()
@@ -755,6 +776,14 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let groupReceiptsDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: groupReceiptsDisabled, evaluatedWith: groupReadReceipts, handler: nil)
         waitForExpectations(timeout: 30)
+        for identifier in ["v2.privacy.allow-being-added", "v2.privacy.share-online-presence", "v2.privacy.share-typing-indicators"] {
+            let toggle = app.switches[identifier]
+            XCTAssertTrue(toggle.waitForExistence(timeout: 30))
+            for _ in 0..<3 where !toggle.isHittable { app.swipeUp() }
+            XCTAssertTrue(toggle.isHittable)
+            let disabled = expectation(for: NSPredicate(format: "value == %@", "0"), evaluatedWith: toggle)
+            wait(for: [disabled], timeout: 30)
+        }
         app.buttons["v2.privacy.done"].tap()
         app.tabBars.buttons["消息"].tap()
         let group = app.staticTexts.matching(
@@ -808,7 +837,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()
         let queuedMessage = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "q")
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "q")
         ).firstMatch
         XCTAssertTrue(queuedMessage.waitForExistence(timeout: 30), "恢复连接后必须仅重放该设备离线时安全保存的群消息。")
         let editedMessage = app.descendants(matching: .any).matching(
@@ -843,7 +872,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(withdrawn.waitForExistence(timeout: 30), "设备被要求重置快照后必须重建撤回 tombstone。")
         let replayedMessage = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "q")
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "q")
         ).firstMatch
         XCTAssertTrue(replayedMessage.waitForExistence(timeout: 30), "设备被要求重置快照后必须重建此前离线重放的消息。")
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
@@ -865,12 +894,191 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         ).firstMatch
         XCTAssertTrue(withdrawn.waitForExistence(timeout: 30), "第一台设备必须投影第二台设备提交的撤回 tombstone。")
         let replayedOfflineMessage = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label == %@", "q")
+            NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "q")
         ).firstMatch
         XCTAssertTrue(replayedOfflineMessage.waitForExistence(timeout: 30), "第一台设备必须投影第二台设备恢复连接后重放的群消息。")
         XCUIDevice.shared.press(.home)
         app.activate()
         XCTAssertTrue(withdrawn.waitForExistence(timeout: 30), "同账号设备前后台切换后必须保留撤回后的同步投影。")
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testGroupOwnerProjectsActualMemberReadReceipts() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let group = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "跨装群")).firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let body = app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier BEGINSWITH %@ AND label BEGINSWITH %@", "v2.message.body.", "two-install-group-")).firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: 30) && body.isHittable)
+        let messageID = body.identifier.replacingOccurrences(of: "v2.message.body.", with: "")
+        XCTAssertFalse(messageID.isEmpty)
+        body.press(forDuration: 1)
+        let readers = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@",
+            "v2.message.group-readers.\(messageID)", "查看已读")).firstMatch
+        XCTAssertTrue(readers.waitForExistence(timeout: 10) && readers.isHittable)
+        readers.tap()
+        XCTAssertTrue(app.navigationBars["已读详情"].waitForExistence(timeout: 15))
+        let member = app.descendants(matching: .any).matching(NSPredicate(
+            format: "label CONTAINS %@ AND value == %@", "Two install sender", "已读")).firstMatch
+        if !member.waitForExistence(timeout: 30) {
+            let hierarchy = XCTAttachment(string: app.debugDescription)
+            hierarchy.name = "group-readers-missing-actual-member"
+            hierarchy.lifetime = .keepAlways
+            add(hierarchy)
+        }
+        XCTAssertTrue(member.exists, "已读详情必须显示实际阅读的独立成员及已读状态。")
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testReceiverProjectsDirectMessageAndReportsRead() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let direct = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.direct.")).firstMatch
+        XCTAssertTrue(direct.waitForExistence(timeout: 30) && direct.isHittable)
+        direct.tap()
+        let body = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.body.")).firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: 30))
+        XCTAssertTrue(body.label.hasPrefix("two-install-"))
+        // Leave only through the ordinary navigation boundary, allowing its
+        // read reporting to finish while the authenticated service is alive.
+        app.navigationBars.buttons.firstMatch.tap()
+        XCTAssertTrue(direct.waitForExistence(timeout: 15))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testSenderColdRestoreProjectsPeerRead() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let direct = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.conversation.direct.")).firstMatch
+        XCTAssertTrue(direct.waitForExistence(timeout: 30) && direct.isHittable)
+        direct.tap()
+        let body = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.body.")).firstMatch
+        XCTAssertTrue(body.waitForExistence(timeout: 30))
+        let messageID = body.identifier.replacingOccurrences(of: "v2.message.body.", with: "")
+        XCTAssertFalse(messageID.isEmpty)
+        let read = app.staticTexts["v2.message.read.\(messageID)"]
+        XCTAssertTrue(read.waitForExistence(timeout: 30), "接收端真实阅读后的回执必须恢复为同一消息的对方已读UI。")
+        XCTAssertEqual(read.label, "对方已读")
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testAccountSwitchAndColdRestoreKeepProjectionsIsolated() throws {
+        let environment = ProcessInfo.processInfo.environment
+        let scope = try XCTUnwrap(environment["IMAPP_ACCOUNT_SWITCH_SCOPE"])
+        let firstHandle = try XCTUnwrap(environment["IMAPP_ACCOUNT_SWITCH_FIRST_HANDLE"])
+        let firstGroup = try XCTUnwrap(environment["IMAPP_ACCOUNT_SWITCH_FIRST_GROUP"])
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(18)
+        let secondHandle = try XCTUnwrap(environment["IMAPP_ACCOUNT_SWITCH_SECOND_HANDLE"])
+        let secondGroup = "Switch B \(suffix)"
+        let app = XCUIApplication()
+        let restore = ["-v2-ui-testing-live-local-account", "-v2-ui-testing-restore-local-account", "-v2-ui-testing-e2e-scope", scope]
+        func group(_ title: String) -> XCUIElement {
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", title)).firstMatch
+        }
+        func replace(_ element: XCUIElement, with value: String) {
+            XCTAssertTrue(element.waitForExistence(timeout: 15))
+            for _ in 0..<3 where !element.isHittable { app.swipeUp() }
+            XCTAssertTrue(element.isHittable)
+            element.tap()
+            let previous = element.value as? String ?? ""
+            if previous != element.placeholderValue {
+                element.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: previous.count))
+            }
+            element.typeText(value)
+        }
+        func signOut() {
+            app.tabBars.buttons["我的"].tap()
+            let signOut = app.buttons["v2.sign-out"]
+            if !signOut.isHittable { app.swipeUp() }
+            XCTAssertTrue(signOut.waitForExistence(timeout: 10) && signOut.isHittable)
+            signOut.tap()
+            let submit = app.buttons["v2.password.submit"]
+            let retry = app.buttons["v2.sign-out.pending.retry"]
+            let destination = expectation(for: NSPredicate { _, _ in submit.exists || retry.exists }, evaluatedWith: app)
+            wait(for: [destination], timeout: 30)
+            if retry.exists {
+                // Record the failed first exit separately. This is the
+                // ordinary user's recovery button, not credential injection.
+                XCTContext.runActivity(named: "account-switch-sign-out-required-manual-retry") { _ in }
+                XCTAssertTrue(retry.isHittable)
+                retry.tap()
+            }
+            XCTAssertTrue(submit.waitForExistence(timeout: 30))
+        }
+        func body(_ text: String) -> XCUIElement {
+            app.descendants(matching: .any).matching(NSPredicate(
+                format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", text)).firstMatch
+        }
+        func send(in title: String, text: String) {
+            group(title).tap()
+            replace(app.textFields["v2.message.draft"], with: text)
+            app.buttons["v2.message.send"].tap()
+            XCTAssertTrue(body(text).waitForExistence(timeout: 30))
+            app.navigationBars.buttons.firstMatch.tap()
+        }
+        func checkMessages(in title: String, own: String, other: String) {
+            group(title).tap()
+            XCTAssertTrue(body(own).waitForExistence(timeout: 30))
+            XCTAssertFalse(body(other).exists)
+            app.navigationBars.buttons.firstMatch.tap()
+        }
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        XCTAssertTrue(group(firstGroup).waitForExistence(timeout: 30))
+        send(in: firstGroup, text: "Switch A message")
+        signOut()
+        app.segmentedControls["v2.password.mode"].buttons["登录"].tap()
+        replace(app.textFields["v2.password.account-handle"], with: secondHandle)
+        replace(app.secureTextFields["v2.password.value"], with: "localpassword")
+        app.buttons["v2.password.submit"].tap()
+        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30))
+        XCTAssertFalse(group(firstGroup).exists, "新账号不能展示旧账号的会话。")
+        tapConversationTool("v2.conversation.new-group", in: app, timeout: 15)
+        replace(app.textFields["v2.conversation.group-title"], with: secondGroup)
+        app.buttons["v2.conversation.group-submit"].tap()
+        let created = app.staticTexts["v2.conversation.group-feedback"]
+        XCTAssertTrue(created.waitForExistence(timeout: 30))
+        let committed = expectation(for: NSPredicate(format: "label == %@", "群聊已创建，可从会话列表打开。"), evaluatedWith: created)
+        wait(for: [committed], timeout: 30)
+        app.buttons["v2.conversation.group-cancel"].tap()
+        XCTAssertTrue(group(secondGroup).waitForExistence(timeout: 30))
+        send(in: secondGroup, text: "Switch B message")
+        app.terminate()
+        app.launchArguments = restore
+        app.launch()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        XCTAssertTrue(group(secondGroup).waitForExistence(timeout: 30), "冷启动必须恢复当前账号B的持久投影。")
+        XCTAssertFalse(group(firstGroup).exists)
+        checkMessages(in: secondGroup, own: "Switch B message", other: "Switch A message")
+        signOut()
+        app.segmentedControls["v2.password.mode"].buttons["登录"].tap()
+        replace(app.textFields["v2.password.account-handle"], with: firstHandle)
+        replace(app.secureTextFields["v2.password.value"], with: "localpassword")
+        app.buttons["v2.password.submit"].tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        XCTAssertTrue(group(firstGroup).waitForExistence(timeout: 30), "重新登录A必须恢复其原投影。")
+        XCTAssertFalse(group(secondGroup).exists, "A不能展示B的会话。")
+        checkMessages(in: firstGroup, own: "Switch A message", other: "Switch B message")
+        app.terminate()
+        app.launchArguments = restore
+        app.launch()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        XCTAssertTrue(group(firstGroup).waitForExistence(timeout: 30))
+        XCTAssertFalse(group(secondGroup).exists)
+        checkMessages(in: firstGroup, own: "Switch A message", other: "Switch B message")
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
