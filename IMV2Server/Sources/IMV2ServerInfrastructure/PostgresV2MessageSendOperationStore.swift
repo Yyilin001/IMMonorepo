@@ -28,11 +28,11 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
     private let roomAcceptance = V2DirectRoomSendAcceptanceMemory()
 
     package func installSendInitialization(_ initialization: V2RoomSendInitialization) async {
-        await roomAcceptance.install(initialization)
+        roomAcceptance.install(initialization)
     }
 
     package func invalidateSendState(token: V2RoomActivationToken) async {
-        await roomAcceptance.invalidate(token)
+        roomAcceptance.invalidate(token)
     }
     private var pinnedOwnerConnection: V2BorrowedRoomConnection?
     private var pinnedOwnerConnectionIsUsable: (@Sendable () -> Bool)?
@@ -379,7 +379,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         let stateProbeStartedAt = ContinuousClock.now
         let needsInitialization: Bool
         if input.pending.isEmpty { needsInitialization = false }
-        else { needsInitialization = await roomAcceptance.needsInitialization(token: request.token) }
+        else { needsInitialization = roomAcceptance.needsInitialization(token: request.token) }
         V2SendPathTrace.current?.record("prepare_state_probe", from: stateProbeStartedAt)
         if needsInitialization {
             // Only cold/invalidated state creates parallel child tasks.
@@ -396,7 +396,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         for policy in policies {
             guard let current = policy.currentDirectPolicy else { continue }
             for command in input.pending where try policy.contains(command.command) {
-                if let decision = try await roomAcceptance.accept(command: command.command, token: request.token,
+                if let decision = try roomAcceptance.accept(command: command.command, token: request.token,
                     policy: current, now: clock()) {
                     accepted[try operationKey(identity: command.identity)] = decision
                 }
@@ -568,11 +568,11 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 let results = try await executePreparedBody(prepared, capacityProfile: capacityProfile, identifiers: identifiers, now: now)
                 await afterCommit { [preparationMemory, roomAcceptance] in
                     await preparationMemory.remember(commands: prepared.commands, results: results)
-                    await roomAcceptance.invalidate(prepared.token)
+                    roomAcceptance.invalidate(prepared.token)
                 }
                 return results
             } catch {
-                await roomAcceptance.invalidate(prepared.token)
+                roomAcceptance.invalidate(prepared.token)
                 throw error
             }
         }
@@ -788,7 +788,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             }
             guard store.controlScopeRoomKinds?[key.room] == nil || store.controlScopeRoomKinds?[key.room] == "direct" else { return nil }
             guard let row = try await v2MeasureSendOperationStage(.ownerRuntimeState, metrics: sendOperationMetrics, {
-                try await roomAcceptance.preflight(command: command.command, token: prepared.token,
+                try roomAcceptance.preflight(command: command.command, token: prepared.token,
                     policy: policy, ordinal: ordinal, now: resolvedAt)
             }), row.usesRuntimeState else { return nil }
             rows.append(row)
@@ -823,13 +823,13 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             let outcomes = commits.map { $0.commit.outcome }
             await afterCommit { [preparationMemory, roomAcceptance, sendOperationMetrics, committedMessageObserver] in
                 await preparationMemory.remember(commands: prepared.commands, results: values)
-                await roomAcceptance.committed(commands: prepared.commands, results: values, token: prepared.token)
+                roomAcceptance.committed(commands: prepared.commands, results: values, token: prepared.token)
                 sendOperationMetrics?.recordOwnerCohortCommitted(acceptedCommandCount: values.count, replayedCommandCount: 0)
                 committedMessageObserver?.observeCommittedMessages(outcomes, activation: prepared.token)
             }
             return values
         } catch {
-            await roomAcceptance.invalidate(prepared.token)
+            roomAcceptance.invalidate(prepared.token)
             // The runner exposes raw constraint failures only after an idle
             // confirmation proved the failed statement has settled. A stale
             // cursor is eligible only when all durable mutation counts were zero.
@@ -934,7 +934,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                             var runtimeRows: [Int: PlainDirectRoomLogBatchPreflightRow] = [:]
                             for ordinal in ordered {
                                 let command = operations[ordinal]
-                                guard let row = try await roomAcceptance.preflight(command: command.command,
+                                guard let row = try roomAcceptance.preflight(command: command.command,
                                         token: prepared.token, policy: policies[ordinal]!,
                                         ordinal: ordinal, now: resolvedAt) else { return nil }
                                 runtimeRows[ordinal] = row
@@ -1053,8 +1053,8 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             await afterCommit { [preparationMemory, roomAcceptance, sendOperationMetrics, committedMessageObserver] in
                 let results = values.map { V2RoomMessagingResult.sendOperation($0) }
                 await preparationMemory.remember(commands: prepared.commands, results: results)
-                await roomAcceptance.committed(commands: prepared.commands, results: results, token: prepared.token)
-                if !committed.usesRuntimeState { await roomAcceptance.invalidateCursor(prepared.token) }
+                roomAcceptance.committed(commands: prepared.commands, results: results, token: prepared.token)
+                if !committed.usesRuntimeState { roomAcceptance.invalidateCursor(prepared.token) }
                 sendOperationMetrics?.recordOwnerCohortCommitted(acceptedCommandCount: committed.newlyAccepted.count,
                     replayedCommandCount: values.count - committed.newlyAccepted.count)
                 if !committed.newlyAccepted.isEmpty {
@@ -1065,7 +1065,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         } catch {
             // A failed/uncertain transaction cannot leave an authoritative local cursor.
             // Reload on the next execution; the scalar fallback resolves original IDs.
-            await roomAcceptance.invalidate(prepared.token)
+            roomAcceptance.invalidate(prepared.token)
             // Only proven pre-COMMIT failures may retry. COMMIT-unknown
             // failures propagate with the original stable message identities.
             let canRetryScalar: Bool

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import FluentKit
 import SQLKit
 import IMV2ServerApplication
@@ -15,79 +16,72 @@ struct V2AcceptedDirectSend: Sendable {
     let context: DirectMessageAcceptanceContext
 }
 
-actor V2DirectRoomSendAcceptanceMemory {
-    private struct Load { let id: UUID; let task: Task<State?, any Error> }
-    private var initializedGroups: Set<V2RoomActivationToken> = []
-    private var states: [V2RoomActivationToken: State] = [:]
-    private var loads: [V2RoomActivationToken: Load] = [:]
-    private var order: [V2RoomActivationToken] = []
-    private var policies: [V2RoomActivationToken: [UUID: V2DirectSendControlPolicy]] = [:]
+/// Short synchronous memory operations avoid an executor hop while a SQL loan
+/// is held. Cold I/O is single-flight and always awaited outside the mutex.
+final class V2DirectRoomSendAcceptanceMemory: Sendable {
+    private struct Load: Sendable { let id: UUID; let task: Task<State?, any Error> }
+    private let memory = Mutex(Storage())
 
     func accept(command: V2SendMessageCommand, token: V2RoomActivationToken,
-        policy: V2DirectSendControlPolicy, now: Date) async throws -> V2AcceptedDirectSend? {
-        if let previous = policies[token]?[policy.sender.userID], previous != policy {
-            invalidate(token)
-        }
-        // Unanswered stranger quota and special accounts retain their durable
-        // workflows. Established conversations reuse the recipient's reply fact.
-        guard !policy.blocked, policy.sender.isActive, policy.recipient.isActive,
-              policy.sender.specialKind == nil, policy.recipient.specialKind == nil else { return nil }
-        let state = states[token]
-        guard let state else { return nil }
-        policies[token, default: [:]][policy.sender.userID] = policy
-        return try decision(command: command, token: token, policy: policy, state: state, now: now)
+        policy: V2DirectSendControlPolicy, now: Date) throws -> V2AcceptedDirectSend? {
+        try memory.withLock { try $0.accept(command: command, token: token, policy: policy, now: now) }
     }
-
     func needsInitialization(token: V2RoomActivationToken) -> Bool {
-        states[token] == nil && !initializedGroups.contains(token)
+        memory.withLock { $0.needsInitialization(token: token) }
     }
+    func install(_ initialization: V2RoomSendInitialization) {
+        memory.withLock { $0.install(initialization) }
+    }
+    func preflight(command: V2SendMessageCommand, token: V2RoomActivationToken,
+        policy: V2DirectSendControlPolicy, ordinal: Int, now: Date) throws -> PlainDirectRoomLogBatchPreflightRow? {
+        try memory.withLock { try $0.preflight(command: command, token: token, policy: policy, ordinal: ordinal, now: now) }
+    }
+    func committed(commands: [V2MessageSendOperationCommand], results: [V2RoomMessagingResult], token: V2RoomActivationToken) {
+        memory.withLock { $0.committed(commands: commands, results: results, token: token) }
+    }
+    func invalidateCursor(_ token: V2RoomActivationToken) { memory.withLock { $0.invalidateCursor(token) } }
+    func invalidate(_ token: V2RoomActivationToken) { memory.withLock { $0.invalidate(token) } }
 
     func initializeIfNeeded(token: V2RoomActivationToken, database: any Database) async throws {
-        guard !initializedGroups.contains(token) else { return }
         try Task.checkCancellation()
-        let state: State?
-        if let existing = states[token] { state = existing }
-        else {
-            let load: Load
-            if let existing = loads[token] { load = existing }
-            else {
-                let task = Task<State?, any Error> {
-                    return try await database.withConnection { connection in
-                        connection.eventLoop.makeFutureWithTask {
-                            guard let sql = connection as? any SQLDatabase else {
-                                throw V2RoomWriteStoreError.corruptPersistenceState
-                            }
-                            return try await Self.readInitialization(sql: sql, token: token).directState
+        let load = memory.withLock { value -> Load? in
+            guard value.needsInitialization(token: token) else { return nil }
+            if let existing = value.loads[token] { return existing }
+            let task = Task<State?, any Error> {
+                try await database.withConnection { connection in
+                    connection.eventLoop.makeFutureWithTask {
+                        guard let sql = connection as? any SQLDatabase else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
                         }
-                    }.get()
-                }
-                load = .init(id: UUID(), task: task); loads[token] = load
+                        return try await Self.readInitialization(sql: sql, token: token).directState
+                    }
+                }.get()
             }
-            do {
-                state = try await load.task.value
-                if loads[token]?.id == load.id {
-                    loads.removeValue(forKey: token)
-                    if let state {
-                        states[token] = state; order.append(token)
-                        if order.count > 8192 {
-                            let evicted = order.removeFirst(); states.removeValue(forKey: evicted); policies.removeValue(forKey: evicted)
-                        }
-                    } else { initializedGroups.insert(token) }
-                } else { return } // A concurrent mutation invalidated this initialization.
-            } catch {
-                if loads[token]?.id == load.id { loads.removeValue(forKey: token) }
-                throw error
-            }
+            let load = Load(id: UUID(), task: task)
+            value.loads[token] = load
+            return load
         }
-        _ = state
-    }
-
-    func install(_ initialization: V2RoomSendInitialization) {
-        invalidate(initialization.token)
-        if let state = initialization.directState {
-            states[initialization.token] = state
-            order.append(initialization.token)
-        } else if initialization.kind == "group" { initializedGroups.insert(initialization.token) }
+        guard let load else { return }
+        do {
+            let state = try await load.task.value
+            memory.withLock { value in
+                // Invalidation or restoration supersedes an in-flight cold load.
+                guard value.loads[token]?.id == load.id else { return }
+                value.loads[token] = nil
+                if let state {
+                    value.states[token] = state
+                    value.order.append(token, key: token)
+                    if value.order.count > 8192, let evicted = value.order.removeFirst() {
+                        value.states[evicted] = nil; value.policies[evicted] = nil
+                    }
+                } else { value.initializedGroups.insert(token) }
+            }
+        } catch {
+            memory.withLock { value in
+                if value.loads[token]?.id == load.id { value.loads[token] = nil }
+            }
+            throw error
+        }
     }
 
     static func readInitialization(sql: any SQLDatabase, token: V2RoomActivationToken) async throws -> V2RoomSendInitialization {
@@ -120,82 +114,117 @@ actor V2DirectRoomSendAcceptanceMemory {
         return .init(token: token, kind: kind, directState: kind == "direct" ? try row.decode(model: State.self) : nil)
     }
 
-    private func decision(command: V2SendMessageCommand, token: V2RoomActivationToken,
-        policy: V2DirectSendControlPolicy, state: State, now: Date) throws -> V2AcceptedDirectSend? {
-        guard !policy.blocked, policy.sender.isActive, policy.recipient.isActive,
-              policy.sender.specialKind == nil, policy.recipient.specialKind == nil else { return nil }
-        guard state.members == 2, state.totalMembers == 2 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        guard state.frozenAt == nil, let sender = command.senderUserID.uuidValue,
-              (sender == state.lower || sender == state.higher),
-              policy.recipient.userID == (sender == state.lower ? state.higher : state.lower) else { return nil }
-        let lower = sender == state.lower
-        guard policy.isFriend || (lower ? state.higherReplied : state.lowerReplied) else { return nil }
-        guard (lower ? state.lowerMute : state.higherMute).map({ $0 > now }) != true else { return nil }
-        return .init(command: command, activation: token, membershipRevision: state.membershipRevision,
-            context: .init(recipientID: policy.recipient.userID, restriction: nil, requiresStrangerQuota: false,
-                senderProfileVisibleToRecipient: lower ? state.lowerVisible : state.higherVisible,
-                senderCanSend: lower ? state.lowerCanSend : state.higherCanSend,
-                senderHasReplied: lower ? state.lowerReplied : state.higherReplied, supportAccountID: nil))
-    }
-
-    /// Execution obtains the latest committed room state, not the snapshot
-    /// captured by an earlier preparation. The room turn owns serialization.
-    func preflight(command: V2SendMessageCommand, token: V2RoomActivationToken,
-        policy: V2DirectSendControlPolicy,
-        ordinal: Int, now: Date) throws -> PlainDirectRoomLogBatchPreflightRow? {
-        // This runs with the write connection held. Cold/revoked state must
-        // fall back to the transaction's existing durable preflight, never
-        // start another pool loan while occupying the message connection.
-        if let previous = policies[token]?[policy.sender.userID], previous != policy {
-            invalidate(token); return nil
-        }
-        guard let state = states[token], state.cursorIsValid else {
-            invalidate(token); return nil
-        }
-        guard let decision = try decision(command: command, token: token, policy: policy, state: state, now: now) else { return nil }
-        let room = RoomRow(kind: "direct", roomShardID: state.roomShardID,
-            roomSequence: state.roomSequence, timelineSequence: state.timelineSequence,
-            membershipRevision: state.membershipRevision, capacityProfileID: state.capacityProfileID,
-            capacityClass: state.capacityClass, frozenAt: state.frozenAt)
-        return .init(ordinal: ordinal, room: room,
-            context: decision.context, policy: policy, directPolicyRevision: state.directPolicyRevision,
-            recipientHasReplied: policy.sender.userID == state.lower ? state.higherReplied : state.lowerReplied)
-    }
-
-    func committed(commands: [V2MessageSendOperationCommand], results: [V2RoomMessagingResult], token: V2RoomActivationToken) {
-        guard commands.count == results.count, var state = states[token] else { return }
-        for (command, result) in zip(commands, results) {
-            guard case .sendOperation(.receipt(let receipt)) = result, case .accepted(let accepted) = receipt.outcome else { continue }
-            guard let sequence = Int64(exactly: accepted.roomSequence), sequence > state.roomSequence else { continue }
-            let delta = sequence - state.roomSequence
-            guard state.timelineSequence <= Int64.max - delta else {
-                invalidate(token); return
+    private struct Storage: Sendable {
+        var initializedGroups: Set<V2RoomActivationToken> = []
+        var states: [V2RoomActivationToken: State] = [:]
+        var loads: [V2RoomActivationToken: Load] = [:]
+        var order = V2IndexedFIFO<V2RoomActivationToken, V2RoomActivationToken>()
+        var policies: [V2RoomActivationToken: [UUID: V2DirectSendControlPolicy]] = [:]
+        mutating func accept(command: V2SendMessageCommand, token: V2RoomActivationToken,
+            policy: V2DirectSendControlPolicy, now: Date) throws -> V2AcceptedDirectSend? {
+            if let previous = policies[token]?[policy.sender.userID], previous != policy {
+                invalidate(token)
             }
-            state.roomSequence = sequence
-            state.timelineSequence += delta
-            if command.command.senderUserID.uuidValue == state.lower {
-                if !state.lowerReplied { state.directPolicyRevision += 1 }
-                state.lowerReplied = true; state.lowerVisible = true; state.lowerCanSend = true
-            } else if command.command.senderUserID.uuidValue == state.higher {
-                if !state.higherReplied { state.directPolicyRevision += 1 }
-                state.higherReplied = true; state.higherVisible = true; state.higherCanSend = true
-            }
+            // Unanswered stranger quota and special accounts retain their durable
+            // workflows. Established conversations reuse the recipient's reply fact.
+            guard !policy.blocked, policy.sender.isActive, policy.recipient.isActive,
+                  policy.sender.specialKind == nil, policy.recipient.specialKind == nil else { return nil }
+            let state = states[token]
+            guard let state else { return nil }
+            policies[token, default: [:]][policy.sender.userID] = policy
+            return try decision(command: command, token: token, policy: policy, state: state, now: now)
         }
-        states[token] = state
-    }
 
-    /// Compatibility appends can change private timeline facts. Keep immutable
-    /// membership/reply eligibility for preparation, but reload cursors before
-    /// a later optimized write. These facts never authorize persistence alone.
-    func invalidateCursor(_ token: V2RoomActivationToken) {
-        guard var state = states[token] else { return }
-        state.cursorIsValid = false; states[token] = state
-    }
+        func needsInitialization(token: V2RoomActivationToken) -> Bool {
+            states[token] == nil && !initializedGroups.contains(token)
+        }
 
-    func invalidate(_ token: V2RoomActivationToken) {
-        initializedGroups.remove(token)
-        states.removeValue(forKey: token); loads.removeValue(forKey: token); policies.removeValue(forKey: token)
-        order.removeAll { $0 == token }
+        mutating func install(_ initialization: V2RoomSendInitialization) {
+            invalidate(initialization.token)
+            if let state = initialization.directState {
+                states[initialization.token] = state
+                order.append(initialization.token, key: initialization.token)
+            } else if initialization.kind == "group" { initializedGroups.insert(initialization.token) }
+        }
+
+        private func decision(command: V2SendMessageCommand, token: V2RoomActivationToken,
+            policy: V2DirectSendControlPolicy, state: State, now: Date) throws -> V2AcceptedDirectSend? {
+            guard !policy.blocked, policy.sender.isActive, policy.recipient.isActive,
+                  policy.sender.specialKind == nil, policy.recipient.specialKind == nil else { return nil }
+            guard state.members == 2, state.totalMembers == 2 else { throw V2RoomWriteStoreError.corruptPersistenceState }
+            guard state.frozenAt == nil, let sender = command.senderUserID.uuidValue,
+                  (sender == state.lower || sender == state.higher),
+                  policy.recipient.userID == (sender == state.lower ? state.higher : state.lower) else { return nil }
+            let lower = sender == state.lower
+            guard policy.isFriend || (lower ? state.higherReplied : state.lowerReplied) else { return nil }
+            guard (lower ? state.lowerMute : state.higherMute).map({ $0 > now }) != true else { return nil }
+            return .init(command: command, activation: token, membershipRevision: state.membershipRevision,
+                context: .init(recipientID: policy.recipient.userID, restriction: nil, requiresStrangerQuota: false,
+                    senderProfileVisibleToRecipient: lower ? state.lowerVisible : state.higherVisible,
+                    senderCanSend: lower ? state.lowerCanSend : state.higherCanSend,
+                    senderHasReplied: lower ? state.lowerReplied : state.higherReplied, supportAccountID: nil))
+        }
+
+        /// Execution obtains the latest committed room state, not the snapshot
+        /// captured by an earlier preparation. The room turn owns serialization.
+        mutating func preflight(command: V2SendMessageCommand, token: V2RoomActivationToken,
+            policy: V2DirectSendControlPolicy,
+            ordinal: Int, now: Date) throws -> PlainDirectRoomLogBatchPreflightRow? {
+            // This runs with the write connection held. Cold/revoked state must
+            // fall back to the transaction's existing durable preflight, never
+            // start another pool loan while occupying the message connection.
+            if let previous = policies[token]?[policy.sender.userID], previous != policy {
+                invalidate(token); return nil
+            }
+            guard let state = states[token], state.cursorIsValid else {
+                invalidate(token); return nil
+            }
+            guard let decision = try decision(command: command, token: token, policy: policy, state: state, now: now) else { return nil }
+            let room = RoomRow(kind: "direct", roomShardID: state.roomShardID,
+                roomSequence: state.roomSequence, timelineSequence: state.timelineSequence,
+                membershipRevision: state.membershipRevision, capacityProfileID: state.capacityProfileID,
+                capacityClass: state.capacityClass, frozenAt: state.frozenAt)
+            return .init(ordinal: ordinal, room: room,
+                context: decision.context, policy: policy, directPolicyRevision: state.directPolicyRevision,
+                recipientHasReplied: policy.sender.userID == state.lower ? state.higherReplied : state.lowerReplied)
+        }
+
+        mutating func committed(commands: [V2MessageSendOperationCommand], results: [V2RoomMessagingResult], token: V2RoomActivationToken) {
+            guard commands.count == results.count, var state = states[token] else { return }
+            for (command, result) in zip(commands, results) {
+                guard case .sendOperation(.receipt(let receipt)) = result, case .accepted(let accepted) = receipt.outcome else { continue }
+                guard let sequence = Int64(exactly: accepted.roomSequence), sequence > state.roomSequence else { continue }
+                let delta = sequence - state.roomSequence
+                guard state.timelineSequence <= Int64.max - delta else {
+                    invalidate(token); return
+                }
+                state.roomSequence = sequence
+                state.timelineSequence += delta
+                if command.command.senderUserID.uuidValue == state.lower {
+                    if !state.lowerReplied { state.directPolicyRevision += 1 }
+                    state.lowerReplied = true; state.lowerVisible = true; state.lowerCanSend = true
+                } else if command.command.senderUserID.uuidValue == state.higher {
+                    if !state.higherReplied { state.directPolicyRevision += 1 }
+                    state.higherReplied = true; state.higherVisible = true; state.higherCanSend = true
+                }
+            }
+            states[token] = state
+        }
+
+        /// Compatibility appends can change private timeline facts. Keep immutable
+        /// membership/reply eligibility for preparation, but reload cursors before
+        /// a later optimized write. These facts never authorize persistence alone.
+        mutating func invalidateCursor(_ token: V2RoomActivationToken) {
+            guard var state = states[token] else { return }
+            state.cursorIsValid = false; states[token] = state
+        }
+
+        mutating func invalidate(_ token: V2RoomActivationToken) {
+            initializedGroups.remove(token)
+            states.removeValue(forKey: token); loads.removeValue(forKey: token); policies.removeValue(forKey: token)
+            order.remove(token)
+        }
+
     }
 
     struct State: Decodable, Sendable {

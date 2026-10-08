@@ -515,3 +515,8 @@ R79 使用两条消息循环、四条消息写连接，另有一条控制循环�
 `--loader-report-drain-seconds`默认120秒，可设1—600。首次loader非零退出后，服务继续运行，其他loader按原工作负载结束并写报告；后续失败不延长期限。原总超时、服务异常退出和质量门槛保持生效，任何loader非零仍令整轮失败。`candidate/loader-report-collection.json`（或baseline目录）记录失败分片、期限是否超时及缺失报告。期限到达时执行原清理，报告可能仍不完整，不保证挂死loader生成报告。
 
 失败分片退出后实际负载可能降低，因此报告齐全的失败轮也不作为容量通过证据。连接warmup仅保证既有连接/房间条件，不保证发送权限scope与SQL全warm；发送预热诊断应另列，并记录测量期残留冷读取。3000/3500交替复测与发送预热诊断结果见`docs/reviews/send-throughput-5000-20261008.zh-CN.md`的R138—R143。
+
+
+### 写连接归还时的同步调度边界
+
+owner_return_callback_wait、owner_return_lock_wait、owner_return_lock_to_release分别测pool_returned→同步归还调用、调用→dispatcher锁进入、锁进入→额度释放；owner_return_schedule_work测释放额度后的锁内调度，不属于owner_pool_return_to_resource_release。等锁时间包含实际Mutex竞争与线程未及时运行，不能单凭耗时证明锁持有方执行了同等时长。房间内存热路径已采用短同步Mutex操作，首次SQL仍single-flight且在锁外等待，提交后才推进游标。R145 / R146的3000对照见性能记录。

@@ -44,7 +44,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 accountLoader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget })
             try await directory.install(initialization)
             let memory = V2DirectRoomSendAcceptanceMemory()
-            await memory.install(initialization)
+            memory.install(initialization)
             let policy = V2DirectSendControlPolicy(
                 sender: .init(userID: senderUUID, isActive: true, specialKind: nil, specialStatus: nil,
                     allowsServiceMessages: nil, allowsCustomerMessages: nil),
@@ -59,8 +59,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             _ = try await registry.runtime(sender: senderUUID, token: lease.token)
             try await memory.initializeIfNeeded(token: lease.token, database: database)
             if direct {
-                #expect(try await memory.accept(command: command, token: lease.token, policy: policy, now: Date()) != nil)
-                let preflight = try #require(try await memory.preflight(command: command, token: lease.token,
+                #expect(try memory.accept(command: command, token: lease.token, policy: policy, now: Date()) != nil)
+                let preflight = try #require(try memory.preflight(command: command, token: lease.token,
                     policy: policy, ordinal: 0, now: Date()))
                 #expect(preflight.room.roomSequence == 0)
             }
@@ -76,16 +76,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             try await sql.raw("ALTER TABLE im_v2.rooms_initialization_test RENAME TO rooms").run()
             if direct {
-                await memory.invalidate(lease.token)
-                #expect(try await memory.accept(command: command, token: lease.token, policy: policy, now: Date()) == nil)
+                memory.invalidate(lease.token)
+                #expect(try memory.accept(command: command, token: lease.token, policy: policy, now: Date()) == nil)
                 try await sql.raw("UPDATE im_v2.rooms SET room_sequence=7,timeline_sequence=11 WHERE room_id=\(bind: roomUUID)").run()
                 try await memory.initializeIfNeeded(token: lease.token, database: database)
-                let reloaded = try #require(try await memory.preflight(command: command, token: lease.token,
+                let reloaded = try #require(try memory.preflight(command: command, token: lease.token,
                     policy: policy, ordinal: 0, now: Date()))
                 #expect(reloaded.room.roomSequence == 7 && reloaded.room.timelineSequence == 11)
             }
             try await directory.retire(token: lease.token)
-            await memory.invalidate(lease.token)
+            memory.invalidate(lease.token)
             #expect(try await leases.release(token: lease.token))
             await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
                 _ = try await v2RestoreRoomSendInitialization(database: database, token: lease.token)

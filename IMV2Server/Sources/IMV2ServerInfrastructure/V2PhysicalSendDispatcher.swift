@@ -138,7 +138,25 @@ package final class V2PhysicalSendDispatcher: Sendable {
     }
 
     private func connectionLoanReturned(id: UUID, unboundSettled: Bool = false) {
-        update { $0.connectionLoanReturned(id: id, unboundSettled: unboundSettled) }
+        let requestedAt = ContinuousClock.now
+        let observation = update { value -> (V2OwnerConnectionTimeline, ContinuousClock.Instant, ContinuousClock.Instant)? in
+            let enteredAt = ContinuousClock.now
+            guard let timeline = value.connectionTimelines[id],
+                  !value.returnedConnections.contains(id),
+                  unboundSettled || value.batchStages[id] != .acquiringConnection else { return nil }
+            value.connectionLoanReturned(id: id, unboundSettled: unboundSettled)
+            return (timeline, enteredAt, .now)
+        }
+        // Record outside the scheduler mutex and preserve the original instants.
+        if let (timeline, enteredAt, endedAt) = observation {
+            if let returned = timeline.marker("pool_returned") {
+                timeline.record(.ownerReturnCallbackWait, from: returned, to: requestedAt)
+            }
+            timeline.record(.ownerReturnLockWait, from: requestedAt, to: enteredAt)
+            let releasedAt = timeline.marker("scheduler_release_entered") ?? endedAt
+            timeline.record(.ownerReturnLockToRelease, from: enteredAt, to: releasedAt)
+            timeline.record(.ownerReturnScheduleWork, from: releasedAt, to: endedAt)
+        }
     }
     private func connectedRoomSettled(
         id: UUID, pending: Pending,

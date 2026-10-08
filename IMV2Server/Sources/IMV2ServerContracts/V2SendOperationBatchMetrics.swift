@@ -60,6 +60,12 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case ownerCommitFutureToExecuteReturn = "owner_commit_future_to_execute_return"
     case ownerRecordOutcome = "owner_record_outcome"
     case ownerExecuteReturnToPoolReturn = "owner_execute_return_to_pool_return"
+    /// Children of pool-return to scheduling capacity release.
+    case ownerReturnCallbackWait = "owner_return_callback_wait"
+    case ownerReturnLockWait = "owner_return_lock_wait"
+    case ownerReturnLockToRelease = "owner_return_lock_to_release"
+    /// Scheduling after capacity release; not a child of return-to-release.
+    case ownerReturnScheduleWork = "owner_return_schedule_work"
     case ownerPoolReturnToResourceRelease = "owner_pool_return_to_resource_release"
     case ownerBeginResume = "owner_begin_resume"
     case ownerWriteResume = "owner_write_resume"

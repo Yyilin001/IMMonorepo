@@ -1,5 +1,7 @@
 # 10,000 在线 / 3,500 msg/s 优化记录（原目标 5,000，2026-10-08）
 
+**最新优化 R145 / R146：移除房间发送内存热路径的共享Actor跳转，两轮原3000均通过；写调度均值7.676 / 7.472ms，内存状态读取0.01086 / 0.01152ms。相对紧邻R144排队与客户端尾延迟改善，但仍有归还锁入口和连接回调任务启动长尾，未验证稳定3500。见文末。**
+
 **最新 R138—R143：生产实现不变，原场景3000 / 3500各两轮均通过；发送预热诊断3000通过、3500失败。失败轮保留12/12报告，仍有19次overflow和4条重试耗尽。结论是存在通过能力与明显波动，尚无稳定3500的证明，详细对照见文末。**
 
 **后续对照 R135 / R136：当前实现再次失败；逐文件恢复至R132的旧实现也失败。R133认证消息体改动不是失败的必要条件，现有实验不支持将它作为唯一原因；当前源码已精确恢复，Server / Account Release重建通过。**
@@ -774,3 +776,72 @@ R143测量期实际发送209969，最终全程269957发送 / 269953ACK，4条`me
 当前最明确的压力差异是写调度与房间等待、客户端尾延迟和BUSY重试放大，实际借连接始终低于1ms；仍未识别历史波动的唯一成因。后续若继续定位，应固定实际动作轨迹、关联溢出连接当时的发送/重试/排空状态，并拆分对应写调度窗口，做同模式多轮交替；本轮没有增加这些生产探针或声称已完成轨迹回放。
 
 证据：`/tmp/imv2-controlled-series-results.json`、`/tmp/imv2-r138-r143-performance.json`；每轮`/tmp/imv2-resource-10k{3000或3500}-20261008-r{138至143}/candidate`，对应`/tmp/imv2-rNN-hotspots.json`、`preflight.json`与`verification.log`。本次6轮全部保留，没有丢弃失败样本。
+
+
+## R144：3000档按请求拆解写调度等待
+
+用户要求继续定位，沿用R140原3000场景 / 10000在线 / 60秒 / 6节点 / 每节点6写连接 / 2消息DB EventLoop / sampled tracing，未改生产代码、线程或连接预算。结果exit0，12/12报告，180000发送 / 最终ACK，overflow / workloadFailed0；窗口2999.536ACK/s，SERVER_BUSY646次后重试成功。全部10000前台视图追平，owned PG消息 / completion各180000，元数据missing / mismatch0，核对PG关闭；服务cleanup settled=true、forcedKill0。
+
+整体阶段counter加权均值：房间队列18.903ms，写调度21.865ms，实际借连接0.819ms，写语句周期5.046ms，连接进入到首SQL1.116ms。平均值不相加当端到端延迟。6节点写调度分别22.443 / 11.834 / 13.451 / 32.220 / 15.903 / 32.969ms，不能只看节点平均推断全系统均匀。系统测量内10个CPU区间idle0.311—1.054%，表示当前同机系统接近饱和，但不能单凭此证明每个长尾来自CPU调度。
+
+864条完整room_actor采样满足写调度>=20ms、整条trace在测量窗口内；历史缺失 / 不完整分区 / malformed均0。该慢样本平均66.405ms，P95 181.581ms，P99 252.020ms。按同一请求等待窗口的互斥状态分区如下，百分比按这批请求累计等待计算，不是全部消息百分比：
+
+| 状态 | 慢样本平均ms | 累计等待占比 |
+|---|---:|---:|
+| 全部6个连接已经进入驱动、尚未返回 | 39.342 | 59.25% |
+| 调度名额满，未借满，待连接分配发布 | 10.631 | 16.01% |
+| 调度尚有名额 | 7.095 | 10.68% |
+| 调度名额满，有连接返回但额度未释放 | 6.557 | 9.87% |
+| 其他混合pending | 1.331 | 2.00% |
+| 已启动借用入口、待注册池申请 | 0.872 | 1.31% |
+| 其他单一task/callback/driver pending | 0.578 | 0.87% |
+
+“调度尚有名额”不证明物理连接闲置；“分配发布等待”包括容量准入与Future/执行域推进，不能称纯容量等待。全量owner_gate_capacity_wait平均0.0007ms、queued capacity count0，而gate delivery平均0.635ms，off-loop约1.819ms / on-loop约0.130ms（人群不同，非因果实验）。说明底层gate排队不是本轮主要等待；长时突发满借仍真实存在，因为大部分请求在上层等待前面任务。
+
+最长完整写调度请求286.194ms：全借出133.577ms、已返回未释放77.359ms、待分配30.122ms、尚有名额43.310ms，其余3.826ms；轮到它后写future仅1.961ms。说明长队列时间不能用该消息自己的SQL耗时解释，必须看前面的连接生命周期。
+
+进一步核对持有连接的采样长尾：gateway3操作01D6BEBD-16B5-4FF1-AC36-8E4C11B5ACC3，driver→首SQL181.518ms，其中owner_runtime_state180.027ms，permission promotion0.025ms，SQL future0.756ms；gateway0操作01FD06EC-22F6-4B60-B0CB-C8A3C0EEECA5，runtime state138.224ms、SQL3.061ms。PostgresV2MessageSendOperationStore约933行拿着写连接逐条await roomAcceptance.preflight；其实现V2DirectRoomSendAcceptanceMemory约143行是同步内存读取/判断，无SQL。Store由V2RoomServerActivationFactory约219行按物理Owner创建一次，该Actor供该Owner下房间共享。已确认这里存在“持连接等待共享Actor”的结构，不是数据库权限查询180ms；现有外层计时仍混合Actor排队、执行器切换与函数正文，不能证明180ms全部是Actor队列。另一个preSQL98.435ms样本runtime state仅0.024ms，说明还有未细分的调用间隙，不能将全部preSQL长尾归因于该Actor。
+
+连接返回推进也有长尾：采样owner_pool_return_to_resource_release最大80.817ms，采样P99 0.772ms、均值0.096ms；全量counter均值0.083ms。这是少量极端停顿，不是平均每次归还慢80ms。同步release会进入dispatcher Mutex，当前时间线没有把锁申请/进入分开，因此无法判断该长尾是锁等待还是执行线程被暂停。owner_ticket_task_wait均值5.483ms，但借用已在当前调用栈同步注册，root Task只是收尾等待，它可与SQL重叠，不能当作SQL启动前5.483ms。
+
+本轮定位优先级：先解决持写连接跨共享roomAcceptance Actor读取内存状态（考虑房间拥有状态或房间内形成执行快照，仍保留提交后推进边界），并对该hop单独记录调用→Actor入口→退出；其次给同步连接return回调→dispatcher锁请求→锁进入→额度释放补边界。SQL future采样最大121.621ms仍含驱动与DB，未测得纯DB执行分布。此次仅诊断，没有改动这些生产实现。证据目录/tmp/imv2-resource-10k3000-20261008-r144；完整分析/tmp/imv2-r144-hotspots.json。
+
+
+## R145—R146：房间发送内存同步读取与归还边界诊断
+
+本次改造V2DirectRoomSendAcceptanceMemory：从共享Actor改为Sendable final class，其状态由Synchronization.Mutex保护。accept / preflight / committed / install / invalidate都是同步短临界区，不再跨Actor执行器跳转，调用点去掉await；仍是在实际执行轮次读取最新已提交游标，未提前冻结准备阶段快照。单个物理Owner仍共享该同步字典，不声称独立房间已经完全没有共享状态或没有锁。冷initializeIfNeeded保留同token single-flight Task，SQL / await在锁外，load UUID检查保持，失效或restore后的旧加载不能覆盖新状态。order换成V2IndexedFIFO，按token失效/淘汰为常数时间，消除锁内线性扫描。提交后才推进内存和归还结果、冷/撤销状态回退持久化预检的原语义不变。
+
+连接归还新增owner_return_callback_wait（pool_returned→调用同步归还入口）、owner_return_lock_wait（入口→锁进入）、owner_return_lock_to_release（锁进入→调度额度释放），三者按边界拆分父阶段；owner_return_schedule_work是释放额度后的锁内调度，不属于父阶段，不能重复相加。计时在锁外上报，首次真实释放才记录，重复回调保持幂等。此次补齐归还诊断，不声称已消除调度器Mutex长尾。
+
+验证：内存跨房间并发、策略变化失效、无效游标回退，加时间线分类共13项测试通过；独立PostgreSQL的24项测试实际执行并通过，覆盖direct/group初始化、已回复会话权限、策略变更、房间FIFO、独立事务、提前归还、取消与排空，临时PG关闭。Server Release204.04秒、Account Release10.93秒构建通过。早期无数据库运行中部分fixture直接返回/skip，不能替代随后这24项真实PG验证。
+
+3000测试仍10000在线 / 6节点 / 每节点6写连接 / 2消息DB EventLoop / 原10Hz场景 / 60秒 / sampled tracing，未改连接预算、质量门槛和客户端负载器。R145 / R146均12/12报告、180000发送 / 最终ACK、overflow / workloadFailed0、所有10000前台视图追平，owned PG消息/completion各180000、元数据缺失/mismatch0。服务cleanup settled=true / forcedKill0，验证PG均关闭。
+
+| 阶段均值ms | R144改造前 | R145 | R146复测 |
+|---|---:|---:|---:|
+| 房间队列 | 18.90255 | 9.75368 | 9.47981 |
+| 写调度 | 21.86455 | 7.67615 | 7.47186 |
+| 实际借连接 | 0.81866 | 0.61522 | 0.61258 |
+| 连接进入到首SQL | 1.11557 | 0.63548 | 0.64551 |
+| 内存房间状态读取 | 0.27596 | 0.01086 | 0.01152 |
+| 单语句周期 | 5.04561 | 3.59541 | 3.68376 |
+| 连接返回到额度释放 | 0.08247 | 0.03690 | 0.03645 |
+
+| 客户端 / 结果 | R144 | R145 | R146 |
+|---|---:|---:|---:|
+| 各分片P50范围ms | 117—129 | 60—64 | 61—64 |
+| 各分片P95范围ms | 584—667 | 307—340 | 269—294 |
+| 各分片P99范围ms | 1177—1306 | 591—698 | 471—525 |
+| SERVER_BUSY次数 | 646 | 126 | 106 |
+| 测量阶段ACK | 179982 | 179572 | 180000 |
+| runner窗口ACK/s | 2999.536 | 2992.473 | 2999.837 |
+
+阶段counter以6节点计数加权，采样窗口和计数人口不同，不相加当客户端延迟。客户端范围是12分片各自分位数的最小—最大，不是全局分位数。最终180000ACK包含有界排空：R145有428条在阶段后确认，因此不以均值下降宣称测量吞吐增加。R145 / R146相对紧邻R144的写调度均值约下降65%，房间队列约48—50%；此前R138 / R140写调度已是9.442 / 8.196ms，相对这些较快历史轮收益更小。单个旧基线加两个新轮未控制热状态/实际调度轨迹，改善幅度不当作稳定因果百分比或3500容量证明。
+
+R145完整慢请求分区281条（boundary excluded1 / incomplete0），R146见原始分析；不同慢样本人群不能当完全同cohort比较。R144内存state采样P99 6.886ms / max180.027ms；R145 0.02467 / 3.404ms；R146 0.01904 / 20.268ms。同步读取仍可能遇到Mutex或线程暂停，不宣称任意内存查询必定微秒。
+
+归还新边界：R145 / R146平均callback0.00060 / 0.00053ms，lock_wait0.03518 / 0.03501ms，lock_to_release0.00111 / 0.00091ms；释放后schedule_work0.02913 / 0.02842ms（与父阶段不可相加）。R146采样最大归还父阶段79.539ms，lock_wait79.538ms、锁进入后释放约0.001ms，定位到同步调用等待进入Mutex这一段，仍混合实际锁竞争和执行线程被暂停；尚无锁持有方时间线来确定两者比例。
+
+另一条R146采样gateway2操作01847A38-7805-46D1-9084-94B48F0DA537：driver→首SQL214.310ms，driver_callback_task_wait210.871ms，runtime_state仅0.004ms，SQL future5.251ms。该残留长尾是连接回调已到达后异步任务未及时开始，不能再归因共享房间内存Actor或数据库执行214ms。下一步定位该EventLoop作业队列及Mutex持有方时序，而非继续增加写连接。
+
+证据：/tmp/imv2-r144-r146-performance.json；/tmp/imv2-resource-10k3000-20261008-r145和r146；各轮hotspots / verification日志；/tmp/imv2-r145-final-tests.log、postgres-tests.log、release-server.log、release-account.log。此次未运行3500档。
