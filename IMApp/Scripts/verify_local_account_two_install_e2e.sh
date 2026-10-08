@@ -126,6 +126,7 @@ build_products_directory="$(xcodebuild -showBuildSettings -json \
 app_bundle="${build_products_directory}/IMApp.app"
 cleanup_attempted=false
 audit_failure_count=0
+withdrawal_failure_count=0
 receiver_original_increase_contrast=""
 sender_original_increase_contrast=""
 receiver_original_content_size=""
@@ -262,6 +263,16 @@ run_stage() {
     printf 'retained accessibility audit failure; continuing functional stages: %s\n' "${test_name}" >&2
     return 0
   fi
+  # Group creation and offline replay have no dependency on this direct-room
+  # withdrawal projection. Preserve this exact failed acceptance and run those
+  # independent stages; the aggregate still fails, never waives the issue.
+  if [[ "${test_name}" == "testReceiverRestoresScopedInstallationAndProjectsOfflineMessageThenSendsGroupMessage" &&
+        "${xcode_status}" -ne 0 && "${failed_test_count}" == "1" && "${total_test_count}" == "1" ]] &&
+     jq --exit-status '(.testFailures | length) > 0 and all(.testFailures[]; (.failureText | startswith("Asynchronous wait failed: Exceeded timeout of 30 seconds")) and (.failureText | contains("label == \"消息已撤回\"")))' <<<"${test_summary}" >/dev/null; then
+    withdrawal_failure_count=$((withdrawal_failure_count + 1))
+    printf 'retained direct withdrawal projection failure; continuing independent stages: %s\n' "${test_name}" >&2
+    return 0
+  fi
   if [[ "${xcode_status}" -ne 0 || "${test_result}" != "Passed" || "${failed_test_count}" != "0" || "${passed_test_count}" != "1" || "${total_test_count}" != "1" ]]; then
     printf 'local two-install stage mismatch: stage=%s result=%s passed=%s failed=%s total=%s\n' \
       "${test_name}" "${test_result}" "${passed_test_count}" "${failed_test_count}" "${total_test_count}" >&2
@@ -333,6 +344,16 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-message-mentions "${group_message_mentions}"
 run_stage "${receiver_simulator_id}" testReceiverRestoresScopedInstallationAndProjectsOfflineMessageThenSendsGroupMessage
 
+launch_fixture "${receiver_simulator_id}" \
+  -v2-ui-testing-live-local-account \
+  -v2-ui-testing-restore-local-account \
+  -v2-ui-testing-e2e-scope "${receiver_scope}" \
+  -v2-ui-testing-group-title "${receiver_group_title}" \
+  -v2-ui-testing-group-members "@${sender_public_handle}" \
+  -v2-ui-testing-message "${group_message}" \
+  -v2-ui-testing-message-mentions "${group_message_mentions}"
+run_stage "${receiver_simulator_id}" testReceiverCreatesIndependentGroupAndSendsMessage
+
 launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-live-local-account \
   -v2-ui-testing-restore-local-account \
@@ -352,8 +373,8 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-e2e-scope "${receiver_scope}"
 run_stage "${receiver_simulator_id}" testReceiverRestoresIndependentGroupMemberReply
 
-if [[ "${audit_failure_count}" -gt 0 ]]; then
-  printf 'local two-install functional stages completed; overall FAILED with %s retained accessibility audit stage(s).\n' "${audit_failure_count}" >&2
+if [[ "${audit_failure_count}" -gt 0 || "${withdrawal_failure_count}" -gt 0 ]]; then
+  printf 'local two-install stages completed; overall FAILED with %s retained accessibility and %s direct withdrawal projection stage(s).\n' "${audit_failure_count}" "${withdrawal_failure_count}" >&2
   exit 1
 fi
 printf '%s\n' 'local two-install direct-and-group-message E2E: pass'

@@ -461,6 +461,7 @@ def main():
     parser.add_argument('--room-recovery-drop-tail', action='store_true', help='with nonempty scale, discard the last real TLS wake at the test consumer and verify periodic reconciliation')
     parser.add_argument('--room-recovery-scan-race', choices=['before-listener', 'directory', 'state'], help='commit through another Gateway at a selected recovery boundary')
     parser.add_argument('--headless-app', action='store_true', help='with --app-ui --gateway, also run real credential Push entry in an App host without constructing its root view')
+    parser.add_argument('--app-ack-cut', action='store_true', help='with --app-ui --gateway --multi-gateway, verify lost TCP ACK after independently observed PostgreSQL COMMIT and automatic App recovery')
     parser.add_argument('--current-logout', action='store_true', help='also verify current-device logout through real HTTPS and PostgreSQL')
     parser.add_argument('--interrupted-issuance', action='store_true', help='with --app-ui --current-logout, terminate the owned App after issuance and cancellation commit but before either response is forwarded')
     parser.add_argument('--load-credentials', action='store_true', help='exercise the actual load credential preparation script and cancel its issued session through the saved proof')
@@ -475,7 +476,7 @@ def main():
         if not 2 <= args.gateway_recovery_connections <= 10000:
             parser.error('--gateway-recovery-connections must be 2...10000')
         if any((args.app_ui, args.gateway, args.private_hint, args.room_recovery_scale is not None,
-                args.current_logout, args.interrupted_issuance, args.load_credentials, args.headless_app,
+                args.current_logout, args.interrupted_issuance, args.load_credentials, args.headless_app, args.app_ack_cut,
                 args.multi_gateway, args.room_recovery_membership_race, args.room_recovery_slow_tls,
                 args.room_recovery_app_reconnect, args.room_recovery_scan_race, args.room_recovery_drop_tail)):
             parser.error('gateway recovery mode is exclusive of App and authorization fault modes')
@@ -500,8 +501,10 @@ def main():
         parser.error('--room-recovery-scan-race requires nonempty scale, --multi-gateway and no other fault flag')
     if args.room_recovery_drop_tail and not args.room_recovery_scale:
         parser.error('--room-recovery-drop-tail requires nonempty scale')
-    if args.multi_gateway and not (args.private_hint or args.room_recovery_scale):
-        parser.error('--multi-gateway requires --private-hint or a nonempty --room-recovery-scale')
+    if args.multi_gateway and not (args.private_hint or args.room_recovery_scale or args.app_ack_cut):
+        parser.error('--multi-gateway requires --private-hint, nonempty --room-recovery-scale or --app-ack-cut')
+    if args.app_ack_cut and not (args.app_ui and args.gateway and args.multi_gateway):
+        parser.error('--app-ack-cut requires --app-ui --gateway --multi-gateway')
     if args.gateway and not (args.app_ui or args.gateway_recovery_connections):
         parser.error('--gateway requires --app-ui')
     if args.private_hint and not (args.app_ui and args.gateway):
@@ -1282,6 +1285,10 @@ def main():
                         if gateway_connections() != 0:
                             raise RuntimeError('gateway connection remains after headless Push cleanup')
                         gateway_samples.append({'afterHeadlessCleanup': 0})
+                    if args.app_ack_cut:
+                        from v2_live_app_ack_cut import run_app_ack_cut
+                        run_app_ack_cut(ROOT, output, environment, database_arguments,
+                            simulator, primary_tls_port, secondary_port)
                     # Assert persisted server effects, not only client presentation.
                     sql = """SELECT
                         (SELECT count(*) FROM im_v2.auth_devices),
@@ -1299,7 +1306,7 @@ def main():
                     # Automatic reconnect signs the scoped App into the scale
                     # account in addition to the test-owned sender session. The
                     # three transport reconnects must reuse that one App device.
-                    expected_devices = 5 + (6 if args.gateway else 3 if args.app_ui else 0) + (2 if args.headless_app else 0) + (3 if args.current_logout else 0) + 2 * int(args.interrupted_issuance) + int(args.load_credentials) + 3 * int(args.private_hint) + int(args.private_hint and args.multi_gateway) + int(args.room_recovery_scale is not None) + int(args.room_recovery_membership_race) + int(args.room_recovery_app_reconnect)
+                    expected_devices = 5 + (6 if args.gateway else 3 if args.app_ui else 0) + (2 if args.headless_app else 0) + 2 * int(args.app_ack_cut) + (3 if args.current_logout else 0) + 2 * int(args.interrupted_issuance) + int(args.load_credentials) + 3 * int(args.private_hint) + int(args.private_hint and args.multi_gateway) + int(args.room_recovery_scale is not None) + int(args.room_recovery_membership_race) + int(args.room_recovery_app_reconnect)
                     expected_revoked = 1 + (2 if args.gateway else 1 if args.app_ui else 0) + int(args.headless_app) + (3 if args.current_logout else 0) + int(args.interrupted_issuance) + int(args.load_credentials)
                     assert persisted == '{}|{}|0|0|{}'.format(expected_devices, expected_revoked, expected_revoked), persisted
                     if args.room_recovery_app_reconnect:

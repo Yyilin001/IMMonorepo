@@ -940,7 +940,18 @@ struct LocalE2EOpenedRoom {let roomID:RoomID}
 func localOpenDirectRoom(account:LocalE2EAccountCredentials,target:UserID) async throws -> LocalE2EOpenedRoom {
     let client=try V2HTTPDirectRoomOperationClient(baseURL:#require(URL(string:"https://localhost:8443")),credentials:LocalE2EMessageCredentials(account:account),transport:LocalE2EMessageHTTP())
     let command=try V2DirectRoomOperationCommand(actorUserID:account.userID,operationID:.init(uuid:UUID()),targetUserID:target,firstSubmissionDeadlineMilliseconds:UInt64(Date().timeIntervalSince1970*1000)+600000)
-    guard case .receipt(let receipt)=try await client.submit(command),receipt.validates(command:command),case .opened(let room,_)=receipt.outcome else {throw LocalE2EMembershipFailure.noReceipt}
+    var result = try await client.submit(command)
+    let deadline = ContinuousClock.now + .seconds(90)
+    var reconciliationAttempt = 0
+    while case .processing(let proof) = result {
+        guard proof.validates(command: command), ContinuousClock.now < deadline else { throw LocalE2EMembershipFailure.noReceipt }
+        let delay = V2NetworkWorkPolicy.acceptedResultPollDelay(attempt: reconciliationAttempt)
+        try await Task.sleep(for: min(.seconds(delay), ContinuousClock.now.duration(to: deadline)))
+        guard ContinuousClock.now < deadline else { throw LocalE2EMembershipFailure.noReceipt }
+        reconciliationAttempt += 1
+        result = try await client.recover(command, action: .query)
+    }
+    guard case .receipt(let receipt)=result,receipt.validates(command:command),case .opened(let room,_)=receipt.outcome else {throw LocalE2EMembershipFailure.noReceipt}
     return .init(roomID:room)
 }
 

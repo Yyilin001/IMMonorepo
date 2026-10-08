@@ -291,7 +291,7 @@ struct V2LiveResourceAuthorTests {
 
             // This HTTP fallback crosses from Account to the separately running
             // Gateway Actor host, then checks real control and room SQL again.
-            let visible = try await profiles.readPresentations([key])
+            let visible = try await readReviewPage(profiles, keys: [key])
             #expect(visible.presentations[key]?.view.publicIdentity?.displayName == "Resource author")
             #expect(visible.avatars[key]?.mediaID == mediaID)
             // Directory membership and receipt disclosure do not distribute
@@ -373,7 +373,7 @@ struct V2LiveResourceAuthorTests {
             #expect(unavailable == key)
             try await repository.ingest(revoked, binding: binding)
             #expect(await repository.cachedSnapshot(for: key, activation: activation) == nil)
-            let hidden = try await profiles.readPresentations([key])
+            let hidden = try await readReviewPage(profiles, keys: [key])
             #expect(hidden.unavailable.contains(key) && hidden.presentations.isEmpty && hidden.avatars.isEmpty)
             await #expect(throws: V2PublicIdentityDirectoryClientError.notFound) {
                 try await discovery.resolveForPresentation(handle: authorHandle.description)
@@ -498,19 +498,33 @@ struct V2LiveResourceAuthorTests {
         let after = try await readReviewPage(ownerProfiles, keys: [request.presentationKey])
         #expect(after.unavailable == [request.presentationKey] && after.presentations.isEmpty)
         let resubmitted = try await resourceInvitation(applicantOperations, account: applicant, room: room,
-            action: .submit(inviteID: inviteID, tokenDigest: bearer.tokenDigest, note: "Approval fixture"), authorization: bearer)
+            action: .submit(inviteID: inviteID, tokenDigest: bearer.tokenDigest, note: "Rejection fixture"), authorization: bearer)
         guard case .applied(.requestSubmitted(let secondRequest, _)) = resubmitted.outcome else { throw ResourceLiveFailure.presentation }
+        let rejectionBaseline = try await ownerOperations.baseline(roomID: room)
+        let rejected = try await resourceInvitation(ownerOperations, account: manager, room: room,
+            action: .decide(requestID: secondRequest, decision: .reject, expectedMembershipRevision: rejectionBaseline.membershipRevision))
+        #expect(rejected.outcome == .applied(.requestDecided(requestID: secondRequest, decision: .reject, membershipRevision: nil)))
+        print("Live resource: owner rejected the real join request without changing membership.")
+        // Rejection is terminal for this applicant/invitation. Use a distinct
+        // actual account for approval rather than reopening the rejected fact.
+        let approvalApplicant = try await fixture.register().credentials
+        let approvalOperations = try V2HTTPInvitationOperationClient(baseURL: fixture.url(""),
+            credentials: ResourceLiveCredentials(value: approvalApplicant), transport: bytesHTTP)
+        let submittedForApproval = try await resourceInvitation(approvalOperations, account: approvalApplicant, room: room,
+            action: .submit(inviteID: inviteID, tokenDigest: bearer.tokenDigest, note: "Approval fixture"), authorization: bearer)
+        guard case .applied(.requestSubmitted(let approvalRequest, _)) = submittedForApproval.outcome else { throw ResourceLiveFailure.presentation }
         let reviewBaseline = try await ownerOperations.baseline(roomID: room)
         let approved = try await resourceInvitation(ownerOperations, account: manager, room: room,
-            action: .decide(requestID: secondRequest, decision: .approve, expectedMembershipRevision: reviewBaseline.membershipRevision))
+            action: .decide(requestID: approvalRequest, decision: .approve, expectedMembershipRevision: reviewBaseline.membershipRevision))
         guard case .applied(.requestDecided(let decided, let decision, let revision)) = approved.outcome else { throw ResourceLiveFailure.presentation }
-        #expect(decided == secondRequest && decision == .approve && revision == reviewBaseline.membershipRevision + 1)
+        #expect(decided == approvalRequest && decision == .approve && revision == reviewBaseline.membershipRevision + 1)
         let memberConnection = try connection(authorSupplements: false)
         do {
-            let session = try await authenticate(memberConnection, applicant)
+            let session = try await authenticate(memberConnection, approvalApplicant)
             let transport = V2ProtobufSyncTransport(wire: memberConnection, protocolVersion: session.protocolVersion)
             let roster = try await transport.listRoomMembers(roomID: room, cursor: nil, pageSize: 100)
-            #expect(roster.members.contains { $0.userID == applicant.userID })
+            #expect(roster.members.contains { $0.userID == approvalApplicant.userID })
+            #expect(!roster.members.contains { $0.userID == applicant.userID })
             await memberConnection.disconnect()
         } catch { await memberConnection.disconnect(); throw error }
         let finalBaseline = try await ownerOperations.baseline(roomID: room)
@@ -518,7 +532,7 @@ struct V2LiveResourceAuthorTests {
             action: .revoke(inviteID: inviteID, expectedMembershipRevision: finalBaseline.membershipRevision))
         #expect(revoked.outcome == .applied(.inviteRevoked(inviteID: inviteID)))
         #expect(try await ownerInvites.activeInvites(roomID: room).allSatisfy { $0.inviteID != inviteID })
-        print("Live resource: join request cancellation, owner approval, actual member roster and invitation revocation passed.")
+        print("Live resource: join request cancellation, rejection, owner approval, actual member roster and invitation revocation passed.")
     }
 
     private func readReviewPage(_ client: V2HTTPProfilePresentationClient,
@@ -529,7 +543,7 @@ struct V2LiveResourceAuthorTests {
         for attempt in 0..<3 {
             do { return try await client.readPresentations(keys) }
             catch V2ProfilePresentationError.throttled(let retryAfter) where attempt < 2 && retryAfter <= 5 {
-                print("Live resource: review HTTP honored Retry-After before its bounded retry.")
+                print("Live resource: profile HTTP honored Retry-After before its bounded retry.")
                 try await Task.sleep(for: .seconds(retryAfter + 0.05))
             }
         }

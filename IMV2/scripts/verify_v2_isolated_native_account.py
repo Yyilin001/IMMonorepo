@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Disposable native HTTPS/account/gateway smoke. Never reads .env or changes trust stores."""
-import argparse, base64, http.client, http.server, json, os, re, secrets, signal, socket, ssl
-import subprocess, tempfile, threading, time, urllib.error, urllib.request, uuid
+import argparse, base64, collections, http.client, http.server, json, os, re, secrets, signal, socket, ssl
+import subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 import yaml
 
@@ -45,6 +45,7 @@ def main():
     os.umask(0o077)
     root=Path(tempfile.mkdtemp(prefix='imv2-native-e2e-'))
     processes=[]; logs=[]; pg_started=False; edge=None
+    http_responses=collections.Counter(); http_lock=threading.Lock()
     ports={key:port() for key in ['pg','account','edge','gateway','actor_gateway','actor_account','metrics']}
     if args.two_install_ui: ports.update(edge=8443,gateway=7443)
     if len(set(ports.values())) != len(ports): raise RuntimeError('port collision; rerun')
@@ -107,6 +108,8 @@ def main():
                 connection=http.client.HTTPConnection('127.0.0.1',ports['account'],timeout=30)
                 try:
                     connection.request(self.command,self.path,body,headers);response=connection.getresponse();data=response.read(1024*1024+1)
+                    with http_lock:
+                        http_responses[(self.command, urllib.parse.urlsplit(self.path).path, response.status)] += 1
                     if len(data)>1024*1024: self.send_error(502);return
                     self.send_response(response.status)
                     for k,v in response.getheaders():
@@ -158,6 +161,21 @@ def main():
             while time.monotonic()<deadline and not (root/'stop').exists(): time.sleep(.5)
     finally:
         if edge: edge.shutdown();edge.server_close()
+        with http_lock:
+            (root/'http-summary.json').write_text(json.dumps([
+                {'method':method,'path':path,'status':status,'count':count}
+                for (method,path,status),count in sorted(http_responses.items())],indent=2)+'\n')
+        if pg_started:
+            try:
+                facts=run([PG/'psql','-X','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-tAc',
+                    "SELECT COALESCE(json_agg(json_build_object('messageID',m.message_id,'roomID',m.room_id,"
+                    "'contentRevision',m.content_revision,'withdrawn',m.withdrawn_at IS NOT NULL,"
+                    "'roomHead',r.room_sequence,'eventTypes',(SELECT json_agg(e.event_type ORDER BY e.room_sequence) "
+                    "FROM im_v2.room_events e WHERE e.room_id=m.room_id))),'[]'::json) "
+                    "FROM im_v2.messages m JOIN im_v2.rooms r USING(room_id)"],timeout=15)
+                (root/'message-facts.json').write_bytes(facts.stdout)
+            except Exception as error:
+                (root/'message-facts-error.log').write_text(type(error).__name__+'\n')
         for process in reversed(processes):
             if process.poll() is None: process.terminate()
         for process in reversed(processes):
