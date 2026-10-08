@@ -52,10 +52,10 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         // success timeout for a control that can no longer appear made this
         // stage needlessly vulnerable to an XCTest UI-query stall.
         if groupFeedback.waitForExistence(timeout: 10) {
-            XCTAssertEqual(
-                groupFeedback.label,
-                "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。",
-                "未获得房间 ID 时，建群 UI 必须明确保留 durable-retry 语义。"
+            XCTAssertTrue(
+                groupFeedback.label == "建群请求已安全保存；取消可阻止其在恢复连接后继续创建。"
+                    || groupFeedback.label == "群聊已创建，可从会话列表打开。",
+                "建群必须保留原请求，或明确反馈该原请求已完成。"
             )
             let cancel = app.buttons["v2.conversation.group-cancel"]
             XCTAssertTrue(cancel.waitForExistence(timeout: 5) && cancel.isHittable)
@@ -140,6 +140,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         identityDone.tap()
         app.tabBars.buttons["消息"].tap()
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 5))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -213,9 +214,13 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         let messageID = messageRow.identifier.replacingOccurrences(of: "v2.message.row.", with: "")
         XCTAssertFalse(messageID.isEmpty)
-        messageRow.press(forDuration: 1)
-        let reactionPicker = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier == %@", "v2.message.reaction-picker.\(messageID)")
+        let messageBody = app.descendants(matching: .any).matching(
+            NSPredicate(format: "identifier == %@", "v2.message.body.\(messageID)")
+        ).firstMatch
+        XCTAssertTrue(messageBody.exists && messageBody.isHittable)
+        messageBody.press(forDuration: 1)
+        let reactionPicker = app.buttons.matching(
+            NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.reaction-picker.\(messageID)", "表情回应")
         ).firstMatch
         let reactionPickerIsHittable = reactionPicker.waitForExistence(timeout: 5) && reactionPicker.isHittable
         if !reactionPickerIsHittable {
@@ -230,8 +235,8 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             XCTFail("反应入口必须在发送消息后可见并可点击。")
         }
         reactionPicker.tap()
-        let thumbsUp = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier == %@", "v2.message.reaction-picker.\(messageID).👍")
+        let thumbsUp = app.buttons.matching(
+            NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.reaction-picker.\(messageID).👍", "👍")
         ).firstMatch
         XCTAssertTrue(
             thumbsUp.waitForExistence(timeout: 5),
@@ -244,9 +249,9 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "反应必须经真实持久化命令提交，并反馈正在同步的状态。"
         )
         XCTAssertTrue(actionFeedback.label.contains("反应已提交") || actionFeedback.label.contains("反应已安全保存"))
-        messageRow.press(forDuration: 1)
-        let edit = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier == %@", "v2.message.edit.\(messageID)")
+        messageBody.press(forDuration: 1)
+        let edit = app.buttons.matching(
+            NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.edit.\(messageID)", "编辑")
         ).firstMatch
         XCTAssertTrue(
             edit.waitForExistence(timeout: 5) && edit.isHittable,
@@ -258,9 +263,6 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             editText.waitForExistence(timeout: 10) && editText.isHittable,
             "编辑页必须提供可由辅助技术定位并输入的消息编辑器。"
         )
-        let messageBody = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier == %@", "v2.message.body.\(messageID)")
-        ).firstMatch
         XCTAssertTrue(messageBody.exists)
         let originalMessageText = messageBody.label
         editText.tap()
@@ -286,9 +288,9 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         wait(for: [projectionChanged], timeout: 30)
         XCTAssertTrue(messageRow.waitForExistence(timeout: 5))
-        messageRow.press(forDuration: 1)
-        let withdraw = app.descendants(matching: .any).matching(
-            NSPredicate(format: "identifier == %@", "v2.message.withdraw.\(messageID)")
+        messageBody.press(forDuration: 1)
+        let withdraw = app.buttons.matching(
+            NSPredicate(format: "identifier == %@ OR label == %@", "v2.message.withdraw.\(messageID)", "撤回")
         ).firstMatch
         XCTAssertTrue(
             withdraw.waitForExistence(timeout: 5) && withdraw.isHittable,
@@ -306,6 +308,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let withdrawalApplied = expectation(for: NSPredicate(format: "label == %@", "消息已撤回"),
             evaluatedWith: messageBody)
         wait(for: [withdrawalApplied], timeout: 30)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -343,6 +346,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let backToConversationList = app.navigationBars.buttons.firstMatch
         XCTAssertTrue(backToConversationList.isHittable)
         backToConversationList.tap()
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -423,7 +427,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(mentionsToggle.waitForExistence(timeout: 5) && mentionsToggle.isHittable)
         mentionsToggle.tap()
         let groupMentions = app.textFields["v2.message.mentions"]
-        if (groupMentions.value as? String ?? "").isEmpty {
+        if (groupMentions.value as? String ?? "").isEmpty || groupMentions.value as? String == groupMentions.placeholderValue {
             groupMentions.tap()
             groupMentions.typeText("@all")
         }
@@ -459,6 +463,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             groupMessageRow.waitForExistence(timeout: 15),
             "前台恢复后的详情页必须继续读取同一 SQLite 消息投影。"
         )
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -497,6 +502,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "已安全保存，连接恢复后会重试。",
             "DEBUG 无效实时端点夹具只能得到 durable-retry 结果，不能误报为已发送。"
         )
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -559,6 +565,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         // control. The Xcode hit-region auditor misclassifies it after
         // custom VoiceOver actions are exposed on the full message row; the
         // representative chat surfaces are audited in the other stages.
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -611,6 +618,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             replayedOfflineMessageAppeared,
             "发送端恢复实时连接后，先前由普通 UI 安全保存的私聊消息必须只投递一次并进入接收端投影。"
         )
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -638,6 +646,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         XCTAssertTrue(app.buttons["v2.device-sessions.done"].isHittable)
         app.buttons["v2.device-sessions.done"].tap()
+        app.tabBars.buttons["消息"].tap()
 
         tapConversationTool("v2.conversation.refresh", in: app, timeout: 10)
         let group = app.staticTexts.matching(
@@ -654,6 +663,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let feedback = app.staticTexts["v2.message.send-feedback"]
         XCTAssertTrue(feedback.waitForExistence(timeout: 30))
         XCTAssertTrue(feedback.label.contains("已发送") || feedback.label.contains("已安全保存"))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -700,13 +710,17 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         privacySettings.tap()
         let strangerMessages = app.switches["v2.privacy.allow-stranger-messages"]
         XCTAssertTrue(strangerMessages.waitForExistence(timeout: 15) && strangerMessages.isHittable && strangerMessages.isEnabled)
-        strangerMessages.tap()
+        let strangerControl = strangerMessages.switches.firstMatch
+        XCTAssertTrue(strangerControl.exists && strangerControl.isHittable)
+        strangerControl.tap()
         let strangerDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: strangerDisabled, evaluatedWith: strangerMessages, handler: nil)
         waitForExpectations(timeout: 45)
         let groupReadReceipts = app.switches["v2.privacy.share-group-read-receipts"]
         XCTAssertTrue(groupReadReceipts.waitForExistence(timeout: 15) && groupReadReceipts.isHittable && groupReadReceipts.isEnabled)
-        groupReadReceipts.tap()
+        let groupReceiptControl = groupReadReceipts.switches.firstMatch
+        XCTAssertTrue(groupReceiptControl.exists && groupReceiptControl.isHittable)
+        groupReceiptControl.tap()
         let groupReceiptsDisabled = NSPredicate(format: "value == %@", "0")
         expectation(for: groupReceiptsDisabled, evaluatedWith: groupReadReceipts, handler: nil)
         waitForExpectations(timeout: 45)
@@ -714,6 +728,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(done.isHittable)
         done.tap()
         app.tabBars.buttons["消息"].tap()
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -751,6 +766,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             NSPredicate(format: "label == %@", "xm")
         ).firstMatch
         XCTAssertTrue(editedBody.waitForExistence(timeout: 30), "第二台设备必须先投影同账号设备对消息的编辑。")
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -777,6 +793,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "已安全保存，连接恢复后会重试。",
             "同账号的第二台设备离线时，群消息必须进入该设备自己的 durable outbox。"
         )
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -807,6 +824,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let actionFeedback = app.staticTexts["v2.message.action-feedback"]
         XCTAssertTrue(actionFeedback.waitForExistence(timeout: 30))
         XCTAssertTrue(actionFeedback.label.contains("撤回已提交") || actionFeedback.label.contains("撤回请求已安全保存"))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -828,6 +846,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             NSPredicate(format: "label == %@", "q")
         ).firstMatch
         XCTAssertTrue(replayedMessage.waitForExistence(timeout: 30), "设备被要求重置快照后必须重建此前离线重放的消息。")
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -852,6 +871,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCUIDevice.shared.press(.home)
         app.activate()
         XCTAssertTrue(withdrawn.waitForExistence(timeout: 30), "同账号设备前后台切换后必须保留撤回后的同步投影。")
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -863,6 +883,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             app.staticTexts["v2.local-e2e.cleanup.completed"].waitForExistence(timeout: 15),
             "跨安装回归结束后必须清理仅该随机 scope 的 Keychain 和 SQLite 工件。"
         )
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
 
@@ -883,7 +904,16 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let menu = app.buttons[menuIdentifier]
         XCTAssertTrue(menu.waitForExistence(timeout: timeout) && menu.isHittable)
         menu.tap()
-        let item = app.buttons[itemIdentifier]
+        var item = app.buttons[itemIdentifier]
+        // The native SwiftUI Menu on this simulator exposes the member action
+        // by its accessibility label while dropping the declared identifier.
+        // Keep the fallback limited to that observed action and require one
+        // unambiguous, hittable button in the opened real menu.
+        if itemIdentifier == "v2.group.members", !item.exists {
+            let members = app.buttons.matching(NSPredicate(format: "label == %@", "成员"))
+            XCTAssertEqual(members.count, 1)
+            item = members.firstMatch
+        }
         XCTAssertTrue(item.waitForExistence(timeout: timeout) && item.isHittable)
         item.tap()
     }

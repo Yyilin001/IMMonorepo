@@ -609,7 +609,7 @@ def main():
                     actor_configuration += ['--host', 'gateway-secondary=localhost:{}'.format(free_port())]
                 run(actor_configuration)
 
-                if args.private_hint or args.room_recovery_scale is not None or args.gateway_recovery_connections:
+                if args.private_hint or args.room_recovery_scale is not None or args.gateway_recovery_connections or args.app_ack_cut:
                     # The auth-only harness does not run the admission operator.
                     # Reserve a bounded lease solely in this disposable cluster
                     # so real room creation and sending exercise normal admission.

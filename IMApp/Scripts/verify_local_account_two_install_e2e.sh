@@ -241,24 +241,46 @@ run_stage() {
     -quiet \
     -collect-test-diagnostics never \
     -test-timeouts-enabled YES \
+    -default-test-execution-time-allowance 300 \
     -maximum-test-execution-time-allowance 300 \
     -project "${project_file}" \
     -scheme "${scheme}" \
     -configuration Debug \
     -destination "platform=iOS Simulator,id=${simulator_id}" \
     -only-testing:"${test_class}/${test_name}" \
-    -resultBundlePath "${result_bundle}" || xcode_status="$?"
+    -resultBundlePath "${result_bundle}" &
+  local test_pid="$!" deadline=$((SECONDS + 360))
+  while kill -0 "${test_pid}" 2>/dev/null; do
+    if ((SECONDS >= deadline)); then
+      printf 'two-install stage exceeded wall-clock deadline: %s\n' "${test_name}" >&2
+      kill -INT "${test_pid}" 2>/dev/null || true
+      local drain_deadline=$((SECONDS + 15))
+      while kill -0 "${test_pid}" 2>/dev/null && ((SECONDS < drain_deadline)); do sleep 1; done
+      kill -TERM "${test_pid}" 2>/dev/null || true
+      drain_deadline=$((SECONDS + 5))
+      while kill -0 "${test_pid}" 2>/dev/null && ((SECONDS < drain_deadline)); do sleep 1; done
+      if kill -0 "${test_pid}" 2>/dev/null; then kill -KILL "${test_pid}" 2>/dev/null || true; fi
+      break
+    fi
+    sleep 1
+  done
+  wait "${test_pid}" || xcode_status="$?"
 
   test_summary="$(xcrun xcresulttool get test-results summary --path "${result_bundle}" --compact)"
   test_result="$(jq --raw-output '.result' <<<"${test_summary}")"
   failed_test_count="$(jq --raw-output '.failedTests' <<<"${test_summary}")"
   passed_test_count="$(jq --raw-output '.passedTests' <<<"${test_summary}")"
   total_test_count="$(jq --raw-output '.totalTestCount' <<<"${test_summary}")"
+  local test_activities
+  test_activities="$(xcrun xcresulttool get test-results activities --path "${result_bundle}" \
+    --test-id "IMAppLocalTwoInstallE2ETests/${test_name}()" --compact)"
+  printf '%s\n' "${test_activities}" > "${result_directory}/${simulator_id}-${test_name}-activities.json"
   # This exact known audit issue is retained as a failed stage, not waived.
   # Continue only when no business assertion or other failure was recorded;
   # the aggregate still exits 1 after all available functional stages.
   if [[ "${xcode_status}" -ne 0 && "${failed_test_count}" == "1" && "${total_test_count}" == "1" ]] &&
-     jq --exit-status '(.testFailures | length) > 0 and all(.testFailures[]; .failureText == "Dynamic Type font sizes are partially unsupported")' <<<"${test_summary}" >/dev/null; then
+     jq --exit-status '(.testFailures | length) > 0 and all(.testFailures[]; .failureText == "Dynamic Type font sizes are partially unsupported" or .failureText == "Text clipped" or .failureText == "Hit area is too small")' <<<"${test_summary}" >/dev/null &&
+     jq --exit-status '([.. | objects | select(.isAssociatedWithFailure == true) | .title // ""] | all(. == "" or . == "Dynamic Type font sizes are partially unsupported" or . == "Text clipped" or . == "Hit area is too small")) and ([.. | objects | .title?] | any(. == "two-install-functional-stage-complete"))' <<<"${test_activities}" >/dev/null; then
     audit_failure_count=$((audit_failure_count + 1))
     printf 'retained accessibility audit failure; continuing functional stages: %s\n' "${test_name}" >&2
     return 0
@@ -283,8 +305,14 @@ run_stage() {
 cleanup() {
   local original_status="$?"
   local restore_status=0
+  local simulator_id container
   if [[ "${cleanup_attempted}" == false ]]; then
     cleanup_attempted=true
+    for simulator_id in "${receiver_simulator_id}" "${sender_simulator_id}"; do
+      container="$(xcrun simctl get_app_container "${simulator_id}" "${app_bundle_id}" data)" || continue
+      /usr/bin/python3 "${repo_root}/scripts/v2_app_work_state_snapshot.py" "${container}" \
+        "${result_directory}/${simulator_id}-work-state.json" || true
+    done
     launch_fixture "${receiver_simulator_id}" \
       -v2-ui-testing-live-local-account \
       -v2-ui-testing-cleanup-local-account \
