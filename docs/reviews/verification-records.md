@@ -2804,7 +2804,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-15 | liveActivityPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App普通开关提交、另一安装冷恢复及独立PG关闭策略一致通过 | extendedLiveResourcesR2, multiDeviceUIR5 |
 | OP-16 | relationship | 真实好友申请/接受/删除及回读通过 | extendedLiveResourcesR4 |
 | OP-17 | userBlock | 真实拉黑/解除/恢复及关系回读通过 | extendedLiveResourcesR4 |
-| OP-18 | conversationPreference | 真实TCP置顶/归档/静音及重放通过；跨安装同步待验 | extendedLiveResourcesR7 |
+| OP-18 | conversationPreference | 已验证：真实TCP及同账号两安装置顶/归档/静音双向冷恢复通过 | extendedLiveResourcesR7, conversationPreferenceUIR2 |
 | OP-19 | messageFavorite | 真实TCP收藏/重放通过 | extendedLiveResourcesR4 |
 | OP-20 | pinnedMessage | 真实群置顶/恢复通过 | extendedLiveResourcesR4 |
 | OP-21 | groupAnnouncement | 真实公告提交/恢复通过 | extendedLiveResourcesR4 |
@@ -2814,9 +2814,9 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-25 | profileUpdate | 真实个人资料更新、头像绑定及授权展示通过 | extendedLiveResourcesR7 |
 | OP-26 | contactAlias | 真实备注设置/清空/恢复/回读通过 | extendedLiveResourcesR4 |
 | OP-27 | groupNickname | 真实群昵称设置/清空/恢复、事件版本及目录租约通过 | extendedLiveResourcesR7 |
-| OP-28 | groupInvite | 真实邀请创建/撤销及列表回读通过 | extendedLiveResourcesR9 |
-| OP-29 | groupJoinRequest | 真实入群申请提交/取消、审核可见性通过 | extendedLiveResourcesR9 |
-| OP-30 | groupJoinDecision | 真实入群取消、拒绝及批准、成员目录结果和邀请撤销通过；跨安装App流程待验 | extendedLiveResourcesR15 |
+| OP-28 | groupInvite | 真实邀请创建/撤销及列表回读通过；App普通UI二维码创建/读取、撤销及另一安装原链接失效通过 | extendedLiveResourcesR9, groupJoinUIR2, groupJoinRejectUIR1 |
+| OP-29 | groupJoinRequest | 真实入群申请/取消及审核可见性通过；App普通粘贴预览、申请、取消、同邀请再次申请和PG记录一致通过 | extendedLiveResourcesR9, groupJoinUIR4 |
+| OP-30 | groupJoinDecision | 真实SDK及App批准/拒绝均通过：申请人冷启动恢复批准成员或拒绝状态，PG成员数与状态一致；批准后发送正文即时投影失败另列 | extendedLiveResourcesR15, groupJoinUIR4, groupJoinRejectUIR1 |
 | OP-31 | mediaUpload | 真实个人头像/消息附件上传处理、下载和撤回授权收敛通过；后台与群头像另列 | extendedLiveResourcesR7 |
 | OP-32 | groupAvatar | 失败：真实上传创建返回422；服务端明确拒绝groupAvatar用途 | extendedLiveResourcesR4 |
 | EX-01 | 注册与登录 | 真实SDK及App密码注册/密码登录通过；同账号两安装设备列表>=2已核对 | liveAccountSDK, nativeSmoke, multiDeviceUIR1 |
@@ -2828,7 +2828,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-07 | 陌生消息拒绝/允许 | 通过：无好友关系私聊预热发送成功；同一TLS连接策略关闭后新发送directPolicyDenied、重新允许后成功 | extendedLiveResourcesR16 |
 | EX-08 | 拉黑后即时授权失效 | 真实拉黑后发送拒绝及恢复unresolved通过；失败：发送者持久限制提示缺失 | liveAccountUIR5 |
 | EX-09 | 私聊唯一性 | 通过：双方并发首次创建及后续重新打开均得到同一私聊房间；真实HTTPS回执核对 | extendedLiveResourcesR16 |
-| EX-10 | 实时收发与历史恢复 | 真实App私聊提交/撤回恢复及群消息双向收发/@all投影通过；离线自动重放失败单列 | twoInstallUIR13, twoInstallUIR14 |
+| EX-10 | 实时收发与历史恢复 | 真实App私聊提交/撤回恢复及群消息双向收发/@all投影通过；离线自动重放失败单列；批准入群后原已提交消息正常App冷启动恢复唯一正文通过 | twoInstallUIR13, twoInstallUIR14, groupJoinColdSendUIR1 |
 | EX-11 | 发送结果不确定后恢复 | 通过：真实App丢ACK前独立PG确认原提交，跨Gateway自动重连、原身份恢复、双端游标与SQLite重开一致 | appACKCutR5 |
 | EX-12 | 离线发送持久化与重放 | 群R3/R4自动重放正文/PG/原工作committed通过；私聊R14失败：needsAttention且PG无q，整体未通过 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4 |
 | EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
@@ -2839,10 +2839,10 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-18 | 在线状态与输入提示 | 真实在线状态通过；typing安装确认后开始/停止通过；冷订阅ACK后立即发送曾丢失 | extendedLiveResourcesR9, extendedLiveResourcesR10 |
 | EX-19 | 通知丢失补偿 | 真实跨Gateway故意丢尾通知后周期补偿通过；50房间投影与游标一致 | liveAccountUIR8 |
 | EX-20 | 断线重连 | 真实50房间冷补拉5.95秒、重连补拉1.28秒，跨Gateway在线更新与通知丢失补偿通过；大规模及App自动重连另待验 | liveAccountUIR8 |
-| EX-21 | 本地持久化清理 | 串行回归失败；部分夹具缺少投影收敛前置，需进一步核对 | clientSerial |
+| EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
 | EX-22 | 后台上传下载 | 真实慢上传期间同账号TCP发送/恢复/补拉与SQLite投影继续通过；iOS系统后台上传/下载与挂起恢复待验 | extendedLiveResourcesR12 |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；未验证外部APNs和真机实际推送 | liveAccountUIR6 |
-| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area失败 | twoInstallUIR13, twoInstallUIR14 |
+| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area失败；新增冷启动邀请深链接未打开申请页；批准入群后发送已提交但正文未即时投影，正常冷启动可恢复原消息 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1 |
 
 <!-- acceptance-matrix-end -->
 
@@ -2961,3 +2961,75 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 群读者UI R2完整回收：六业务阶段功能完成（注册/发送各保留DynamicType，其余4业务用例通过），2范围清理通过，0跳过。群主长按原群消息打开已读详情，真实独立成员Two install sender及value已读断言通过；PG不同读者2、最低readThrough2，终态群2条消息/head3；总驱动退出1、服务/范围清理。证据 `/tmp/imv2-group-read-r2-postgres-facts.json`、`im-v2-local-two-install-e2e.1v4JgE/all-stage-summary.json`、`imv2-native-e2e-o69rrtn3/message-facts.json`。EX14与OP05补群读者UI证据；私聊修改/撤回未在本轮执行，不扩大结论。
 
 同账号隐私R5八业务阶段功能完成：7独立业务用例通过、注册DynamicType失败保留；2范围清理通过，0跳过。普通UI关闭允许他人添加我/在线状态/正在输入，另一安装冷恢复三个开关0值；PG独立userAddDenied1/liveActivityBothDisabled1/strangerDenied1/groupReadDisabled1。原编辑/群离线/撤回/Operator快照重建继续通过。总退出1、服务及范围清理。OP13/15 App待验补齐；本轮并未测试新的好友申请拒绝或在线/typing对端传播，不扩大为这些边界验证。证据 `/tmp/imv2-multi-r5-policy-facts.json`、`im-v2-local-multi-device-e2e.IT2TlZ/all-stage-summary.json`。
+
+
+### 20261009-conversation-preference-ui-r1（测试断言失败）
+
+- 使用隔离原生 PostgreSQL、Account、Gateway、Actor 服务和两台明确选定的模拟器，真实注册同一账号、第二安装登录并发送群消息。
+- 首台 App 普通会话长按菜单提交置顶后，界面提示“会话设置已安全保存，连接恢复后会重试。”；测试仅等待“会话设置已提交，正在同步。”而在 30 秒后失败。清理前 SQLite 的该 `conversationPreference` 工作已为 `committed/finished`，提交次数 1。这是队列路径与测试提示断言不匹配，不能据此宣称完整偏好场景通过。
+- 原始日志 `/tmp/imv2-acceptance-conversation-preferences-r1-20261009.log`；完整活动 `/tmp/imv2-conversation-pref-r1-activities.json`；结果目录 `/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-multi-device-e2e.QTJxbt`。注册仍保留 Dynamic Type 审计失败。两范围清理通过，隔离服务已停止。
+- R2 仅修正测试等待：允许普通持久队列提示，最终必须由 PostgreSQL 以及两台安装的会话状态表和列表索引共同证明，提示本身不作为发送成功或同步成功证据。
+
+
+### 20261009-conversation-preference-ui-r2（功能通过，保留审计失败）
+
+- 在隔离原生服务和同账号两个真实 App 安装中，普通会话长按菜单依次置顶、免打扰一小时、归档；第二安装冷启动验证收件箱不再显示该会话、归档列表可见且带免打扰状态。随后由第二安装普通菜单取消归档、免打扰、置顶；第一安装冷启动验证会话恢复收件箱，归档列表不再显示，免打扰关闭。
+- 每个阶段只读核对 PostgreSQL `user_room_preferences`、对应安装 SQLite `v2_conversation_states` 和 `v2_conversation_list_entries`。正向两端三项均为 true，服务端 revision 3；反向两端三项均为 false，服务端 revision 6。置顶图标隐藏于无障碍层，因此没有把不可见图标或队列提示当作置顶成功证据，置顶由独立状态与列表索引核实。
+- 全部 6 个业务阶段包含功能完成标记：5 个独立业务测试通过；初始注册保留 `Dynamic Type font sizes are partially unsupported` 审计失败。另两个范围清理测试通过，0 跳过。整体退出 1，不能报告整轮全绿；隔离服务和两台本轮账号范围已清理。
+- 原始日志 `/tmp/imv2-acceptance-conversation-preferences-r2-20261009.log`；结果目录 `/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-multi-device-e2e.ZOmU2E`，其中 `all-stage-summary.json`、逐阶段完整活动、8 份脱敏偏好快照和清理前工作状态均保留。
+- OP-18 的跨安装待验项已更新为已验证。本轮没有代替群加入审核、系统后台资源传输、外部 APNs 等仍未完成的验收，也没有消除已有功能失败。
+
+
+### 20261009-group-join-ui-r1（二维码定位失败）
+
+- 隔离原生 PostgreSQL、Account、Gateway、Actor 和两个明确选定的模拟器中，群主普通注册、建群并从“邀请”页提交创建。SQLite `groupInvite` 工作为 `committed/finished/attempt1`。
+- 测试仅查找 `v2.group-invite.qr.*`，45 秒后失败；实际失败无障碍树有可见 180×180“群邀请二维码”，其标识继承了外层 `v2.group-invite.link.*`。此处不能据测试定位失败认定邀请创建失败，也不能宣称后续申请/取消/批准通过，因为它们未执行。
+- 日志 `/tmp/imv2-acceptance-group-join-r1-20261009.log`；结果目录 `/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.YgTxhh`；完整附件 `/tmp/imv2-group-join-r1-attachments`。注册 Dynamic Type 失败保留，两个范围清理通过，隔离服务已停止。
+- R2 依据实际树，限定二维码标签及邀请行标识进行定位；仍从 App 实际二维码提取本轮链接，不从数据库构造授权。
+
+
+### 20261009-group-join-ui-r2（二维码通过，冷启动深链接失败）
+
+- 群主 App 普通邀请创建测试通过，保留实际二维码截图，并以 Vision 读取唯一 `iim://group-invite` 链接；独立申请人普通注册通过。未从数据库读取或构造邀请 secret。
+- 申请人安装冷启动后，正常 `simctl openurl` 调用返回成功，但 UI 等待 30 秒未出现“加入群聊”，失败层级树仍为“消息/暂无会话”；申请工作记录为空。不能证明申请/取消/审批，当前只确认深链接入口没有成功呈现，具体根因待定位。
+- 日志 `/tmp/imv2-acceptance-group-join-r2-20261009.log`；結果目录 `/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.q4tmdJ`；申请失败附件 `/tmp/imv2-group-join-r2-applicant-attachments`。原始邀请码只在本轮隔离结果目录保存，权限 0600，不打印到摘要。
+- 注册 Dynamic Type 审计失败保留，两个范围清理通过、服务已停止。R3 改用普通“加入群聊”粘贴入口继续验证业务；此项冷启动深链接失败仍单列 EX-24，不因其他入口通过而删除。
+
+
+### 20261009-group-join-ui-r3（粘贴菜单元素类型定位失败）
+
+- App 实际二维码创建/读取、独立申请人注册再次通过；普通“加入群聊”入口及输入框长按完成。失败树明确显示系统 `MenuItem`“粘贴”，测试错误使用 `app.buttons` 查询，因此等待失败，申请尚未提交。
+- 原始日志 `/tmp/imv2-acceptance-group-join-r3-20261009.log`；完整活动 `/tmp/imv2-group-join-r3-applicant-activities.json`；附件 `/tmp/imv2-group-join-r3-applicant-attachments`；结果目录 `/var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.ChM0oP`。两个范围清理通过、隔离服务已停止，原注册 Dynamic Type 失败保留。
+- R4 将系统“粘贴”定位修正为 `menuItems`，实际邀请仍通过本轮 App 二维码和普通剪贴板传递，无数据库授权写入；此前冷启动深链接未呈现仍独立保留。
+
+
+### 20261009-group-join-ui-r4（申请取消批准通过，最后消息正文投影失败）
+
+- 群主普通 UI 创建邀请，保留实际二维码；Vision 从截图读取链接，另一安装通过普通加入群聊粘贴和预览提交申请。独立 PG 确认第一次 pending=1/members=1，取消后 cancelled=1/pending=0/members=1，再次申请 pending=1/cancelled=1/members=1，群主批准后 approved=1/pending=0/members=2。审批为真实 UI 按钮，没有直接修改数据库成员。
+- 申请人冷启动、重新预览显示“你已经是该群成员。”，正常刷新并打开群，提交 Approved member message。清理前本地 sendMessage 为 committed/finished/attempt1；终态 PG message-facts.json 确认一条 accepted 消息、未撤回、内容修订1、房间head3，事件为 room.created/membership_changed/message.accepted。
+- 最后用例仍失败：30秒内没有权威正文元素，失败树仅在 v2.message.pending-sends 中显示该文本，提示仍为“已安全保存，连接恢复后会重试。”。判定即时正文投影异常，不能因为数据库提交而报告用例通过，也不能判定数据库发送失败。冷恢复能否补齐该消息仍需验证。
+- 8业务阶段6测试通过，注册保留Dynamic Type失败，最后正文投影测试失败；另2范围清理通过，0跳过。整体退出1，服务与范围清理完成。App管理员拒绝和邀请撤销仍待验；此前冷启动深链接未呈现继续保留。
+- 日志 /tmp/imv2-acceptance-group-join-r4-20261009.log；结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.Wq9vIT，含all-stage-summary.json、完整活动、4份阶段PG事实和两端工作状态。终态消息事实 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-wsrvyvej/message-facts.json；失败附件 /tmp/imv2-group-join-r4-restored-attachments。
+
+
+### 20261009-group-join-reject-ui-r1（拒绝与撤销功能通过，保留审计失败）
+
+- 群主普通App创建真实邀请二维码，另一安装通过普通粘贴预览提交申请；群主App拒绝后，申请人冷启动重新预览显示已拒绝、不能再提交该申请，普通刷新后无群会话。
+- 群主App随后撤销原邀请，申请人再次粘贴原链接读取时收到“邀请不存在、已撤销、已过期或次数已用完。”，没有申请按钮。每阶段独立PG核对：pending1/members1，拒绝后rejected1/pending0/members1，撤销后activeInvites0/rejected1/members1。
+- 8业务阶段全部包含功能完成标记，7独立业务测试通过，注册保留Dynamic Type审计失败；2范围清理通过，0跳过，整体退出1。隔离服务和本轮账号范围已清理。此结果没有覆盖此前冷启动深链接入口和即时正文投影的失败。
+- 日志 /tmp/imv2-acceptance-group-join-reject-r1-20261009.log；结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.cCLxa7，保留all-stage-summary.json、完整活动、PG阶段事实及两安装清理前工作状态。
+
+
+### 20261009-group-join-cold-send-ui-r1（原已提交消息冷恢复通过）
+
+- 使用另一套隔离原生服务和两真实App安装完成邀请、申请、取消、再次申请、群主批准。申请人冷启动确认已是成员，普通群会话提交原消息；持久化观察阶段只证明发送意图保存，不把安全保存提示当作数据库提交。
+- 保持App运行，驱动以30秒上限独立读取PG直到messages=1，再核对SQLite唯一sendMessage工作为committed/finished/attempt1。随后普通终止并冷启动同一安装，进入原群显示唯一权威正文元素，未再提交消息。最终PG仍仅1条消息、成员2，证明恢复原提交而非重发制造新消息。
+- 9业务阶段全部完成，8独立业务测试通过，注册保留Dynamic Type审计失败；另2范围清理通过，0跳过，整体退出1。隔离服务和本轮范围已清理。本轮没有重测或消除R4即时正文投影失败，只补齐其冷恢复证据。
+- 日志 /tmp/imv2-acceptance-group-join-cold-send-r1-20261009.log；结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.SKR8ii，含all-stage-summary.json、完整活动、send-confirmation-join-facts.json、pre-cold-send-work.json和joined-message-join-facts.json。
+
+
+### 20261009-local-retention-and-live-r18（清理夹具修正及真实TCP验证）
+
+- 修正4个清理测试的夹具：成功回执之后，使用实际同步导入器应用匹配的权威投影，再验证历史清理。未修改生产清理条件；投影未收敛、未知结果、依赖和物理资源仍受保护。相关41项测试、5个套件通过，日志 /tmp/imv2-acceptance-client-retention-r2-20261009.log。首次编译缺少try已修正。
+- 新增真实TLS/TCP发送、本地SQLite保存、权威房间事件拉取、8天后清理、SQLite重开及服务器原结果查询验证。R17夹具误用同一账号作为两名成员，触发成员主键冲突；已改为两个真实注册账号，R18新增用例通过。日志 /tmp/imv2-acceptance-live-resources-r18-20261009/client.log。
+- R18整套运行仍退出1，唯一失败是已知群头像上传HTTP422；慢资源用例未启用。没有把整套验收或此前全量客户端回归标为通过。两份脚本bash语法、Python解析和git diff --check通过。

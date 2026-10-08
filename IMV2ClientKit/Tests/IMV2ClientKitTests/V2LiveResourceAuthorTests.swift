@@ -942,6 +942,63 @@ extension V2LiveResourceAuthorTests {
         print("Live acceptance: TCP send idempotency/recovery, edit, reaction add/remove, conversation preference, favorite, pin, forward, history and withdrawal passed.")
     }
 
+    @Test("real TCP acceptance waits for local projection before history GC and retains canonical content",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func localRetentionAcceptance() async throws {
+        let fixture = try LiveAccountFixture()
+        defer { fixture.close() }
+        let account = try await fixture.register().credentials
+        let viewer = try await fixture.register().credentials
+        let room = try await seedRoom(fixture, viewer: viewer.userID, author: account.userID)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let binding = V2LocalInstallationBinding(value: UUID())
+        let url = directory.appendingPathComponent("retention.sqlite")
+        let store = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account.userID)
+        let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()),
+            text: "Retained canonical content", attachmentJobIDs: [])
+        try await store.freezeSendIntent(intent)
+        try await store.handOffSendIntent(intent.id)
+        let work = try #require(try await store.dueOperationWork(now: Date(), kinds: [.sendMessage]).first)
+        let command = try await store.messageSendCommand(workID: work.id)
+        guard case .claimed = try await store.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit, now: Date()) else {
+            throw ResourceLiveFailure.presentation
+        }
+        let socket = try connection(authorSupplements: false)
+        do {
+            let session = try await authenticate(socket, account)
+            let transport = V2ProtobufSyncTransport(wire: socket, protocolVersion: session.protocolVersion)
+            let sender = V2ProtobufMessageSendOperationClient(transport: transport, connection: socket)
+            guard case .receipt(let receipt) = try await sender.submit(command),
+                  case .accepted(let accepted) = receipt.outcome else { throw ResourceLiveFailure.presentation }
+            try await store.completeMessageSend(command, receipt: receipt)
+            let later = Date().addingTimeInterval(8 * 86_400)
+            #expect(try await store.pruneCompletedOperationHistory(now: later) == 0)
+            #expect(try await store.submittedSendIntents(in: room).first?.status == .acceptedAwaitingProjection)
+            let history = try await transport.pullGroupEvents(roomID: room, afterRoomSequence: 0, pageSize: 100)
+            _ = try await store.applyGroupEventPage(history)
+            #expect(try await store.messages(in: room).map(\.messageID) == [accepted.messageID])
+            #expect(try await store.pruneCompletedOperationHistory(now: later) == 1)
+            #expect(try await store.operationWork(id: work.id) == nil)
+            #expect(try await store.messages(in: room).first?.text == intent.text)
+            // Local history compaction must not erase the server's original outcome.
+            #expect(try await sender.recover(.init(identity: command.identity, fingerprint: command.fingerprint,
+                domainFingerprint: command.command.fingerprint, action: .query)) == .receipt(receipt))
+            try await store.close()
+            let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account.userID)
+            #expect(try await reopened.messages(in: room).map(\.messageID) == [accepted.messageID])
+            #expect(try await reopened.operationWork(id: work.id) == nil)
+            try await reopened.close()
+            await socket.disconnect()
+        } catch {
+            await socket.disconnect()
+            try? await store.close()
+            throw error
+        }
+        print("Live acceptance: real TCP send retained before projection; local GC removed history only after actual TLS projection and preserved canonical content and original server receipt across SQLite reopen.")
+    }
+
     @Test("real group creation, announcement, permission, role and membership recovery",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
     func groupOperationAcceptance() async throws {

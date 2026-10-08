@@ -184,7 +184,12 @@ struct V2ResourceRecoveryTests {
         try await engine.releaseAcceptedStaging()
         #expect(FileManager.default.fileExists(atPath:file.path))
         #expect(try await store.resourceSendPayloads().count==1)
-        try await store.completeResourceSendFixture(intent.clientMessageID,result:.accepted(.init(messageID:.init(uuid:UUID()),roomSequence:1)))
+        let accepted = try V2MessageOperationAcceptance(messageID: .init(uuid: UUID()), roomSequence: 1)
+        try await store.completeResourceSendFixture(intent.clientMessageID, result: .accepted(accepted))
+        #expect(try await store.submittedSendIntents(in: room).first?.status == .acceptedAwaitingProjection)
+        #expect(try await store.pruneCompletedOperationHistory(now: Date().addingTimeInterval(8 * 86_400)) == 0)
+        try await store.observeResourceSendFixtureProjection(intent.clientMessageID, accepted: accepted,
+            mediaPresentations: [try .init(mediaID: request.mediaID, kind: .file, contentType: request.contentType, byteCount: request.byteCount)])
         #expect(try await store.submittedSendIntents(in:room).isEmpty)
         _ = try await store.pruneCompletedOperationHistory(now:Date().addingTimeInterval(8*86_400))
         #expect(try await store.resourceSendPayloads().count==1)

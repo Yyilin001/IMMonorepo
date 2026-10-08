@@ -24,12 +24,13 @@ def main():
     parser.add_argument('--account-switch-ui',action='store_true',help='Run real App sign-out, account switching and cold restoration isolation.')
     parser.add_argument('--read-receipt-ui',action='store_true',help='Run independent App direct delivery and peer-read cold restoration.')
     parser.add_argument('--group-read-ui',action='store_true',help='Run independent App group readers presentation after actual member reading.')
+    parser.add_argument('--group-join-ui',action='store_true',help='Run independent App invite QR, actual join submission/cancellation/approval.')
     parser.add_argument('--receiver-simulator',help='Explicitly owned, booted receiver simulator for --two-install-ui.')
     parser.add_argument('--sender-simulator',help='Explicitly owned, booted sender simulator for --two-install-ui.')
     args=parser.parse_args()
     if not 0 <= args.hold_seconds <= 900: parser.error('hold must be 0...900 seconds')
-    if sum([args.two_install_ui,args.multi_device_ui,args.account_switch_ui,args.read_receipt_ui,args.group_read_ui]) > 1: parser.error('UI modes are mutually exclusive')
-    ui_requested=args.two_install_ui or args.multi_device_ui or args.account_switch_ui or args.read_receipt_ui or args.group_read_ui
+    if sum([args.two_install_ui,args.multi_device_ui,args.account_switch_ui,args.read_receipt_ui,args.group_read_ui,args.group_join_ui]) > 1: parser.error('UI modes are mutually exclusive')
+    ui_requested=args.two_install_ui or args.multi_device_ui or args.account_switch_ui or args.read_receipt_ui or args.group_read_ui or args.group_join_ui
     if ui_requested:
         if not args.receiver_simulator or not args.sender_simulator or args.receiver_simulator == args.sender_simulator:
             parser.error('two-install UI requires two distinct, explicitly selected simulator IDs')
@@ -159,6 +160,12 @@ def main():
             ui_log=(root/'two-install-ui.log').open('wb');logs.append(ui_log)
             ui_source=REPO/'IMApp/Scripts/verify_local_account_two_install_e2e.sh'
             success_marker='local two-install direct-and-group-message E2E: pass'
+            if args.group_join_ui:
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_ONLY']='true'
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
+                success_marker='local group join approval E2E: pass'
+                if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_REJECT_ONLY') == 'true':
+                    success_marker='local group join rejection E2E: pass'
             if args.group_read_ui:
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_GROUP_READ_ONLY']='true'
                 success_marker='local group readers E2E: pass'
@@ -183,6 +190,8 @@ def main():
                     IMAPP_LOCAL_MULTI_DEVICE_OPERATOR_URL=f'http://127.0.0.1:{ports["operator"]}/internal/v2/device-snapshots/reset',
                     IMAPP_LOCAL_MULTI_DEVICE_OPERATOR_TOKEN=operator_env['IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64'])
                 success_marker='local same-account multi-device E2E: pass'
+                if os.environ.get('IMAPP_LOCAL_MULTI_DEVICE_CONVERSATION_PREFERENCE_ONLY') == 'true':
+                    success_marker='local same-account conversation preferences E2E: pass'
             ui_driver=root/'two-install-ui-driver.sh'
             ui_driver.write_text(ui_source.read_text().replace(
                 'script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',

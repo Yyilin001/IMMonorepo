@@ -353,6 +353,109 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-group-title "${receiver_self_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
 
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_ONLY:-false}" == true ]]; then
+  [[ "${external_stack}" == true ]] || { printf '%s\n' 'group join mode requires the owned native stack.' >&2; exit 1; }
+  : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
+  export TEST_RUNNER_IMAPP_JOIN_OWNER_GROUP="${receiver_self_group_title}"
+  join_facts() {
+    local phase="$1"
+    /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -c "SELECT json_build_object('pending',count(*) FILTER (WHERE r.state='pending'),'cancelled',count(*) FILTER (WHERE r.state='cancelled'),'approved',count(*) FILTER (WHERE r.state='approved'),'rejected',count(*) FILTER (WHERE r.state='rejected'),'activeInvites',(SELECT count(*) FROM im_v2.group_invite_links i WHERE i.room_id=g.room_id AND i.state='active'),'members',(SELECT count(*) FROM im_v2.room_memberships m WHERE m.room_id=g.room_id AND m.left_revision IS NULL),'messages',(SELECT count(*) FROM im_v2.messages msg WHERE msg.room_id=g.room_id))::text FROM im_v2.group_rooms g LEFT JOIN im_v2.group_join_requests r ON r.room_id=g.room_id WHERE g.title='${receiver_self_group_title}' GROUP BY g.room_id" > "${result_directory}/${phase}-join-facts.json"
+  }
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testGroupOwnerCreatesInvitationQRCode
+  xcrun xcresulttool export attachments --path "${result_directory}/${receiver_simulator_id}-testGroupOwnerCreatesInvitationQRCode.xcresult" --output-path "${result_directory}/invite-qr-attachments" >/dev/null
+  cat > "${result_directory}/read-invite-qr.swift" <<'SWIFT'
+import Foundation
+import Vision
+let folder = URL(fileURLWithPath: CommandLine.arguments[1])
+var links = Set<String>()
+for file in try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) where file.pathExtension.lowercased() == "png" {
+    let request = VNDetectBarcodesRequest()
+    request.symbologies = [.qr]
+    try VNImageRequestHandler(url: file).perform([request])
+    for result in request.results ?? [] {
+        if let value = result.payloadStringValue, let url = URL(string: value), url.scheme == "iim", url.host == "group-invite" { links.insert(value) }
+    }
+}
+guard links.count == 1, let link = links.first else { fatalError("expected one actual App invitation QR") }
+try link.write(toFile: CommandLine.arguments[2], atomically: true, encoding: .utf8)
+SWIFT
+  swift "${result_directory}/read-invite-qr.swift" "${result_directory}/invite-qr-attachments" "${result_directory}/invite-link.txt"
+  chmod 600 "${result_directory}/invite-link.txt"
+  launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-e2e-scope "${sender_scope}" -v2-ui-testing-password-register -v2-ui-testing-local-password localpassword -v2-ui-testing-account-handle "${sender_account_handle}" -v2-ui-testing-public-handle "${sender_public_handle}" -v2-ui-testing-display-name 'Two install applicant'
+  run_stage "${sender_simulator_id}" testApplicantRegistersForGroupInvitation
+  open_applicant_invite() {
+    launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${sender_scope}"
+    xcrun simctl pbcopy "${sender_simulator_id}" < "${result_directory}/invite-link.txt"
+  }
+  open_applicant_invite
+  run_stage "${sender_simulator_id}" testApplicantSubmitsActualGroupJoinRequest
+  join_facts first-pending
+  jq --exit-status '.pending == 1 and .members == 1' "${result_directory}/first-pending-join-facts.json" >/dev/null
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_REJECT_ONLY:-false}" == true ]]; then
+    launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+    run_stage "${receiver_simulator_id}" testGroupOwnerRejectsActualJoinRequest
+    join_facts rejected
+    jq --exit-status '.rejected == 1 and .approved == 0 and .pending == 0 and .members == 1' "${result_directory}/rejected-join-facts.json" >/dev/null
+    open_applicant_invite
+    run_stage "${sender_simulator_id}" testApplicantRestoresActualRejectedJoinRequest
+    launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+    run_stage "${receiver_simulator_id}" testGroupOwnerRevokesActualInvitation
+    join_facts revoked
+    jq --exit-status '.activeInvites == 0 and .rejected == 1 and .members == 1' "${result_directory}/revoked-join-facts.json" >/dev/null
+    open_applicant_invite
+    run_stage "${sender_simulator_id}" testApplicantCannotPreviewActualRevokedInvitation
+    if [[ "${audit_failure_count}" -gt 0 ]]; then
+      printf '%s\n' 'group join rejection functional stages complete; retained accessibility failure.' >&2
+      exit 1
+    fi
+    printf '%s\n' 'local group join rejection E2E: pass'
+    exit 0
+  fi
+  open_applicant_invite
+  run_stage "${sender_simulator_id}" testApplicantCancelsActualGroupJoinRequest
+  join_facts cancelled
+  jq --exit-status '.pending == 0 and .cancelled == 1 and .members == 1' "${result_directory}/cancelled-join-facts.json" >/dev/null
+  open_applicant_invite
+  run_stage "${sender_simulator_id}" testApplicantResubmitsAfterActualCancellation
+  join_facts resubmitted
+  jq --exit-status '.pending == 1 and .cancelled == 1 and .members == 1' "${result_directory}/resubmitted-join-facts.json" >/dev/null
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testGroupOwnerApprovesActualJoinRequest
+  join_facts approved
+  jq --exit-status '.approved == 1 and .pending == 0 and .members == 2' "${result_directory}/approved-join-facts.json" >/dev/null
+  open_applicant_invite
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_COLD_SEND_ONLY:-false}" == true ]]; then
+    run_stage "${sender_simulator_id}" testApplicantRestoresApprovedGroupAndPersistsSend
+    send_confirmation_deadline=$((SECONDS + 30))
+    while true; do
+      join_facts send-confirmation
+      if jq --exit-status '.messages == 1' "${result_directory}/send-confirmation-join-facts.json" >/dev/null; then break; fi
+      [[ "${SECONDS}" -lt "${send_confirmation_deadline}" ]] || { printf '%s\n' 'original member send was not accepted by PG within 30 seconds.' >&2; exit 1; }
+      sleep 0.25
+    done
+    send_container="$(xcrun simctl get_app_container "${sender_simulator_id}" "${app_bundle_id}" data)"
+    while true; do
+      /usr/bin/python3 "${repo_root}/scripts/v2_app_work_state_snapshot.py" "${send_container}" "${result_directory}/pre-cold-send-work.json"
+      if jq --exit-status '[.[].work[] | select(.operation_kind == "sendMessage")] | length == 1 and all(.[]; .execution_state == "committed" and .scheduling_state == "finished")' "${result_directory}/pre-cold-send-work.json" >/dev/null; then break; fi
+      [[ "${SECONDS}" -lt "${send_confirmation_deadline}" ]] || { printf '%s\n' 'original member send local work was not committed within 30 seconds.' >&2; exit 1; }
+      sleep 0.25
+    done
+    launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${sender_scope}"
+    run_stage "${sender_simulator_id}" testApplicantColdRestoresCanonicalApprovedMemberMessage
+  else
+    run_stage "${sender_simulator_id}" testApplicantRestoresApprovedGroupAndSendsMessage
+  fi
+  join_facts joined-message
+  jq --exit-status '.approved == 1 and .members == 2 and .messages == 1' "${result_directory}/joined-message-join-facts.json" >/dev/null
+  if [[ "${audit_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'group join approval functional stages complete; retained accessibility failure.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local group join approval E2E: pass'
+  exit 0
+fi
+
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_ACCOUNT_SWITCH_ONLY:-false}" == true ]]; then
   export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_SCOPE="${receiver_scope}"
   export TEST_RUNNER_IMAPP_ACCOUNT_SWITCH_FIRST_HANDLE="${receiver_account_handle}"

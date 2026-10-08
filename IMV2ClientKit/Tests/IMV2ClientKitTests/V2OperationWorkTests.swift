@@ -178,6 +178,7 @@ struct V2OperationWorkTests {
         let unknown = try await persistDurableMessage(in: store, roomID: room,
             clientMessageID: .init(uuid: UUID()), text: "outcome unknown")
         var sendIDs: [UUID: UUID] = [:]
+        var acceptedSends: [(ClientMessageID, V2MessageOperationAcceptance)] = []
         for intent in [plain, pinned, unknown] {
             let id = try #require(try await store.databasePool.read { db in
                 try String.fetchOne(db, sql: "SELECT work_id FROM v2_send_intents WHERE intent_id=?",
@@ -191,8 +192,9 @@ struct V2OperationWorkTests {
             if intent.id == unknown.id {
                 try await store.deferOperationWork(currentClaim, until: now, code: "TEST_UNKNOWN")
             } else {
-                try await store.completeOperationWork(.init(identity: work.identity, fingerprint: work.fingerprint,
-                    state: .committed, receipt: "send-receipt"), now: now)
+                let accepted = try V2MessageOperationAcceptance(messageID: .init(uuid: UUID()), roomSequence: UInt64(acceptedSends.count + 1))
+                try await store.completeResourceSendFixture(intent.clientMessageID, result: .accepted(accepted), now: now)
+                acceptedSends.append((intent.clientMessageID, accepted))
             }
         }
         // A replacement reference must keep its parent even when all network work completed.
@@ -202,7 +204,13 @@ struct V2OperationWorkTests {
         }
         let later = now.addingTimeInterval(8 * 24 * 60 * 60)
         #expect(try await store.pruneCompletedOperationHistory(now: now) == 0)
-        #expect(try await store.pruneCompletedOperationHistory(now: later) == 3)
+        // Accepted but unmaterialized sends remain protected beyond retention.
+        #expect(try await store.pruneCompletedOperationHistory(now: later) == 2)
+        #expect(try await store.operationWork(id: #require(sendIDs[plain.id])) != nil)
+        for (id, accepted) in acceptedSends {
+            try await store.observeResourceSendFixtureProjection(id, accepted: accepted)
+        }
+        #expect(try await store.pruneCompletedOperationHistory(now: later) == 1)
         for id in completedMutationIDs { #expect(try await store.operationWork(id: id) == nil) }
         #expect(try await store.operationWork(id: #require(sendIDs[plain.id])) == nil)
         #expect(try await store.operationWork(id: #require(sendIDs[pinned.id])) != nil)
@@ -230,8 +238,11 @@ struct V2OperationWorkTests {
         guard case .claimed = try await store.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit, now: Date()) else {
             throw V2OperationWorkError.invalidTransition
         }
-        try await store.completeOperationWork(.init(identity: work.identity, fingerprint: work.fingerprint,
-            state: .committed, receipt: "attachment-receipt"), now: now)
+        let accepted = try V2MessageOperationAcceptance(messageID: .init(uuid: UUID()), roomSequence: 1)
+        try await store.completeResourceSendFixture(intent.clientMessageID, result: .accepted(accepted), now: now)
+        #expect(try await store.pruneCompletedOperationHistory(now: now.addingTimeInterval(8 * 24 * 60 * 60)) == 0)
+        try await store.observeResourceSendFixtureProjection(intent.clientMessageID, accepted: accepted,
+            mediaPresentations: [try .init(mediaID: request.targetMediaID, kind: .file, contentType: "text/plain", byteCount: 3)])
         #expect(try await store.pruneCompletedOperationHistory(now: now.addingTimeInterval(8 * 24 * 60 * 60)) == 1)
         #expect(try await store.operationWork(id: work.id) == nil)
         #expect(try await savedDurableMessages(in: store).isEmpty)
@@ -266,8 +277,8 @@ struct V2OperationWorkTests {
         guard case .claimed = try await store.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit, now: Date()) else {
             throw V2OperationWorkError.invalidTransition
         }
-        try await store.completeOperationWork(.init(identity: work.identity, fingerprint: work.fingerprint,
-            state: .committed, receipt: "upload-receipt"), now: now)
+        let accepted = try V2MessageOperationAcceptance(messageID: .init(uuid: UUID()), roomSequence: 1)
+        try await store.completeResourceSendFixture(intent.clientMessageID, result: .accepted(accepted), now: now)
         let later = now.addingTimeInterval(8 * 24 * 60 * 60)
         #expect(try await store.pruneCompletedOperationHistory(now: later) == 0)
         #expect(FileManager.default.fileExists(atPath: file.path))
@@ -276,6 +287,9 @@ struct V2OperationWorkTests {
         #expect(try await store.pruneCompletedOperationHistory(now: later) == 0)
         try FileManager.default.removeItem(at: file)
         try await store.confirmResourceStagingReleased(id: job)
+        #expect(try await store.pruneCompletedOperationHistory(now: later) == 0)
+        try await store.observeResourceSendFixtureProjection(intent.clientMessageID, accepted: accepted,
+            mediaPresentations: [try .init(mediaID: request.mediaID, kind: .file, contentType: request.contentType, byteCount: request.byteCount)])
         #expect(try await store.pruneCompletedOperationHistory(now: later) == 1)
         #expect(try await store.operationWork(id: work.id) == nil)
         #expect(try await savedDurableMessages(in: store).isEmpty)

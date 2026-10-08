@@ -905,6 +905,362 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     }
 
     @MainActor
+    private func invitationGroup(in app: XCUIApplication) throws -> XCUIElement {
+        let title = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_JOIN_OWNER_GROUP"])
+        return app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", title)).firstMatch
+    }
+
+    @MainActor
+    private func openInvitationManagement(in app: XCUIApplication) throws {
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let group = try invitationGroup(in: app)
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let tools = app.buttons["v2.conversation.detail.tools"]
+        XCTAssertTrue(tools.waitForExistence(timeout: 15) && tools.isHittable)
+        tools.tap()
+        let invites = app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@", "v2.group.invitations", "邀请")).firstMatch
+        XCTAssertTrue(invites.waitForExistence(timeout: 10) && invites.isHittable)
+        invites.tap()
+        XCTAssertTrue(app.navigationBars["群邀请与审批"].waitForExistence(timeout: 15))
+    }
+
+    @MainActor
+    func testGroupOwnerCreatesInvitationQRCode() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openInvitationManagement(in: app)
+        let create = app.buttons["v2.group-invite.create"]
+        let enabled = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: create)
+        wait(for: [enabled], timeout: 30)
+        create.tap()
+        // The actual native tree inherits the outer invitation row ID.
+        let qr = app.images.matching(NSPredicate(format: "(identifier BEGINSWITH %@ OR identifier BEGINSWITH %@) AND label == %@",
+            "v2.group-invite.qr.", "v2.group-invite.link.", "群邀请二维码")).firstMatch
+        XCTAssertTrue(qr.waitForExistence(timeout: 45), "普通创建命令必须生成真实可分享的二维码。")
+        for _ in 0..<3 where !qr.isHittable { app.swipeUp() }
+        XCTAssertTrue(qr.isHittable)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "actual-group-invitation-qr"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testApplicantRegistersForGroupInvitation() throws {
+        let app = XCUIApplication()
+        app.activate()
+        let submit = app.buttons["v2.password.submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 15) && submit.isEnabled)
+        submit.tap()
+        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    private func openActualInvitationPreview(in app: XCUIApplication, expectsValidPreview: Bool = true) throws {
+        // Use the ordinary paste entry after authentication. The cold-start
+        // deep-link failure remains a separate, recorded acceptance issue.
+        tapConversationTool("v2.group-join.open", in: app, timeout: 30)
+        let input = app.textFields["v2.group-join.input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 15) && input.isHittable)
+        input.tap()
+        input.press(forDuration: 1)
+        let paste = app.menuItems.matching(NSPredicate(format: "label == %@ OR label == %@", "粘贴", "Paste")).firstMatch
+        XCTAssertTrue(paste.waitForExistence(timeout: 10) && paste.isHittable)
+        paste.tap()
+        let allow = app.buttons["允许粘贴"]
+        if allow.exists { allow.tap() }
+        let preview = app.buttons["v2.group-join.preview"]
+        let canPreview = expectation(for: NSPredicate(format: "enabled == true"), evaluatedWith: preview)
+        wait(for: [canPreview], timeout: 15)
+        XCTAssertTrue(preview.isHittable)
+        preview.tap()
+        if expectsValidPreview {
+            let title = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_JOIN_OWNER_GROUP"])
+            XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 30))
+        }
+    }
+
+    @MainActor
+    func testApplicantSubmitsActualGroupJoinRequest() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openActualInvitationPreview(in: app)
+        let submit = app.buttons["v2.group-join.submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 30) && submit.isEnabled)
+        submit.tap()
+        let status = app.staticTexts["v2.group-join.status"]
+        let pending = expectation(for: NSPredicate(format: "label == %@", "入群申请正在等待审批。"), evaluatedWith: status)
+        wait(for: [pending], timeout: 45)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testApplicantResubmitsAfterActualCancellation() throws {
+        try testApplicantSubmitsActualGroupJoinRequest()
+    }
+
+    @MainActor
+    func testApplicantCancelsActualGroupJoinRequest() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openActualInvitationPreview(in: app)
+        let cancel = app.buttons["v2.group-join.cancel"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 30) && cancel.isEnabled)
+        cancel.tap()
+        // The cancelled invitation returns to the ordinary submission form.
+        let submit = app.buttons["v2.group-join.submit"]
+        let canResubmit = expectation(for: NSPredicate(format: "exists == true AND enabled == true"), evaluatedWith: submit)
+        wait(for: [canResubmit], timeout: 45)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testGroupOwnerApprovesActualJoinRequest() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openInvitationManagement(in: app)
+        let approve = app.buttons.matching(NSPredicate(format: "(identifier BEGINSWITH %@ OR identifier BEGINSWITH %@) AND label == %@",
+            "v2.group-join-request.approve.", "v2.group-join-request.", "批准")).firstMatch
+        XCTAssertTrue(approve.waitForExistence(timeout: 30) && approve.isEnabled)
+        for _ in 0..<3 where !approve.isHittable { app.swipeUp() }
+        XCTAssertTrue(approve.isHittable)
+        approve.tap()
+        let removed = expectation(for: NSPredicate { _, _ in !approve.exists }, evaluatedWith: app)
+        wait(for: [removed], timeout: 45)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testGroupOwnerRejectsActualJoinRequest() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openInvitationManagement(in: app)
+        let reject = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.group-join-request.", "拒绝")).firstMatch
+        XCTAssertTrue(reject.waitForExistence(timeout: 30) && reject.isEnabled)
+        for _ in 0..<3 where !reject.isHittable { app.swipeUp() }
+        XCTAssertTrue(reject.isHittable)
+        reject.tap()
+        let removed = expectation(for: NSPredicate { _, _ in !reject.exists }, evaluatedWith: app)
+        wait(for: [removed], timeout: 45)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testApplicantRestoresActualRejectedJoinRequest() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openActualInvitationPreview(in: app)
+        let status = app.staticTexts["v2.group-join.status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 30))
+        XCTAssertEqual(status.label, "入群申请已拒绝。")
+        XCTAssertFalse(app.buttons["v2.group-join.submit"].exists)
+        app.buttons["v2.group-join.close"].tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        XCTAssertFalse(try invitationGroup(in: app).exists, "拒绝申请不能创建群成员会话。")
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testGroupOwnerRevokesActualInvitation() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openInvitationManagement(in: app)
+        let revoke = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.group-invite.", "撤销")).firstMatch
+        XCTAssertTrue(revoke.waitForExistence(timeout: 30) && revoke.isEnabled)
+        for _ in 0..<3 where !revoke.isHittable { app.swipeUp() }
+        XCTAssertTrue(revoke.isHittable)
+        revoke.tap()
+        let removed = expectation(for: NSPredicate { _, _ in !revoke.exists }, evaluatedWith: app)
+        wait(for: [removed], timeout: 45)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testApplicantCannotPreviewActualRevokedInvitation() throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openActualInvitationPreview(in: app, expectsValidPreview: false)
+        let feedback = app.staticTexts["v2.group-join.feedback"]
+        let unavailable = expectation(for: NSPredicate(format: "label == %@", "邀请不存在、已撤销、已过期或次数已用完。"), evaluatedWith: feedback)
+        wait(for: [unavailable], timeout: 30)
+        XCTAssertFalse(app.buttons["v2.group-join.submit"].exists)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    private func restoreApprovedGroupAndSend(assertImmediateBody: Bool) throws {
+        let app = XCUIApplication()
+        app.activate()
+        try openActualInvitationPreview(in: app)
+        let status = app.staticTexts["v2.group-join.status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 30))
+        XCTAssertEqual(status.label, "你已经是该群成员。")
+        app.buttons["v2.group-join.close"].tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let group = try invitationGroup(in: app)
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let draft = app.textFields["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 15) && draft.isHittable)
+        draft.tap()
+        draft.typeText("Approved member message")
+        app.buttons["v2.message.send"].tap()
+        let body = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "Approved member message")).firstMatch
+        if assertImmediateBody {
+            XCTAssertTrue(body.waitForExistence(timeout: 30))
+        } else {
+            let feedback = app.staticTexts["v2.message.send-feedback"]
+            let saved = expectation(for: NSPredicate(format: "label IN %@",
+                ["已安全保存，连接恢复后会重试。", "已发送，正在同步。"]), evaluatedWith: feedback)
+            wait(for: [saved], timeout: 30)
+        }
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        // The persistence-only stage leaves the App alive. The driver must
+        // observe PG acceptance and committed local work before terminating.
+        if assertImmediateBody { app.terminate() }
+    }
+
+    @MainActor
+    func testApplicantRestoresApprovedGroupAndSendsMessage() throws {
+        try restoreApprovedGroupAndSend(assertImmediateBody: true)
+    }
+
+    @MainActor
+    func testApplicantRestoresApprovedGroupAndPersistsSend() throws {
+        try restoreApprovedGroupAndSend(assertImmediateBody: false)
+    }
+
+    @MainActor
+    func testApplicantColdRestoresCanonicalApprovedMemberMessage() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let group = try invitationGroup(in: app)
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        let bodies = app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "Approved member message"))
+        XCTAssertTrue(bodies.firstMatch.waitForExistence(timeout: 30), "冷恢复必须显示原已提交消息的权威正文。")
+        XCTAssertEqual(bodies.count, 1)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    private func sameAccountConversationRow(in app: XCUIApplication) -> XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label CONTAINS %@",
+            "v2.conversation.group.", "同账号群")).firstMatch
+    }
+
+    @MainActor
+    private func changeConversationPreference(_ menu: String, action: String, in app: XCUIApplication) {
+        let row = sameAccountConversationRow(in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 30) && row.isHittable)
+        row.press(forDuration: 1)
+        let submenu = app.buttons[menu]
+        XCTAssertTrue(submenu.waitForExistence(timeout: 10) && submenu.isHittable)
+        submenu.tap()
+        let choice = app.buttons[action]
+        XCTAssertTrue(choice.waitForExistence(timeout: 10) && choice.isHittable)
+        choice.tap()
+        let feedback = app.staticTexts["v2.conversation.state-feedback"]
+        // Saving to the ordinary durable queue can precede its asynchronous
+        // commit. Independent PG and both local projections are checked by
+        // the driver; this label alone is never acceptance evidence.
+        let saved = expectation(for: NSPredicate(format: "label IN %@",
+            ["会话设置已提交，正在同步。", "会话设置已安全保存，连接恢复后会重试。"]), evaluatedWith: feedback)
+        wait(for: [saved], timeout: 30)
+    }
+
+    @MainActor
+    func testSameAccountFirstInstallationPinsMutesAndArchivesConversation() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        changeConversationPreference("会话置顶", action: "置顶会话", in: app)
+        changeConversationPreference("消息提醒", action: "免打扰 1 小时", in: app)
+        let muted = expectation(for: NSPredicate { _, _ in
+            self.sameAccountConversationRow(in: app).label.contains("免打扰")
+        }, evaluatedWith: app)
+        wait(for: [muted], timeout: 30)
+        changeConversationPreference("会话归档", action: "归档会话", in: app)
+        let removed = expectation(for: NSPredicate { _, _ in !self.sameAccountConversationRow(in: app).exists }, evaluatedWith: app)
+        wait(for: [removed], timeout: 30)
+        tapConversationTool("v2.conversation.archive-toggle", in: app, timeout: 15)
+        XCTAssertTrue(app.navigationBars["已归档"].waitForExistence(timeout: 15))
+        XCTAssertTrue(sameAccountConversationRow(in: app).waitForExistence(timeout: 30))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountSecondInstallationRestoresConversationPreferences() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        XCTAssertFalse(sameAccountConversationRow(in: app).exists)
+        tapConversationTool("v2.conversation.archive-toggle", in: app, timeout: 15)
+        XCTAssertTrue(app.navigationBars["已归档"].waitForExistence(timeout: 15))
+        XCTAssertTrue(sameAccountConversationRow(in: app).waitForExistence(timeout: 30))
+        XCTAssertTrue(sameAccountConversationRow(in: app).label.contains("免打扰"))
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountSecondInstallationRestoresAndReversesConversationPreferences() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        XCTAssertFalse(sameAccountConversationRow(in: app).exists, "另一安装的归档会话不能出现在收件箱。")
+        tapConversationTool("v2.conversation.archive-toggle", in: app, timeout: 15)
+        XCTAssertTrue(app.navigationBars["已归档"].waitForExistence(timeout: 15))
+        XCTAssertTrue(sameAccountConversationRow(in: app).waitForExistence(timeout: 30))
+        XCTAssertTrue(sameAccountConversationRow(in: app).label.contains("免打扰"))
+        XCTContext.runActivity(named: "conversation-preferences-cross-install-restored") { _ in }
+        changeConversationPreference("会话归档", action: "取消归档", in: app)
+        let removed = expectation(for: NSPredicate { _, _ in !self.sameAccountConversationRow(in: app).exists }, evaluatedWith: app)
+        wait(for: [removed], timeout: 30)
+        tapConversationTool("v2.conversation.archive-toggle", in: app, timeout: 15)
+        XCTAssertTrue(app.navigationBars["消息"].waitForExistence(timeout: 15))
+        changeConversationPreference("消息提醒", action: "取消免打扰", in: app)
+        let unmuted = expectation(for: NSPredicate { _, _ in
+            let row = self.sameAccountConversationRow(in: app)
+            return row.exists && !row.label.contains("免打扰")
+        }, evaluatedWith: app)
+        wait(for: [unmuted], timeout: 30)
+        changeConversationPreference("会话置顶", action: "取消置顶会话", in: app)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testSameAccountFirstInstallationRestoresReversedConversationPreferences() throws {
+        let app = XCUIApplication()
+        app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let row = sameAccountConversationRow(in: app)
+        XCTAssertTrue(row.waitForExistence(timeout: 30))
+        XCTAssertFalse(row.label.contains("免打扰"))
+        tapConversationTool("v2.conversation.archive-toggle", in: app, timeout: 15)
+        XCTAssertTrue(app.navigationBars["已归档"].waitForExistence(timeout: 15))
+        XCTAssertFalse(sameAccountConversationRow(in: app).exists)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
     func testGroupOwnerProjectsActualMemberReadReceipts() throws {
         let app = XCUIApplication()
         app.activate()

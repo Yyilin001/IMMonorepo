@@ -230,6 +230,56 @@ run_stage "${second_simulator_id}" testSameAccountSecondInstallationListsDevices
 second_device_id="$(postgres_scalar "SELECT device_id FROM im_v2.auth_devices WHERE user_id = (SELECT user_id FROM im_v2.account_password_credentials WHERE account_handle = '${account_handle}') AND device_id <> '${first_device_id}' AND revoked_at IS NULL")"
 [[ "${second_device_id}" =~ ^[0-9a-fA-F-]{36}$ ]] || { printf '%s\n' 'expected exactly one independently registered second-device identity.' >&2; exit 1; }
 
+if [[ "${IMAPP_LOCAL_MULTI_DEVICE_CONVERSATION_PREFERENCE_ONLY:-false}" == true ]]; then
+  preference_room="$(postgres_scalar "SELECT room_id FROM im_v2.group_rooms WHERE title = '${group_title}'")"
+  [[ "${preference_room}" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+  assert_preference_projection() {
+    local simulator_id="$1" phase="$2" expected="$3" container
+    container="$(xcrun simctl get_app_container "${simulator_id}" "${app_bundle_id}" data)"
+    /usr/bin/python3 - "${container}" "${preference_room}" "${expected}" "${result_directory}/${phase}-local-preferences.json" <<'PYTHON'
+import json,pathlib,sqlite3,sys,time
+container,room,expected,output=sys.argv[1:]
+expected=bool(int(expected));facts=[]
+for path in pathlib.Path(container).rglob('*.sqlite'):
+    db=sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)
+    tables={r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if 'v2_conversation_states' in tables:
+        for table in ['v2_conversation_states','v2_conversation_list_entries']:
+            rows=db.execute('SELECT is_pinned,is_archived,mute_until FROM '+table+' WHERE lower(room_id)=lower(?)',(room,)).fetchall()
+            assert len(rows)==1, (table,'expected one matching projection',len(rows))
+            pin,archive,mute=rows[0]
+            fact={'table':table,'pinned':bool(pin),'archived':bool(archive),'muted':mute>time.time()}
+            facts.append(fact)
+    db.close()
+pathlib.Path(output).write_text(json.dumps(facts,ensure_ascii=False,indent=2)+'\n')
+assert len(facts)==2, 'expected both local projection and list index'
+assert all(f[k]==expected for f in facts for k in ['pinned','archived','muted']),facts
+PYTHON
+    local server
+    server="$(postgres_scalar "SELECT json_build_object('pinned',pinned_at IS NOT NULL,'archived',archived_at IS NOT NULL,'muted',COALESCE(mute_until > clock_timestamp(),false),'revision',revision)::text FROM im_v2.user_room_preferences WHERE room_id = '${preference_room}'")"
+    printf '%s\n' "${server}" > "${result_directory}/${phase}-server-preferences.json"
+    jq --exit-status --argjson expected "${expected}" '.pinned == ($expected == 1) and .archived == ($expected == 1) and .muted == ($expected == 1)' <<<"${server}" >/dev/null
+  }
+  launch "${first_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${first_scope}"
+  run_stage "${first_simulator_id}" testSameAccountFirstInstallationPinsMutesAndArchivesConversation
+  assert_preference_projection "${first_simulator_id}" first-applied 1
+  launch "${second_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${second_scope}"
+  run_stage "${second_simulator_id}" testSameAccountSecondInstallationRestoresConversationPreferences
+  assert_preference_projection "${second_simulator_id}" second-restored 1
+  launch "${second_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${second_scope}"
+  run_stage "${second_simulator_id}" testSameAccountSecondInstallationRestoresAndReversesConversationPreferences
+  assert_preference_projection "${second_simulator_id}" second-reversed 0
+  launch "${first_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${first_scope}"
+  run_stage "${first_simulator_id}" testSameAccountFirstInstallationRestoresReversedConversationPreferences
+  assert_preference_projection "${first_simulator_id}" first-restored-reversal 0
+  if [[ "${audit_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'conversation preferences functional stages complete; retained accessibility failure.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local same-account conversation preferences E2E: pass'
+  exit 0
+fi
+
 launch "${first_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${first_scope}"
 run_stage "${first_simulator_id}" testSameAccountFirstInstallationProjectsEditsAndChangesPreference
 assert_same_account_read_receipt
