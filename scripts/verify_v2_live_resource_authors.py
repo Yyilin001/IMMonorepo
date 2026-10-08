@@ -193,7 +193,10 @@ def main():
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
     parser.add_argument('--slow-resource', action='store_true', help='one opt-in slow signed-byte upload with concurrent typed control and TLS cursor progress')
     parser.add_argument('--extended-acceptance', action='store_true', help='also run typed message and group operation acceptance against the owned stack')
+    parser.add_argument('--nickname-directory-only', action='store_true', help='real multi-page nickname reads with two independently issued devices')
     args = parser.parse_args()
+    if args.nickname_directory_only and (args.slow_resource or args.extended_acceptance):
+        parser.error('--nickname-directory-only cannot combine with other scenario modes')
     if sys.platform != 'darwin':
         raise RuntimeError('this native ClientKit acceptance requires macOS')
     if not ssl.HAS_TLSv1_3:
@@ -340,9 +343,15 @@ def main():
                             actors = json.loads(body)
                             viewer, author = str(uuid.UUID(actors['viewer'])), str(uuid.UUID(actors['author']))
                             room_id = str(uuid.uuid4())
-                            # The only seeded business data is this two-member
-                            # large-class room. Messages, uploads, profile binding,
-                            # authorization and revocation use real public routes.
+                            directory_ids = []
+                            if actors.get('directoryCount') is not None:
+                                if not args.nickname_directory_only or actors['directoryCount'] != '257':
+                                    self.send_error(400); return
+                                directory_ids = [str(uuid.uuid4()) for _ in range(257)]
+                            # Seed a large-class room; directory-only mode also
+                            # seeds a bounded profile/nickname population. Reads,
+                            # messages, authorization changes and revocation use
+                            # real public routes.
                             sql(f"""BEGIN;
                               INSERT INTO im_v2.shard_admission_pools
                                 (room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit)
@@ -359,7 +368,22 @@ def main():
                                 SELECT '{room_id}',2,command_window_limit,lease_id,generation FROM im_v2.shard_admission_pools
                                 WHERE room_shard_id='rooms-primary' AND capacity_profile_id='standard';
                               COMMIT;""")
-                            payload = json.dumps({'roomID': room_id.upper()}).encode()
+                            if directory_ids:
+                                rows = ','.join(f"('{identity}'::uuid,'directory{i}')" for i, identity in enumerate(directory_ids))
+                                sql(f"""BEGIN;
+                                  CREATE TEMP TABLE directory_seed(user_id uuid,nickname text) ON COMMIT DROP;
+                                  INSERT INTO directory_seed VALUES {rows};
+                                  INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at)
+                                    SELECT user_id,replace(user_id::text,'-',''),nickname,now(),now() FROM directory_seed;
+                                  INSERT INTO im_v2.room_memberships(room_id,user_id,joined_revision,role)
+                                    SELECT '{room_id}',user_id,1,'member' FROM directory_seed;
+                                  INSERT INTO im_v2.room_member_nicknames(room_id,user_id,nickname,revision,updated_at)
+                                    SELECT '{room_id}',user_id,nickname,1,now() FROM directory_seed;
+                                  UPDATE im_v2.room_admission SET eligible_member_count=259 WHERE room_id='{room_id}';
+                                  COMMIT;""")
+                            reply = {'roomID': room_id.upper()}
+                            if directory_ids: reply['directoryIDs'] = directory_ids
+                            payload = json.dumps(reply).encode()
                             self.send_response(200); self.send_header('Content-Type', 'application/json')
                             self.send_header('Content-Length', str(len(payload))); self.end_headers()
                             self.wfile.write(payload); return
@@ -430,7 +454,11 @@ def main():
                     test_env['IMV2_LIVE_RESOURCE_SLOW_UPLOAD'] = '1'
                 if args.extended_acceptance:
                     test_env['IMV2_LIVE_EXTENDED_ACCEPTANCE'] = '1'
+                if args.nickname_directory_only:
+                    test_env['IMV2_LIVE_NICKNAME_DIRECTORY'] = '1'
                 test_filter = 'V2LiveResourceAuthorTests/slowResourceUploadKeepsControlAndCursorProgress' if args.slow_resource else 'V2LiveResourceAuthorTests'
+                if args.nickname_directory_only:
+                    test_filter = 'V2LiveResourceAuthorTests/largeNicknameDirectoryIndependentDeviceReads'
                 with (output / 'client.log').open('w') as log:
                     test = subprocess.Popen(['swift', 'test', '--disable-automatic-resolution', '--no-parallel',
                         '--jobs', '4', '--filter', test_filter], cwd=ROOT / 'IMV2ClientKit', env=test_env,
@@ -445,6 +473,8 @@ def main():
                     passed = 'slowResourceUploadKeepsControlAndCursorProgress' in text and bool(re.search(r'Test .*slowResourceUploadKeepsControlAndCursorProgress.* passed', text))
                     state = slow_gate.snapshot()
                     passed = passed and state['hits'] == state['completed'] == 1 and state['expired'] == state['active'] == 0 and state['released'] and state['bodyBytesRead'] > 16384
+                elif args.nickname_directory_only:
+                    passed = bool(re.search(r'Test .*largeNicknameDirectoryIndependentDeviceReads.* passed', text))
                 else:
                     passed = len(re.findall(r'Test "real resource upload, author delivery, byte access and block revocation" passed', text)) == 1
                 summary = {'clientExitCode': result, 'requiredTestPassed': passed,

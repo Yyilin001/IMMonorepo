@@ -2820,7 +2820,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-31 | mediaUpload | 真实个人头像/消息附件上传处理、下载和撤回授权收敛通过；后台与群头像另列 | extendedLiveResourcesR7 |
 | OP-32 | groupAvatar | 失败：真实上传创建返回422；服务端明确拒绝groupAvatar用途 | extendedLiveResourcesR4 |
 | EX-01 | 注册与登录 | 真实SDK及App密码注册/密码登录通过；同账号两安装设备列表>=2已核对 | liveAccountSDK, nativeSmoke, multiDeviceUIR1 |
-| EX-02 | 凭据刷新 | 真实SDK通过；本轮App联调待完成 | liveAccountSDK, nativeSmoke |
+| EX-02 | 凭据刷新 | 真实SDK及App业务401刷新、原15分钟令牌自然到期自动刷新、冷启动使用新凭据通过 | liveAccountSDK, nativeSmoke, appCredentialRefreshUIR1, appNaturalExpiryUIR2 |
 | EX-03 | 当前设备登出 | 真实SDK退出通过；App首次退出失败，两次均停待凭据删除；普通重试后可完成退出和账号切换 | liveAccountSDK, accountSwitchUIR1, accountSwitchUIR4 |
 | EX-04 | 远程设备撤销 | 真实SDK及App远端撤销、回到登录和重启保留终止态通过 | liveAccountUIR4 |
 | EX-05 | 账号封禁 | 通过：真实Operator封禁/幂等、原已认证TCP在8秒观察边界内由服务端终止、HTTP凭据清除、登录及TLS重新认证拒绝 | extendedLiveResourcesR16 |
@@ -2833,14 +2833,14 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-12 | 离线发送持久化与重放 | 群R3/R4自动重放正文/PG/原工作committed通过；私聊R14失败：needsAttention且PG无q，整体未通过 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4 |
 | EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
 | EX-14 | 多设备已读 | 已验证：同账号两设备progress/单条群用户已读与跨设备隐私暂停；独立接收阅读后私聊发送端冷恢复对方已读；群主读者页显示真实独立阅读成员与已读，PG一致 | multiDeviceUIR2, multiDeviceUIR4, peerReadUIR1, groupReadUIR2 |
-| EX-15 | 目录分页与权限过滤 | 真实群昵称分页租约和权限过滤通过；大目录和跨安装恢复待验 | extendedLiveResourcesR7 |
+| EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；App遍历超时，跨安装恢复待验 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3 |
 | EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
 | EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
 | EX-18 | 在线状态与输入提示 | 真实在线状态通过；typing安装确认后开始/停止通过；冷订阅ACK后立即发送曾丢失 | extendedLiveResourcesR9, extendedLiveResourcesR10 |
 | EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标通过；R13功能通过但驱动清理失败已修正，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
 | EX-20 | 断线重连 | 1000房间冷补拉122.62秒/重连11.34秒及真实跨Gateway在线更新R13通过；R12在线超时保留，不宣称稳定性；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
-| EX-22 | 后台上传下载 | 真实慢上传期间同账号TCP发送/恢复/补拉与SQLite投影继续通过；iOS系统后台上传/下载与挂起恢复待验 | extendedLiveResourcesR12 |
+| EX-22 | 后台上传下载 | 真实慢上传期间TCP及SQLite投影通过；系统后台上传/挂起恢复待验；下载当前仅前台实现，无系统后台下载 | extendedLiveResourcesR12, backgroundDownloadSourceAudit |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；未验证外部APNs和真机实际推送 | liveAccountUIR6 |
 | EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area/Contrast审计失败；新增冷启动邀请深链接未打开申请页；批准入群后发送已提交但正文未即时投影，正常冷启动可恢复原消息 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1 |
 
@@ -3082,3 +3082,65 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 终态PG仍唯一原消息、内容修订2、未撤回；SQLite发送端editMessage committed/finished，接收端使用自身同步投影。两端没有复制数据库或注入消息。
 - 五测试3通过、2审计失败、0跳过：业务接收冷恢复通过，两范围清理通过，注册与发送端保留DynamicType/Hit area/Text clipped/Contrast审计失败。整体exit1，不称整轮全绿；OP03中间态待验已补齐，EX24审计失败仍保留。
 - 日志 /tmp/imv2-acceptance-direct-edit-ui-r5-20261009.log；结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.QDaZMK，含all-stage-summary.json、完整活动、edited-message-facts.json与两安装工作状态；终态PG事实 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-4b2uua1j/message-facts.json。隔离服务和两个范围均已清理。bash语法、Python解析、git diff --check通过。
+
+
+### 20261009-app-credential-refresh-ui-r1（真实App刷新与冷恢复通过，审计失败保留）
+
+- 普通App注册真实账号后，通过独占测试Edge对一次真实设备列表HTTP200返回受控401，触发App原有认证刷新路径；刷新请求仍由真实账号服务处理，没有注入Keychain或数据库凭据。此验证证明业务401恢复，不代表自然到期。
+- 独立PG同设备generation由1到2，refresh操作1、历史1；真实App普通设备页读取恢复通过。终止App后正常冷启动，Edge仅在进程内比较请求Bearer与真实刷新响应令牌的摘要，冷设备读取确实使用新凭据1次；日志未输出令牌或摘要。冷恢复PG仍generation2/operation1/history1，未额外刷新。
+- 两个刷新用例通过；注册保留可访问性审计失败，两安装范围清理通过。全阶段5测试4通过1失败0跳过，整体exit1，隔离服务关闭。EX02更新为该范围已验，自然到期仍待验；完整56项及已有失败不变。
+- 日志 /tmp/imv2-acceptance-app-refresh-ui-r1-20261009.log；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.q3vv0c，含all-stage-summary.json、before/rotated/cold-credential-facts.json和refresh-status.json。测试对应已推送提交e8c8a9f0。
+
+
+### 20261009-app-natural-expiry-ui-r1（进行中，不计通过）
+
+- 新增自然到期专门模式：普通App注册后关闭进程，仅只读查询原access token期限，等待服务端默认15分钟有效期自然结束；期限结束时要求generation仍1/refresh操作0，再普通冷启动。后续要求真实刷新到generation2、原设备身份不变，并再次冷启动验证使用新凭据。与401模式复用实际设备页断言，但不调用401注入入口；终态要求injected0。
+- 本轮已启动且exec会话65121确认仍运行，尚无终态结论。日志 /tmp/imv2-acceptance-app-natural-expiry-ui-r1-20261009.log；隔离目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-etggm6_6；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.93PRit。EX02自然到期仍待验，不能使用新测试代码作为通过证据。bash语法和diff检查通过，新增Swift测试编译由本轮真实XCTest执行。
+
+- R1后续终态exit1：注册后XCTest已关闭App，驱动simctl terminate遇到found nothing to terminate而提前退出，未等到原令牌到期。两范围清理及隔离服务回收完成；此失败不算认证刷新失败。驱动仅将明确的已停止结果作为幂等，其他终止错误仍拒绝继续。新增Swift测试已由本轮XCTest构建。
+- R2使用修正后的同一自然到期模式启动，exec会话99630，日志 /tmp/imv2-acceptance-app-natural-expiry-ui-r2-20261009.log；自然到期仍待真实结果，不能标通过。
+
+
+### 20261009-background-transfer-source-audit（识别实现边界，不代替真实后台验收）
+
+- App真实组装V2URLSessionMediaByteTransfer（V2AppRealtimeRuntime.swift:1044）；适配器注释明确下载计划只授权前台读取（V2MediaTransfer.swift:173）。其V2RangeDownloadTransport使用dataTask，默认mediaProvider来自ephemeral URLSession（V2SecureURLSession.swift:22）。V2NativeBackgroundSession系统后台会话当前只创建uploadTask；两项目生产源码无downloadTask调用。系统后台下载为当前实现缺口，不能继续笼统写成仅待执行测试，更不能用前台断点续传或慢上传通过替代。
+- 系统后台上传有真实实现：账号激活安装native协调器、能力检查、签发后台分片授权、先持久化映射再resume，UIKit处理系统完成回调。真实iOS挂起传输仍待执行，本源码核对不证明其正确性。
+- devicectl只读清单存在3个connected iPhone记录，但是否可用于本轮及APNs测试环境尚待确认；未安装或操作这些设备，未读取其业务数据。EX23外部APNs继续待验。
+
+
+### 20261009-large-nickname-directory-r1-r2（真实SDK大分页通过，UI边界保留）
+
+- 新增独占native模式，只在该模式下准备257条隔离测试用户资料/群成员/昵称初始数据；另有真实注册作者与浏览者，浏览者再通过真实密码登录签发第二设备凭据。作者通过真实昵称操作及原回执恢复设置昵称，真实拉黑接口推进权限。257条资料是分页规模夹具，不证明257次真实注册或昵称写入。
+- R1新用例错误传首次expectedRevision0，被非零版本类型拒绝，未进入分页；终态exit1、服务清理。修正为协议已有首次nil；不修改生产类型或版本约束。
+- R2独立两设备读取，每页32条、每遍历9页/258唯一ID，完整集合一致，租约绑定各设备，无签名头像；真实拉黑后作者unavailable且无展示快照，目录不丢游标。27次真实GET全部200；PG blocks1。1专项2.979秒通过，驱动exit0及资源清理通过。
+- R3进一步增加逐用户精确昵称与初始数据对应断言，运行中，不预先报告通过。此SDK专项没有正常App目录页、独立安装SQLite或UI冷恢复，EX15该边界仍待验。
+- 证据 /tmp/imv2-acceptance-large-nickname-directory-r1-20261009 与 /tmp/imv2-acceptance-large-nickname-directory-r2-20261009，含client.log、summary.json、服务及清理日志。R3 /tmp/imv2-acceptance-large-nickname-directory-r3-20261009，exec会话50202。
+
+- R3终态exit0：逐用户精确昵称与userID对应全部通过，仍27次真实分页读取200、258条9页/两独立设备、真实拉黑后作者不可见。1专项3.001秒，隔离服务及PG正常清理。EX15加入R3证据，App跨安装目录UI仍未验证。
+
+
+### 20261009-app-natural-expiry-ui-r2（真实自然到期刷新通过，审计失败保留）
+
+- 原默认15分钟access token仅等待实际时间流逝，数据库期限与服务器时钟未修改。App未运行期间只读PG确认原token1/expired true，generation仍1、refresh操作0/history0。
+- 普通App冷启动，原设备身份不变，真实账号服务刷新到generation2/refresh操作1/history1；设备页功能用例通过12.802秒。App终止并再次普通冷启动，使用新凭据完成设备读取，PG仍同generation2；冷恢复用例通过12.100秒。Edge私有摘要比较只计数，不输出令牌或摘要：injected0、refreshResponses1、coldFreshDeviceReads1。没有受控401，不用SDK时钟替代App真实到期。
+- 五测试4通过、1注册可访问性审计失败、0跳过，整体exit1；两范围清理通过，隔离服务停止。EX02自然到期待验已补齐，原审计失败继续列在EX24，不报告整轮全绿。
+- 日志 /tmp/imv2-acceptance-app-natural-expiry-ui-r2-20261009.log；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.l8QQOw，含all-stage-summary.json、natural-expiry-facts.json、before/expired/rotated/cold-credential-facts.json、refresh-status.json及原始xcresult。R1夹具失败继续保留。
+
+
+### 20261009-app-large-directory-ui-r1-r2（普通成员页大分页，进行中）
+
+- 普通App真实注册建群后，仅在隔离库准备257条成员资料及同名昵称，加上原群主共258名；更新初始成员修订与人数。此规模夹具不证明257次公开成员添加已验，成员操作的真实接口验证另有已有证据。普通App成员页应实际点击两次加载更多、读取3页，逐UUID和对应精确名字核对全部成员；第二安装通过普通密码登录同账号，再正常冷启动重读，不能复制SQLite或凭据。
+- R1终态exit1：测试进入真实成员页后，其BEGINSWITH选择器也匹配v2.group.member.role/remove按钮，XCTUnwrap预期成员名失败，尚未读完整集合。修改选择器为精确UUID成员行并规范化UUID，保留失败原证据。两范围及隔离服务已清理。
+- R1日志 /tmp/imv2-acceptance-app-large-directory-ui-r1-20261009.log；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.bPQnES。R2日志 /tmp/imv2-acceptance-app-large-directory-ui-r2-20261009.log，exec会话38552，运行中不计通过；EX15 App待验状态不变。
+
+- R2当前仍在首次成员目录遍历（exec会话38552已确认运行），结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.9LQu7F。源码V2AvatarPipeline成员名合并为无障碍元素、children ignore；下一轮将StaticText专用查询修正为原成员行内精确label查询，并记录遍历seen/load计数。当前运行二进制仍使用旧名称查询，未改变或并行重启该轮；没有业务通过结论。
+
+- R2终态exit1：首次成员页专项超过5分钟，两范围及隔离服务清理完成。完整活动 /tmp/imv2-app-large-directory-r2-activities.json 末尾仍查询目录成员StaticText名称，之后查不存在/未呈现末尾成员isHittable出现retry；截图 /tmp/imv2-app-large-directory-r2-live.png 有真实正确成员名称，不代表完整集合通过。修正合并label定位及lastRow.exists前置，避免缺失元素的可点击查询等待；不是修改业务分页或缩减258成员范围。
+- R3使用修正版真实重跑，exec会话50038，日志 /tmp/imv2-acceptance-app-large-directory-ui-r3-20261009.log。未有终态结论，EX15 App待验继续保留。
+
+- R3当前已进入首次App冷恢复成员遍历，exec会话50038确认运行；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.9KNWjU，服务目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-a34_ar7h。新增progress-seen/loads活动用于实际失败定位。仍未终态，完整258成员和第二安装边界保持待验。
+
+- R3终态exit1：首次成员遍历超过5分钟。活动 /tmp/imv2-app-large-directory-r3-activities.json：seen4→64→105→124→191→202→227，loads0→1→2，确认真实3页已加载；最后停留Swipe down与事件合成，仍有31个成员名未核对。不把此计数当全部通过，不据此判定SQL或认证失败。两范围/隔离服务清理完成；截图 /tmp/imv2-app-large-directory-r3-live.png 仅补充可见姓名。
+- 整页flick存在跳过相邻快照之间成员行的风险。保持258人逐原ID与精确名字断言，改为当前成员sheet内慢速短拖动、前后视口重叠并停惯性；采用本机XCUIAutomation公有坐标拖动API。R4实际启动，exec会话83757，日志 /tmp/imv2-acceptance-app-large-directory-ui-r4-20261009.log；尚无结论。
+
+- R4已编译并进入首次真实App冷恢复成员遍历，exec会话83757仍运行；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.g5OKBC，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-dnf20c2u。矩阵EX15明确列出App遍历超时与R3证据，直到新结果证明才更新；不将失败藏在待验分类后。

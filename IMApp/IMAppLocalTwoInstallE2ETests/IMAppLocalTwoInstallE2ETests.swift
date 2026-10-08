@@ -363,6 +363,91 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     }
 
     @MainActor
+    func testRealAppRotatesNaturallyExpiredCredentials() throws {
+        try openRealDeviceListAfterCredentialRotation()
+    }
+
+    @MainActor
+    private func verifyLargeMemberDirectory(login: Bool) throws {
+        let app = XCUIApplication()
+        app.activate()
+        if login {
+            let submit = app.buttons["v2.password.submit"]
+            XCTAssertTrue(submit.waitForExistence(timeout: 15))
+            submit.tap()
+        }
+        XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30))
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let environment = ProcessInfo.processInfo.environment
+        let title = try XCTUnwrap(environment["IMAPP_DIRECTORY_GROUP_TITLE"])
+        let encoded = try XCTUnwrap(environment["IMAPP_DIRECTORY_MEMBERS"]?.data(using: .utf8))
+        let expected = try JSONDecoder().decode([String: String].self, from: encoded)
+        XCTAssertEqual(expected.count, 258)
+        let group = app.staticTexts[title].firstMatch
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        tapConversationTool("v2.group.members", from: "v2.conversation.detail.tools", in: app, timeout: 30)
+        let sheet = app.collectionViews["v2.group.members.sheet"]
+        XCTAssertTrue(sheet.waitForExistence(timeout: 30))
+        var seen = Set<String>(), loadCount = 0, backwards = false
+        for iteration in 0..<150 {
+            let rows = sheet.descendants(matching: .any).matching(NSPredicate(format: "identifier MATCHES %@", "v2\\.group\\.member\\.[0-9A-Fa-f-]{36}"))
+            for row in rows.allElementsBoundByIndex {
+                let rawKey = String(row.identifier.dropFirst("v2.group.member.".count))
+                let key = try XCTUnwrap(UUID(uuidString: rawKey)).uuidString
+                let name = try XCTUnwrap(expected[key], "目录不应显示夹具集合之外的成员：\(key)。")
+                // The production avatar/name combines its accessibility
+                // children into one named element, rather than a StaticText.
+                if row.descendants(matching: .any).matching(NSPredicate(format: "label == %@", name)).firstMatch.exists { seen.insert(key) }
+            }
+            if iteration.isMultiple(of: 10) {
+                XCTContext.runActivity(named: "directory-progress-seen-\(seen.count)-loads-\(loadCount)") { _ in }
+            }
+            let more = app.buttons["v2.group.members.load-more"]
+            if seen.count == expected.count && !more.exists { break }
+            if more.exists && more.isHittable && more.isEnabled {
+                more.tap()
+                loadCount += 1
+                XCTAssertLessThanOrEqual(loadCount, 2)
+            } else {
+                let last = expected.keys.sorted().last!
+                let lastRow = sheet.descendants(matching: .any).matching(NSPredicate(format: "identifier ==[c] %@", "v2.group.member.\(last)")).firstMatch
+                if !more.exists && lastRow.exists && lastRow.isHittable { backwards = true }
+                // A full flick can skip rows between accessibility snapshots.
+                // Keep adjacent viewports overlapping and stop momentum before
+                // checking the next original member/name pairs.
+                let start = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: backwards ? 0.35 : 0.72))
+                let end = sheet.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: backwards ? 0.72 : 0.35))
+                start.press(forDuration: 0.01, thenDragTo: end, withVelocity: .slow, thenHoldForDuration: 0.1)
+            }
+        }
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "large-directory-verified-\(seen.count)-members"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        XCTAssertEqual(seen, Set(expected.keys), "必须显示全部原成员ID及对应精确名称。")
+        XCTAssertEqual(loadCount, 2, "258成员应通过真实加载更多读取3页。")
+        XCTAssertFalse(app.buttons["v2.group.members.load-more"].exists)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
+    func testFirstInstallationColdRestoresLargeMemberDirectory() throws {
+        try verifyLargeMemberDirectory(login: false)
+    }
+
+    @MainActor
+    func testSecondInstallationLogsInAndReadsLargeMemberDirectory() throws {
+        try verifyLargeMemberDirectory(login: true)
+    }
+
+    @MainActor
+    func testSecondInstallationColdRestoresLargeMemberDirectory() throws {
+        try verifyLargeMemberDirectory(login: false)
+    }
+
+    @MainActor
     func testRealAppColdRestoreUsesRotatedCredentials() throws {
         try openRealDeviceListAfterCredentialRotation()
     }

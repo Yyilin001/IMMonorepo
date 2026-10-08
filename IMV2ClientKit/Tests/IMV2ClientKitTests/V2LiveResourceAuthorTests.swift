@@ -15,6 +15,66 @@ import UniformTypeIdentifiers
 @Suite("Live resource and author delivery", .serialized, .timeLimit(.minutes(2)),
        .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_GATEWAY_PORT"] != nil))
 struct V2LiveResourceAuthorTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_NICKNAME_DIRECTORY"] == "1"))
+    func largeNicknameDirectoryIndependentDeviceReads() async throws {
+        let fixture = try LiveAccountFixture(); defer { fixture.close() }
+        let viewer = try await fixture.register(), author = try await fixture.register().credentials
+        let second = try await fixture.login(viewer.handle)
+        try #require(second.userID == viewer.credentials.userID && second.deviceID != viewer.credentials.deviceID)
+        var request = URLRequest(url: fixture.url("__fixture__/room"))
+        request.httpMethod = "POST"
+        request.setValue(try #require(ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_FIXTURE_TOKEN"]), forHTTPHeaderField: "X-Resource-Fixture")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["viewer": viewer.credentials.userID.rawValue,
+            "author": author.userID.rawValue, "directoryCount": "257"])
+        let (data, response) = try await fixture.http.data(for: request)
+        try #require((response as? HTTPURLResponse)?.statusCode == 200)
+        struct DirectorySeed: Decodable { let roomID: String; let directoryIDs: [String] }
+        let seed = try JSONDecoder().decode(DirectorySeed.self, from: data)
+        let room = try RoomID(seed.roomID)
+        let expected = Set(try seed.directoryIDs.map { try UserID($0) }).union([author.userID])
+        try #require(expected.count == 258)
+        var expectedNames = Dictionary(uniqueKeysWithValues: try seed.directoryIDs.enumerated().map {
+            (try UserID($0.element), "directory\($0.offset)")
+        })
+        expectedNames[author.userID] = "Directory author"
+        try await updateNickname(fixture, author: author, room: room, expectedRevision: nil, name: "Directory author")
+        let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+        func readAll(_ credentials: V2AuthCredentials, blocked: Bool) async throws -> Set<UserID> {
+            let client = try V2HTTPGroupNicknamePresentationClient(groupsEndpoint: fixture.url("v2/profile-presentations/groups"),
+                actorUserID: credentials.userID, credentials: ResourceLiveCredentials(value: credentials), transport: http)
+            var cursor: UserID?, seen = Set<UserID>(), pageCount = 0
+            repeat {
+                try Task.checkCancellation()
+                let page = try await client.read(roomID: room, afterUserID: cursor, limit: 32)
+                pageCount += 1
+                try #require(pageCount <= 10 && page.retryable.isEmpty)
+                for id in page.userIDs {
+                    try #require(seen.insert(id).inserted)
+                    if blocked && id == author.userID {
+                        #expect(page.unavailable.contains(id) && page.snapshot(for: id) == nil)
+                    } else {
+                        let snapshot = try #require(page.snapshot(for: id))
+                        #expect(snapshot.presentation.lease.deviceID == credentials.deviceID)
+                        #expect(snapshot.presentation.groupMember?.groupNickname == expectedNames[id] && snapshot.avatar == nil)
+                    }
+                }
+                if let next = page.nextCursor {
+                    try #require(next == page.userIDs.last && next != cursor)
+                }
+                cursor = page.nextCursor
+            } while cursor != nil
+            #expect(pageCount == 9 && seen == expected)
+            return seen
+        }
+        let firstIDs = try await readAll(viewer.credentials, blocked: false)
+        let secondIDs = try await readAll(second, blocked: false)
+        #expect(firstIDs == secondIDs)
+        try await resourceBlock(fixture, account: author, target: viewer.credentials.userID)
+        #expect(try await readAll(second, blocked: true) == expected)
+        print("Live nickname directory: 258 entries, 9 pages per scan, two independently issued devices; blocked author withheld without cursor loss.")
+    }
+
     @Test("slowResourceUploadKeepsControlAndCursorProgress",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_RESOURCE_SLOW_UPLOAD"] == "1"))
     func slowResourceUploadKeepsControlAndCursorProgress() async throws {

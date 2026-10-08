@@ -357,6 +357,39 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-group-title "${receiver_self_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
 
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_MEMBER_DIRECTORY_ONLY:-false}" == true ]]; then
+  [[ "${external_stack}" == true ]] || exit 1
+  : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
+  directory_sql() {
+    /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -v ON_ERROR_STOP=1 -c "$1"
+  }
+  directory_room="$(directory_sql "SELECT room_id FROM im_v2.group_rooms WHERE title='${receiver_self_group_title}'")"
+  [[ "${directory_room}" =~ ^[0-9a-fA-F-]{36}$ ]] || exit 1
+  # Only the pagination population is seeded. The account, room creation,
+  # device login and every App directory read use their normal public paths.
+  directory_sql "BEGIN; CREATE TEMP TABLE directory_seed ON COMMIT DROP AS SELECT md5('${directory_room}' || i::text)::uuid AS user_id,'目录成员' || lpad(i::text,4,'0') AS name FROM generate_series(1,257) i;
+    INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) SELECT user_id,replace(user_id::text,'-',''),name,now(),now() FROM directory_seed;
+    UPDATE im_v2.rooms SET membership_revision=membership_revision+1 WHERE room_id='${directory_room}';
+    INSERT INTO im_v2.room_memberships(room_id,user_id,joined_revision,role) SELECT '${directory_room}',s.user_id,r.membership_revision,'member' FROM directory_seed s CROSS JOIN im_v2.rooms r WHERE r.room_id='${directory_room}';
+    INSERT INTO im_v2.room_member_nicknames(room_id,user_id,nickname,revision,updated_at) SELECT '${directory_room}',user_id,name,1,now() FROM directory_seed;
+    UPDATE im_v2.room_admission SET eligible_member_count=258 WHERE room_id='${directory_room}'; COMMIT;" > "${result_directory}/directory-seed.log"
+  directory_sql "SELECT json_object_agg(upper(m.user_id::text),coalesce(n.nickname,p.display_name)) FROM im_v2.room_memberships m JOIN im_v2.public_user_profiles p USING(user_id) LEFT JOIN im_v2.room_member_nicknames n ON n.room_id=m.room_id AND n.user_id=m.user_id WHERE m.room_id='${directory_room}' AND m.left_revision IS NULL" > "${result_directory}/directory-members.json"
+  jq --exit-status 'length == 258' "${result_directory}/directory-members.json" >/dev/null
+  export TEST_RUNNER_IMAPP_DIRECTORY_GROUP_TITLE="${receiver_self_group_title}"
+  export TEST_RUNNER_IMAPP_DIRECTORY_MEMBERS="$(cat "${result_directory}/directory-members.json")"
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testFirstInstallationColdRestoresLargeMemberDirectory
+  launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-e2e-scope "${sender_scope}" -v2-ui-testing-local-password localpassword -v2-ui-testing-account-handle "${receiver_account_handle}"
+  run_stage "${sender_simulator_id}" testSecondInstallationLogsInAndReadsLargeMemberDirectory
+  launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${sender_scope}"
+  run_stage "${sender_simulator_id}" testSecondInstallationColdRestoresLargeMemberDirectory
+  directory_sql "SELECT json_build_object('devices',count(*)) FROM im_v2.auth_devices WHERE user_id=(SELECT user_id FROM im_v2.account_password_credentials WHERE account_handle='${receiver_account_handle}') AND revoked_at IS NULL" > "${result_directory}/directory-device-facts.json"
+  jq --exit-status '.devices == 2' "${result_directory}/directory-device-facts.json" >/dev/null
+  if [[ "${audit_failure_count}" -gt 0 ]]; then printf '%s\n' 'App member directory stages complete; retained accessibility failure.' >&2; exit 1; fi
+  printf '%s\n' 'local App member directory E2E: pass'
+  exit 0
+fi
+
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY:-false}" == true ]]; then
   [[ "${external_stack}" == true ]] || { printf '%s\n' 'credential refresh mode requires the owned native stack.' >&2; exit 1; }
   : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
@@ -370,9 +403,35 @@ if [[ "${IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY:-false}" == true ]]; th
   refresh_facts before
   jq --exit-status '.devices == 1 and .generation == 1 and .refreshOperations == 0 and .history == 0' "${result_directory}/before-credential-facts.json" >/dev/null
   export TEST_RUNNER_IMAPP_REFRESH_DEVICE_ID="$(jq --raw-output '.deviceID' "${result_directory}/before-credential-facts.json")"
-  refresh_control arm
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_NATURAL_EXPIRY:-false}" == true ]]; then
+    if ! xcrun simctl terminate "${receiver_simulator_id}" "${app_bundle_id}" > "${result_directory}/natural-expiry-terminate.log" 2>&1; then
+      # XCTest normally closes its App after the registration stage. That
+      # already-stopped result is harmless; preserve any other simctl error.
+      if ! rg --quiet 'found nothing to terminate' "${result_directory}/natural-expiry-terminate.log"; then
+        cat "${result_directory}/natural-expiry-terminate.log" >&2
+        exit 1
+      fi
+    fi
+    expired=false
+    for attempt in {1..96}; do
+      /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -c "SELECT json_build_object('tokens',count(*),'expired',coalesce(bool_and(t.expires_at <= CURRENT_TIMESTAMP),false),'remainingSeconds',greatest(0,ceil(extract(epoch FROM max(t.expires_at)-CURRENT_TIMESTAMP))))::text FROM im_v2.device_access_tokens t JOIN im_v2.account_password_credentials p USING(user_id) WHERE p.account_handle='${receiver_account_handle}'" > "${result_directory}/natural-expiry-facts.json"
+      jq --exit-status '.tokens == 1' "${result_directory}/natural-expiry-facts.json" >/dev/null
+      if jq --exit-status '.expired == true' "${result_directory}/natural-expiry-facts.json" >/dev/null; then expired=true; break; fi
+      if (( attempt % 6 == 1 )); then printf 'waiting for real credential expiry: %s seconds remaining\n' "$(jq '.remainingSeconds' "${result_directory}/natural-expiry-facts.json")"; fi
+      sleep 10
+    done
+    [[ "${expired}" == true ]] || { printf '%s\n' 'real access token did not expire within bounded observation.' >&2; exit 1; }
+    refresh_facts expired
+    jq --exit-status '.generation == 1 and .refreshOperations == 0 and .history == 0' "${result_directory}/expired-credential-facts.json" >/dev/null
+  else
+    refresh_control arm
+  fi
   launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
-  run_stage "${receiver_simulator_id}" testRealAppRotatesCredentialsAfterBusinessHTTPUnauthorized
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_NATURAL_EXPIRY:-false}" == true ]]; then
+    run_stage "${receiver_simulator_id}" testRealAppRotatesNaturallyExpiredCredentials
+  else
+    run_stage "${receiver_simulator_id}" testRealAppRotatesCredentialsAfterBusinessHTTPUnauthorized
+  fi
   refresh_facts rotated
   jq --exit-status '.devices == 1 and .generation == 2 and .refreshOperations == 1 and .history == 1' "${result_directory}/rotated-credential-facts.json" >/dev/null
   refresh_control cold
@@ -381,7 +440,9 @@ if [[ "${IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY:-false}" == true ]]; th
   refresh_facts cold
   jq --exit-status '.devices == 1 and .generation == 2 and .refreshOperations == 1 and .history == 1' "${result_directory}/cold-credential-facts.json" >/dev/null
   curl --fail --silent --show-error --cacert "${local_ca}" 'https://localhost:8443/__fixture__/app-refresh-status' > "${result_directory}/refresh-status.json"
-  jq --exit-status '.injected == 1 and .refreshResponses == 1 and .coldFreshDeviceReads > 0' "${result_directory}/refresh-status.json" >/dev/null
+  expected_injected=1
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_NATURAL_EXPIRY:-false}" == true ]]; then expected_injected=0; fi
+  jq --exit-status --argjson expected "${expected_injected}" '.injected == $expected and .refreshResponses == 1 and .coldFreshDeviceReads > 0' "${result_directory}/refresh-status.json" >/dev/null
   if [[ "${audit_failure_count}" -gt 0 ]]; then
     printf '%s\n' 'App credential refresh stages complete; retained accessibility failure.' >&2
     exit 1
