@@ -2821,10 +2821,10 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-32 | groupAvatar | 失败：真实上传创建返回422；服务端明确拒绝groupAvatar用途 | extendedLiveResourcesR4 |
 | EX-01 | 注册与登录 | 真实SDK及App密码注册/密码登录通过；同账号两安装设备列表>=2已核对 | liveAccountSDK, nativeSmoke, multiDeviceUIR1 |
 | EX-02 | 凭据刷新 | 真实SDK及App业务401刷新、原15分钟令牌自然到期自动刷新、冷启动使用新凭据通过 | liveAccountSDK, nativeSmoke, appCredentialRefreshUIR1, appNaturalExpiryUIR2 |
-| EX-03 | 当前设备登出 | 真实SDK退出通过；App首次退出失败，两次均停待凭据删除；普通重试后可完成退出和账号切换 | liveAccountSDK, accountSwitchUIR1, accountSwitchUIR4 |
+| EX-03 | 当前设备登出 | 修复后真实App两次首次退出无需手动重试，A→B→A账号切换及冷恢复通过；22项相关回归通过，历史失败保留 | liveAccountSDK, accountSwitchUIR1, accountSwitchUIR4, fixSignOutUnitR2, fixSignOutAppR1 |
 | EX-04 | 远程设备撤销 | 真实SDK及App远端撤销、回到登录和重启保留终止态通过 | liveAccountUIR4 |
 | EX-05 | 账号封禁 | 通过：真实Operator封禁/幂等、原已认证TCP在8秒观察边界内由服务端终止、HTTP凭据清除、登录及TLS重新认证拒绝 | extendedLiveResourcesR16 |
-| EX-06 | 账号切换与冷启动 | 账号切换及冷启动投影隔离通过：A→B→A，双方各自群/消息恢复且互不可见；退出各需手动重试，EX03失败单列 | accountSwitchUIR4 |
+| EX-06 | 账号切换与冷启动 | 修复后真实App首次退出、A→B→A及正常冷恢复账号投影隔离通过，各自消息可见且互不可见，历史需重试失败保留 | accountSwitchUIR4, fixSignOutAppR1 |
 | EX-07 | 陌生消息拒绝/允许 | 通过：无好友关系私聊预热发送成功；同一TLS连接策略关闭后新发送directPolicyDenied、重新允许后成功 | extendedLiveResourcesR16 |
 | EX-08 | 拉黑后即时授权失效 | 真实拉黑后发送拒绝及恢复unresolved通过；失败：发送者持久限制提示缺失 | liveAccountUIR5 |
 | EX-09 | 私聊唯一性 | 通过：双方并发首次创建及后续重新打开均得到同一私聊房间；真实HTTPS回执核对 | extendedLiveResourcesR16 |
@@ -2833,15 +2833,15 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-12 | 离线发送持久化与重放 | 群R3/R4自动重放正文/PG/原工作committed通过；私聊R14失败：needsAttention且PG无q，整体未通过 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4 |
 | EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
 | EX-14 | 多设备已读 | 已验证：同账号两设备progress/单条群用户已读与跨设备隐私暂停；独立接收阅读后私聊发送端冷恢复对方已读；群主读者页显示真实独立阅读成员与已读，PG一致 | multiDeviceUIR2, multiDeviceUIR4, peerReadUIR1, groupReadUIR2 |
-| EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；首次App冷恢复258人通过；第二安装258人断言完成但退出超时，跨安装冷恢复未执行 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3, appLargeDirectoryUIR4, appLargeDirectoryUIR6 |
+| EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；两独立安装App登录和正常冷恢复完整258成员ID/名字、3页及PG两设备记录通过，历史UI遍历超时保留 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3, appLargeDirectoryUIR4, appLargeDirectoryUIR6, appLargeDirectoryUIR8 |
 | EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
 | EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
 | EX-18 | 在线状态与输入提示 | 真实在线状态通过；typing安装确认后开始/停止通过；冷订阅ACK后立即发送曾丢失 | extendedLiveResourcesR9, extendedLiveResourcesR10 |
 | EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标通过；R13功能通过但驱动清理失败已修正，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
 | EX-20 | 断线重连 | 1000房间冷补拉122.62秒/重连11.34秒及真实跨Gateway在线更新R13通过；R12在线超时保留，不宣称稳定性；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
-| EX-22 | 后台上传下载 | 前台慢上传期间TCP及SQLite投影通过；App实际挂起后后台授权PUT512KiB/校验/204已观察，整资源任务及原消息冷恢复待验；无系统后台下载 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5 |
-| EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；未验证外部APNs和真机实际推送 | liveAccountUIR6 |
+| EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；系统后台下载未实现 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7 |
+| EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；外部APNs和真机唤醒待验：当前无已连接物理设备且测试进程无APNs配置，等待指定设备与测试环境 | liveAccountUIR6, apnsEnvironmentAudit20261009 |
 | EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area/Contrast审计失败；新增冷启动邀请深链接未打开申请页；批准入群后发送已提交但正文未即时投影，正常冷启动可恢复原消息 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1 |
 
 <!-- acceptance-matrix-end -->
@@ -3184,3 +3184,47 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 后台R5已实际启动，exec49817，日志 /tmp/imv2-acceptance-app-native-background-upload-ui-r5-20261009.log，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-aiql5qsd。普通Files文件Cell点击后仍需真实导入、系统任务映射/挂起、字节和原消息冷恢复验证，未有业务通过结论。
 
 - 后台R5终态exit1：真实Files导入512KiB、普通发送、后台授权PUT及App runningBackgroundSuspended断言均已实际执行；释放等待后真实provider返回204，完整524288字节和校验一致。随后durableActiveMappings0断言失败，原消息冷恢复未执行。源码确认URL顶层mediaID是不可变分片ID，grant.mediaID.rawValue才是整资源ID；探针错误使用前者查询SQLite，0不能证明映射缺失。修正为原资源ID和partNumber关联，并用两个不同UUID及隔离SQLite验证查询正确；此探针回归不替代App验收。摘要 /tmp/imv2-app-native-background-upload-r5-summary.json、活动 /tmp/imv2-app-native-background-upload-r5-activities.json、服务 background-upload-observation.json。两范围清理与文件删除完成、owned stack stopped。EX22仅增加已观察局部证据，未判整链路通过。
+
+- 后台R6终态exit1：真实App挂起、原资源active映射1、后台PUT524288字节/校验/204均通过，最终正文StaticText查询失败。生产V2ConversationUI正文使用独立accessibilityElement包装，并非StaticText；改为任意类型节点，保留精确identifier/正文断言。原消息冷恢复未执行；两范围清理通过、owned stack stopped。摘要 /tmp/imv2-app-native-background-upload-r6-summary.json、活动 /tmp/imv2-app-native-background-upload-r6-activities.json；不将局部成功计为整链路通过。
+
+- 后台R7两个功能阶段均Passed/1通过/0失败/0跳过：真实App挂起、原资源持久化任务映射1、后台PUT524288字节/校验/204；独立PG唯一原消息01a11d77-962a-7f7d-901c-febc1cb4d56a、completed上传1、available媒体1；正常冷启动恢复同原UUID精确正文及附件通过。摘要 /tmp/imv2-app-native-background-upload-r7-upload-summary.json 和 /tmp/imv2-app-native-background-upload-r7-cold-summary.json，事实 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.Ub4pdP/background-message-facts.json 与 background-upload-observation.json。原注册无障碍审计失败保留，因此驱动整体不算全绿；系统后台下载未实现。
+
+- 后台R7整轮已退出1，仅注册审计失败，5测试4通过1失败0跳过；两个后台功能和两范围清理均通过、owned stack stopped。完整汇总 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.Ub4pdP/all-stage-summary.json。
+- 目录R8实际启动并进入首次冷恢复（exec82405，驱动43264，Xcode43764已确认运行），采用明确600秒目录观察预算；结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.3FRxWQ，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-ku7ribte，日志 /tmp/imv2-acceptance-app-large-directory-ui-r8-20261009.log。尚未终态，不计通过。完整矩阵与manifest核对56项、无缺失或重复编号，所有证据索引均存在。
+
+- 20261009验收证据完整性复核：矩阵保留OP01..32和EX01..24共56项，无缺号/重复；manifest引用52个run键全部存在，引用的绝对路径记录均仍存在。重新读取资源R7原日志，8个真实用例仅群头像用途422失败，其余各命名用例有真实Passed记录；此整体Failed未改为Passed。重新核对实际App后台下载组装及NativeBackgroundSession源码，仅上传使用uploadTask，下载仍dataTask；EX22不扩展为系统后台下载通过。目录R8仍为首次冷恢复进行中（驱动43264/Xcode43764已实时确认），截图 /tmp/imv2-app-large-directory-r8-first-live.png，未计算为通过。
+
+- 目录R8首次安装正常冷恢复已通过：XCTest1通过0失败0跳过，原258成员ID/精确名字、实际两次加载更多和完整集合断言均保留；Xcode elapsed300.951秒。摘要 /tmp/imv2-app-large-directory-r8-first-summary.json、活动 /tmp/imv2-app-large-directory-r8-first-activities.json。第二安装真实登录读取已进入（驱动43264、Xcode44777），正常第二安装冷恢复仍待运行，不能按首次通过关闭EX15。
+
+- 20261009 EX23边界复核：liveAccountUIR6/headless-summary.json实际platform为iOS Simulator，1测试通过0失败0跳过，仅证明App headless Push入口；不证明外部APNs或真机唤醒。IMApp/Config/IMApp.entitlements的aps-environment为构建变量，GatewayMaintenanceAssembly只在apns配置下组装真实provider；源码存在不等于实际签名或服务端凭据可用。真实设备与测试环境确认仍未收到，未在未指定的物理设备上安装或发送Push。目录R8第二登录Xcode44777仍运行；保持原任务，不重复启动。
+
+- 目录R8第二安装真实密码登录读取已通过：XCTest1通过0失败0跳过，完整258成员ID/name及两次加载更多断言，Xcode elapsed310.012秒。摘要 /tmp/imv2-app-large-directory-r8-second-summary.json、活动 /tmp/imv2-app-large-directory-r8-second-activities.json。第三阶段正常第二安装冷启动恢复已开始（驱动43264/Xcode46162），尚无终态；此前超时保留，不将前两阶段通过扩展成整个跨安装冷恢复通过。
+
+- 目录R8终态：三个功能阶段每项Passed/1通过/0失败/0跳过，首次正常冷恢复300.951秒、第二安装真实密码登录310.012秒、第二安装正常冷恢复303.644秒；全部核对258原ID/精确名字、3页/两次加载更多。独立PG directory-device-facts.json设备数2，directory-members.json原集合258。整轮6测试5通过1注册无障碍审计失败0跳过、exit1；两个随机范围清理通过、owned stack stopped。第三阶段摘要 /tmp/imv2-app-large-directory-r8-cold-summary.json、活动 /tmp/imv2-app-large-directory-r8-cold-activities.json，完整汇总 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.3FRxWQ/all-stage-summary.json。历史R1..R7超时/定位错误保留；600秒为明确功能测试预算，实际约5分钟是逐行远程AX验收耗时，未宣称业务接口性能改善。EX15更新完整跨安装冷恢复证据。
+
+- 20261009真实APNs环境审计：当前security只计数得到有效签名身份2；新devicectl清单物理设备5 unavailable/2 disconnected，connected的3条为simulated，没有已连接物理iPhone。当前测试进程六项Push/APNs配置均未设置；这不推定整机其他位置没有凭据，也不把签名身份存在视为entitlement/provisioning通过。证据 /tmp/imv2-acceptance-device-inventory-final-20261009.json。真实设备及配置位置的用户确认仍未收到，未操作未指定真机或发送APNs。所有本轮拥有的原服务/Xcode任务已结束；EX23仍待验。
+
+- 20261009任务阻塞审计第三轮：新清单 /tmp/imv2-acceptance-device-inventory-blocked-20261009.json 再次确认已连接物理设备0，当前测试进程Push/APNs六项配置0；未收到指定真机及测试配置位置的确认，没有本轮拥有的测试进程仍运行。同一剩余真机APNs环境条件连续三轮未改变，任务标记blocked，完整56项范围、真实失败及已通过功能均保留，未标记整体完成。恢复条件为提供本轮可用真机和App签名/APNs测试环境；不要求在聊天中提交私钥或设备令牌。
+
+### 20261009-acceptance-repair（进行中）
+
+用户新目标为根据验收表修复问题，并通过本机模拟环境验证。保留此前真实失败证据，在各项修复及相应实测完成后再更新矩阵。完整修复范围：
+
+- OP08主动退群；OP32群头像用途及授权/展示。
+- EX03首次退出及EX06账号切换；EX08发送者持久拒绝提示；EX12私聊离线自动重放。
+- EX18冷订阅后的typing投递；EX20规模重连及在线提示波动。
+- EX22系统后台下载；EX23本机模拟Push/APNs请求与App唤醒路径（不声称真实APNs送达）。
+- EX24动态字体/文本裁剪/点击区/对比度审计、邀请冷启动深链接、批准成员发送后的即时正文投影。
+
+首次登出修复：V2SignedInRootView离开时取消页面signOutTask，而V2AppStore.signOut先切换route并随后检查取消，导致普通退出停在pending删除。新增App Store持有的单飞用户退出任务，UI仅提交请求，页面消失不取消账户收尾；既有受保护数据及失败marker保留。账号切换真实UI用例移除补偿重试，明确要求第一次退出成功。取消发起页面任务/重复点击的单元回归已加入。
+
+单位回归R1编译通过，16通过6失败0跳过；6项Keychain失败均为本轮CODE_SIGNING_ALLOWED=NO导致unexpectedStatus(-34018)，不视为产品通过。R2恢复默认签名，exec18169，/tmp/imv2-fix-signout-unit-r2-20261009.log，尚未终态。
+
+- 首次登出修复单元R2恢复默认签名后22通过0失败0跳过，摘要 /tmp/imv2-fix-signout-unit-r2-summary.json。真实App修复R1已启动，exec94792/驱动65141/Xcode65710，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-ioszyjgl，结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.C7z00e，日志 /tmp/imv2-fix-signout-app-r1-20261009.log；实际账号切换要求首次退出直接成功，不允许旧补偿重试。注册无障碍失败继续保留，整体尚未有终态。
+
+- 首次退出修复App R1已完成：真实A→B→A普通登录/两次首次退出、两账号内容隔离和正常冷恢复通过，1功能测试0失败0跳过，Xcode elapsed96.530秒；用例明确断言没有pending重试入口，manual-retry标记0，功能标记1。摘要 /tmp/imv2-fix-signout-app-r1-summary.json、活动 /tmp/imv2-fix-signout-app-r1-activities.json。整轮4测试3通过1注册无障碍审计失败0跳过，exit1，两个测试范围清理和owned stack stopped。EX03/EX06补修复后通过证据，原失败和审计失败保留；其他修复项仍未完成。
+
+- 私聊离线重放修复已实现、实测进行中：未开始网络提交的缺连接错误改为waitingForNetwork；认证连接拥有的恢复worker观察等待任务头的原身份/修订，处理恢复前已有等待、恢复后迟到及连续回调，避免仅Bool去重吞掉ready→parked变更。只唤醒本账号的缺连接/待认证状态（含旧版对应needsAttention）；保留冻结命令、首提截止期和submit/reconcile动作，恢复时建立新的有限尝试轮次。容量已满单独busyBeforeSubmission有退避，不当作断网无限重置预算；未知结果、拒绝和指纹冲突不按联网事件自动重试。
+- 回归R1因新增夹具API引用及actor复合读取编译失败已修正，原日志保留；R2发送工作13项通过。最终R3共18项/2套件通过，包含SQLite冷重开原命令、恢复前/后/连续入队时序、旧暂停任务及未知/容量错误边界；/tmp/imv2-fix-offline-work-r3-20261009.log。真实双安装App R1已启动，exec13452，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-rwohad_p，日志 /tmp/imv2-fix-offline-app-r1-20261009.log，尚未终态，EX12旧失败保留。
+
+- 私聊离线修复App R1已终态exit1：离线普通UI入队、发送者正常冷恢复和最后接收者恢复阶段均通过；最后阶段testReceiverRestoresIndependentGroupMemberReply原xcresult摘要为1通过0失败0跳过。整轮仍保留3个无障碍审计失败阶段，不宣称全绿；两个范围清理完成，owned stack stopped。原结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.nWdkUn，进一步独立事实核对和矩阵更新仍待完成。

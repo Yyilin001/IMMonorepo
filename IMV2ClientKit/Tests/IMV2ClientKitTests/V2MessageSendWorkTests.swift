@@ -6,6 +6,121 @@ import Testing
 
 @Suite("Message send public work", .serialized)
 struct V2MessageSendWorkTests {
+    @Test("offline work survives reopening and resumes the frozen command without a manual retry")
+    func offlineWorkResumesAfterColdConnection() async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let intent = try f.intent("offline original body")
+        try await f.store.freezeSendIntent(intent)
+        try await f.store.handOffSendIntent(intent.id)
+        let original = try await f.head()
+        let command = try await f.store.messageSendCommand(workID: original.id)
+        try await V2MessageSendOperationService(accountID: f.account, store: f.store,
+            client: FailingSendWorkRemote(failure: .unavailableBeforeSubmission)).execute(f.claim(original))
+        #expect(try await f.store.operationWork(id: original.id)?.scheduling == .waitingForNetwork)
+        #expect(try await f.store.dueOperationWork(now: .distantFuture, kinds: [.sendMessage]).isEmpty)
+        try await f.store.close()
+        let restored = try GRDBV2LocalSyncStore(databaseURL: f.url, installationBinding: f.binding, userID: f.account)
+        try await restored.resumeNetworkWaitingMessageSends(accountID: f.account)
+        let ready = try #require(try await restored.operationWork(id: original.id))
+        #expect(ready.scheduling == .ready && ready.nextAction == .submit)
+        #expect(ready.submissionRoundAttempts == 0)
+        #expect(try await restored.messageSendCommand(workID: original.id) == command)
+        guard case .claimed(let claim) = try await restored.claimOperationWork(id: ready.id, ownerID: UUID(), action: ready.nextAction, now: ready.nextActionAt)
+        else { throw V2OperationWorkError.invalidTransition }
+        try await restored.resumeNetworkWaitingMessageSends(accountID: f.account)
+        #expect(try await restored.operationWork(id: original.id)?.submissionRoundAttempts == 1)
+        let service = V2MessageSendOperationService(accountID: f.account, store: restored, client: f.remote)
+        try await service.execute(claim)
+        let unknown = try #require(try await restored.operationWork(id: original.id))
+        guard case .claimed(let query) = try await restored.claimOperationWork(id: unknown.id, ownerID: UUID(), action: unknown.nextAction, now: unknown.nextActionAt)
+        else { throw V2OperationWorkError.invalidTransition }
+        try await service.execute(query)
+        #expect(try await restored.operationWork(id: original.id)?.execution == .committed)
+        #expect(try await restored.messageSendCommand(workID: original.id) == command)
+        let submissions = await f.remote.submissions, recoveries = await f.remote.recoveries
+        #expect(submissions == 1 && recoveries == 1)
+        try await restored.close()
+    }
+
+    @Test("connection recovery observes both preexisting and late parked commands", arguments: [false, true])
+    func networkWakeupDoesNotLoseLateParking(parkFirst: Bool) async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let intent = try f.intent("connection race")
+        try await f.store.freezeSendIntent(intent)
+        try await f.store.handOffSendIntent(intent.id)
+        let work = try await f.head(), claim = try await f.claim(work)
+        let park = {
+            try await f.store.deferOperationWork(claim, until: Date(), code: "MESSAGE_SEND_TRANSPORT_UNAVAILABLE",
+                                               scheduling: .waitingForNetwork, nextAction: .reconcile)
+        }
+        if parkFirst { try await park() }
+        let runner = Task {
+            try await V2MessageSendNetworkRecoveryRunner(store: f.store, accountID: f.account, isAuthenticated: { true }).run()
+        }
+        defer { runner.cancel() }
+        if !parkFirst { try await park() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while try await f.store.operationWork(id: work.id)?.scheduling != .ready {
+            try #require(ContinuousClock.now < deadline)
+            await Task.yield()
+        }
+        let ready = try #require(try await f.store.operationWork(id: work.id))
+        #expect(ready.identity == work.identity && ready.fingerprint == work.fingerprint)
+        #expect(ready.nextAction == .reconcile)
+        for _ in 0..<3 {
+            let next = try await f.claim(try #require(try await f.store.operationWork(id: work.id)))
+            try await f.store.deferOperationWork(next, until: Date(), code: "MESSAGE_SEND_TRANSPORT_UNAVAILABLE",
+                                               scheduling: .waitingForNetwork, nextAction: .reconcile)
+            let wakeDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while try await f.store.operationWork(id: work.id)?.scheduling != .ready {
+                try #require(ContinuousClock.now < wakeDeadline)
+                await Task.yield()
+            }
+        }
+        runner.cancel()
+        _ = await runner.result
+        try await f.store.close()
+    }
+
+    @Test("fresh authentication wakes legacy transport-paused work but keeps its recovery action")
+    func legacyTransportPauseCanResume() async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let intent = try f.intent("legacy parked identity")
+        try await f.store.freezeSendIntent(intent)
+        try await f.store.handOffSendIntent(intent.id)
+        let work = try await f.head(), claim = try await f.claim(work)
+        try await f.store.deferOperationWork(claim, until: Date(), code: "MESSAGE_SEND_TRANSPORT_UNAVAILABLE",
+                                           scheduling: .needsAttention, nextAction: .reconcile)
+        try await f.store.resumeNetworkWaitingMessageSends(accountID: f.account)
+        let resumed = try #require(try await f.store.operationWork(id: work.id))
+        #expect(resumed.scheduling == .ready && resumed.nextAction == .reconcile)
+        #expect(resumed.identity == work.identity && resumed.fingerprint == work.fingerprint)
+        #expect(resumed.admissionDeadline == work.admissionDeadline)
+        try await f.store.close()
+    }
+
+    @Test("connection wakeup excludes unknown outcomes and capacity failures", arguments: [false, true])
+    func networkWakeupPreservesOtherFailureBoundaries(capacity: Bool) async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let intent = try f.intent("other failure")
+        try await f.store.freezeSendIntent(intent)
+        try await f.store.handOffSendIntent(intent.id)
+        let work = try await f.head()
+        let failure: V2MessageSendTransportError = capacity ? .busyBeforeSubmission(Date().addingTimeInterval(3)) : .outcomeUnknown
+        try await V2MessageSendOperationService(accountID: f.account, store: f.store,
+            client: FailingSendWorkRemote(failure: failure)).execute(f.claim(work))
+        let before = try #require(try await f.store.operationWork(id: work.id))
+        try await f.store.resumeNetworkWaitingMessageSends(accountID: f.account)
+        let after = try #require(try await f.store.operationWork(id: work.id))
+        #expect(after.revision == before.revision && after.nextActionAt == before.nextActionAt)
+        #expect(after.nextAction == (capacity ? .submit : .reconcile))
+        #expect(after.scheduling == .backingOff)
+        await #expect(throws: V2OperationWorkError.accountMismatch) {
+            try await f.store.resumeNetworkWaitingMessageSends(accountID: .init(uuid: UUID()))
+        }
+        try await f.store.close()
+    }
+
     @Test("an unknown last submission starts the independent reconciliation round", arguments: [false, true])
     func exhaustedSubmissionStillReconcilesOriginalIdentity(typedTransportFailure: Bool) async throws {
         let fixture = try SendWorkFixture(); defer { fixture.remove() }
@@ -18,7 +133,7 @@ struct V2MessageSendWorkTests {
             let work = try #require(try await fixture.store.operationWork(id: original.id))
             let claim = try await fixture.claim(work)
             try await V2MessageSendOperationService(accountID: fixture.account, store: fixture.store,
-                client: FailingSendWorkRemote(failure: .unavailableBeforeSubmission)).execute(claim)
+                client: CorrelatedRejectedSendWorkRemote(code: "SERVER_BUSY")).execute(claim)
         }
         let last = try await fixture.claim(try #require(try await fixture.store.operationWork(id: original.id)))
         let remote = SendWorkRemote(failure: typedTransportFailure ? V2MessageSendTransportError.outcomeUnknown : URLError(.networkConnectionLost))

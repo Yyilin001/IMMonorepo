@@ -195,7 +195,7 @@ public actor V2MessageSendOperationService {
             let now=Date(),transportFailure=error as? V2MessageSendTransportError,policy=V2NetworkWorkPolicy.commandRecovery
             let nextAction: V2OperationWorkAction
             switch transportFailure {
-            case .unavailableBeforeSubmission, .authenticationRequired:
+            case .unavailableBeforeSubmission, .authenticationRequired, .busyBeforeSubmission:
                 nextAction = claim.action
             default:
                 nextAction = .reconcile
@@ -204,8 +204,10 @@ public actor V2MessageSendOperationService {
             // submission round must not prevent its first original-ID query.
             let deadline=(nextAction == .submit ? claim.work.submissionRoundDeadline : claim.work.reconciliationRoundDeadline) ?? now.addingTimeInterval(policy.totalBudget)
             let retryAfter: Date?
-            if case .retryAfter(let date) = transportFailure { retryAfter = date }
-            else { retryAfter = nil }
+            switch transportFailure {
+            case .retryAfter(let date), .busyBeforeSubmission(let date): retryAfter = date
+            default: retryAfter = nil
+            }
             let attempts = nextAction == .submit ? claim.work.submissionRoundAttempts : claim.work.reconciliationRoundAttempts
             let retry=policy.nextAttempt(now:now,startedAt:deadline.addingTimeInterval(-policy.totalBudget),attemptsCompleted:attempts,randomUnit:Double.random(in:0...1),serverRetryNotBefore:retryAfter)
             let malformed=error is V2OperationWorkError || error is V2MessageOperationValidationError ||
@@ -214,11 +216,14 @@ public actor V2MessageSendOperationService {
             let code: String
             switch transportFailure {
             case .unavailableBeforeSubmission:
-                scheduling = retry == nil ? .needsAttention : .backingOff
+                scheduling = .waitingForNetwork
                 code = "MESSAGE_SEND_TRANSPORT_UNAVAILABLE"
             case .authenticationRequired:
                 scheduling = .waitingForAuthentication
                 code = "MESSAGE_SEND_AUTHENTICATION_REQUIRED"
+            case .busyBeforeSubmission:
+                scheduling = retry == nil ? .needsAttention : .backingOff
+                code = "MESSAGE_SEND_CAPACITY_UNAVAILABLE"
             case .outcomeUnknown:
                 scheduling = retry == nil ? .needsAttention : .backingOff
                 code = "MESSAGE_SEND_OUTCOME_UNKNOWN"

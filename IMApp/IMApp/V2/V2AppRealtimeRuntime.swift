@@ -1168,6 +1168,13 @@ struct V2AppRealtimeRuntime {
                 try await withThrowingTaskGroup(of:Void.self) {group in
                     group.addTask {try await V2RolePolicyRecoveryRunner(store:localStore,transport:transport).run()}
                     group.addTask {
+                        try await V2MessageSendNetworkRecoveryRunner(store: localStore, accountID: actorUserID) {
+                            guard let session = await connection.messageSendSession(), session.accountID == actorUserID else { return false }
+                            try await authSession.requireAuthenticatedEpoch(authEpoch)
+                            return true
+                        }.run()
+                    }
+                    group.addTask {
                         let loop = UUID()
                         await coverage.begin(loop)
                         for await value in await connection.realtimeCoverageChanges() {

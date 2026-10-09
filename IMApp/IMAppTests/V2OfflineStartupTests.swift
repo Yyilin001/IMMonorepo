@@ -26,6 +26,27 @@ struct V2OfflineStartupTests {
         #expect(f.app.offlinePresentation == nil && f.app.accountAccessMode == .blocked)
     }
 
+    @Test("user exit completes even when its initiating view task is cancelled")
+    func userExitOutlivesItsViewTask() async throws {
+        let f = try await OfflineAppFixture.make()
+        defer { f.removeFiles() }
+        await f.app.restore()
+        await f.refresh.waitForStart()
+        await f.refresh.fail()
+        try await waitUntil { f.app.authenticationMessage != nil }
+        let initiatingViewTask = Task { @MainActor in
+            f.app.requestSignOut()
+            f.app.requestSignOut()
+        }
+        initiatingViewTask.cancel()
+        await initiatingViewTask.value
+        try await waitUntil { f.app.route == .signedOut }
+        #expect(f.app.accountAccessMode == .blocked)
+        #expect(f.app.offlinePresentation == nil)
+        #expect(await f.marker.isPending() == false)
+        #expect(try await f.store.load() == nil)
+    }
+
     @Test("pending exit, locked credentials and locked or mismatched installation block local presentation", arguments: ["exit", "credentials-locked", "binding-locked", "binding-mismatch"])
     func trustFailures(scenario: String) async throws {
         let f = try await OfflineAppFixture.make()

@@ -112,7 +112,7 @@ extension IMAppLocalTwoInstallE2ETests {
         XCTAssertEqual(observation.readBytes, 512 * 1024)
         XCTAssertFalse(observation.expired)
         app.activate()
-        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", text)).firstMatch.waitForExistence(timeout: 60))
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", text)).firstMatch.waitForExistence(timeout: 60))
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
@@ -125,7 +125,7 @@ extension IMAppLocalTwoInstallE2ETests {
         let text = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_BACKGROUND_MESSAGE_TEXT"])
         let rawID = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_BACKGROUND_MESSAGE_ID"])
         let id = try XCTUnwrap(UUID(uuidString: rawID)).uuidString
-        let body = app.staticTexts.matching(NSPredicate(format: "identifier == %@ AND label == %@", "v2.message.body.\(id)", text))
+        let body = app.descendants(matching: .any).matching(NSPredicate(format: "identifier == %@ AND label == %@", "v2.message.body.\(id)", text))
         XCTAssertTrue(body.firstMatch.waitForExistence(timeout: 30))
         XCTAssertEqual(body.count, 1)
         XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "v2.message.attachments.\(id)").firstMatch.exists)

@@ -210,6 +210,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     @ObservationIgnored private var realtimeAttemptGate = V2RealtimeAttemptGate()
     @ObservationIgnored private var authenticationAttemptGate = V2AuthenticationAttemptGate()
     @ObservationIgnored private var signOutAttemptGate = V2SignOutAttemptGate()
+    @ObservationIgnored private var userSignOutTask: Task<Void, Never>?
     @ObservationIgnored private var isApplicationActive = false
     @ObservationIgnored private let restoration = V2SessionRestoration()
     @ObservationIgnored private let authenticationObserver = V2AuthenticationStateObserver()
@@ -733,6 +734,17 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             )
             route = .signedOut
             authenticationMessage = "账户服务暂不可用，请稍后重试。"
+        }
+    }
+
+    /// A user-requested exit belongs to the account lifecycle: replacing its
+    /// authenticated view must not cancel credential deletion halfway through.
+    func requestSignOut() {
+        guard userSignOutTask == nil, !signOutAttemptGate.isInFlight else { return }
+        userSignOutTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.userSignOutTask = nil }
+            await self.signOut()
         }
     }
 

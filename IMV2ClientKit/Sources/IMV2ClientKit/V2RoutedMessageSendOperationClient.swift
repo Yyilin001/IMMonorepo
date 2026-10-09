@@ -4,6 +4,7 @@ import IMV2Core
 /// Certainty describes whether another submit could duplicate work without recovery.
 public enum V2MessageSendTransportError: Error, Equatable, Sendable {
     case unavailableBeforeSubmission
+    case busyBeforeSubmission(Date)
     case outcomeUnknown
     case authenticationRequired
     case invalidResponse

@@ -58,8 +58,10 @@ public struct V2ProtobufMessageSendOperationClient: V2MessageSendRealtimeClient 
             throw error
         } catch let error as V2TLSFrameConnectionError {
             switch error {
-            case .notConnected, .tooManyPendingRequests:
+            case .notConnected:
                 throw V2MessageSendTransportError.unavailableBeforeSubmission
+            case .tooManyPendingRequests:
+                throw V2MessageSendTransportError.busyBeforeSubmission(Date().addingTimeInterval(0.5))
             case .authenticationFailed:
                 throw V2MessageSendTransportError.authenticationRequired
             default:

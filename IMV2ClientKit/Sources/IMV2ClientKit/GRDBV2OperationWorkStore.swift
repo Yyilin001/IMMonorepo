@@ -359,6 +359,53 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
+    // Only a proven absence of transport/authentication may be resumed by a
+    // fresh authenticated connection. Unknown outcomes and business failures
+    // retain their independent reconciliation/user-action boundaries.
+    private static let networkWaitingMessagePredicate = """
+        operation_kind='sendMessage'
+        AND scheduling_state IN ('waitingForNetwork','waitingForAuthentication','needsAttention')
+        AND last_error_code IN ('MESSAGE_SEND_TRANSPORT_UNAVAILABLE','MESSAGE_SEND_AUTHENTICATION_REQUIRED')
+        """
+
+    public nonisolated func networkWaitingMessageSendUpdates(accountID: UserID) -> AsyncThrowingStream<Bool, any Error> {
+        let pool = databasePool
+        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let task = Task {
+                do {
+                    let observation = ValueObservation.tracking { db in
+                        // Track a pending head's identity/revision, not merely
+                        // existence: coalescing ready -> parked back to true
+                        // must still emit the new callback's wakeup.
+                        try String.fetchOne(db, sql: "SELECT CAST(local_sequence AS TEXT)||':'||CAST(work_revision AS TEXT) FROM v2_operation_work WHERE account_id=? AND \(Self.networkWaitingMessagePredicate) ORDER BY local_sequence LIMIT 1",
+                                            arguments: [accountID.rawValue])
+                    }.removeDuplicates()
+                    for try await value in observation.values(in: pool, bufferingPolicy: .bufferingNewest(1)) {
+                        continuation.yield(value != nil)
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Call after validating this account's authenticated connection. Keep the
+    /// frozen identity, first-submission deadline and original recovery action.
+    public func resumeNetworkWaitingMessageSends(accountID: UserID, now: Date = Date()) throws {
+        let time = try Self.commandRetryTimestamp(now)
+        try databasePool.write { db in
+            guard try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") == accountID.rawValue
+            else { throw V2OperationWorkError.accountMismatch }
+            try db.execute(sql: """
+                UPDATE v2_operation_work SET scheduling_state='ready',next_action_at=?,work_revision=work_revision+1,
+                    submission_round_attempts=0,reconciliation_round_attempts=0,
+                    submission_round_deadline=NULL,reconciliation_round_deadline=NULL
+                WHERE account_id=? AND \(Self.networkWaitingMessagePredicate)
+                """, arguments: [time, accountID.rawValue])
+        }
+    }
+
     /// Observe only eligible heads of supported domains. A blocked younger row
     /// must not leave the wake timer permanently due while its parent is asleep.
     public nonisolated func operationWorkRetrySchedule(kinds: Set<V2OperationKind>) -> V2CommandRetrySchedule {

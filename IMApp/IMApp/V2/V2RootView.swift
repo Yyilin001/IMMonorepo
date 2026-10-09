@@ -80,7 +80,7 @@ struct V2RootView: View {
                 case .localReadOnly:
                     if let presentation = store.offlinePresentation {
                         V2OfflineRootView(presentation: presentation,
-                            retryOnline: { await store.retryOnlineFromLocalReadOnly() }, signOut: { await store.signOut() })
+                            retryOnline: { await store.retryOnlineFromLocalReadOnly() }, signOut: { store.requestSignOut() })
                     } else { ProgressView("正在打开本地内容…") }
                 case .signedIn:
                     if let conversationStore = store.conversationStore,
@@ -98,7 +98,7 @@ struct V2RootView: View {
                             pendingGroupAvatarsStore: store.pendingGroupAvatarsStore,
                             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                             passwordLifecycleClient: store.passwordLifecycleClient(),
-                            signOut: { await store.signOut() }
+                            signOut: { store.requestSignOut() }
                         )
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
                         .environment(\.v2AvatarPipeline, store.avatarPipeline)

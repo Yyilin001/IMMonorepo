@@ -1542,13 +1542,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             let retry = app.buttons["v2.sign-out.pending.retry"]
             let destination = expectation(for: NSPredicate { _, _ in submit.exists || retry.exists }, evaluatedWith: app)
             wait(for: [destination], timeout: 30)
-            if retry.exists {
-                // Record the failed first exit separately. This is the
-                // ordinary user's recovery button, not credential injection.
-                XCTContext.runActivity(named: "account-switch-sign-out-required-manual-retry") { _ in }
-                XCTAssertTrue(retry.isHittable)
-                retry.tap()
-            }
+            XCTAssertFalse(retry.exists, "Ordinary sign-out must finish without a manual credential-deletion retry.")
             XCTAssertTrue(submit.waitForExistence(timeout: 30))
         }
         func body(_ text: String) -> XCUIElement {
