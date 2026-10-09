@@ -1103,10 +1103,10 @@ struct V2ConversationListView: View {
                     }
                 case .loaded:
                     if store.visibleItems.isEmpty && store.directConversationRequests.isEmpty {
-                        ContentUnavailableView(
-                            store.isShowingArchived ? "没有已归档会话" : "暂无会话",
-                            systemImage: store.isShowingArchived ? "archivebox" : "bubble.left.and.bubble.right",
-                            description: Text(store.isShowingArchived ? "归档的会话会显示在这里。" : "连接实时网关并完成同步后，消息会显示在这里。")
+                        V2ConversationEmptyState(
+                            title: store.isShowingArchived ? "没有已归档会话" : "暂无会话",
+                            symbol: store.isShowingArchived ? "archivebox" : "bubble.left.and.bubble.right",
+                            description: store.isShowingArchived ? "归档的会话会显示在这里。" : "连接实时网关并完成同步后，消息会显示在这里。"
                         )
                     } else {
                     ScrollViewReader { scrollProxy in
@@ -1187,7 +1187,28 @@ struct V2ConversationListView: View {
                 }
             }
             .navigationTitle(store.isShowingArchived ? "已归档" : "消息")
-            .searchable(text: $conversationQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索会话摘要")
+            .safeAreaInset(edge: .top) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").font(.body)
+                        .foregroundStyle(.secondary).accessibilityHidden(true)
+                    TextField("搜索会话摘要", text: $conversationQuery, axis: .vertical)
+                        .font(.body).foregroundStyle(.primary).lineLimit(1...3)
+                        .submitLabel(.search)
+                        .accessibilityIdentifier("v2.conversation.summary-search")
+                    if !conversationQuery.isEmpty {
+                        Button { conversationQuery = "" } label: {
+                            Image(systemName: "xmark.circle.fill").font(.body)
+                                .frame(minWidth: 44, minHeight: 44)
+                        }
+                        .accessibilityLabel("清除会话搜索")
+                        .accessibilityIdentifier("v2.conversation.summary-search.clear")
+                    }
+                }
+                .padding(12)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, 16).padding(.vertical, 8)
+                .background(.background)
+            }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 4) {
                 if let feedback = store.conversationRefreshFeedback {

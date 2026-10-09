@@ -37,16 +37,16 @@ public struct V2ChangeRoomMembershipCommand: Equatable, Sendable {
     /// 预期成员修订号的 UInt64 原始值。
     public var expectedMembershipRevision: UInt64 { expectedRevision.rawValue }
 
-    /// 构造成员变更命令，拒绝操作者与目标相同，再校验预期成员版本。
+    /// 构造成员变更命令；允许显式退出，禁止自行添加，再校验预期成员版本。
     ///
     /// - Parameters:
     ///   - roomID: 目标房间。
     ///   - actorUserID: 请求操作者。
     ///   - operationID: 本次变更稳定身份。
-    ///   - targetUserID: 添加或移除对象，必须不同于操作者。
+    ///   - targetUserID: 添加或移除对象；移除自身表示主动退出。
     ///   - action: 成员集合动作。
     ///   - expectedMembershipRevision: 调用者观察到的成员版本。
-    /// - Throws: 自身目标报告 selfTargetingNotAllowed；版本范围错误由 V2MembershipRevision 报告。
+    /// - Throws: 自行添加报告 selfTargetingNotAllowed；版本范围错误由 V2MembershipRevision 报告。
     ///
     /// 不读取实际成员状态、容量或管理权限。
     public init(
@@ -57,7 +57,7 @@ public struct V2ChangeRoomMembershipCommand: Equatable, Sendable {
         action: V2RoomMembershipAction,
         expectedMembershipRevision: UInt64
     ) throws {
-        guard actorUserID != targetUserID else { throw V2RoomMembershipValidationError.selfTargetingNotAllowed }
+        guard actorUserID != targetUserID || action == .remove else { throw V2RoomMembershipValidationError.selfTargetingNotAllowed }
         self.roomID = roomID
         self.actorUserID = actorUserID
         self.operationID = operationID
@@ -105,6 +105,6 @@ public struct V2RoomMembershipChange: Equatable, Sendable {
 
 /// 成员变更命令的目标校验错误。
 public enum V2RoomMembershipValidationError: Error, Equatable, Sendable {
-    /// 操作者与目标相同，此命令不处理自加入或自行退出。
+    /// 添加自身被禁止；移除自身表示主动退出，仍由服务端校验群主保护。
     case selfTargetingNotAllowed
 }

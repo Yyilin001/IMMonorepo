@@ -571,6 +571,33 @@ SWIFT
   run_stage "${receiver_simulator_id}" testGroupOwnerApprovesActualJoinRequest
   join_facts approved
   jq --exit-status '.approved == 1 and .pending == 0 and .members == 2' "${result_directory}/approved-join-facts.json" >/dev/null
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_EXIT_ONLY:-false}" == true ]]; then
+    launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${sender_scope}"
+    run_stage "${sender_simulator_id}" testApplicantLeavesApprovedGroupThroughOrdinaryUI
+    exit_confirmation_deadline=$((SECONDS + 30))
+    while true; do
+      join_facts voluntary-exit
+      if jq --exit-status '.members == 1 and .approved == 1' "${result_directory}/voluntary-exit-join-facts.json" >/dev/null; then break; fi
+      [[ "${SECONDS}" -lt "${exit_confirmation_deadline}" ]] || { printf '%s\n' 'voluntary exit did not commit within 30 seconds.' >&2; exit 1; }
+      sleep 0.25
+    done
+    exit_container="$(xcrun simctl get_app_container "${sender_simulator_id}" "${app_bundle_id}" data)"
+    while true; do
+      /usr/bin/python3 "${repo_root}/scripts/v2_app_work_state_snapshot.py" "${exit_container}" "${result_directory}/pre-cold-exit-work.json"
+      if jq --exit-status '[.[].work[] | select(.operation_kind == "membership")] | length == 1 and all(.[]; .execution_state == "committed" and .scheduling_state == "finished")' "${result_directory}/pre-cold-exit-work.json" >/dev/null; then break; fi
+      [[ "${SECONDS}" -lt "${exit_confirmation_deadline}" ]] || { printf '%s\n' 'original voluntary exit local work did not commit within 30 seconds.' >&2; exit 1; }
+      sleep 0.25
+    done
+    launch_fixture "${sender_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${sender_scope}"
+    xcrun simctl pbcopy "${sender_simulator_id}" < "${result_directory}/invite-link.txt"
+    run_stage "${sender_simulator_id}" testApplicantColdRestoreDoesNotResurrectExitedGroup
+    if [[ "${audit_failure_count}" -gt 0 ]]; then
+      printf '%s\n' 'voluntary exit functional stages complete; retained accessibility failure.' >&2
+      exit 1
+    fi
+    printf '%s\n' 'local voluntary group exit E2E: pass'
+    exit 0
+  fi
   open_applicant_invite
   if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_COLD_SEND_ONLY:-false}" == true ]]; then
     run_stage "${sender_simulator_id}" testApplicantRestoresApprovedGroupAndPersistsSend
@@ -705,6 +732,11 @@ launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-unavailable-realtime \
   -v2-ui-testing-e2e-scope "${sender_scope}"
 run_stage "${sender_simulator_id}" testSenderQueuesDirectMessageWhileRealtimeEndpointIsUnavailable
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_OFFLINE_IDENTITY_PROOF:-false}" == true ]]; then
+  offline_sender_container="$(xcrun simctl get_app_container "${sender_simulator_id}" "${app_bundle_id}" data)"
+  /usr/bin/python3 "${repo_root}/scripts/v2_app_offline_message_snapshot.py" "${offline_sender_container}" "${sender_scope}" "${result_directory}/offline-original.json" --sender
+  jq --exit-status '.projections | length == 0' "${result_directory}/offline-original.json" >/dev/null
+fi
 
 launch_fixture "${sender_simulator_id}" \
   -v2-ui-testing-live-local-account \
@@ -717,6 +749,20 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-restore-local-account \
   -v2-ui-testing-e2e-scope "${receiver_scope}"
 run_stage "${receiver_simulator_id}" testReceiverRestoresIndependentGroupMemberReply
+
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_OFFLINE_IDENTITY_PROOF:-false}" == true ]]; then
+  : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
+  /usr/bin/python3 "${repo_root}/scripts/v2_app_offline_message_snapshot.py" "${offline_sender_container}" "${sender_scope}" "${result_directory}/offline-restored-sender.json" --sender --original "${result_directory}/offline-original.json"
+  offline_receiver_container="$(xcrun simctl get_app_container "${receiver_simulator_id}" "${app_bundle_id}" data)"
+  /usr/bin/python3 "${repo_root}/scripts/v2_app_offline_message_snapshot.py" "${offline_receiver_container}" "${receiver_scope}" "${result_directory}/offline-restored-receiver.json" --original "${result_directory}/offline-original.json"
+  offline_room="$(jq --raw-output '.intent.roomID' "${result_directory}/offline-original.json")"
+  offline_client="$(jq --raw-output '.intent.clientMessageID' "${result_directory}/offline-original.json")"
+  /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -c "SELECT json_build_object('originalMessages',(SELECT count(*) FROM im_v2.messages WHERE room_id='${offline_room}' AND client_message_id='${offline_client}' AND text_body='q'),'roomQMessages',(SELECT count(*) FROM im_v2.messages WHERE room_id='${offline_room}' AND text_body='q'),'originalCompletions',(SELECT count(*) FROM im_v2.message_send_completions WHERE room_id='${offline_room}' AND client_message_id='${offline_client}'),'messageID',(SELECT message_id FROM im_v2.messages WHERE room_id='${offline_room}' AND client_message_id='${offline_client}'))" > "${result_directory}/offline-pg-facts.json"
+  jq --exit-status '.originalMessages == 1 and .roomQMessages == 1 and .originalCompletions == 1' "${result_directory}/offline-pg-facts.json" >/dev/null
+  jq --exit-status --slurpfile pg "${result_directory}/offline-pg-facts.json" '.work.execution_state == "committed" and .work.scheduling_state == "finished" and (.work.accepted_message_id | ascii_downcase) == $pg[0].messageID and (.projections | length) == 1 and (.projections[0].message_id | ascii_downcase) == $pg[0].messageID' "${result_directory}/offline-restored-sender.json" >/dev/null
+  jq --exit-status --slurpfile pg "${result_directory}/offline-pg-facts.json" '(.projections | length) == 1 and (.projections[0].message_id | ascii_downcase) == $pg[0].messageID and .projections[0].is_withdrawn == 0' "${result_directory}/offline-restored-receiver.json" >/dev/null
+  printf '%s\n' 'original offline identity, PG uniqueness and both independent SQLite projections: pass'
+fi
 
 if [[ "${audit_failure_count}" -gt 0 || "${withdrawal_failure_count}" -gt 0 ]]; then
   printf 'local two-install stages completed; overall FAILED with %s retained accessibility and %s direct withdrawal projection stage(s).\n' "${audit_failure_count}" "${withdrawal_failure_count}" >&2

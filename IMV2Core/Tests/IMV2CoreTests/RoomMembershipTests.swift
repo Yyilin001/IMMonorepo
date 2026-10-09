@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import IMV2Core
 
@@ -19,8 +20,8 @@ struct RoomMembershipTests {
         }
     }
 
-    @Test("membership operation IDs are domain-scoped and self-targeting is rejected")
-    func rejectsSelfTargetingChange() throws {
+    @Test("self-add is rejected while explicit self-exit survives decoding")
+    func validatesSelfMembershipChanges() throws {
         let user = try UserID("user-a")
         #expect(throws: V2RoomMembershipValidationError.selfTargetingNotAllowed) {
             _ = try V2ChangeRoomMembershipCommand(
@@ -28,9 +29,21 @@ struct RoomMembershipTests {
                 actorUserID: user,
                 operationID: .init("operation-a"),
                 targetUserID: user,
-                action: .remove,
+                action: .add,
                 expectedMembershipRevision: 4
             )
+        }
+        let exit = try V2ChangeRoomMembershipCommand(roomID: .init("room-a"), actorUserID: user,
+            operationID: .init("operation-a"), targetUserID: user, action: .remove, expectedMembershipRevision: 4)
+        #expect(exit.targetUserID == exit.actorUserID)
+        let intent = try V2MembershipIntent(roomID: exit.roomID, actorUserID: user,
+            operationID: exit.operationID, targetUserID: user, action: .remove,
+            expectedMembershipRevision: 4, confirmedUntilMilliseconds: 120_000)
+        let encoded = try JSONEncoder().encode(intent)
+        #expect(try JSONDecoder().decode(V2MembershipIntent.self, from: encoded) == intent)
+        let invalid = String(decoding: encoded, as: UTF8.self).replacingOccurrences(of: "remove", with: "add")
+        #expect(throws: V2MembershipOperationValidationError.invalidIntent) {
+            _ = try JSONDecoder().decode(V2MembershipIntent.self, from: Data(invalid.utf8))
         }
     }
 

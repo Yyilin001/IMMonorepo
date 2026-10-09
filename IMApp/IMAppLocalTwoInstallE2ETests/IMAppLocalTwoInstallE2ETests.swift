@@ -784,10 +784,10 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             "接收端恢复后必须继续保有此前私聊的 SQLite 投影。"
         )
         directConversation.tap()
-        let replayedOfflineMessage = app.descendants(matching: .any).matching(
+        let replayedOfflineMessages = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@ AND label == %@", "v2.message.body.", "q")
-        ).firstMatch
-        let replayedOfflineMessageAppeared = replayedOfflineMessage.waitForExistence(timeout: 30)
+        )
+        let replayedOfflineMessageAppeared = replayedOfflineMessages.firstMatch.waitForExistence(timeout: 30)
         if !replayedOfflineMessageAppeared {
             let screenshot = XCTAttachment(screenshot: app.screenshot())
             screenshot.name = "two-install-replayed-offline-direct-message-missing"
@@ -802,6 +802,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
             replayedOfflineMessageAppeared,
             "发送端恢复实时连接后，先前由普通 UI 安全保存的私聊消息必须只投递一次并进入接收端投影。"
         )
+        XCTAssertEqual(replayedOfflineMessages.count, 1)
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
@@ -1307,6 +1308,52 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         // The persistence-only stage leaves the App alive. The driver must
         // observe PG acceptance and committed local work before terminating.
         if assertImmediateBody { app.terminate() }
+    }
+
+    @MainActor
+    func testApplicantLeavesApprovedGroupThroughOrdinaryUI() throws {
+        let app = XCUIApplication(); app.activate()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let group = try invitationGroup(in: app)
+        XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
+        group.tap()
+        tapConversationTool("v2.group.members", from: "v2.conversation.detail.tools", in: app, timeout: 30)
+        let leave = app.buttons["v2.group.members.leave"]
+        XCTAssertTrue(leave.waitForExistence(timeout: 30) && leave.isHittable)
+        leave.tap()
+        let alert = app.alerts["确认退出群聊？"]
+        XCTAssertTrue(alert.waitForExistence(timeout: 10))
+        // UIKit owns the alert actions; scope its visible native button rather
+        // than the offscreen SwiftUI presentation node carrying the modifier.
+        let confirmation = alert.buttons["退出群聊"]
+        XCTAssertTrue(confirmation.waitForExistence(timeout: 10))
+        let canConfirm = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: confirmation)
+        wait(for: [canConfirm], timeout: 10)
+        confirmation.tap()
+        let feedback = app.staticTexts["v2.group.members.feedback"]
+        let saved = expectation(for: NSPredicate(format: "label IN %@",
+            ["已退出群聊。", "退出确认已保存；正在核对原操作结果，尚未确认退出。"]), evaluatedWith: feedback)
+        wait(for: [saved], timeout: 30)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+    }
+
+    @MainActor
+    func testApplicantColdRestoreDoesNotResurrectExitedGroup() throws {
+        let app = XCUIApplication(); app.activate()
+        // The authenticated preview distinguishes current membership from
+        // the retained approval history of the original join request.
+        try openActualInvitationPreview(in: app)
+        let status = app.staticTexts["v2.group-join.status"]
+        XCTAssertTrue(status.waitForExistence(timeout: 30))
+        XCTAssertEqual(status.label, "入群申请已批准。")
+        app.buttons["v2.group-join.close"].tap()
+        tapConversationTool("v2.conversation.refresh", in: app, timeout: 30)
+        let group = try invitationGroup(in: app)
+        let absent = expectation(for: NSPredicate(format: "exists == false"), evaluatedWith: group)
+        wait(for: [absent], timeout: 30)
+        XCTAssertFalse(group.exists)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
     }
 
     @MainActor

@@ -14,7 +14,7 @@ public struct V2MembershipIntent:Codable,Equatable,Sendable {
     public let expectedMembershipRevision:UInt64
     public let confirmedUntilMilliseconds:UInt64
     public init(roomID:RoomID,actorUserID:UserID,operationID:MembershipOperationID,targetUserID:UserID,action:V2RoomMembershipAction,expectedMembershipRevision:UInt64,confirmedUntilMilliseconds:UInt64) throws {
-        guard actorUserID != targetUserID,expectedMembershipRevision<UInt64(Int64.max),confirmedUntilMilliseconds>0,confirmedUntilMilliseconds<=UInt64(Int64.max) else { throw V2MembershipOperationValidationError.invalidIntent }
+        guard (actorUserID != targetUserID || action == .remove),expectedMembershipRevision<UInt64(Int64.max),confirmedUntilMilliseconds>0,confirmedUntilMilliseconds<=UInt64(Int64.max) else { throw V2MembershipOperationValidationError.invalidIntent }
         self.roomID=roomID;self.actorUserID=actorUserID;self.operationID=operationID;self.targetUserID=targetUserID;self.action=action;self.expectedMembershipRevision=expectedMembershipRevision;self.confirmedUntilMilliseconds=confirmedUntilMilliseconds
     }
     public var identity:V2OperationIdentity { get throws { try .init(accountID:actorUserID,scope:.room(roomID),operation:.membership(operationID)) } }

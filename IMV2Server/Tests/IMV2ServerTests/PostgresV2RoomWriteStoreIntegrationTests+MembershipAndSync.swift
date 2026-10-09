@@ -283,8 +283,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("an admin can remove a non-owner through the durable membership path")
-    func adminMayRemoveMember() async throws {
+    @Test("membership removal preserves self-exit and management boundaries", arguments: ["admin-other", "member-self", "owner-self", "corrupt-owner-self", "member-other"])
+    func membershipRemovalBoundaries(scenario: String) async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
         else { return }
@@ -297,16 +297,34 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             guard schemaExists?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
             try await installSchema(on: sql)
             try await seedRoom(on: sql)
-            try await sql.raw("UPDATE im_v2.room_memberships SET role = 'admin' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
+            let actorRole = scenario == "owner-self" ? "owner" : (scenario == "admin-other" ? "admin" : "member")
+            try await sql.raw("UPDATE im_v2.room_memberships SET role = \(bind: actorRole) WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
+            if scenario != "owner-self" && scenario != "corrupt-owner-self" {
+                try await sql.raw("UPDATE im_v2.group_rooms SET owner_user_id = \(bind: memberThreeUUID) WHERE room_id = \(bind: roomUUID)").run()
+            }
             try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: memberThreeUUID)").run()
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let target = try UserID(memberTwoUUID.uuidString)
+            let target = try UserID(scenario.hasSuffix("self") ? senderUUID.uuidString : memberTwoUUID.uuidString)
             let operation = try MembershipOperationID("00000000-0000-0000-0000-000000000028")
             let database = resources.database(.psql)
             let store = PostgresV2MembershipOperationStore(database: database, clock: { now })
             let snapshot = try await V2PostgresMembershipIdentitySnapshotValidator(database: database).snapshot(actorUserID: senderID, targetUserID: target)
+            if scenario == "owner-self" || scenario == "corrupt-owner-self" || scenario == "member-other" {
+                let intent = try V2MembershipIntent(roomID: roomID, actorUserID: senderID, operationID: operation,
+                    targetUserID: target, action: .remove, expectedMembershipRevision: 0,
+                    confirmedUntilMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 120_000)
+                let denied = try await withRoomActivation(database: database, roomID: roomID) { token in
+                    try await store.admit(intent, identitySnapshot: snapshot, token: token)
+                }
+                #expect(denied == .currentUnavailable(.permissionDenied))
+                #expect(try await count("im_v2.membership_operation_receipts", on: sql) == 0)
+                #expect(try await count("im_v2.room_events", on: sql) == 0)
+                try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
+                try await resources.shutdown()
+                return
+            }
             let request = try await withRoomActivation(database: database, roomID: roomID) { token in
                 let intent = try V2MembershipIntent(roomID: roomID, actorUserID: senderID, operationID: operation,
                     targetUserID: target, action: .remove, expectedMembershipRevision: 0,
@@ -323,11 +341,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             let first = try await submit()
-            guard case .receipt(let receipt) = first, case .changed(let change) = receipt.outcome else { Issue.record("expected admin removal"); return }
+            guard case .receipt(let receipt) = first, case .changed(let change) = receipt.outcome else { Issue.record("expected authorized removal"); return }
             let replay = try await submit()
             let membership = try #require(try await sql.raw("SELECT left_revision FROM im_v2.room_memberships WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: UUID(uuidString: target.rawValue)!)").first(decoding: LeftRevisionRow.self))
             let auditMembershipEvent = try #require(try await sql.raw("SELECT event_type, payload->>'action' AS action FROM im_v2.room_events WHERE event_id = \(bind: UUID(uuidString: change.eventID.rawValue)!)").first(decoding: MembershipEventRow.self))
 
+            let recovery = try V2MembershipRecoveryRequest(identity: request.identity, fingerprint: request.fingerprint, action: .query)
+            let recovered = try await withRoomActivation(database: database, roomID: roomID) { token in
+                try await store.recover(recovery, token: token)
+            }
+            #expect(recovered == .receipt(receipt))
+            #expect(try await count("im_v2.room_events", on: sql) == 1)
+            #expect(try await count("im_v2.membership_operation_receipts", on: sql) == 1)
             #expect(replay == .receipt(receipt))
             #expect(change.membershipRevision == 1)
             #expect(membership.leftRevision == 1)

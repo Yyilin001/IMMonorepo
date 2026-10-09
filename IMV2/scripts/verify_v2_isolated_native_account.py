@@ -211,7 +211,9 @@ def main():
             ui_environment=dict(base,IMAPP_LOCAL_TWO_INSTALL_EXTERNAL_STACK='true',IMAPP_LOCAL_TWO_INSTALL_CA_PATH=str(ca),
                 IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID=args.receiver_simulator,
                 IMAPP_LOCAL_TWO_INSTALL_SENDER_SIMULATOR_ID=args.sender_simulator,
-                IMAPP_LOCAL_TWO_INSTALL_E2E_KEEP_RESULTS='true')
+                IMAPP_LOCAL_TWO_INSTALL_E2E_KEEP_RESULTS='true',
+                IMAPP_LOCAL_TWO_INSTALL_PG_PORT=str(ports['pg']),
+                IMAPP_LOCAL_TWO_INSTALL_OFFLINE_IDENTITY_PROOF='true')
             ui_log=(root/'two-install-ui.log').open('wb');logs.append(ui_log)
             ui_source=REPO/'IMApp/Scripts/verify_local_account_two_install_e2e.sh'
             success_marker='local two-install direct-and-group-message E2E: pass'
@@ -234,6 +236,8 @@ def main():
                 success_marker='local group join approval E2E: pass'
                 if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_REJECT_ONLY') == 'true':
                     success_marker='local group join rejection E2E: pass'
+                if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_GROUP_EXIT_ONLY') == 'true':
+                    success_marker='local voluntary group exit E2E: pass'
             if args.group_read_ui:
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_GROUP_READ_ONLY']='true'
                 success_marker='local group readers E2E: pass'

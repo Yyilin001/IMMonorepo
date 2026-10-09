@@ -3,6 +3,37 @@ import IMV2ClientKit
 import IMV2Core
 
 /// Content stays opaque; Liquid Glass belongs to floating controls and navigation.
+/// Explicit semantic fonts and a scrollable layout keep empty conversations
+/// readable at every supported content size, including accessibility sizes.
+struct V2ConversationEmptyState: View {
+    let title: String
+    let symbol: String
+    let description: String
+
+    var body: some View {
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 16) {
+                    Image(systemName: symbol)
+                        .font(.largeTitle).foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text(title).font(.title2.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
+                        .accessibilityIdentifier("v2.conversation.empty.title")
+                    Text(description).font(.body).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("v2.conversation.empty.description")
+                }
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, minHeight: max(0, geometry.size.height - 48))
+                .padding(24)
+            }
+        }
+    }
+}
+
 struct V2UnreadBadge: View {
     let count: UInt64
     @ScaledMetric(relativeTo: .caption2) private var diameter: CGFloat = 26

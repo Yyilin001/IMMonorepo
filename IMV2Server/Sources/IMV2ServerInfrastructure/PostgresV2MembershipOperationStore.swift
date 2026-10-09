@@ -110,18 +110,21 @@ public struct PostgresV2MembershipOperationStore:Sendable {
         guard identitySnapshot.actorUserID==intent.actorUserID,identitySnapshot.targetUserID==intent.targetUserID else { throw V2MembershipOperationValidationError.invalidIntent }
         guard identitySnapshot.actorIsActive else { return .failure(.permissionDenied) }
         if intent.action == .add,!identitySnapshot.targetIsActive { return .failure(.targetUnavailable) }
-        guard let row=try await sql.raw("SELECT room_kind AS kind,membership_revision FROM im_v2.rooms WHERE room_id=\(bind:intent.roomID.uuidValue!) FOR UPDATE").first(decoding:RoomRow.self) else { return .failure(.roomNotFound) }
+        guard let row=try await sql.raw("SELECT r.room_kind AS kind,r.membership_revision,g.owner_user_id FROM im_v2.rooms r LEFT JOIN im_v2.group_rooms g ON g.room_id=r.room_id WHERE r.room_id=\(bind:intent.roomID.uuidValue!) FOR UPDATE OF r").first(decoding:RoomRow.self) else { return .failure(.roomNotFound) }
         guard row.kind=="group",row.membership_revision>=0,let actor=try await activeMember(intent.actorUserID,intent:intent,revision:row.membership_revision,sql:sql),let role=V2RoomMembershipRole(rawValue:actor.role) else { return .failure(.permissionDenied) }
-        let required:V2GroupPermission=intent.action == .add ? .inviteMembers:.removeMembers
-        let configured=try await v2ResolvedGroupPermissions(roomID:intent.roomID.uuidValue!,role:role,sql:sql)
-        guard V2GroupPermissionDefaults.allows(role:role,permission:required,configured:configured) else { return .failure(.permissionDenied) }
+        let isSelfExit = intent.action == .remove && intent.actorUserID == intent.targetUserID
+        if !isSelfExit {
+            let required:V2GroupPermission=intent.action == .add ? .inviteMembers:.removeMembers
+            let configured=try await v2ResolvedGroupPermissions(roomID:intent.roomID.uuidValue!,role:role,sql:sql)
+            guard V2GroupPermissionDefaults.allows(role:role,permission:required,configured:configured) else { return .failure(.permissionDenied) }
+        }
         guard UInt64(row.membership_revision)==intent.expectedMembershipRevision else { return .failure(.membershipChanged(currentRevision:UInt64(row.membership_revision))) }
         let target=try await activeMember(intent.targetUserID,intent:intent,revision:row.membership_revision,sql:sql)
         switch intent.action {
         case .add:guard target == nil else { return .failure(.targetAlreadyMember) }
         case .remove:
             guard let target else { return .failure(.targetNotMember) }
-            guard target.role != "owner" else { return .failure(.permissionDenied) }
+            guard let owner = row.owner_user_id, owner != intent.targetUserID.uuidValue!, target.role != "owner" else { return .failure(.permissionDenied) }
             guard target.joined_revision>=0 else { throw V2RoomMembershipStoreError.corruptPersistenceState }
         }
         return .success(.init(revision:UInt64(row.membership_revision),targetJoinedRevision:target.map{UInt64($0.joined_revision)}))
@@ -157,6 +160,6 @@ public struct PostgresV2MembershipOperationStore:Sendable {
     }
     private func json<T:Encodable>(_ value:T) throws -> String { try v2EncodePersistenceJSON(value) }
     private struct PayloadRow:Decodable { let payload:String }
-    private struct RoomRow:Decodable { let kind:String;let membership_revision:Int64 }
+    private struct RoomRow:Decodable { let kind:String;let membership_revision:Int64;let owner_user_id:UUID? }
     private struct MemberRow:Decodable { let role:String;let joined_revision:Int64 }
 }

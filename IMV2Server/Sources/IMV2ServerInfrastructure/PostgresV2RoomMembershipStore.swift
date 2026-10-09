@@ -110,7 +110,7 @@ enum PostgresV2RoomMembershipStore {
             let actorRole = V2RoomMembershipRole(rawValue: actor.role)
         else { throw V2RoomMembershipStoreError.actorNotOwner }
         let requiredPermission: V2GroupPermission = command.action == .add ? .inviteMembers : .removeMembers
-        if actorRole != .owner {
+        if actorRole != .owner && !(command.action == .remove && actorID == targetID) {
             let configuredPermissions = try await v2ResolvedGroupPermissions(roomID: roomID, role: actorRole, sql: sql)
             guard V2GroupPermissionDefaults.allows(role: actorRole, permission: requiredPermission, configured: configuredPermissions) else { throw V2RoomMembershipStoreError.actorNotOwner }
         }
@@ -157,8 +157,8 @@ enum PostgresV2RoomMembershipStore {
             else { return .memberLimitReached }
         case .remove:
             guard let currentTarget else { return .targetNotMember }
-            // V2 初始只有一位不可转让的所有者；移除它会让群组失去授权权威。
-            guard currentTarget.role != "owner" else { throw V2RoomMembershipStoreError.actorNotOwner }
+            // 结构群主必须先转让所有权，角色投影不能绕过此边界。
+            guard group.ownerUserID != targetID, currentTarget.role != "owner" else { throw V2RoomMembershipStoreError.actorNotOwner }
             nextEligibleCount = admission.eligibleMemberCount - 1
         }
         guard v2PostgresTimestampCanEncode(group.createdAt),

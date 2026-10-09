@@ -816,6 +816,54 @@ extension V2LiveResourceAuthorTests {
         print("Live acceptance: group avatar real upload/processing/set/download/remove/recover passed.")
     }
 
+    @Test("real voluntary group exit, owner protection and original recovery",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
+    func voluntaryGroupExitAcceptance() async throws {
+        let fixture = try LiveAccountFixture(); defer { fixture.close() }
+        let owner = try await fixture.register().credentials
+        let member = try await fixture.register().credentials
+        let room = try await seedRoom(fixture, viewer: member.userID, author: owner.userID)
+        let socket = try connection(authorSupplements: false)
+        let memberSocket = try connection(authorSupplements: false)
+        do {
+            let session = try await authenticate(socket, owner)
+            let memberSession = try await authenticate(memberSocket, member)
+            let transport = V2ProtobufSyncTransport(wire: socket, protocolVersion: session.protocolVersion)
+            let memberTransport = V2ProtobufSyncTransport(wire: memberSocket, protocolVersion: memberSession.protocolVersion)
+            let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
+            let ownerClient = try V2HTTPMembershipOperationClient(baseURL: fixture.url(""),
+                credentials: ResourceLiveCredentials(value: owner), transport: http)
+            let memberClient = try V2HTTPMembershipOperationClient(baseURL: fixture.url(""),
+                credentials: ResourceLiveCredentials(value: member), transport: http)
+            let baseline = try await transport.fetchRolePolicyBaseline(roomID: room)
+            let ownerExit = try V2MembershipIntent(roomID: room, actorUserID: owner.userID,
+                operationID: .init(uuid: UUID()), targetUserID: owner.userID, action: .remove,
+                expectedMembershipRevision: baseline.membershipRevision, confirmedUntilMilliseconds: liveAcceptanceDeadline())
+            #expect(try await ownerClient.admit(ownerExit) == .currentUnavailable(.permissionDenied))
+            let intent = try V2MembershipIntent(roomID: room, actorUserID: member.userID,
+                operationID: .init(uuid: UUID()), targetUserID: member.userID, action: .remove,
+                expectedMembershipRevision: baseline.membershipRevision, confirmedUntilMilliseconds: liveAcceptanceDeadline())
+            guard case .admitted(let admission) = try await memberClient.admit(intent) else { throw ResourceLiveFailure.presentation }
+            let command = try V2MembershipOperationCommand(intent: intent, admission: admission)
+            let result = try await memberClient.submit(command)
+            guard case .receipt(let receipt) = result, case .changed(let change) = receipt.outcome else { throw ResourceLiveFailure.presentation }
+            #expect(change.membershipRevision == baseline.membershipRevision + 1)
+            #expect(try await memberClient.submit(command) == result)
+            #expect(try await memberClient.recover(command, action: .query) == result)
+            let roster = try await transport.listRoomMembers(roomID: room, cursor: nil, pageSize: 20)
+            #expect(!roster.members.contains { $0.userID == member.userID })
+            let sender = V2ProtobufMessageSendOperationClient(transport: memberTransport, connection: memberSocket)
+            let forbidden = try V2MessageSendOperationCommand(command: .init(roomID: room, senderUserID: member.userID,
+                clientMessageID: .init(uuid: UUID()), text: "Must fail after voluntary exit", limits: .init(maxUTF8Bytes: 4096)),
+                firstSubmissionDeadlineMilliseconds: liveAcceptanceDeadline())
+            guard case .receipt(let denial) = try await sender.submit(forbidden), case .rejected = denial.outcome else {
+                Issue.record("Member could send after voluntary exit"); throw ResourceLiveFailure.presentation
+            }
+            await memberSocket.disconnect(); await socket.disconnect()
+        } catch { await memberSocket.disconnect(); await socket.disconnect(); throw error }
+        print("Live acceptance: voluntary exit, original replay/recovery and immediate send denial passed.")
+    }
+
     @Test("real moderation, member mute and removal with persisted recovery",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_LIVE_EXTENDED_ACCEPTANCE"] == "1"))
     func moderationAcceptance() async throws {

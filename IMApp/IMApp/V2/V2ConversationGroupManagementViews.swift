@@ -325,6 +325,7 @@ struct V2GroupMembersSheet: View {
     @Bindable var store: V2ConversationDetailStore
     @Environment(\.dismiss) private var dismiss
     @State private var newMemberUserID = ""
+    @State private var confirmsLeave = false
     @State private var membershipChangeTask: Task<Void, Never>?
     @State private var moderationTask: Task<Void, Never>?
     @State private var pendingModeratedRemoval: V2GroupMemberItem?
@@ -432,6 +433,16 @@ struct V2GroupMembersSheet: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("v2.group.member.\(member.id)")
                 }
+                if store.canLeaveGroup {
+                    Section {
+                        Button("退出群聊", role: .destructive) { confirmsLeave = true }
+                            .disabled(store.isChangingGroupMembership || store.isApplyingGroupModeration)
+                            .accessibilityIdentifier("v2.group.members.leave")
+                    }
+                } else if store.groupActorRole == "群主" {
+                    Text("请先转让群主，再退出群聊。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
                 if store.canLoadMoreGroupMembers {
                     Button("加载更多") { Task { await store.loadGroupMembers() } }
                         .disabled(store.isLoadingGroupMembers)
@@ -468,6 +479,13 @@ struct V2GroupMembersSheet: View {
                         .accessibilityValue(store.isLoadingGroupMembers ? "正在读取成员" : "")
                 }
             }
+            .alert("确认退出群聊？", isPresented: $confirmsLeave) {
+                Button("退出群聊", role: .destructive) { runLeaveGroup() }
+                    .accessibilityIdentifier("v2.group.members.leave.confirm")
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("退出后将不能接收或发送该群的新消息。")
+            }
             .task { await store.loadGroupMembers(reset: true) }
             .sheet(item: $pendingModeratedRemoval) { member in
                 V2GroupMemberRemovalConfirmation(key: (try? UserID(member.id)).flatMap(store.groupPresentationKey)) {
@@ -477,6 +495,15 @@ struct V2GroupMembersSheet: View {
             }
         }
         .authorPresentationPage(context: .list(profilePageID))
+    }
+
+    private func runLeaveGroup() {
+        guard membershipChangeTask == nil else { return }
+        membershipChangeTask = Task {
+            _ = await store.leaveGroup()
+            guard !Task.isCancelled else { return }
+            membershipChangeTask = nil
+        }
     }
 
     private func runMembershipChange(target: String, action: V2RoomMembershipAction) {

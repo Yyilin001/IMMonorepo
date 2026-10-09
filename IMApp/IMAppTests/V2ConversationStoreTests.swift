@@ -1913,6 +1913,27 @@ struct V2ConversationStoreTests {
         #expect(store.groupMemberFeedback == nil)
     }
 
+    @Test(arguments: ["成员", "管理员", "群主"])
+    func selfExitUsesAccountIdentityWithoutRequiringOwnPagedRow(role: String) async {
+        let reader = V2GroupMemberDirectoryFake(pages: [nil: .init(membershipRevision: 8,
+            actorRole: role, members: [.init(id: "member-a", role: "成员")], nextCursor: nil)])
+        let changer = V2GroupMembershipChangerFake(result: .accepted)
+        let store = makeConversationDetailStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            sender: nil, userID: "current-user", roomID: "room-group", kind: .group,
+            groupMemberDirectory: reader, groupMembershipChanger: changer)
+        await store.loadGroupMembers(reset: true)
+        #expect(store.canLeaveGroup == (role != "群主"))
+        let saved = await store.leaveGroup()
+        #expect(saved == (role != "群主"))
+        let requests = await changer.requests()
+        if role == "群主" { #expect(requests.isEmpty) }
+        else {
+            #expect(requests == [.init(roomID: "room-group", targetUserID: "current-user", action: .remove, expectedMembershipRevision: 8)])
+            #expect(!store.canLeaveGroup)
+            #expect(store.groupMemberFeedback == "已退出群聊。")
+        }
+    }
+
     @Test func groupMembershipChangeAllowsOnlyOneInFlightCommand() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let page = V2GroupMemberPage(

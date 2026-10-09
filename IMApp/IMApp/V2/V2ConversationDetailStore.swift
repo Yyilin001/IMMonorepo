@@ -2105,6 +2105,21 @@ final class V2ConversationDetailStore {
         !groupMemberDirectoryIsStale && !isLoadingGroupMembers && (groupActorRole == "群主" || groupActorRole == "管理员")
     }
 
+    var canLeaveGroup: Bool {
+        !groupMemberDirectoryIsStale && !isLoadingGroupMembers && groupMemberRevision != nil
+            && (groupActorRole == "成员" || groupActorRole == "管理员")
+    }
+
+    private func canConfirmMembership(target: String, action: V2RoomMembershipAction) -> Bool {
+        if action == .add { return canAddGroupMembers }
+        if target == userID { return canLeaveGroup }
+        return groupMembers.first(where: { $0.id == target }).map(canRemoveGroupMember) ?? false
+    }
+
+    @discardableResult func leaveGroup() async -> Bool {
+        await changeGroupMembership(targetUserID: userID, action: .remove)
+    }
+
     func canRemoveGroupMember(_ member: V2GroupMemberItem) -> Bool {
         guard !groupMemberDirectoryIsStale, !isLoadingGroupMembers, member.id != userID, member.role != "群主" else { return false }
         return groupActorRole == "群主" || groupActorRole == "管理员"
@@ -2267,9 +2282,20 @@ final class V2ConversationDetailStore {
             for try await pending in await manager.membershipUpdates(roomID:room) {
                 try Task.checkCancellation();membershipPending=pending
                 let committed=Set(pending.filter{$0.work?.execution == .committed}.map(\.id))
-                let changed = !committed.subtracting(observed).isEmpty
+                let observedBefore = observed
+                let changed = !committed.subtracting(observedBefore).isEmpty
                 observed=committed
-                if changed { await loadGroupMembers(reset:true,reason:.authorizationChanged) }
+                if changed {
+                    let selfExitCommitted = pending.contains {
+                        $0.work?.execution == .committed && $0.intent.action == .remove
+                            && $0.intent.targetUserID.rawValue == userID
+                            && !observedBefore.contains($0.id)
+                    }
+                    if selfExitCommitted {
+                        invalidateGroupMemberDirectory()
+                        groupMemberFeedback = "已退出群聊。"
+                    } else { await loadGroupMembers(reset:true,reason:.authorizationChanged) }
+                }
             }
         } catch is CancellationError {} catch { groupMemberFeedback="成员操作状态暂不可读，已保存的请求不会撤销。" }
     }
@@ -2279,7 +2305,7 @@ final class V2ConversationDetailStore {
             if pending.work != nil { try await manager.resumeMembership(id:pending.id) }
             else {
                 guard !groupMemberDirectoryIsStale,let revision=groupMemberRevision,
-                    pending.intent.action == .add ? canAddGroupMembers : (groupMembers.first(where:{$0.id==pending.intent.targetUserID.rawValue}).map(canRemoveGroupMember) ?? false)
+                    canConfirmMembership(target: pending.intent.targetUserID.rawValue, action: pending.intent.action)
                 else { groupMemberFeedback="请先刷新成员与权限，再重新确认此操作。";return }
                 let confirmation=try changer.membershipConfirmation(roomID:roomID,action:pending.intent.action,expectedMembershipRevision:revision)
                 try await manager.reconfirmMembership(id:pending.id,confirmation:confirmation)
@@ -2308,7 +2334,7 @@ final class V2ConversationDetailStore {
             groupMemberFeedback = "成员变更暂不可用。"
             return false
         }
-        guard action == .add ? canAddGroupMembers : (groupMembers.first(where:{$0.id==input}).map(canRemoveGroupMember) ?? false) else {
+        guard canConfirmMembership(target: input, action: action) else {
             groupMemberFeedback="当前成员权限不可用，请刷新后确认。";return false
         }
         isChangingGroupMembership = true
@@ -2331,10 +2357,17 @@ final class V2ConversationDetailStore {
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
-                groupMemberFeedback = nil
-                await loadGroupMembers(reset: true, reason: .authorizationChanged)
+                if action == .remove && target == userID {
+                    invalidateGroupMemberDirectory()
+                    groupMemberFeedback = "已退出群聊。"
+                } else {
+                    groupMemberFeedback = nil
+                    await loadGroupMembers(reset: true, reason: .authorizationChanged)
+                }
             case .queuedForRetry:
-                groupMemberFeedback = "成员确认已保存；两分钟窗口内核对权限，超时需重新确认。"
+                groupMemberFeedback = action == .remove && target == userID
+                    ? "退出确认已保存；正在核对原操作结果，尚未确认退出。"
+                    : "成员确认已保存；两分钟窗口内核对权限，超时需重新确认。"
             case .rejected(let code):
                 groupMemberFeedback = "成员变更被拒绝（\(code)），请刷新后重试。"
                 return false
