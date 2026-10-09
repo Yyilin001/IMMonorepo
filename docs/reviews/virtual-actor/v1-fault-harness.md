@@ -1,6 +1,6 @@
 # Room Virtual Actor 故障验证入口
 
-使用下面已经实际运行的专项入口。最初 W0 的未实现 `IMV2VAFaultProbe` / `file-v1` 脚手架已移除；它的退出码 78 从来不是故障验收证据。完整 21 项范围仍以[任务卡](../../../IMV2/docs/00-foundation/virtual-actor-task-cards.md#v1-验证与证据)和[逐项审查](final-coverage-audit.md)为准，不把某一个脚本等同于整个矩阵。
+使用下面已经实际运行的专项入口。最初 W0 的未实现 `IMV2VAFaultProbe` / `file-v1` 脚手架已移除；它的退出码 78 从来不是故障验收证据。完整 21 项范围仍以[任务卡](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/00-foundation/virtual-actor-task-cards.md#v1-验证与证据)和[逐项审查](final-coverage-audit.md)为准，不把某一个脚本等同于整个矩阵。
 
 | 入口 | 实际边界 | 证据 |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 # B17 房间订阅实施合同
 
-目标是[47 项修复方案](archive/2026-09-05-system-remediation-plan.md)中的完整 B17：页面不离开也能在新连接恢复实时更新、多 scene 共用订阅、旧取消不撤销新意图、退群/关页面后收敛。本文记录已接入的 App/runtime 路径及验证边界；真机网络切换和生产证书另由 E01/E04 验收。
+目标是[47 项修复方案](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/2026-09-05-system-remediation-plan.md)中的完整 B17：页面不离开也能在新连接恢复实时更新、多 scene 共用订阅、旧取消不撤销新意图、退群/关页面后收敛。本文记录已接入的 App/runtime 路径及验证边界；真机网络切换和生产证书另由 E01/E04 验收。
 
 ## 当前组件
 

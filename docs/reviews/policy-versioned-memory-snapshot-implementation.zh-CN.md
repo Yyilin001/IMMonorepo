@@ -56,7 +56,7 @@ Gateway 和权威快照缓存默认各保留最多 32,768 个 scope，LRU 淘汰
 - 新旧 Policy RPC 权限验证：4 项（含参数化场景）、1 个 suite，通过，同一日志。
 - 消息准备、发送、回放、策略修改及房间隔离：5 项（含参数化场景）、1 个 suite，通过；日志 `/tmp/imv2-snapshot-final-room-tests.log`。
 - 共 18 项相关测试通过。没有运行整个仓库的全套测试。
-- R26 全部 10,000 连接 ready；1,000 msg/s 在约 20 秒因重试耗尽停止，未完成 60 秒，只有 2/12 客户端报告。消息 Owner 正文仍约 35.832 ms；整体吞吐尚未达标。详见 [压测报告及限制](performance-policy-versioned-snapshot-10000-online-1000msg-20261006.md)。
+- R26 全部 10,000 连接 ready；1,000 msg/s 在约 20 秒因重试耗尽停止，未完成 60 秒，只有 2/12 客户端报告。消息 Owner 正文仍约 35.832 ms；整体吞吐尚未达标。详见 [压测报告及限制](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/performance-policy-versioned-snapshot-10000-online-1000msg-20261006.md)。
 - R25 的源端口冲突启动失败已排除；有效 R26 的所有进程已结束，没有强制 kill，但两个 Gateway 出现连接 drain 超时退出 1。测试和压测 PostgreSQL 均已停止。
 
 

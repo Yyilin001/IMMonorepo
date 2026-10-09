@@ -51,7 +51,7 @@ python3 IMV2/scripts/run_v2_actor_realtime_benchmark.py \
 
 ## Account HTTPS 接入补充
 
-Runner 的 `--baseline-account-binary` 和 `--candidate-account-binary` 必须分别指向两版 Release `IMV2AccountServerApp`。历史 r1–r10 的消息发送固定使用 Account HTTP，不能代表当前 App 的消息路径。当前 common Loader 在既有 TLS/TCP 连接上协商并发送 `messageSendOperation`；`--account-base-url` 仅保留用于工具中的其他 Account 操作。Account caller 使用独立 Actor 身份。当前 App 的 `V2RoutedMessageSendOperationClient` 提交和结果恢复均使用 TCP；缺少就绪会话或超出协商载荷限制时返回明确错误，由持久工作流保留原身份处理，不存在消息 HTTP 自动回退。真实 App 持久 outbox 和跨 Gateway 多设备验证另见[实施证据](../../../docs/reviews/actor-realtime-routing-evidence.md)，不能以 Loader 重连代替。
+Runner 的 `--baseline-account-binary` 和 `--candidate-account-binary` 必须分别指向两版 Release `IMV2AccountServerApp`。历史 r1–r10 的消息发送固定使用 Account HTTP，不能代表当前 App 的消息路径。当前 common Loader 在既有 TLS/TCP 连接上协商并发送 `messageSendOperation`；`--account-base-url` 仅保留用于工具中的其他 Account 操作。Account caller 使用独立 Actor 身份。当前 App 的 `V2RoutedMessageSendOperationClient` 提交和结果恢复均使用 TCP；缺少就绪会话或超出协商载荷限制时返回明确错误，由持久工作流保留原身份处理，不存在消息 HTTP 自动回退。真实 App 持久 outbox 和跨 Gateway 多设备验证另见[实施证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/actor-realtime-routing-evidence.md)，不能以 Loader 重连代替。
 
 TCP 请求重试保存原 operation identity/fingerprint、冻结首次提交期限和总尝试预算。明确匹配请求的 `SERVER_BUSY` 是前置准入拒绝，客户端保持被拒绝请求的原 submit/query/close 动作；query 被拒绝不证明先前 submit 未执行。`UNAVAILABLE` 与传输超时保持未知并查询持久结果；查询返回 `unresolved` 且首次提交期限仍有效时，才允许同 ID 重提，过期进入 closeIfAbsent。业务 `deferred` 同样保持本次动作。服务端重试下限作为最早时刻，再加不超过剩余总预算的指数随机窗口，避免所有客户端在下限到期同时重试。Loader 与生产策略公式一致，但各自使用单调时钟与持久日期，测试和正式对照必须使用相同新版 common Loader；旧版数据保留其原 hash，不跨版本计算性能比例。
 
@@ -367,7 +367,7 @@ sync SERVER_BUSY是此前的工作错误，不能替代真实终止原因。
 所有owned服务/PG已停，原PG1995保留，原5000与80%门槛未接受。
 
 完整时序、采样边界、源码链与原始日志见
-[本轮诊断证据](../../../docs/reviews/actor-realtime-routing-evidence.md)。
+[本轮诊断证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/actor-realtime-routing-evidence.md)。
 
 
 ### r70生产寻址窗口与最终收敛
@@ -376,7 +376,7 @@ sync SERVER_BUSY是此前的工作错误，不能替代真实终止原因。
 
 独立`hotpath-address-sql-proof.json`在共同rate-1000 phase内取6个完整六节点实际HTTP采集窗口：publishSettled增27042，route_lookup与realtime_owner_snapshot来源四phase SQL计数增量各0、边界active总数0。这个结果仅覆盖特定寻址来源，排除授权/注册、恢复头、持久化和租约SQL；旧routeQueries零值及ACK量单独都不能证明它。离线工具不改原quality或回填历史结果，旧记录缺实际read时间、缺节点、计数重置或有效窗口不足10000发布均为incomplete。
 
-r71正式50k/1000仍在根代理独占运行，原checkpoint180秒+90秒消息及资源不变；此处不预写终态。10k结果不能代替50k/5000或同规格基线至少80%门槛。详见[实测证据](../../../docs/reviews/actor-realtime-routing-evidence.md)。
+r71正式50k/1000仍在根代理独占运行，原checkpoint180秒+90秒消息及资源不变；此处不预写终态。10k结果不能代替50k/5000或同规格基线至少80%门槛。详见[实测证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/actor-realtime-routing-evidence.md)。
 
 ### 写连接等待的请求窗口归因
 

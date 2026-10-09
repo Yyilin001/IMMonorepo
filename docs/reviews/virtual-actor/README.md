@@ -2,7 +2,7 @@
 
 2026-09-24 按用户要求先完成功能、暂缓性能调优，**Room Virtual Actor 本轮功能落地已完成**。业务入口、生命周期与房间写者已接入；[#19 单 owner 故障批查询](g5-owner-fault-functional-evidence.md)和[最新冻结源码的完整 Linux/Vapor 5 回归](g5-linux-regression-evidence.md)通过。首次完整回归曾出现未定位的测试进程停滞，同产物隔离复现及第二次完整回归均通过；原失败与诊断保留，不称根因已修复。
 
-业务基线固定为 `f1cdd78d6a21bf0ae23da627c0710c65115236aa`（Vapor 5 beta.2 / Swift 6.4）；原工作目录未提交的 Distributed Actor 改动不参与。子代理统一 GPT-6 Sol / High。整体设计见[并行实施方案](../../../IMV2/docs/00-foundation/virtual-actor-parallel-plan.md)，当前行为以[房间 Virtual Actor 合同](../room-virtual-actor-contract.md)为准。
+业务基线固定为 `f1cdd78d6a21bf0ae23da627c0710c65115236aa`（Vapor 5 beta.2 / Swift 6.4）；原工作目录未提交的 Distributed Actor 改动不参与。子代理统一 GPT-6 Sol / High。整体设计见[并行实施方案](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/00-foundation/virtual-actor-parallel-plan.md)，当前行为以[房间 Virtual Actor 合同](../room-virtual-actor-contract.md)为准。
 
 ## 功能实现与验证
 

@@ -560,7 +560,7 @@ bash scripts/verify_v2.sh
 
 - 日期：2026-09-13
 - 主题：当前 Release 私聊、标准群和 10 万人大群固定负载
-- 证据：[实测报告与限制](archive/room-log-fixed-load-2026-09-13.md)
+- 证据：[实测报告与限制](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/room-log-fixed-load-2026-09-13.md)
 - 结果：每轮 800 条计划消息全部确认，最终排空，无逐用户正文；不代表容量上限或完整故障恢复验收。
 
 ### 20260907-session-absolute-expiry
@@ -933,7 +933,7 @@ limit 加一上界核对，详见[整数入口清单](message-projection-integer
 当前源码核对确认：SendMessage 没有服务端可验证的旧操作期限/代次，35 天常量只是最短保留期；
 `v2ForwardSourceVisibility` 同时依赖接受记录中的 accepted_membership_revision 作为历史授权事实。
 因此安全 GC 需要同时解决旧操作拒绝和仍存活内容的授权依赖，不能直接加一条按年龄 DELETE。
-现行合同已从历史 v1/v2 实施记录分离，见[接受记录保留与清理](send-completion-retention.md)。
+现行合同已从历史 v1/v2 实施记录分离，见[接受记录保留与清理](message-send-contract.md)。
 
 扩展 `sendCompletionIsIndependentOfMutableContent`：完成编辑、撤回、正文删除后，将维护时刻设为
 最短服务端保留期加一天，调用真实控制面维护工作器；检查接受事实不变、重发仍返回原回执、六类

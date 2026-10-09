@@ -28,7 +28,7 @@
 
 当前新库直接创建邀请目录及其约束、不可变触发器。旧结构回填和版本升级脚本已移除；正常目录写入与持久恢复仍由当前服务执行。
 
-回填保持 owner 原始记录不变，active、expired、revoked 都登记 ready。独立 owner 上的历史链接须通过后续 schema 25 的[审计导入入口](group-invite-directory-import-contract.md)显式导入 control、核验冲突与覆盖率；本迁移不会跨数据库自行发现它们。路由启用前必须完成导入。owner 历史成员区间、D05 审计与旧操作阻断的迁移不属于目录数据，仍必须完整迁移后才能开放写入。
+回填保持 owner 原始记录不变，active、expired、revoked 都登记 ready。独立 owner 上的历史链接须通过后续 schema 25 的[审计导入入口](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/group-invite-directory-import-contract.md)显式导入 control、核验冲突与覆盖率；本迁移不会跨数据库自行发现它们。路由启用前必须完成导入。owner 历史成员区间、D05 审计与旧操作阻断的迁移不属于目录数据，仍必须完整迁移后才能开放写入。
 
 readiness 的 Swift 与 SQL 两个入口同时检查列类型/非空、三个非延迟有效唯一键、六个完整 CHECK、无外键、触发器类型/启用状态及函数体 SHA-256。仅表名或 schema 版本正确不足以启动。
 

@@ -222,26 +222,13 @@ evidence remains local-stack coverage, not a production deployment approval.
   Room cursors recover content. Personal state continues through the durable
   user-state event outbox and user projection. Neither path uses the retired
   direct fan-out selectors or delivery-plan tables.
-- PostgreSQL durable polling remains the correctness path. When the current
-  `IM_V2_GROUP_WAKE_NATS_*` configuration is enabled, NATS supplies only
-  best-effort room and live-activity hints. Loss or duplication does not
-  determine acceptance, authorization or cursor progress. The
-  [room-log operations](../IMV2/docs/10-operations/direct-room-log-command-credit-runbook.md)
-  and [observability guide](../IMV2/docs/10-operations/observability.md)
-  describe the active worker and hint boundaries.
-- Groups use the existing authenticated TLS/protobuf connection rather than
-  WebSocket or one-second foreground polling. An active detail view sends a
-  room subscription, receives a metadata-only availability frame, then pulls
-  authorized room events. Both `standard` and `large` capacity classes retain
-  durable room cursors. Best-effort hints trigger pulls and never replace
-  persisted room history or advance the cursor themselves.
-  In a multi-Gateway deployment set
-  `IM_V2_GROUP_WAKE_NATS_URL`, `...SUBJECT_PREFIX`, `...TOKEN`, and
-  `...ROUTING_KEY_BASE64` on every replica. The routing key derives opaque HMAC
-  room subjects and a distinct payload-authentication key. Every live payload
-  MAC is bound to its actual NATS subject, so a broker credential cannot forge
-  or move a captured event across subjects. NATS loss or duplication only
-  delays visibility because the room cursor remains authoritative.
+- Room Owner / Relay uses signed Actor delivery to reach the Gateway that owns
+  an authenticated device connection. Account membership coverage is distinct
+  from detail-view subscriptions. Public content recovery uses durable room
+  cursors; live delivery never replaces persisted history or proves local apply.
+  NATS and its former room-wake configuration are retired. See the
+  [Relay implementation](../docs/reviews/room-subscription-relay-implementation.zh-CN.md)
+  and [account membership coverage](../docs/reviews/account-membership-incremental-audit.md).
 - `IM_V2_DURABLE_RETRY_*` is an explicit exponential-backoff budget for that
   path. The initial/max delays, attempt budget and 0–100% jitter are required
   deployment inputs. Exhausted work becomes alertable `paused` durable work;

@@ -2,9 +2,9 @@
 
 Audited against clean business commit `f1cdd78d6a21bf0ae23da627c0710c65115236aa`. This is an **entry and table inventory**, not evidence that an Actor or activation fence currently exists. `owner route` below means the existing `room_owner_routes`/ownerEpoch check; R1 must add activation token validation in the **same transaction**, with room lock held until commit. A table containing `room_id` is not automatically room authority; the last section records control/projection exceptions. All rows need integration and fault evidence before G4.
 
-The table preserves the original baseline findings. Current implementation routing and remaining verification are recorded below; a baseline description such as “no activation token” does not describe the integrated candidate.
+The table preserves historical baseline findings and writer IDs used by the static inventory. It is not a current production entry-point map. Current send behavior is defined by the [message send contract](../message-send-contract.md); the retired command-credit pools are not active writers. Other paths require current source verification before governance changes.
 
-## Resource subsystem addition (not yet exposed by HTTP/App)
+## Resource subsystem entry
 
 | ID / implementation entry | Writer and effects | Authorization, fence and current evidence |
 | --- | --- | --- |

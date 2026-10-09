@@ -199,7 +199,7 @@ TLS 两命令自协议 33 引入独立 `PersonalPreferenceReceipt`（envelope fi
 
 ### 普通消息发送、编辑与撤回（current57 / protocol35）
 
-普通生产写入口采用 `V2MessageSendOperationCommand`、`V2MessageEditOperationCommand`、`V2MessageWithdrawalOperationCommand`。发送保留 domain v3，公共 v1 包装稳定身份与首次截止；编辑／撤回绑定目标消息和 expected revision。发送首次窗口最多二十四小时，编辑／撤回十分钟；重放原结果不受首次截止影响。永久最小回执与原正文投影分开，提交／query／close 经 RoomRef 共操作锁与 activation fence；不支持旧 DTO fallback。具体领域边界见 [发送合同](../reviews/send-message-owner-fence-contract.md) 与 [变更合同](../reviews/message-mutation-owner-fence-contract.md)。reaction、forward parent 和其他普通命令的当前接线另列下文。
+普通生产写入口采用 `V2MessageSendOperationCommand`、`V2MessageEditOperationCommand`、`V2MessageWithdrawalOperationCommand`。发送保留 domain v3，公共 v1 包装稳定身份与首次截止；编辑／撤回绑定目标消息和 expected revision。发送首次窗口最多二十四小时，编辑／撤回十分钟；重放原结果不受首次截止影响。永久最小回执与原正文投影分开，提交／query／close 经 RoomRef 共操作锁与 activation fence；不支持旧 DTO fallback。具体领域边界见 [发送合同](../reviews/message-send-contract.md) 与 [变更合同](../reviews/message-mutation-owner-fence-contract.md)。reaction、forward parent 和其他普通命令的当前接线另列下文。
 
 Reaction 已在 current58/protocol36 增补 typed own-key baseline、expectedReactionRevision、24 小时首次截止及永久原回执 query/close。每个新成功操作推进 key revision，包括目标已满足时；未知结果不能用当前聚合集合代替原证明。生产写经 RoomRef HTTP 端点，旧无截止 TLS 写入口已删除，保留同步事实。
 

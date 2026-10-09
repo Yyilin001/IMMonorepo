@@ -30,7 +30,7 @@ Gateway 的房间命令、Account 的群昵称/邀请/消息媒体授权，以�
 
 Directory 的只读位置 lookup 每跳最多等待 3 秒，已有更短截止优先。旧物理地址无响应后重新读取权威租约；超时不证明租约失效，也不允许抢占有效租约。激活、业务写和未知结果核对保留各自原有期限，已经派发的底层 RPC 仍追踪到实际完成。
 
-只读或带稳定操作 ID 的持久幂等 `RoomRef.call` 可复用已确认的本机或远端物理引用，省略重复位置lookup；纯state集合读取按缓存的完整token与物理Host分组。实际派发前核对descriptor、会话、capability和reference generation；明确位置失效仅精确撤销匹配缓存并进入有界singleflight，超时或busy不证明远端已死亡。公开resolve或预约等显式确认路径仍保留其严格要求；共享等待者中的严格要求即使取消也不降低。冷位置解析及结果未知恢复保留原权限、期限和实际排空限额。历史本机能力验证见[本机缓存调用证据](virtual-actor/r3-local-capability-evidence.md#仅限本机的缓存调用)，当前远端缓存与生产阶段证据见[实时路由实施证据](actor-realtime-routing-evidence.md)。
+只读或带稳定操作 ID 的持久幂等 `RoomRef.call` 可复用已确认的本机或远端物理引用，省略重复位置lookup；纯state集合读取按缓存的完整token与物理Host分组。实际派发前核对descriptor、会话、capability和reference generation；明确位置失效仅精确撤销匹配缓存并进入有界singleflight，超时或busy不证明远端已死亡。公开resolve或预约等显式确认路径仍保留其严格要求；共享等待者中的严格要求即使取消也不降低。冷位置解析及结果未知恢复保留原权限、期限和实际排空限额。历史本机能力验证见[本机缓存调用证据](virtual-actor/r3-local-capability-evidence.md#仅限本机的缓存调用)，当前远端缓存与生产阶段证据见[实时路由实施证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/actor-realtime-routing-evidence.md)。
 
 ## 顺序、微批与失败语义
 

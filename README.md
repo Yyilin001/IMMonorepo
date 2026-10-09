@@ -19,7 +19,7 @@ cache participates in this path.
 - [Documentation entry](docs/README.md): start here — current state, current
   contracts, and where history is archived.
 - [Current V2 architecture](docs/current-system-map.md): component boundaries,
-  durable delivery path, group semantics and NATS limitations.
+  durable delivery path, group semantics and signed Actor delivery.
 - [Current contracts index](docs/reviews/README.md): which document is the
   authoritative contract for each topic.
 - [Problem status](docs/reviews/status.md): which of the 47 tracked issues are

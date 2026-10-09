@@ -210,7 +210,7 @@ PostgresV2RoomLatestVisibleStore 现使用单条最新候选权限探测；不�
 
 服务端第二轮全量仍在原进程运行，尚未据此报告通过。
 
-更新：2026-09-13。目标仍未完成。设计要求见 [实施方案](client-owned-conversation-sync-plan.md)，阶段性日志见 [历史证据](archive/client-owned-conversation-sync-progress-2026-09-13.md)。历史记录中的“待完成”只代表对应阶段；以下未验证项仍是交付门禁。
+更新：2026-09-13。目标仍未完成。设计要求见 [实施方案](client-owned-conversation-sync-plan.md)，阶段性日志见 [历史证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/client-owned-conversation-sync-progress-2026-09-13.md)。历史记录中的“待完成”只代表对应阶段；以下未验证项仍是交付门禁。
 
 ## 已有实现及证据范围
 
@@ -352,7 +352,7 @@ xcresult summary：240 passed、0 failed、1 skipped（包含参数展开时设�
 
 目标：按 [实施方案](client-owned-conversation-sync-plan.md) 完整落地；不保留历史兼容路径。**目标尚未完成。** 本页按方案十项验收要求组织，局部通过不等于整项完成。
 
-过程、失败和实验原始记录完整保留于 [2026-09-13 证据记录](client-owned-conversation-sync-evidence-2026-09-13.md) 与 [早期实施记录](archive/client-owned-conversation-sync-progress-2026-09-13.md)。历史“运行中”不能覆盖本页终态。
+过程、失败和实验原始记录完整保留于 [2026-09-13 证据记录](client-owned-conversation-sync-evidence-2026-09-13.md) 与 [早期实施记录](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/client-owned-conversation-sync-progress-2026-09-13.md)。历史“运行中”不能覆盖本页终态。
 
 ## 当前正在执行
 

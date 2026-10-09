@@ -47,7 +47,7 @@ Accepted — 2026-09-03；审批事务修订 — 2026-09-06；申请取消修订
 新路径不产生 `approving`。旧的 `approving` 继续占用邀请码和申请人名额，普通审批入口返回冲突；现有独立 operator
 恢复入口按确切成员 operation 和完整历史区间判断，同事务保存审计与必要的旧操作阻断。
 结果不确定则隔离，不能凭当前成员资格释放或结算。详见
-[恢复合同](../../../docs/reviews/group-approval-recovery-contract.md)。B23 已在 schema 39 接入 control 全局预留、owner 回执与恢复，
+[恢复合同](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/group-approval-recovery-contract.md)。B23 已在 schema 39 接入 control 全局预留、owner 回执与恢复，
 见[全局配额合同](../../../docs/reviews/group-join-global-quota-contract.md)。B27 的完整房间迁移仍开放；账户库不因此成为所有群的 owner。
 
 schema 21 在 20 的决策唯一约束上新增不可变恢复审计和旧操作阻断。schema 20 增加 `(decided_by_user_id, decision_operation_id)` 唯一约束。19→20 迁移要求

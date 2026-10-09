@@ -42,6 +42,6 @@ B26 的目标 owner 路由与真实 HTTP/进程生命周期组合仍待验证；
 
 新代码不产生 approving，但旧 approving 继续占额度且普通接口返回冲突。D05 必须用确切成员 operation 证明成功/未提交，并提供审计恢复入口；不能通过当前成员资格结算或释放，不能盲目恢复旧审核人的操作。D06 本人撤销、过期、控制库释放和 GC 仍未实现。
 
-后续证据修订（2026-09-06）：发现通用幂等清理会删除审批引用的成员操作回执，现已增加按审核人＋操作 ID 的保留条件，见[审批恢复证据合同](approval-recovery-evidence-contract.md)。原批次 manifest 保留历史源码指纹；新证据记录更新后的清理器与迁移测试链。
+后续证据修订（2026-09-06）：发现通用幂等清理会删除审批引用的成员操作回执，现已增加按审核人＋操作 ID 的保留条件，见[审批恢复证据合同](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/approval-recovery-evidence-contract.md)。原批次 manifest 保留历史源码指纹；新证据记录更新后的清理器与迁移测试链。
 
-后续实现（2026-09-06）：现有 owner 的 operator 恢复、不可变审计和旧 operation 阻断已完成并验证，见[恢复合同](group-approval-recovery-contract.md)。本文件保留对应阶段的历史验收范围；最新 schema 为 21。
+后续实现（2026-09-06）：现有 owner 的 operator 恢复、不可变审计和旧 operation 阻断已完成并验证，见[恢复合同](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/group-approval-recovery-contract.md)。本文件保留对应阶段的历史验收范围；最新 schema 为 21。

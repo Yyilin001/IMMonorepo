@@ -1,7 +1,7 @@
 # IM V2 当前设计与实现问题总表
 
 > **这是判断"哪些问题还开着"的唯一文档。**
-> 逐批追加的验证过程已移出到 [历史时间线](archive/2026-09-05-remediation-timeline.md)；
+> 逐批追加的验证过程已移出到 [历史时间线](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/2026-09-05-remediation-timeline.md)；
 > 某个主题当前生效的设计合同见 [合同索引](README.md)。
 >
 > **最后定向校正：2026-09-25；核对对象为 `main` 的 `6597d53b`。**
@@ -121,7 +121,7 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 | B08 | P1 | 认证失效后退出流程依赖已删除的凭据 | 实施中 | 退出持久标记、独立撤销队列、签发取消及旧档案清理已接通；已有真实 HTTPS、Keychain 和受控 App 进程中断恢复记录。剩余：真机强杀/锁屏/系统后台、退出/换号全部检查点、冲突与记录保留/GC；后续一般登录成功不替代这些组合验收。 |
 | B09 | P1 | 刷新凭据的终止错误未映射成重新登录 | 已验证 | 业务 HTTP 统一接入认证代次与刷新判定，Gateway 的认证拒绝不再退化为裸 EOF。部署类证据按 E 类跟踪。 |
 | B10 | P1 | 邀请预览与实际提交 token 可指向不同群 | 已验证 | 预览与 secret 绑定为同一 ready 状态，token 变化先撤销旧提交能力，joinGeneration 丢弃迟到结果。 |
-| B11 | P2 | 编辑/撤回后重放原 SendMessage 被误判冲突 | 实施中 | 发送重放按不可变接受指纹比较，当前普通发送/转发统一 v3 指纹，已移除旧 targetRule；修改/撤回/清理正文后重试有回归记录；超过 35 天运行真实维护后重放与改参冲突专项通过。同库转发绑定曾被通用清理删除，导致迟到重试重复发送；现已移出过期清理，见[复现与回归](verification-records.md#20260920-forward-operation-retention)。剩余：完成记录的保留/GC 与重试窗口及写入成本证据；当前没有旧发送的服务端过期拒绝边界，来源授权也依赖接受成员修订，35 天不能直接作为删除期限，见[保留合同](send-completion-retention.md)。不以恢复旧指纹版本为关闭条件。 |
+| B11 | P2 | 编辑/撤回后重放原 SendMessage 被误判冲突 | 实施中 | 发送重放按不可变接受指纹比较，当前普通发送/转发统一 v3 指纹，已移除旧 targetRule；修改/撤回/清理正文后重试有回归记录；超过 35 天运行真实维护后重放与改参冲突专项通过。同库转发绑定曾被通用清理删除，导致迟到重试重复发送；现已移出过期清理，见[复现与回归](verification-records.md#20260920-forward-operation-retention)。剩余：完成记录的保留/GC 与重试窗口及写入成本证据；当前没有旧发送的服务端过期拒绝边界，来源授权也依赖接受成员修订，35 天不能直接作为删除期限，见[保留合同](message-send-contract.md)。不以恢复旧指纹版本为关闭条件。 |
 | B12 | P2 | 房间追赶的一轮预算耗尽后不继续 | 已验证 | 原单轮预算耗尽后丢弃剩余工作的触发点已修；当前由 V2RoomRecoveryRunner/Engine 和持久待办接替已删除的 V2RoomLogCatchUpWorker，前台继续调度，后台有界运行留待下次恢复。受控取消续跑已有 SQLite 记录；系统后台期限仍由 D03 跟踪。 |
 | B13 | P2 | 并发 flush 同时取到同一 pending 命令 | 已验证 | 各 outbox 共用 `V2CommandFlushFlight` actor 单飞，终态结果幂等提交。 |
 | B14 | P2 | 取消单个请求会把迟到响应升级为整条 TLS 失败 | 已验证 | `cancelRequest` 保留 cancelledOnWire 关联项（continuation 置空但不删除），迟到响应被匹配后清理，不再升级为整条连接失败。 |
@@ -170,7 +170,7 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 | B03/B12 房间恢复 | [Runner](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RoomRecoveryRunner.swift)、[Engine](../../IMV2ClientKit/Sources/IMV2ClientKit/V2RoomRecoveryEngine.swift)、[持久待办](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2RoomRecoveryStore.swift) | [验收矩阵](client-owned-conversation-sync-acceptance.md)、[事务边界](client-owned-conversation-sync-transaction-audit.md)、[规模结果](client-owned-conversation-sync-scale-results.md)；原单轮预算问题已修，完整恢复目标仍开放 |
 | B06 成员与角色 | [本地 reducer](../../IMV2ClientKit/Sources/IMV2ClientKit/GRDBV2LocalSyncStore.swift) 的 applyMembershipAwareRoomProjection / applyGroupCapability | 本人 membership 状态保留撤销版本，新的授予同时创建待办；其他成员 add/remove/role 按独立持久来源历史归并，快照保留撤销事实并拒绝冲突；缺失历史时的权威基线与代次组合仍开放 |
 | B04/B11 转发与接受记录 | [Actor 转发协调器](../../IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorForwardingCoordinator.swift)、[接受记录](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2SendCompletion.swift)、[清理器](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2ControlPlaneHousekeepingWorker.swift) | [房间日志改造](room-log-only-implementation.md)记录 v3 指纹和接受回执验证；终态保留/清理不由这些记录替代 |
-| B08 退出与凭据恢复 | [App Store](../../IMApp/IMApp/V2/V2AppStore.swift)、[撤销恢复测试](../../IMV2ClientKit/Tests/IMV2ClientKitTests/V2DeviceRevocationRecoveryTests.swift) | [受控进程中断](archive/legacy-registration-app-process-contract.md)、[撤销状态](device-revocation-status-contract.md)保留真机、系统后台及 GC 边界 |
+| B08 退出与凭据恢复 | [App Store](../../IMApp/IMApp/V2/V2AppStore.swift)、[撤销恢复测试](../../IMV2ClientKit/Tests/IMV2ClientKitTests/V2DeviceRevocationRecoveryTests.swift) | [受控进程中断](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/legacy-registration-app-process-contract.md)、[撤销状态](device-revocation-status-contract.md)保留真机、系统后台及 GC 边界 |
 | B15/B16/D02–D04 生命周期 | [App runtime](../../IMApp/IMApp/V2/V2AppRealtimeRuntime.swift)、[Push reconciler](../../IMV2ClientKit/Sources/IMV2ClientKit/V2PushIntentReconciler.swift) | 后续 headless 整轮通过见[恢复验收](client-owned-conversation-sync-acceptance.md)；不等同真实 APNs、磁盘擦除或账号切换全组合通过 |
 | B23/B24/B25/B26/D06 邀请与审批 | [申请存储](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupInvitationStore.swift)、[服务接口](../../IMV2Server/Sources/IMV2ServerApplication/V2GroupInvitationService.swift)、[schema](../../IMV2/sql/schema.sql) | owner 内锁串行申请；schema 39 的 control 账本承担跨 owner 配额并保存重复操作绑定，owner 保存原子提交回执；B23 全局配额专项已通过。分页使用不可变键，审批单事务提交；申请人可取消旧 pending，终态保留重放记录 |
 | B27 owner 路由 | [Account 组装](../../IMV2Server/Sources/IMV2AccountServerApp/main.swift)、[Actor 邀请协调器](../../IMV2Server/Sources/IMV2ServerApplication/Room/Invitations/V2ActorInvitationCoordinator.swift)、[三库测试](../../IMV2Server/Tests/IMV2ServerTests/PostgresV2RoomWriteStoreIntegrationTests+GroupCapabilities.swift) | 原邀请静态 owner 路由已验证；在线搬迁不作为关闭条件 |
@@ -188,7 +188,7 @@ E 类“未开始”表示尚无对应生产发布验收的关闭证据，不否
 成员角色恢复已修改 ClientKit 生产 reducer 和当前本地 schema，148 项同步/恢复/schema 定向回归通过，见[成员持久版本证据](verification-records.md#20260919-member-ledger)；此前 App/TLS 通过早于此修改，不能充当修改后的全量证明。未重跑全仓业务套件、真实 APNs 或容量验收，未提交或部署。文档链接、结构、协议及差异检查独立执行。
 已有通过记录按其原场景和版本保留；当前未提交源码不能直接继承全部历史全量结果。
 
-详细原始触发条件见[原始审查](archive/2026-09-05-system-design-implementation-audit.md)；历史实施与运行见[修复进度](archive/2026-09-05-system-remediation-progress.md)和[验证记录](verification-records.md)。历史文档的旧路径、版本与行号不作为当前实现事实。
+详细原始触发条件见[原始审查](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/2026-09-05-system-design-implementation-audit.md)；历史实施与运行见[修复进度](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/2026-09-05-system-remediation-progress.md)和[验证记录](verification-records.md)。历史文档的旧路径、版本与行号不作为当前实现事实。
 
 2026-09-19 后续：D06 申请取消已关闭，D06 引入 schema 37；取消、审批、配额、跨库路由及 App 定向测试通过。最后新增历史索引后仅补跑对应 schema 约束门禁，详见[取消验证记录](verification-records.md#20260919-group-join-cancellation)。
 

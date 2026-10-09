@@ -72,7 +72,7 @@
 有界批次预扣 durable 额度，普通消息事务只验证当前 lease/profile fence 并消费本地已扣额度；R29
 进一步把本地 credit actor 交互收敛为每个 micro-batch 一次。两种路径都不允许 ACK-before-commit，
 也不能靠取消 durable fence 换吞吐。当前证据见
-[`R29 50,000 在线梯度记录`](../09-capacity/direct-room-log-50000-gradient-r29-2026-08-27.md)。
+[`R29 50,000 在线梯度记录`](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/09-capacity/direct-room-log-50000-gradient-r29-2026-08-27.md)。
 
 本仓库 server/profile Compose 已启用 normalized query、I/O 和 WAL timing。每个 A/B 阶段使用
 同一统计纪元的前后快照计算差值，不要清空共享数据库统计：

@@ -1,6 +1,6 @@
 # 文档入口
 
-仓库文档分三层，读的时候按层走，不要跨层找答案。
+仓库文档按当前状态、当前合同和历史证据分开维护。
 
 ## 第一层：当前状态（只有三份）
 
@@ -18,18 +18,15 @@
 每个主题的权威设计合同在 [合同索引](reviews/README.md) 里按主题列出。改代码前先在那里
 找到对应合同；改完代码要同步更新同一份合同，而不是新写一份。
 
-## 第三层：历史归档
+## 历史记录
 
-三个归档目录保存被后续修订取代的内容。它们提供决策来源，**不参与判断当前状态**，
-其中的代码行号和版本号也不保证与当前一致：
-
-| 归档目录 | 内容 |
-| --- | --- |
-| [`reviews/archive/`](reviews/archive/README.md) | 整改期的原始审查、修复方案、逐批验证记录与被替换的旧结论 |
-| [`09-capacity/archive/`](../IMV2/docs/09-capacity/archive/README.md) | 被后续修订取代的阶段性压测报告 |
-| [`00-foundation/archive/`](../IMV2/docs/00-foundation/archive/README.md) | 编号冲突或未登记的历史设计文档 |
+已被替代的设计、阶段报告与旧运维步骤从工作树删除，历史可通过 Git 查询。
+仍需追溯原测试结论时，正文使用固定提交的链接，不把旧实现和旧容量作为当前合同。
 
 ## 其他入口
+
+- [当前消息发送与结果恢复合同](reviews/message-send-contract.md)：房间顺序、内存权限、原子提交、单份成功记录和只读恢复。
+- [消息发送性能记录](reviews/send-throughput-5000-20261008.zh-CN.md)：当前 Actor 链路各轮运行条件、结果及失败边界。
 
 - [服务端解耦优化方案](proposals/server-decoupling-plan.md)：资源、HTTP/Gateway、房间执行器、消息写入及 SwiftPM 模块边界的分阶段方案；当前进度见[实施状态](proposals/server-decoupling-progress.md)。
 - [应用级弱网架构提案](proposals/application-weak-network-design.md)与[实施任务计划](proposals/application-weak-network-implementation-plan.md)：结合当前源码的目标设计；基础组件与个人资料链路已接入，完整差距见[实施状态](proposals/application-weak-network-progress.md)，全量能力尚未验收。

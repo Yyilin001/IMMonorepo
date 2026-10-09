@@ -1,6 +1,6 @@
 # 客户端会话排序与房间恢复实施方案
 
-当前实现与尚未完成的验收见 [验收状态](client-owned-conversation-sync-acceptance.md)。本文件规定目标设计；[历史实施证据](archive/client-owned-conversation-sync-progress-2026-09-13.md) 保留各阶段日志，其中早期的待办描述不代表当前状态。目标尚未完成，不能以单元测试或分层基线替代完整系统验收。
+当前实现与尚未完成的验收见 [验收状态](client-owned-conversation-sync-acceptance.md)。本文件规定目标设计；[历史实施证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/client-owned-conversation-sync-progress-2026-09-13.md) 保留各阶段日志，其中早期的待办描述不代表当前状态。目标尚未完成，不能以单元测试或分层基线替代完整系统验收。
 
 ## 1. 范围与设计决定
 

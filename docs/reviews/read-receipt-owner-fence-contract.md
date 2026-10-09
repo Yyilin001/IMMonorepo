@@ -36,4 +36,4 @@ PostgreSQL 25、protocol 25、SQLite 173/5 不变。通用发送/批量/fast app
 
 迁移须先 fence 旧 owner，再复制和切换 route；只修改 control route 不足以阻止仍与旧库 epoch 一致的旧缓存。没有新增主动 cache 失效、透明重路由、实际 TLS/App/生产迁移验收。B27 及相关 B04/B06/B11 仍保持开放。
 
-后续补充：普通发送的单条、私聊冷/暖批量与大群集合事务现已补 owner 校验，见[发送栅栏合同](send-message-owner-fence-contract.md)。后台转发导入、来源/其他读取、control 身份/策略隔离和完整迁移交接仍开放。
+后续补充：普通发送的单条、私聊冷/暖批量与大群集合事务现已补 owner 校验，见[发送栅栏合同](message-send-contract.md)。后台转发导入、来源/其他读取、control 身份/策略隔离和完整迁移交接仍开放。

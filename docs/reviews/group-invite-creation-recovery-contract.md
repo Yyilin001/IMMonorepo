@@ -1,6 +1,6 @@
 # 邀请创建后台恢复合同（B27 第三阶段）
 
-2026-09-06。Account 已接入持久恢复队列，继续执行同一创建 intent，不需要用户重新生成 token。该批补齐普通提交中断后的自动恢复；B27 的完整房间历史迁移仍未关闭；独立 owner 旧目录已接通[审计导入](group-invite-directory-import-contract.md)，B23 全局申请配额仍独立开放。
+2026-09-06。Account 已接入持久恢复队列，继续执行同一创建 intent，不需要用户重新生成 token。该批补齐普通提交中断后的自动恢复；B27 的完整房间历史迁移仍未关闭；独立 owner 旧目录已接通[审计导入](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/group-invite-directory-import-contract.md)，B23 全局申请配额仍独立开放。
 
 ## 时间与幂等输入
 

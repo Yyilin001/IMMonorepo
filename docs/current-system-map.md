@@ -25,7 +25,7 @@
 - `IMV2ServerHTTP`：认证提取、输入解码、业务接口调用及 HTTP 响应/文件流映射。
 - `IMV2Server` 与 `IMV2ActorApplication`：进程配置、具体能力接线、共享资源及启动/关闭。旧 Server 已收敛为 15 个配置和组装文件。
 
-传输层和基础设施依赖内层契约及应用逻辑；内层不依赖旧 Server。RoomWrite 的事务内路径借用连接，事务、提交结果分类及提交后额度/缓存处理由明确的所有者管理。源码边界、macOS 编译、本机 Linux 六产品构建、四种应用栈模式及 G4/G6 独立进程故障验证已通过；完整故障矩阵和性能对照仍见[验收矩阵](proposals/server-decoupling-validation.md)。
+传输层和基础设施依赖内层契约及应用逻辑；内层不依赖旧 Server。RoomWrite 的事务内路径借用连接，事务、提交结果分类及提交后内存状态/缓存处理由明确的所有者管理。源码边界、macOS 编译、本机 Linux 六产品构建、四种应用栈模式及 G4/G6 独立进程故障验证已通过；完整故障矩阵和性能对照仍见[验收矩阵](proposals/server-decoupling-validation.md)。
 
 ## 账户网络与专属安全恢复
 
@@ -39,27 +39,27 @@ protocol 43 的 `presencePublicationControl` 是保留容量的瞬时控制，AC
 
 ```mermaid
 flowchart LR
-    C["App / ClientKit 持久领域意图与 operation work"] --> G["Account HTTPS submit / recover"]
+    C["App / ClientKit 持久领域意图与 operation work"] --> G["TCP / HTTPS send submit / recover"]
     G --> V["RoomRef / Directory"]
     C --> L["TLS gateway 同步 / 查询 / 瞬时控制"]
     L --> V
     V --> H["房间 Host / FIFO turn"]
-    H --> T["PostgreSQL activation fence 原子事务"]
+    H --> T["PostgreSQL 原子提交"]
     T --> R["公共房间日志"]
     T --> P["个人状态事件与可靠 outbox"]
     P --> S["个人投影 / sync / snapshot"]
     S --> C
     R --> Q["按房间游标恢复"]
     Q --> C
-    T -.-> N["房间级唤醒 / NATS"]
+    T -.-> N["Room Owner / Relay 签名投递"]
     N -.-> A["账号级房间变化通知"]
     A --> W["客户端持久恢复待办"]
     W --> Q
     D["授权目录 / 按 ID 状态与摘要"] --> W
-    C --> L["SQLite 有效活动排序与分页"]
+    C --> O["SQLite 有效活动排序与分页"]
 ```
 
-客户端先将命令写入本地 outbox；Gateway 经 RoomRef 调用房间 Host，在 PostgreSQL 原子事务成功后确认接受。
+客户端先将命令写入本地 outbox；TCP 与 HTTPS 发送共用 RoomRef 和房间 Host，在 PostgreSQL 确认原子提交后返回接受结果。普通内存权限发送依靠房间顺序与在途退役边界；不逐条执行旧 activation SQL 写围栏。成功记录只有 `message_send_completions`，拒绝结果不持久化。完整边界见[当前发送与恢复合同](reviews/message-send-contract.md)。
 Gateway 可托管房间或仅调用远端 Host；Account 的房间能力使用 caller-only 节点。寻址、租约、完整 token fence 和回收边界见[房间 Virtual Actor 合同](reviews/room-virtual-actor-contract.md)。
 私聊和群聊公共内容统一保存在房间日志，普通接受消息可由 message_row 承载，读取时与 room_events 合并。
 个人事件流保存成员变化、已读、偏好和单侧提示；公共消息不再按成员写入个人同步副本。
@@ -125,11 +125,12 @@ housekeeping 分批删除。控制投影的稳定
 
 最新实现边界、实测记录和未完成要求见[资源系统实施记录](proposals/resource-system-implementation.md)，完整设计见[资源系统方案](proposals/resource-system-design.md)。这些改动尚不构成完整资源系统或生产容量批准。
 
-## 可选 NATS 提示层
+## 当前实时投递
 
-默认不需要 Redis 或 NATS。gateway 始终轮询 PostgreSQL durable work；启用 NATS 后，房间变化与实时活动提示仍是持久化完成后的可丢失优化。当前群房间和 presence/typing 使用每个 gateway 一条复用 Core NATS 连接，只订阅本机当前观看/观察的作用域；所有命令以 `PING`/`PONG` 确认，连接失败或 broker 重启后按当前本机兴趣重放订阅。
-
-当前实现仍不参与完成、授权、去重或重试决定。前台 room hint mailbox、broker payload mailbox 和 pending ACK 均有硬上限；NATS 不可用、提示丢失或重复时，durable polling/cursor pull 会恢复。尚缺 NATS TLS/NKey、broker/reconnect/consumer-lag 指标与代表性负载/故障证据，因此生产热点群仍不能只依赖该提示层。
+当前服务端不依赖 NATS。房间实时正文与提交头由物理 Room Owner 的签名 Relay 推送到负责设备连接的 Gateway；账户覆盖由成员目录建立，客户端详情订阅表达当前查看兴趣。
+投递权限、代次和连续水位由当前授权合同约束，写出实时帧不表示客户端已经持久化。
+丢失、断线或覆盖重建时，客户端继续以持久房间游标恢复。
+实现边界见[房间 Relay 实现](reviews/room-subscription-relay-implementation.zh-CN.md)与[账户在线覆盖](reviews/account-membership-incremental-audit.md)。
 
 ## 文档使用方式
 
@@ -137,6 +138,6 @@ housekeeping 分批删除。控制投影的稳定
 - 想了解设计决定：查看 [ADR register](../IMV2/docs/ADR-REGISTER.md)。
 - 想判断能力和证据等级：查看 [implementation status](../IMV2/docs/implementation-status.md)。
 - 想知道 47 项问题哪些还开着：查看 [问题状态表](reviews/status.md)；整改过程的逐批记录在
-  [历史时间线](reviews/archive/2026-09-05-remediation-timeline.md)，不代表当前状态。
+  [历史时间线](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/2026-09-05-remediation-timeline.md)，不代表当前状态。
 - 想运行本机账户栈：查看 [IMApp README](../IMApp/README.md) 或 [IMV2Server README](../IMV2Server/README.md)。
 - 想处理 paused durable work、观察指标或配置静态用户分片：从 [V2 文档入口](../IMV2/docs/README.md) 进入对应 runbook。

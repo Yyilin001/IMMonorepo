@@ -15,10 +15,8 @@
 | Room/user shard 路由与迁移 | [ADR-006](00-foundation/ADR-006-routing-and-migration.md) | 路由待批准；在线迁移已删除 | 部署前配置固定的逻辑桶到物理库映射，room owner/epoch 在存储事务内校验；copy/verify、双写、cutover、rollback 与迁移运维入口已于 2026-09-20 删除，仅支持全新建库 |
 | sync cursor、snapshot reset、多设备 | [ADR-007](00-foundation/ADR-007-sync-cursor-and-snapshot.md) | 已接受 | Server sync、Client SQLite 与 snapshot tests |
 | sync projection checkpoint、日志保留与 compaction | [ADR-013](00-foundation/ADR-013-sync-checkpoint-and-log-retention.md) | 已接受并实施 | Snapshot V3、连续 checkpoint/effect capture、独立 busy-drain compactor、有界个人日志裁剪及低游标 reset 已实施；生产 replay window/阈值仍需容量校准 |
-| 消息投影正文单写与用户窄引用 | [ADR-014](00-foundation/ADR-014-shared-message-projection-state.md) | 已被替代 | 公共消息统一由房间日志恢复；expand/dual/backfill/shared/contract 流程及相关 SQL 已删除，ADR 仅保留历史背景 |
-| 私聊权威受众直达投递 | [ADR-015](00-foundation/ADR-015-direct-preplanned-fanout.md) | 已被替代 | planner/preplanned/fanout 模式及 `IM_V2_DIRECT_FANOUT_MODE` 已删除，私聊统一走房间日志（ADR-017）；ADR 仅保留历史背景 |
 | 公共消息房间日志恢复 | [ADR-017](00-foundation/ADR-017-direct-room-event-log.md) | 已接受并实施 | 私聊与两类群的公共内容统一按逻辑房间游标恢复；普通接受事件可由带身份与版本约束的 `messages` 行承载，其他事件使用 `room_events`，读取端合并。旧 R29 单 Gateway 写入数字属于其冻结版本，不是当前 Actor 组合的容量批准；见[当前实现与证据](implementation-status.md)。 |
-| 有序私聊 room-log 原子微批 | [ADR-018](00-foundation/ADR-018-ordered-direct-room-log-microbatch.md) | 已接受并实施，受运行时开关保护 | PostgreSQL set-based batch CTE、锁内连续 sequence、bounded fairness/hot-room batch、revision-fenced fast cache 与每 micro-batch 一次的 credit actor 交互均已落地。R29 限定场景无拒绝完成 5,000 msg/s；不得以循环单条事务冒充批量化，也不得把未覆盖 pull 的结果外推为完整 IM 容量。 |
+| 房间内顺序批次与当前发送持久化 | [当前发送合同](../../docs/reviews/message-send-contract.md) | 当前实现 | 同房间顺序执行、房间独立事务与单份成功记录；旧 command-credit ADR 已退出工作树，历史基准不代表当前容量。 |
 | 单节点数据库工作负载隔离与投影批处理 | [ADR-016](09-capacity/ADR-016-single-node-runtime-workload-isolation.md) | 已接受并实施，可独立回滚 | 五类 pool 预算、foreground/Sync 短队列、Projection 并行与 accepted 批量 SQL、Sync hint 合并、Sync 往返压缩和运行压力指标已实现；真实环境对照压测待执行 |
 | 移动前后台与 Push wake | [ADR-008](00-foundation/ADR-008-mobile-lifecycle-and-push.md) | 待批准 | durable wake/预算、APNs provider、加密端点与 iOS 明确开关已实现；资格/活动策略与真实 APNs 发布证据待定 |
 | Auth、设备撤销、本地存储、媒体授权、日志脱敏 | [ADR-009](00-foundation/ADR-009-auth-local-storage-and-redaction.md) | 部分待批准 | auth/keychain 已实现；媒体授权待 ADR-002 |

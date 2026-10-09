@@ -9,7 +9,7 @@
 > 本文件回答"现在有哪些能力、证据到什么等级"。**哪个文件是当前合同**见
 > [V2 文档索引](../../docs/reviews/README.md)；**哪些问题还没关闭**见
 > [问题状态表](../../docs/reviews/status.md)；整改期的逐批记录已移入
-> [历史时间线](../../docs/reviews/archive/2026-09-05-remediation-timeline.md)，
+> [历史时间线](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/archive/2026-09-05-remediation-timeline.md)，
 > 不要再把过程记录追加回本文件。
 
 ## 证据等级
@@ -116,9 +116,9 @@ bash IMV2/scripts/test_v2_local_environment_contract.sh
 [`standard-100k.md`](09-capacity/standard-100k.md)。不得用普通 package 通过替代容量报告。
 
 历史容量证据包括
-[`R34 私聊 room-log 50,000 在线共享帧 A/B`](09-capacity/direct-room-log-50000-shared-frame-ab-r34-2026-08-27.md)：
+[`R34 私聊 room-log 50,000 在线共享帧 A/B`](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/09-capacity/direct-room-log-50000-shared-frame-ab-r34-2026-08-27.md)：
 该冻结版本在限定的单 Gateway 普通私聊写入、实时 payload 与 hint-triggered room-log 恢复路径完成 5,000 msg/s，
-2,475,000 条发送全部 ACK。[R51 五分钟 soak](09-capacity/direct-room-log-50000-profile-isolation-r51-2026-08-28.md)
+2,475,000 条发送全部 ACK。[R51 五分钟 soak](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/09-capacity/direct-room-log-50000-profile-isolation-r51-2026-08-28.md)
 也只适用于其各自冻结版本。当前房间 Actor 组合尚无同版本、混合消息、显式 pull、长时间 soak 与多 Gateway 的容量验收，
 上述数字不能批准完整高活跃 IM、100k 或生产 SLO。
 

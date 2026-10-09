@@ -3,7 +3,7 @@
 对应 B04/B11/D07；2026-09-05。状态为实施中，不能据此宣布跨 owner 转发或完整内容版本受众已经验收。
 
 历史实现记录中的 v1/v2 指纹、投递模式和迁移脚本已被当前房间日志架构替代。
-当前接受成员权威来自 message_send_completions，普通发送与转发统一 v3；见[接受记录合同](send-completion-retention.md)。
+当前接受成员权威来自 message_send_completions，普通发送与转发统一 v3；见[接受记录合同](message-send-contract.md)。
 终态读取与尚未完成的载荷清理见[现行边界](forward-terminal-payload-retention.md)。
 
 ## 已实现的同库边界
@@ -31,7 +31,7 @@
 
 ## 精确源版本与迁移补充
 
-schema 8 为 pair 增加 nullable source revision；只有旧记录可以保持未知，服务新建记录必填已验证的正版本。迁移不重新解释历史未知版本，旧 pending 操作失败关闭。协议 23 进一步要求重放时源房间/版本与持久绑定一致；旧成功记录若也缺原版本，不伪造版本以接受新协议请求。完整编码与迁移合同见 [发送指纹](2026-09-05-send-message-fingerprint-contract.md)。版本相同之外仍保留正文/实体/媒体比较，版本栅栏不能代替实际内容授权。
+schema 8 为 pair 增加 nullable source revision；只有旧记录可以保持未知，服务新建记录必填已验证的正版本。迁移不重新解释历史未知版本，旧 pending 操作失败关闭。协议 23 进一步要求重放时源房间/版本与持久绑定一致；旧成功记录若也缺原版本，不伪造版本以接受新协议请求。完整编码与迁移合同见 [发送指纹](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/2026-09-05-send-message-fingerprint-contract.md)。版本相同之外仍保留正文/实体/媒体比较，版本栅栏不能代替实际内容授权。
 
 ## Schema 9：当前编辑版本受众
 

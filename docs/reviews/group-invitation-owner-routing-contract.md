@@ -50,6 +50,6 @@ Swift 与 SQL readiness 除完整旧合同外，还拒绝 invite/request 对 pro
 
 Vapor 测试使用确定的测试 authenticator，**不是**真实 TLS/账号登录端到端验证。测试中的 epoch 改变也**不是**完整房间在线迁移。启用跨物理迁移前仍须转移完整成员历史区间、D05 不可变审计/旧 operation 阻断、邀请/申请/成员回执及相关事件与 outbox，并验证旧 owner 的迟到操作无法重新落地。历史覆盖不足时不得依靠缺失记录释放 legacy approving。
 
-B23 的 20 条申请配额目前仍是单 owner 事务保护；不能把本批多 owner 功能通过视为全局配额已完成。prepared intent 已接入持久后台恢复，见[恢复合同](group-invite-creation-recovery-contract.md)；历史目录的分页导入已接通独立 operator，见[导入合同](group-invite-directory-import-contract.md)。
+B23 的 20 条申请配额目前仍是单 owner 事务保护；不能把本批多 owner 功能通过视为全局配额已完成。prepared intent 已接入持久后台恢复，见[恢复合同](group-invite-creation-recovery-contract.md)；历史目录的分页导入已接通独立 operator，见[导入合同](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/group-invite-directory-import-contract.md)。
 
 普通成员变更已补路由 epoch 传递和回执重放前的事务栅栏，含单库组装；完整迁移执行器及其他房间写入栅栏仍开放，见[成员栅栏合同](room-membership-owner-fence-contract.md)。

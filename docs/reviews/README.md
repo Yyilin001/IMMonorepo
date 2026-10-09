@@ -5,15 +5,15 @@
 ## 三条规则
 
 1. **一份合同只有一个权威文档。** 同一主题有多份文件时，本页列出的是唯一权威版本，其余是它引用的补充合同或历史记录。
-2. **合同只写"现在生效的规则"和"如何验证"。** 过程记录、逐批追加的验证日志一律不进合同，见 `archive/`。
-3. **历史记录不参与判断当前状态。** `archive/` 下的文件保留原样，只为追溯决策来源；判断现状请看下面"当前状态"一行指向的三个文件。
+2. **合同只写"现在生效的规则"和"如何验证"。** 过程记录和逐批验证日志不进入合同；已替代内容从工作树删除，通过 Git 追溯。
+3. **历史记录不参与判断当前状态。** 被替代文档只在 Git 历史保留；判断现状请看下面列出的当前状态文件。
 
 ## 先读哪一个
 
 | 你想知道 | 看这里 |
 | --- | --- |
 | 如何逐项审核设计、实现与体验（执行计划，非通过证明） | [设计与实现质量审核蓝图](design-implementation-review-blueprint.md) |
-| Gateway 分布式 Actor 路由修正（新设计，待实施验收） | [Gateway Actor 实时路由修正方案](actor-realtime-routing-plan.md) |
+| 房间实时投递与账户在线覆盖 | [房间 Relay 实现](room-subscription-relay-implementation.zh-CN.md)、[账户成员覆盖](account-membership-incremental-audit.md) |
 | 如何判断测试是否有独立验证价值（首轮治理台账） | [测试有效性治理](test-governance-audit.md) |
 | 账号密码变更、离线恢复码、断言版本与登录限流 | [账号认证生命周期](account-authentication-lifecycle.md) |
 | 系统由哪些组件组成、消息怎么流动 | [当前系统架构](../current-system-map.md) |
@@ -23,14 +23,13 @@
 | 还有哪些外部风险没有关闭 | [开放风险登记表](../../IMV2/docs/10-operations/residual-risk-register.md) |
 | 某个结论是怎么验证出来的 | [验证运行记录索引](verification-records.md) |
 | 房间日志改造的最终范围与完成清单 | [实施与验收记录](room-log-only-implementation.md) |
-| 当前房间日志负载、重启和个人事件验收 | [当前版本运行验收](room-log-current-runtime-2026-09-13.md) |
+| 房间日志阶段负载、重启和个人事件证据 | [当前版本运行验收](room-log-current-runtime-2026-09-13.md) |
 | 独立分片裁剪与摘要数据分布复核 | [房间分片后续验证](room-log-shard-followup.md) |
 | 客户端排序与房间恢复的目标设计 | [具体实施方案](client-owned-conversation-sync-plan.md) |
 | 客户端房间恢复当前验收状态 | [验收矩阵](client-owned-conversation-sync-acceptance.md) |
 | 客户端房间恢复事务与强杀覆盖 | [事务边界审计](client-owned-conversation-sync-transaction-audit.md) |
 | 客户端房间恢复规模测量与边界 | [规模验收结果](client-owned-conversation-sync-scale-results.md) |
 | 客户端房间恢复阶段证据（历史） | [阶段记录](client-owned-conversation-sync-evidence-2026-09-13.md) |
-| 历史过程、被替换的旧结论 | [归档目录](archive/) |
 
 ## 当前合同
 
@@ -69,14 +68,14 @@
 | 主题 | 当前合同 | 覆盖 |
 | --- | --- | --- |
 | 房间读模型：投递、未读与保留窗口（**已实施**：单聊与标准群默认都走读模型、未读、保留窗口与运维重放；列表为本地优先 + 服务端未读；进入房间按 §5.4 推进到已应用序号／房间头） | [房间读模型合同](room-read-model-contract.md) | B03、B04、D07 |
-| 发送请求指纹与幂等 | [发送接受记录保留与清理](send-completion-retention.md)；[旧指纹实施历史](2026-09-05-send-message-fingerprint-contract.md)仅供追溯 | B11、D07 |
+| 发送请求指纹与幂等 | [发送成功记录与恢复](message-send-contract.md) | B11、D07 |
 | 房间写入存储的职责拆分与事务边界 | [Room write Store decomposition](room-write-store-decomposition.md) | D07 |
 | 消息发送双通道的当前实施与聚焦验证 | [双通道实施记录](message-send-dual-transport.md)；生产与真机验收仍待执行 | B27、D07 |
 | 静态房间归属与跨库持久发送授权 | [当前归属与发送授权合同](room-owner-migration-contract.md)；在线迁移章节仅供追溯 | B27、B04、B11、D07 |
 | 房间逻辑寻址、激活、事务资格与回收 | [房间 Virtual Actor 合同](room-virtual-actor-contract.md) | B27 |
-| 消息发送的 owner 栅栏 | [消息发送 owner 事务栅栏](send-message-owner-fence-contract.md) | B27 |
+| 消息发送、成功结果与恢复 | [当前发送合同](message-send-contract.md) | B27 |
 | 编辑、撤回、reaction 的接受事实与房间恢复 | [消息变更与房间日志](message-mutation-delivery-authority-contract.md) | B03、B06、D07 |
-| 消息变更的历史可见性与扫描游标 | [读取与游标合同](message-mutation-read-contract.md)；[旧受众结算记录](message-mutation-audience-contract.md)仅供追溯 | B03 |
+| 消息变更的历史可见性与扫描游标 | [读取与游标合同](message-mutation-read-contract.md) | B03 |
 | 编辑的完整替换与版本缺口 | [可授权完整编辑与版本缺口](message-edit-replacement-contract.md) | B03、B06 |
 | 编辑与权限变更的提交顺序 | [提交顺序合同](edit-policy-commit-ordering.md) | B02 |
 | 消息终态与快照重放 | [终态、版本缺口与快照重放](message-terminal-projection-contract.md) | B06 |
@@ -119,11 +118,8 @@
 | 邀请 token 目录与创建意图 | [token 目录与创建意图合同](group-invite-directory-contract.md) | B27 |
 | 邀请创建后台恢复 | [创建恢复合同](group-invite-creation-recovery-contract.md) | B27 |
 | 邀请 owner 路由与 control 身份 | [owner 路由合同](group-invitation-owner-routing-contract.md) | B27 |
-| 历史邀请目录导入（已取消，历史设计） | [分页导入合同](group-invite-directory-import-contract.md) | B27 历史范围 |
-| 历史邀请创建的目录绑定 | [兼容补充合同](group-invite-legacy-binding-contract.md) | B27 |
+| 邀请创建重试的目录绑定 | [兼容补充合同](group-invite-legacy-binding-contract.md) | B27 |
 | 群申请原子审批 | [原子审批合同](atomic-group-approval-contract.md) | B26 |
-| 遗留审批恢复 | [受控恢复](group-approval-recovery-contract.md)、[证据保留](approval-recovery-evidence-contract.md) | D05、B26 |
-| 申请人配额 | [历史单库事务修复](invitation-applicant-quota-contract.md) | B23 |
 
 ### Owner 与分片栅栏
 
@@ -132,7 +128,7 @@
 | 主题 | 当前合同 | 覆盖 |
 | --- | --- | --- |
 | 普通成员变更 | [成员变更 owner 栅栏](room-membership-owner-fence-contract.md) | B27 |
-| 消息发送 | [发送 owner 栅栏](send-message-owner-fence-contract.md) | B27 |
+| 消息发送 | [当前发送与恢复合同](message-send-contract.md) | B27 |
 | 消息编辑/撤回/reaction | [消息变更 owner 栅栏](message-mutation-owner-fence-contract.md) | B27 |
 | 公告、置顶、角色权限、成员角色 | [群管理 owner 栅栏](group-capability-owner-fence-contract.md) | B27 |
 | Moderation | [Moderation owner 栅栏](moderation-owner-fence-contract.md) | B27 |
@@ -164,6 +160,6 @@
 ## 维护规则
 
 - 新增或修订合同：直接改对应合同文档，**不要**在状态文档或实现状态文档里追加"最新补充"段落。
-- 过程记录、一次性实验、被替换的结论：写入 `archive/`，并在文首标注归档日期和替代它的合同。
+- 过程记录和一次性实验必须说明源码、环境与执行结果；被替换的文档删除，必要引用使用固定 Git 提交。
 - 状态变化：只更新 [当前问题状态表](status.md) 的状态列；能力与证据等级变化更新 [当前实现与发布证据](../../IMV2/docs/implementation-status.md)。
 - 提交前运行 `bash scripts/check_v2_document_links.sh`，链接必须为零断链。

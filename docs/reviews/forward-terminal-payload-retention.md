@@ -82,7 +82,7 @@ schema 42 的源 export 增加 delivery_completed_at / payload_compacted_at。
 5. 完整 room owner 迁移承接压缩状态、身份及结果；这部分依赖 B27，路由切换不替代迁移。
 
 压缩信封只能回收正文副本，不等于接受记录 GC、媒体对象清除、备份清除或无界身份记录增长已解决。
-接受记录另见[保留合同](send-completion-retention.md)。
+接受记录另见[保留合同](message-send-contract.md)。
 
 ## SQL 清理成本
 
