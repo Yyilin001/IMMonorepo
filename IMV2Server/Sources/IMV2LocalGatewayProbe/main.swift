@@ -212,6 +212,8 @@ private enum ProbeError: Error, Equatable, Sendable {
     case messageDeliveryNotObserved
     case connectionClosed
     case heldBarrierTimedOut
+    case serverRejected(String)
+    case sendResponseCorrelation, sendResponseType, sendResultPending, sendReceiptMismatch
 }
 
 private enum ProbeResult: Sendable {
@@ -280,6 +282,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
             hello.clientHello = .init()
             hello.clientHello.supportedProtocolVersions = [IMV2ProtocolVersion.current]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
+            hello.clientHello.supportsMessageSendOperations = true
             hello.clientHello.deviceID = configuration.deviceID.rawValue
             try write(hello, frameVersion: 0, context: context)
         } catch {
@@ -339,6 +342,11 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         }
         if frame.requestID == 0,
            case .groupEventAvailable? = envelope.body {
+            return
+        }
+        if frame.requestID == 0, case .realtimeCoverage? = envelope.body {
+            // Coverage changes are unsolicited control notifications, not a
+            // response to the pending durable send (including a cold Owner).
             return
         }
         switch stage {
@@ -410,6 +418,44 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
 
         case .holdingBatchSend:
             throw ProbeError.unexpectedResponse
+
+        case .awaitingMessageSend(let requestID, let command):
+            guard frame.requestID == requestID else { throw ProbeError.sendResponseCorrelation }
+            if case .error(let error)? = envelope.body,
+               configuration.mode == .heldRoomSend || configuration.mode == .sendKnownRoomExpectDenied,
+               error.code == "UNAUTHENTICATED" || error.code == "FORBIDDEN" || error.code == "DIRECT_MESSAGE_RESTRICTED" {
+                let result: ProbeResult = configuration.mode == .heldRoomSend
+                    ? .heldRequestDenied(reason: error.code) : .knownRoomDenied(reason: error.code)
+                finish(context: context, result: .success(result))
+                return
+            }
+            if case .error(let error)? = envelope.body {
+                guard !error.code.isEmpty, error.code.utf8.count <= 64,
+                      error.code.utf8.allSatisfy({ (65...90).contains($0) || (48...57).contains($0) || $0 == 95 })
+                else { throw ProbeError.unexpectedResponse }
+                throw ProbeError.serverRejected(error.code)
+            }
+            guard case .messageSendOperationResult(let wire)? = envelope.body else { throw ProbeError.sendResponseType }
+            guard case .receipt(let receipt) = try V2MessageSendOperationWireCodec.decode(result: wire)
+            else { throw ProbeError.sendResultPending }
+            guard receipt.validates(identity: try command.identity, fingerprint: try command.fingerprint)
+            else { throw ProbeError.sendReceiptMismatch }
+            switch receipt.outcome {
+            case .accepted(let acceptance):
+                guard configuration.mode != .heldRoomSend, configuration.mode != .sendKnownRoomExpectDenied else {
+                    throw ProbeError.unexpectedResponse
+                }
+                finish(context: context, result: .success(.messageAccepted(roomID: command.command.roomID,
+                    messageID: acceptance.messageID)), closeChannel: false)
+            case .rejected(let reason) where reason == .permissionDenied || reason == .directPolicyDenied:
+                let code = reason == .directPolicyDenied ? "DIRECT_MESSAGE_RESTRICTED" : "FORBIDDEN"
+                if configuration.mode == .heldRoomSend {
+                    finish(context: context, result: .success(.heldRequestDenied(reason: code)))
+                } else if configuration.mode == .sendKnownRoomExpectDenied {
+                    finish(context: context, result: .success(.knownRoomDenied(reason: code)))
+                } else { throw ProbeError.unexpectedResponse }
+            default: throw ProbeError.unexpectedResponse
+            }
 
         case .awaitingHTTP:
             if case .error? = envelope.body { throw ProbeError.unexpectedResponse }
@@ -613,43 +659,13 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
             text: Configuration.messageText, media: configuration.mediaID.map { [.init(mediaID: $0)] } ?? [],
             limits: .init(maxUTF8Bytes: 65_536)),
             firstSubmissionDeadlineMilliseconds: configuration.sendDeadlineMilliseconds)
-        let configuration = self.configuration
-        stage = .awaitingHTTP
-        let handler = NIOLoopBound(self, eventLoop: context.eventLoop), boundContext = context.loopBound
-        let taskID = UUID(); sendTaskID = taskID
-        let completionLoop = context.eventLoop
-        let installed = sendTasks.start(id: taskID) {
-            let result: Result<V2MessageSendOperationTerminalOutcome, any Error>
-            do { result = .success(try await V2ToolOperationHTTP.scoped(baseURL: configuration.accountBaseURL, caPath: configuration.caPath) { client in
-                try await client.sendMessage(command, token: configuration.accessToken, deviceID: configuration.deviceID.rawValue)
-            }) }
-            catch { result = .failure(error) }
-            _ = try? await completionLoop.submit {
-
-            let handler = handler.value, context = boundContext.value
-            handler.sendTaskID = nil
-            guard !handler.finished else { return }
-            do {
-                let outcome = try result.get()
-                switch outcome {
-                case .accepted(let acceptance):
-                    guard configuration.mode != .heldRoomSend, configuration.mode != .sendKnownRoomExpectDenied else { throw ProbeError.unexpectedResponse }
-                    handler.finish(context: context, result: .success(.messageAccepted(roomID: roomID, messageID: acceptance.messageID)), closeChannel: false)
-                case .rejected(let reason) where reason == .permissionDenied || reason == .directPolicyDenied:
-                    let code = reason == .directPolicyDenied ? "DIRECT_MESSAGE_RESTRICTED" : "FORBIDDEN"
-                    if configuration.mode == .heldRoomSend {
-                        handler.finish(context: context, result: .success(.heldRequestDenied(reason: code)))
-                    } else if configuration.mode == .sendKnownRoomExpectDenied {
-                        handler.finish(context: context, result: .success(.knownRoomDenied(reason: code)))
-                    } else { throw ProbeError.unexpectedResponse }
-                default: throw ProbeError.unexpectedResponse
-                }
-            } catch V2ToolOperationHTTP.Failure.status(let status) where configuration.mode == .heldRoomSend && (status == 401 || status == 403) {
-                handler.finish(context: context, result: .success(.heldRequestDenied(reason: status == 401 ? "UNAUTHENTICATED" : "FORBIDDEN")))
-            } catch { handler.finish(context: context, result: .failure(error)) }
-            }.get()
-        }
-        guard installed else { sendTaskID = nil; throw CancellationError() }
+        let requestID = takeRequestID()
+        var request = IMV2Envelope()
+        request.requestID = requestID
+        request.protocolVersion = IMV2ProtocolVersion.current
+        request.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: command)
+        stage = .awaitingMessageSend(requestID, command)
+        try write(request, frameVersion: UInt8(IMV2ProtocolVersion.current), context: context)
     }
 
     private func sendRoomEventPull(context: ChannelHandlerContext) throws {
@@ -719,6 +735,7 @@ private final class GatewayProbeHandler: ChannelInboundHandler {
         case holdingAuthenticated
         case holdingBatchSend
         case awaitingHTTP
+        case awaitingMessageSend(UInt64, V2MessageSendOperationCommand)
         case awaitingRoomEventPage(UInt64, UInt64)
     }
 }

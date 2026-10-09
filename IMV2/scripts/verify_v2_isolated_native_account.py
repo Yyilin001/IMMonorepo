@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Disposable native HTTPS/account/gateway smoke. Never reads .env or changes trust stores."""
 import argparse, base64, collections, hashlib, http.client, http.server, json, os, re, secrets, signal, socket, ssl
-import shlex, subprocess, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid
+import shlex, subprocess, sys, tempfile, threading, time, urllib.error, urllib.parse, urllib.request, uuid
 from pathlib import Path
 import yaml
 from v2_native_background_upload_gate import NativeBackgroundUploadGate
+from v2_native_push_wake_gate import NativePushWakeGate
 
 REPO = Path(__file__).resolve().parents[2]
 PG = Path('/opt/homebrew/opt/postgresql@16/bin')
@@ -25,6 +26,7 @@ def main():
     parser.add_argument('--account-switch-ui',action='store_true',help='Run real App sign-out, account switching and cold restoration isolation.')
     parser.add_argument('--read-receipt-ui',action='store_true',help='Run independent App direct delivery and peer-read cold restoration.')
     parser.add_argument('--group-read-ui',action='store_true',help='Run independent App group readers presentation after actual member reading.')
+    parser.add_argument('--push-wake-ui',action='store_true',help='Verify actual simulator OS Push and durable room projection while App remains backgrounded.')
     parser.add_argument('--group-join-ui',action='store_true',help='Run independent App invite QR, actual join submission/cancellation/approval.')
     parser.add_argument('--receiver-simulator',help='Explicitly owned, booted receiver simulator for --two-install-ui.')
     parser.add_argument('--sender-simulator',help='Explicitly owned, booted sender simulator for --two-install-ui.')
@@ -38,8 +40,8 @@ def main():
                 'IMAPP_LOCAL_TWO_INSTALL_DIRECT_EDIT_ONLY')):
             parser.error('native background upload must run as an independent scenario')
     if not 0 <= args.hold_seconds <= 900: parser.error('hold must be 0...900 seconds')
-    if sum([args.two_install_ui,args.multi_device_ui,args.account_switch_ui,args.read_receipt_ui,args.group_read_ui,args.group_join_ui]) > 1: parser.error('UI modes are mutually exclusive')
-    ui_requested=args.two_install_ui or args.multi_device_ui or args.account_switch_ui or args.read_receipt_ui or args.group_read_ui or args.group_join_ui
+    if sum([args.two_install_ui,args.multi_device_ui,args.account_switch_ui,args.read_receipt_ui,args.group_read_ui,args.group_join_ui,args.push_wake_ui]) > 1: parser.error('UI modes are mutually exclusive')
+    ui_requested=args.two_install_ui or args.multi_device_ui or args.account_switch_ui or args.read_receipt_ui or args.group_read_ui or args.group_join_ui or args.push_wake_ui
     if ui_requested:
         if not args.receiver_simulator or not args.sender_simulator or args.receiver_simulator == args.sender_simulator:
             parser.error('two-install UI requires two distinct, explicitly selected simulator IDs')
@@ -61,12 +63,13 @@ def main():
     signal.signal(signal.SIGTERM,interrupted)
     os.umask(0o077)
     root=Path(tempfile.mkdtemp(prefix='imv2-native-e2e-'))
-    processes=[]; logs=[]; pg_started=False; edge=None; gateway_process=None
+    processes=[]; logs=[]; pg_started=False; edge=None; gateway_process=None; push_gate=None; push_cleanup_error=None
     http_responses=collections.Counter(); http_lock=threading.Lock()
     app_refresh_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY') == 'true'
     background_upload_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY') == 'true'
     background_gate=NativeBackgroundUploadGate() if background_upload_mode else None
     background_fixture_token=secrets.token_hex(32) if background_upload_mode else None
+    push_fixture_token=secrets.token_hex(32) if args.push_wake_ui else None
     refresh_diagnostics=dict(armed=False,injected=0,refreshResponses=0,coldRestore=False,coldFreshDeviceReads=0)
     refresh_digest=[None]  # Process-private comparison only; never exported.
     ports={key:port() for key in ['pg','account','edge','gateway','actor_gateway','actor_account','metrics']}
@@ -142,6 +145,19 @@ def main():
                     diagnostic=json.dumps(background_gate.snapshot()).encode()
                     self.send_response(200);self.send_header('Content-Type','application/json')
                     self.send_header('Content-Length',str(len(diagnostic)));self.end_headers();self.wfile.write(diagnostic);return
+                if args.push_wake_ui and path.startswith('/__fixture__/push-wake/'):
+                    if self.headers.get('X-Push-Fixture') != push_fixture_token or push_gate is None or length > 1024:
+                        self.send_error(403);return
+                    try:
+                        if self.command == 'POST' and path == '/__fixture__/push-wake/start':
+                            push_gate.start(json.loads(self.rfile.read(length)))
+                        elif not (self.command == 'GET' and path == '/__fixture__/push-wake/state' and length == 0):
+                            self.send_error(404);return
+                    except (ValueError, TypeError, KeyError):
+                        self.send_error(400);return
+                    diagnostic=json.dumps(push_gate.snapshot()).encode()
+                    self.send_response(200);self.send_header('Content-Type','application/json')
+                    self.send_header('Content-Length',str(len(diagnostic)));self.end_headers();self.wfile.write(diagnostic);return
                 gated=background_gate is not None and self.command == 'PUT' and path.startswith('/v2/local-media/upload/') and background_gate.claim(self.path,length)
                 body=background_gate.read(self,length) if gated else self.rfile.read(length)
                 with http_lock:
@@ -207,6 +223,41 @@ def main():
         config={'httpsBaseURL':f'https://localhost:{ports["edge"]}','gatewayHost':'localhost','gatewayPort':ports['gateway'],'caPath':str(ca)}
         (root/'test-endpoints.json').write_text(json.dumps(config))
         print('PASS independent PG + HTTPS registration + credential issue + native TLS gateway authentication',flush=True)
+        if args.push_wake_ui:
+            sys.path.insert(0,str(REPO/'scripts'))
+            from v2_app_room_recovery_snapshot import snapshot as read_push_room
+            def push_sql(query):
+                result=run([PG/'psql','-X','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e',
+                    '-d','imv2_e2e','-v','ON_ERROR_STOP=1','-tAc',query],timeout=10)
+                return result.stdout.decode().strip()
+            def send_push_message(account_handle,title):
+                # Both names were bounded to this harness's random UI fixture by the gate.
+                push_gate.update(stage='locatingRoom')
+                room=str(uuid.UUID(push_sql("SELECT room_id FROM im_v2.group_rooms WHERE title='"+title+"'")))
+                device=str(uuid.uuid4()).upper();operation=str(uuid.uuid4()).upper()
+                if push_gate.cancelled.is_set(): raise RuntimeError('owned Push cancelled')
+                push_gate.update(stage='authenticatingSender')
+                assertion=post('/v2/account-auth/password/assertion',{'accountHandle':account_handle,
+                    'password':'localpassword','deviceID':device})
+                cancellation={'deviceID':{'rawValue':device},'operationID':operation,
+                    'proof':'imv2-cancel-registration-v1.'+base64.urlsafe_b64encode(secrets.token_bytes(32)).decode().rstrip('='),
+                    'issueBeforeMilliseconds':int((time.time()+600)*1000)}
+                if push_gate.cancelled.is_set(): raise RuntimeError('owned Push cancelled')
+                credential=post('/v2/device-credentials',{'accountAssertion':assertion['accountAssertion'],
+                    'deviceID':device,'operationID':operation,'cancellation':cancellation})
+                if push_gate.cancelled.is_set(): raise RuntimeError('owned Push cancelled')
+                original=str(uuid.uuid4()).upper()
+                sender=dict(probe,IM_V2_GATEWAY_PROBE_ACCESS_TOKEN=credential['accessToken'],
+                    IM_V2_GATEWAY_PROBE_DEVICE_ID=device,IM_V2_GATEWAY_PROBE_MODE='sendKnownRoomMessage',
+                    IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID=room,IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID=original,
+                    IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS=str(int((time.time()+600)*1000)))
+                push_gate.update(stage='tlsSend')
+                run([REPO/'IMV2Server/.build/debug/IMV2LocalGatewayProbe'],env=sender,timeout=30)
+                if push_gate.cancelled.is_set(): raise RuntimeError('owned Push cancelled')
+                push_gate.update(stage='verifyingOriginalCommit')
+                facts=json.loads(push_sql("SELECT json_build_object('messageID',message_id,'roomID',room_id,'roomSequence',room_sequence)::text FROM im_v2.messages WHERE room_id='"+room+"' AND client_message_id='"+original+"'"))
+                return facts
+            push_gate=NativePushWakeGate(args.receiver_simulator,root,send_push_message,read_push_room)
         if ui_requested:
             ui_environment=dict(base,IMAPP_LOCAL_TWO_INSTALL_EXTERNAL_STACK='true',IMAPP_LOCAL_TWO_INSTALL_CA_PATH=str(ca),
                 IMAPP_LOCAL_TWO_INSTALL_RECEIVER_SIMULATOR_ID=args.receiver_simulator,
@@ -217,6 +268,10 @@ def main():
             ui_log=(root/'two-install-ui.log').open('wb');logs.append(ui_log)
             ui_source=REPO/'IMApp/Scripts/verify_local_account_two_install_e2e.sh'
             success_marker='local two-install direct-and-group-message E2E: pass'
+            if args.push_wake_ui:
+                ui_environment['IMAPP_LOCAL_TWO_INSTALL_SYSTEM_PUSH_ONLY']='true'
+                ui_environment['IMAPP_PUSH_FIXTURE_TOKEN']=push_fixture_token
+                success_marker='local App system Push wake E2E: pass'
             if args.two_install_ui and background_upload_mode:
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
                 ui_environment['IMAPP_BACKGROUND_FIXTURE_TOKEN']=background_fixture_token
@@ -306,6 +361,10 @@ def main():
         if background_gate is not None:
             (root/'background-upload-observation.json').write_text(json.dumps(background_gate.snapshot(),indent=2)+'\n')
             background_gate.release()  # Drain only this owned observation on any failed stage.
+        if push_gate is not None:
+            try: push_gate.close()
+            except RuntimeError as error: push_cleanup_error=error
+            (root/'system-push-observation.json').write_text(json.dumps(push_gate.snapshot(),indent=2)+'\n')
         if edge: edge.shutdown();edge.server_close()
         with http_lock:
             (root/'http-summary.json').write_text(json.dumps([
@@ -330,5 +389,6 @@ def main():
         for log in logs: log.close()
         if pg_started: run([PG/'pg_ctl','-D',root/'pg','-m','fast','-w','stop'])
         print('owned stack stopped; diagnostics retained at '+str(root),flush=True)
+        if push_cleanup_error is not None: raise push_cleanup_error
 
 if __name__=='__main__': main()

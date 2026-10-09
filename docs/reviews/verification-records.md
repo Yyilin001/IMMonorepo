@@ -2837,12 +2837,12 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
 | EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
 | EX-18 | 在线状态与输入提示 | 修复后真实TLS冷订阅ACK后立即开始/停止通过，不等待Coverage Ready；安装期间撤销连接拒绝成功ACK、原票据清理通过；历史丢失保留 | extendedLiveResourcesR9, extendedLiveResourcesR10, fixTypingAcknowledgementLiveR1, fixTypingAcknowledgementRevocationR2 |
-| EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标通过；R13功能通过但驱动清理失败已修正，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
-| EX-20 | 断线重连 | 1000房间冷补拉122.62秒/重连11.34秒及真实跨Gateway在线更新R13通过；R12在线超时保留，不宣称稳定性；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
+| EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标R14完整exit0，owned清理通过，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
+| EX-20 | 断线重连 | 1000房间冷恢复/重连及真实跨Gateway在线更新R14完整exit0，owned清理通过；R12在线超时及R13清理失败保留；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
 | EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；系统后台下载未实现 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7 |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；外部APNs和真机唤醒待验：当前无已连接物理设备且测试进程无APNs配置，等待指定设备与测试环境 | liveAccountUIR6, apnsEnvironmentAudit20261009 |
-| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线原身份及全部原AX/contrast修复后完整R8通过；冷URL启动真实预览/普通申请/PG核对通过；批准入群即时投影R5失败、同代码R6通过，波动待修复；正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
+| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线原身份及全部原AX/contrast修复后完整R8通过；冷URL启动真实预览/普通申请/PG核对通过；批准入群即时投影终止ACK修复后R10/R11连续通过，原波动失败保留；正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
 
 <!-- acceptance-matrix-end -->
 
@@ -3308,3 +3308,19 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 终止ACK修复相关回归R1终态exit0：69项/4套件通过（0.867秒），暂停/过期/退休3参数实际ACK及重复ACK通过，原授权关闭/过期不可续/旧围栏不得影响新围栏继续验证。Gateway产品构建exit0，真实原批准成员流程R10运行 /tmp/imv2-approved-member-live-projection-r10-20261009.log，新增owned清理前固定订阅指标留存；未把单元回归当作真实App通过。
 
 - 提交前证据核对：终止ACK网络回归通过，服务端34项/3套件及真实Cluster TCP 3项/1套件，日志 /tmp/imv2-terminal-receipt-network-regression-r1-20261009.log。真实批准成员R10日志显示PASS real two-install App messaging, offline recovery and group scenario及owned stack stopped，日志 /tmp/imv2-approved-member-live-projection-r10-20261009.log；原R5/R7/R8/R9失败记录保留，不以单次通过宣称稳定性验收完成。最终脚本owned Gateway存活检查仅完成Python语法校验，尚未单独运行复验。
+
+- 批准入群即时投影R11终态exit0，原申请/取消/重申请/批准/正常恢复/发送/即时正文/独立PG核对及owned清理通过，日志 /tmp/imv2-approved-member-live-projection-r11-20261009.log；清理前指标subscribeTerminalPending/controlCutMismatch/logGap均0。修复后R10/R11连续通过，R9原terminalPending992的失败证据保留；最新脚本owned Gateway存活检查及指标留存实际运行通过。EX24这一缺口关闭，不将两轮通过泛化成任意长期稳定性保证。1000房间跨Gateway恢复及尾通知丢弃R14运行 /tmp/imv2-acceptance-room-scale-r14-20261009.log，尚未终态。
+
+- 1000房间R14终态exit0：实际App 3项通过/0失败，原独立后台专项未启用跳过1，不将该跳过计入后台证明。真实第二Gateway在线更新、目标尾通知丢弃2次、无相关替代唤醒自动补回原消息/游标均通过，日志 /tmp/imv2-acceptance-room-scale-r14-20261009/app.log。独立PG/HTTPS校验通过，owned服务及PG停止、专用模拟器删除、私有临时材料清理通过，证据 /tmp/imv2-acceptance-room-scale-r14-20261009/cleanup.log；R13驱动清理错误修复得到实际运行验证。
+
+- 系统Push实测R1终态exit1、owned stack stopped：实际App已挂起，本地初始room cursor1/messages为空；发送探针却仍走已移除HTTP消息提交，HTTP 404导致CalledProcessError，尚未执行simctl push。证据 /tmp/imv2-system-push-live-r1-20261009.log、独立root system-push-observation.json；不能把此失败归因OS唤醒。新增严格后台状态/原消息持久化断言的UI专项编译通过，准备将探针改为当前TCP messageSendOperation并校验原身份/指纹回执后复测。
+
+- 系统Push R2终态exit1、owned stack stopped：TCP探针已实际发送，但Hello未声明supportsMessageSendOperations，服务端明确unsupported_command，PG messages为空、未执行系统Push。补齐消息能力协商并使用当前codec/原回执指纹验证；探针产品构建R3 exit0，日志 /tmp/imv2-system-push-probe-build-r3-20261009.log。R3真实UI流程运行 /tmp/imv2-system-push-live-r3-20261009.log，尚未终态。
+
+- 系统Push R3/R4均exit1、owned stack stopped：消息能力协商已补齐，服务端实际处理message_send_operation但发送失败，PG原消息未落盘/未执行Push。R4固定阶段诊断确认tlsSend，未输出stderr、token或请求内容。探针进一步区分回执关联/类型/未决结果/身份指纹错误及安全错误码，构建R5 exit0；真实R5运行 /tmp/imv2-system-push-live-r5-20261009.log，尚未终态。
+
+- 系统Push R5终态exit1、owned stack stopped，固定错误sendResponseCorrelation确认发送等待遇到非关联帧，PG仍无消息/未执行Push。当前真实负载客户端显式处理requestID0 realtimeCoverage，旧探针遗漏这一通知分支；补齐具体覆盖通知，不放宽发送应答请求号/原身份/指纹验证。探针构建R6 exit0，真实R6运行 /tmp/imv2-system-push-live-r6-20261009.log，尚未终态。
+
+- 系统Push R6终态exit1、owned stack stopped：TCP原消息01a11ec4-779f-7b65-9203-4975dc86d2b0/sequence2唯一落盘，实际投递前App SQLite messages为空。发送修复已越过原失败点。simctl纯content-available载荷返回exit121/UNErrorDomain1401 Notification has no user visible content；独立同命令复现。驱动此前因非零返回提前结束，尚无实际后台结果证据；不能宣称OS回调成功或失败。R7保留此具体可见通知错误，继续实际原消息/游标观察，UI不得进入前台；其他工具错误仍失败，未加入alert或手动代理调用。日志 /tmp/imv2-system-push-live-r7-20261009.log。
+
+- 系统Push R7终态exit1，owned stack stopped：真实TCP原消息01a11ec8-08ec-74b9-b9d0-e31395208ee3/sequence2已提交，投递前App SQLite仍为空；保留simctl exit121/1401后继续观察45秒，未出现后台原消息持久化，最终TimeoutError。日志 /tmp/imv2-system-push-live-r7-20261009.log。后续OS日志显示App without push registration；本轮UI尚未通过普通设置开启Push，需补齐注册前置后复验，不能据此认定模拟器不支持。构建产物Simulated.xcent包含aps-environment=development，普通模拟器签名无entitlements不足以判定能力缺失；系统Push验收仍未通过。

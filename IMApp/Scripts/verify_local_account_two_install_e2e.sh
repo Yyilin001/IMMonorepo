@@ -378,6 +378,23 @@ launch_fixture "${receiver_simulator_id}" \
   -v2-ui-testing-group-title "${receiver_self_group_title}"
 run_stage "${receiver_simulator_id}" testReceiverRegistersIndependentInstallation
 
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_SYSTEM_PUSH_ONLY:-false}" == true ]]; then
+  [[ "${external_stack}" == true ]] || exit 1
+  : "${IMAPP_PUSH_FIXTURE_TOKEN:?owned Push fixture token required}"
+  export TEST_RUNNER_IMAPP_PUSH_FIXTURE_TOKEN="${IMAPP_PUSH_FIXTURE_TOKEN}"
+  export TEST_RUNNER_IMAPP_PUSH_GROUP_TITLE="${receiver_self_group_title}"
+  export TEST_RUNNER_IMAPP_PUSH_ACCOUNT_HANDLE="${receiver_account_handle}"
+  export TEST_RUNNER_IMAPP_PUSH_SCOPE="${receiver_scope}"
+  launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+  run_stage "${receiver_simulator_id}" testSystemPushCommitsRoomMessageWhileAppSuspended
+  if [[ "${audit_failure_count}" -gt 0 ]]; then
+    printf '%s\n' 'system Push functional stages complete; retained accessibility failure.' >&2
+    exit 1
+  fi
+  printf '%s\n' 'local App system Push wake E2E: pass'
+  exit 0
+fi
+
 if [[ "${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY:-false}" == true ]]; then
   [[ "${external_stack}" == true ]] || exit 1
   : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
