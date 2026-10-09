@@ -2787,62 +2787,62 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 
 | 编号 | 功能 | 当前验收结果 | 证据索引 |
 |---|---|---|---|
-| OP-01 | sendMessage | 真实TCP提交/幂等/恢复通过；真实App发送及双方消息恢复通过 | extendedLiveResourcesR4, twoInstallUIR13 |
-| OP-02 | withdrawMessage | 真实HTTPS撤回/历史事件及App发送端提交、接收端撤回恢复通过；PG已撤回修订3 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
-| OP-03 | editMessage | 真实HTTPS编辑/恢复及独立两安装普通UI编辑中间态冷恢复通过；PG唯一原消息修订2、未撤回，原消息ID与精确正文一致 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13, directEditUIR5 |
-| OP-04 | reaction | 真实HTTPS表情增删/恢复/回读及App普通表情提交通过；PG message.reaction_changed | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13 |
-| OP-05 | readReceipt | 真实TCP已读提交、读者列表及隐私开关过滤通过；真实App私聊阅读→发送端冷启动同消息对方已读通过；App群主原消息读者页真实成员+已读通过 | extendedLiveResourcesR7, peerReadUIR1, groupReadUIR2 |
-| OP-06 | directRoom | 真实HTTPS打开私聊通过；双向重复打开同房间已核对 | extendedLiveResourcesR9 |
-| OP-07 | groupRoom | 真实SDK群创建/恢复及App普通UI建群、成员核对、群消息双向收发和@all投影通过 | extendedLiveResourcesR4, twoInstallUIR14 |
-| OP-08 | membership | 主动退出已实现：核心/5种PG权限边界/模拟器Store回归通过；真实HTTPS自退、原操作重放恢复、旧TCP发送拒绝通过；普通App退出及冷恢复通过，独立PG与原本地工作一致 | extendedLiveResourcesR4, membershipExitSourceInspection, fixSelfExitCoreR1, fixSelfExitPGR1, fixSelfExitAppUnitR2, fixSelfExitLiveR1, fixSelfExitAppLiveR4 |
-| OP-09 | moderation | 真实管理删除和原结果恢复通过 | extendedLiveResourcesR4 |
-| OP-10 | memberMute | 真实禁言/恢复及后续TCP拒绝通过 | extendedLiveResourcesR4 |
-| OP-11 | moderatedMemberRemoval | 真实成员移除/恢复/roster及后续TCP拒绝通过 | extendedLiveResourcesR4 |
-| OP-12 | strangerMessagePreference | 真实HTTPS提交/重放/恢复/版本回读通过；App设置提交及同账号第二设备恢复通过 | extendedLiveResourcesR2, multiDeviceUIR4 |
-| OP-13 | userAddPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App普通开关提交、另一安装冷恢复及独立PG关闭策略一致通过 | extendedLiveResourcesR2, multiDeviceUIR5 |
-| OP-14 | readReceiptPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App设置提交及同账号第二设备恢复通过 | extendedLiveResourcesR2, multiDeviceUIR4 |
-| OP-15 | liveActivityPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App普通开关提交、另一安装冷恢复及独立PG关闭策略一致通过 | extendedLiveResourcesR2, multiDeviceUIR5 |
-| OP-16 | relationship | 真实好友申请/接受/删除及回读通过 | extendedLiveResourcesR4 |
-| OP-17 | userBlock | 真实拉黑/解除/恢复及关系回读通过 | extendedLiveResourcesR4 |
-| OP-18 | conversationPreference | 已验证：真实TCP及同账号两安装置顶/归档/静音双向冷恢复通过 | extendedLiveResourcesR7, conversationPreferenceUIR2 |
-| OP-19 | messageFavorite | 真实TCP收藏/重放通过 | extendedLiveResourcesR4 |
-| OP-20 | pinnedMessage | 真实群置顶/恢复通过 | extendedLiveResourcesR4 |
-| OP-21 | groupAnnouncement | 真实公告提交/恢复通过 | extendedLiveResourcesR4 |
-| OP-22 | groupPermission | 真实成员权限调整/恢复通过 | extendedLiveResourcesR4 |
-| OP-23 | groupRole | 真实管理员角色调整/恢复/roster通过 | extendedLiveResourcesR4 |
-| OP-24 | forwardMessage | 真实转发计划/恢复/目标历史内容通过 | extendedLiveResourcesR4 |
-| OP-25 | profileUpdate | 真实个人资料更新、头像绑定及授权展示通过 | extendedLiveResourcesR7 |
-| OP-26 | contactAlias | 真实备注设置/清空/恢复/回读通过 | extendedLiveResourcesR4 |
-| OP-27 | groupNickname | 真实群昵称设置/清空/恢复、事件版本及目录租约通过 | extendedLiveResourcesR7 |
-| OP-28 | groupInvite | 真实邀请创建/撤销及列表回读通过；App普通UI二维码创建/读取、撤销及另一安装原链接失效通过 | extendedLiveResourcesR9, groupJoinUIR2, groupJoinRejectUIR1 |
-| OP-29 | groupJoinRequest | 真实入群申请/取消及审核可见性通过；App普通粘贴预览、申请、取消、同邀请再次申请和PG记录一致通过 | extendedLiveResourcesR9, groupJoinUIR4 |
-| OP-30 | groupJoinDecision | 真实SDK及App批准/拒绝均通过：申请人冷启动恢复批准成员或拒绝状态，PG成员数与状态一致；批准后发送正文即时投影失败另列 | extendedLiveResourcesR15, groupJoinUIR4, groupJoinRejectUIR1 |
-| OP-31 | mediaUpload | 真实个人头像/消息附件上传处理、下载和撤回授权收敛通过；后台与群头像另列 | extendedLiveResourcesR7 |
-| OP-32 | groupAvatar | 修复后通过：入口允许并声明群头像；17项PG权限/恢复回归通过；真实HTTPS上传处理/绑定/字节下载/移除/原操作恢复通过，保留422历史失败 | extendedLiveResourcesR4, fixGroupAvatarPGR1, fixGroupAvatarLiveR1 |
-| EX-01 | 注册与登录 | 真实SDK及App密码注册/密码登录通过；同账号两安装设备列表>=2已核对 | liveAccountSDK, nativeSmoke, multiDeviceUIR1 |
+| OP-01 | sendMessage | 真实TCP提交/幂等/恢复通过；真实App发送及双方消息恢复通过 | extendedLiveResourcesR4, twoInstallUIR13, extendedCurrentR1 |
+| OP-02 | withdrawMessage | 真实HTTPS撤回/历史事件及App发送端提交、接收端撤回恢复通过；PG已撤回修订3 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13, extendedCurrentR1 |
+| OP-03 | editMessage | 真实HTTPS编辑/恢复及独立两安装普通UI编辑中间态冷恢复通过；PG唯一原消息修订2、未撤回，原消息ID与精确正文一致 | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13, directEditUIR5, extendedCurrentR1 |
+| OP-04 | reaction | 真实HTTPS表情增删/恢复/回读及App普通表情提交通过；PG message.reaction_changed | extendedLiveResourcesR4, twoInstallUIR8, twoInstallUIR9, twoInstallUIR13, extendedCurrentR1 |
+| OP-05 | readReceipt | 真实TCP已读提交、读者列表及隐私开关过滤通过；真实App私聊阅读→发送端冷启动同消息对方已读通过；App群主原消息读者页真实成员+已读通过 | extendedLiveResourcesR7, peerReadUIR1, groupReadUIR2, extendedCurrentR1 |
+| OP-06 | directRoom | 真实HTTPS打开私聊通过；双向重复打开同房间已核对 | extendedLiveResourcesR9, extendedCurrentR1 |
+| OP-07 | groupRoom | 真实SDK群创建/恢复及App普通UI建群、成员核对、群消息双向收发和@all投影通过 | extendedLiveResourcesR4, twoInstallUIR14, extendedCurrentR1 |
+| OP-08 | membership | 修复后通过：核心/PG权限/Store/真实HTTPS及TCP、普通App退出和冷恢复；独立PG与原本地工作一致 | extendedLiveResourcesR4, membershipExitSourceInspection, fixSelfExitCoreR1, fixSelfExitPGR1, fixSelfExitAppUnitR2, fixSelfExitLiveR1, fixSelfExitAppLiveR4, extendedCurrentR1 |
+| OP-09 | moderation | 真实管理删除和原结果恢复通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-10 | memberMute | 真实禁言/恢复及后续TCP拒绝通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-11 | moderatedMemberRemoval | 真实成员移除/恢复/roster及后续TCP拒绝通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-12 | strangerMessagePreference | 真实HTTPS提交/重放/恢复/版本回读通过；App设置提交及同账号第二设备恢复通过 | extendedLiveResourcesR2, multiDeviceUIR4, extendedCurrentR1 |
+| OP-13 | userAddPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App普通开关提交、另一安装冷恢复及独立PG关闭策略一致通过 | extendedLiveResourcesR2, multiDeviceUIR5, extendedCurrentR1 |
+| OP-14 | readReceiptPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App设置提交及同账号第二设备恢复通过 | extendedLiveResourcesR2, multiDeviceUIR4, extendedCurrentR1 |
+| OP-15 | liveActivityPreference | 真实HTTPS提交/重放/恢复/版本回读通过；App普通开关提交、另一安装冷恢复及独立PG关闭策略一致通过 | extendedLiveResourcesR2, multiDeviceUIR5, extendedCurrentR1 |
+| OP-16 | relationship | 真实好友申请/接受/删除及回读通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-17 | userBlock | 真实拉黑/解除/恢复及关系回读通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-18 | conversationPreference | 已验证：真实TCP及同账号两安装置顶/归档/静音双向冷恢复通过 | extendedLiveResourcesR7, conversationPreferenceUIR2, extendedCurrentR1 |
+| OP-19 | messageFavorite | 真实TCP收藏/重放通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-20 | pinnedMessage | 真实群置顶/恢复通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-21 | groupAnnouncement | 真实公告提交/恢复通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-22 | groupPermission | 真实成员权限调整/恢复通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-23 | groupRole | 真实管理员角色调整/恢复/roster通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-24 | forwardMessage | 真实转发计划/恢复/目标历史内容通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-25 | profileUpdate | 真实个人资料更新、头像绑定及授权展示通过 | extendedLiveResourcesR7, extendedCurrentR1 |
+| OP-26 | contactAlias | 真实备注设置/清空/恢复/回读通过 | extendedLiveResourcesR4, extendedCurrentR1 |
+| OP-27 | groupNickname | 真实群昵称设置/清空/恢复、事件版本及目录租约通过 | extendedLiveResourcesR7, extendedCurrentR1 |
+| OP-28 | groupInvite | 真实邀请创建/撤销及列表回读通过；App普通UI二维码创建/读取、撤销及另一安装原链接失效通过 | extendedLiveResourcesR9, groupJoinUIR2, groupJoinRejectUIR1, extendedCurrentR1 |
+| OP-29 | groupJoinRequest | 真实入群申请/取消及审核可见性通过；App普通粘贴预览、申请、取消、同邀请再次申请和PG记录一致通过 | extendedLiveResourcesR9, groupJoinUIR4, extendedCurrentR1 |
+| OP-30 | groupJoinDecision | 真实SDK及App批准/拒绝、原申请状态冷恢复通过；批准后发送即时正文投影修复后R10/R11完整通过，历史失败保留 | extendedLiveResourcesR15, groupJoinUIR4, groupJoinRejectUIR1, extendedCurrentR1, approvedMemberLiveProjectionR10, approvedMemberLiveProjectionR11 |
+| OP-31 | mediaUpload | 真实个人头像/消息附件上传处理、下载和撤回授权收敛通过；后台与群头像另列 | extendedLiveResourcesR7, extendedCurrentR1 |
+| OP-32 | groupAvatar | 修复后通过：入口允许并声明群头像，17项PG权限/恢复回归通过，真实HTTPS上传处理/绑定/字节下载/移除/原操作恢复通过，保留422历史失败 | extendedLiveResourcesR4, fixGroupAvatarPGR1, fixGroupAvatarLiveR1, extendedCurrentR1 |
+| EX-01 | 注册与登录 | 真实SDK及App密码注册/密码登录通过；同账号两安装设备列表>=2已核对 | liveAccountSDK, nativeSmoke, multiDeviceUIR1, accountSwitchCurrentR1 |
 | EX-02 | 凭据刷新 | 真实SDK及App业务401刷新、原15分钟令牌自然到期自动刷新、冷启动使用新凭据通过 | liveAccountSDK, nativeSmoke, appCredentialRefreshUIR1, appNaturalExpiryUIR2 |
-| EX-03 | 当前设备登出 | 修复后真实App两次首次退出无需手动重试，A→B→A账号切换及冷恢复通过；22项相关回归通过，历史失败保留 | liveAccountSDK, accountSwitchUIR1, accountSwitchUIR4, fixSignOutUnitR2, fixSignOutAppR1 |
-| EX-04 | 远程设备撤销 | 真实SDK及App远端撤销、回到登录和重启保留终止态通过 | liveAccountUIR4 |
-| EX-05 | 账号封禁 | 通过：真实Operator封禁/幂等、原已认证TCP在8秒观察边界内由服务端终止、HTTP凭据清除、登录及TLS重新认证拒绝 | extendedLiveResourcesR16 |
-| EX-06 | 账号切换与冷启动 | 修复后真实App首次退出、A→B→A及正常冷恢复账号投影隔离通过，各自消息可见且互不可见，历史需重试失败保留 | accountSwitchUIR4, fixSignOutAppR1 |
-| EX-07 | 陌生消息拒绝/允许 | 通过：无好友关系私聊预热发送成功；同一TLS连接策略关闭后新发送directPolicyDenied、重新允许后成功 | extendedLiveResourcesR16 |
-| EX-08 | 拉黑后即时授权失效 | 修复后通过：PG原消息身份提示去重/单侧隐私；真实App提示冷恢复及3次后台恢复、跨Gateway多设备投递、解除拉黑后发送全部通过；保留历史失败 | liveAccountUIR5, fixRestrictionPGR2, fixRestrictionLiveR1, fixRestrictionLiveR2 |
-| EX-09 | 私聊唯一性 | 通过：双方并发首次创建及后续重新打开均得到同一私聊房间；真实HTTPS回执核对 | extendedLiveResourcesR16 |
-| EX-10 | 实时收发与历史恢复 | 真实App私聊提交/撤回恢复及群消息双向收发/@all投影通过；离线自动重放失败单列；批准入群后原已提交消息正常App冷启动恢复唯一正文通过 | twoInstallUIR13, twoInstallUIR14, groupJoinColdSendUIR1 |
+| EX-03 | 当前设备登出 | 当前代码真实App两次首次退出无需重试、A→B→A及冷恢复隔离通过；注册与AX、两范围清理完整R1 exit0，22项回归通过，历史失败保留 | liveAccountSDK, accountSwitchUIR1, accountSwitchUIR4, fixSignOutUnitR2, fixSignOutAppR1, accountSwitchCurrentR1 |
+| EX-04 | 远程设备撤销 | 真实SDK及App远端撤销、回到登录和重启保留终止态通过 | liveAccountUIR4, fixRestrictionLiveR2 |
+| EX-05 | 账号封禁 | 通过：真实Operator封禁/幂等、原已认证TCP在8秒观察边界内由服务端终止、HTTP凭据清除、登录及TLS重新认证拒绝 | extendedLiveResourcesR16, extendedCurrentR1 |
+| EX-06 | 账号切换与冷启动 | 当前代码A→B→A正常登录/首次退出/消息与投影隔离/正常冷恢复完整R1 exit0，4项通过0失败0跳过，历史需重试失败保留 | accountSwitchUIR4, fixSignOutAppR1, accountSwitchCurrentR1 |
+| EX-07 | 陌生消息拒绝/允许 | 通过：无好友关系私聊预热发送成功；同一TLS连接策略关闭后新发送directPolicyDenied、重新允许后成功 | extendedLiveResourcesR16, extendedCurrentR1 |
+| EX-08 | 拉黑后即时授权失效 | 修复后通过：PG按原消息身份提示去重/单侧隐私，真实App提示冷恢复及3次后台恢复、跨Gateway多设备投递、解除拉黑后发送全部通过；保留历史失败 | liveAccountUIR5, fixRestrictionPGR2, fixRestrictionLiveR1, fixRestrictionLiveR2 |
+| EX-09 | 私聊唯一性 | 通过：双方并发首次创建及后续重新打开均得到同一私聊房间；真实HTTPS回执核对 | extendedLiveResourcesR16, extendedCurrentR1 |
+| EX-10 | 实时收发与历史恢复 | 真实App私聊提交/撤回恢复及群消息双向收发/@all投影通过；离线自动重放失败单列；批准入群后原已提交消息正常App冷启动恢复唯一正文通过 | twoInstallUIR13, twoInstallUIR14, groupJoinColdSendUIR1, approvedMemberLiveProjectionR10, approvedMemberLiveProjectionR11 |
 | EX-11 | 发送结果不确定后恢复 | 通过：真实App丢ACK前独立PG确认原提交，跨Gateway自动重连、原身份恢复、双端游标与SQLite重开一致 | appACKCutR5 |
-| EX-12 | 离线发送持久化与重放 | 修复后私聊普通离线入队/冷恢复及独立原身份验证通过：intent/冻结命令不变，PG唯一原消息/成功记录及双端唯一对应投影；整UI AX失败另列，历史失败保留 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4, fixOfflineAppR1, fixOfflineOriginalAppR4 |
+| EX-12 | 离线发送持久化与重放 | 普通App离线入队/正常冷恢复及原身份验证通过；修复后R8完整UI与AX/contrast通过，PG唯一原消息/成功记录及双端唯一投影，历史失败保留 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4, fixOfflineAppR1, fixOfflineOriginalAppR4, fixOfflineOriginalAppR8 |
 | EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
 | EX-14 | 多设备已读 | 已验证：同账号两设备progress/单条群用户已读与跨设备隐私暂停；独立接收阅读后私聊发送端冷恢复对方已读；群主读者页显示真实独立阅读成员与已读，PG一致 | multiDeviceUIR2, multiDeviceUIR4, peerReadUIR1, groupReadUIR2 |
 | EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；两独立安装App登录和正常冷恢复完整258成员ID/名字、3页及PG两设备记录通过，历史UI遍历超时保留 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3, appLargeDirectoryUIR4, appLargeDirectoryUIR6, appLargeDirectoryUIR8 |
-| EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
-| EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
-| EX-18 | 在线状态与输入提示 | 修复后真实TLS冷订阅ACK后立即开始/停止通过，不等待Coverage Ready；安装期间撤销连接拒绝成功ACK、原票据清理通过；历史丢失保留 | extendedLiveResourcesR9, extendedLiveResourcesR10, fixTypingAcknowledgementLiveR1, fixTypingAcknowledgementRevocationR2 |
-| EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标R14完整exit0，owned清理通过，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
-| EX-20 | 断线重连 | 1000房间冷恢复/重连及真实跨Gateway在线更新R14完整exit0，owned清理通过；R12在线超时及R13清理失败保留；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
-| EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
-| EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；下载授权、系统驱动与账号恢复已接入；真实挂起GET/持久化映射/512KiB校验/正常冷启动原文件复用R1完整exit0，真实下载途中的撤回R2/登出R1取消排空通过；真实SIGKILL/冷启动接管同一原意图与系统任务R1完整exit0；当前本机后台上传下载专项通过 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7, appNativeBackgroundDownloadUIR1, appNativeBackgroundDownloadWithdrawalR2, appNativeBackgroundDownloadLogoutR1, appNativeBackgroundDownloadRestartR1 |
-| EX-23 | Push端点与唤醒 | 真实headless入口通过；普通UI注册就绪与系统挂起R9/R10通过，但纯后台simctl载荷实际分派后台fetch，远程通知回调及后台原消息投影未证明；系统Push验收仍未完成 | liveAccountUIR6, systemPushLiveR9, systemPushLiveR10 |
-| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线原身份及全部原AX/contrast修复后完整R8通过；冷URL启动真实预览/普通申请/PG核对通过；批准入群即时投影终止ACK修复后R10/R11连续通过，原波动失败保留；正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
+| EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7, extendedCurrentR1 |
+| EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7, extendedCurrentR1 |
+| EX-18 | 在线状态与输入提示 | 修复后真实TLS冷订阅ACK后立即开始/停止通过；激活期间连接撤销拒绝ACK及票据清理通过；原失败保留 | extendedLiveResourcesR9, extendedLiveResourcesR10, fixTypingAcknowledgementLiveR1, fixTypingAcknowledgementRevocationR2, extendedCurrentR1 |
+| EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway冷恢复/断线重连/在线更新、丢尾通知2次且无相关替代唤醒的自动补偿R14完整exit0，owned PG/服务/专用模拟器清理通过，原R12/R13失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13, roomScaleR14 |
+| EX-20 | 断线重连 | 1000房间真实跨Gateway冷恢复/断线重连/在线更新、丢尾通知2次且无相关替代唤醒的自动补偿R14完整exit0，owned PG/服务/专用模拟器清理通过，原R12/R13失败保留 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13, roomScaleR14 |
+| EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2, extendedLiveResourcesR18, extendedCurrentR1 |
+| EX-22 | 后台上传下载 | 当前本机专项通过：真实挂起上传下载、原身份/字节校验、下载途中SIGKILL后原系统任务接管、冷缓存重新授权复用，以及撤回/登出取消排空；不代表真机锁屏或跨版本升级。 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7, appNativeBackgroundDownloadUIR1, appNativeBackgroundDownloadWithdrawalR2, appNativeBackgroundDownloadLogoutR1, appNativeBackgroundDownloadRestartR1 |
+| EX-23 | Push端点与唤醒 | 按用户要求排除 APNs 相关验证；保留失败记录，不计为通过或当前完成门槛 | liveAccountUIR6, systemPushLiveR9, systemPushLiveR10, systemPushDelegateExposureR2, systemPushDispatchR11, systemPushDispatchR12, systemPushUIKitRoutingControlR3, systemPushNewIOS27R13 |
+| EX-24 | UI主流程 | 完整双安装普通消息/离线原身份及全部原AX修复后R8通过；冷URL邀请通过；终止ACK修复后批准入群即时消息投影R10/R11连续通过，原失败记录保留 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, directEditUIR3, directEditUIR5, fixColdInviteAppR3, fixOfflineOriginalAppR8, approvedMemberLiveProjectionR10, approvedMemberLiveProjectionR11, accountSwitchCurrentR1 |
 
 <!-- acceptance-matrix-end -->
 
@@ -3360,3 +3360,23 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 独立UIKit分派对照R1未满足前置：直接UIKit旧入口在当前SDK被UIScene必需检查阻止，真实注册未发生；R2加入Scene后已连接但注册失败，缺少Xcode同等的模拟器__TEXT,__entitlements。两轮均卸载owned对照，仅作为失败前置，不计Push验证。
 - UIKit对照R3有效完成：独立Bundle com.stskcxfz.imv2routingprobe、最小Scene/UIKit委托、声明remote-notification并嵌入aps-environment=development的模拟器entitlement；实际系统注册回调和Scene连接成功，实际Scene进入后台成功。纯apns文件投递前台/后台均exit121，远程回调0，SpringBoard所需后台模式拒绝2次；同一iOS27.0/24A434另一所选模拟器复现，排除问题仅存在IMApp SwiftUI路径的假设，仍不能把对照当作IMApp业务验收通过。owned对照已卸载。可复核源码/构建产物/纯payload/运行脚本/汇总位于 /tmp/imv2-system-push-routing-probe-20261009，summary-r1/r2/r3.json保留。
 - 当前外部条件只读复核：已安装可用运行时iOS18.5/22F77与iOS27.0/24A434，App最低26.2不能用18.5替代；当前已连接实体设备0，本次进程APNS环境变量0。不降低部署版本、不增加后台fetch或可见通知替代原验收。EX-23当前系统通知证据仍未通过；后续须继续完整56项证据审计，不能据后台下载专项完成标记整个目标完成。
+
+- 当前合并扩展验收R1：提交4ffe6a34下真实HTTPS/TLS执行，14个测试方法，群头像/自退/管理/消息操作/账号策略与封禁全部通过，独立服务与PG清理完成。目录规模与慢资源两项显式opt-in本轮跳过，沿用其独立专项证据，不将跳过视作通过。日志 /tmp/imv2-functional-acceptance-current-extended-r1-20261009.log，完整结果 /tmp/imv2-functional-acceptance-current-extended-r1-20261009/client.log 与 summary.json。矩阵补齐最新合并证据及离线R8、房间规模R14的既有实际结果；Push仍未通过。
+
+- 当前验收证据审计直接读取25个关联运行的157个原xcresult摘要，真实失败和跳过数均保留；资料 /tmp/imv2-functional-acceptance-20261008/referenced-ui-result-audit-20261009.json。早期目录/上传/偏好业务通过与注册审计失败明确分开；原批准成员即时正文失败不再作为当前完成证据，矩阵补入修复后完整通过的R10/R11索引。账号切换当前轮注册/无障碍1项通过，切换与清理仍等待终态。
+
+- 当前账号切换R1完整exit0：注册及AX审计、A→B→A实际登录/两次首次退出无重试、各自原消息与投影隔离、正常冷恢复和两个范围清理共4项通过0失败0跳过，owned服务/PG关闭。日志 /tmp/imv2-account-switch-current-r1-20261009.log；四份实际xcresult摘要 /tmp/imv2-account-switch-current-r1-summary.json。EX03/EX06补入当前代码完整证据，不覆盖早期整轮审计失败。系统Push当前OS拒绝条件未改变，完整目标未完成。
+
+- Push跨运行时诊断：本机仅18.5/27.0，当前剩余磁盘约14GiB；独立UIKit程序18.5目标（不改App最低26.2）R1实际Scene启动但远程通知注册前置失败，因此不算通知分派证据。专属新模拟器及诊断App已删除，原模拟器不变。R2保留原失败后补入旧运行时可读取的真实代码签名entitlement并复测；根目录 /tmp/imv2-system-push-routing-probe-ios185-20261009。
+
+- 18.5 UIKit对照R2终态：补入真实代码签名entitlement后，启动/注册前置仍未取得有效成功证据（CalledProcessError）；保持失败，不用低版本对照替代App验收。诊断App卸载及专属模拟器关闭/删除成功，r1/r2各自summary与cleanup保留。现有可运行App的27.0纯后台Push仍保持R11/R12的OS拒绝证据；未得到另一兼容运行时的有效对照。
+
+- 当前修复目标阻塞审计：最近三轮持续遇到同一EX23本机OS远程通知分派条件，现有有效27.0对照在进入App前被拒绝，18.5不能运行最低26.2的App，独立低版本注册前置也未通过。当前所有本轮测试/诊断句柄已终态，无存活验收进程；已安装运行时仍仅18.5/27.0，Spotlight未发现另一本机iOS运行时DMG，未收到可导入路径。完整56项范围和原失败保留，未标记完成。状态应为blocked，恢复条件为提供另一兼容本机运行时或修复当前模拟器系统投递环境，再继续实际Push回调及后台原消息投影验收；资料 /tmp/imv2-functional-acceptance-20261008/push-blocker-current-audit-20261009.json。
+
+- 用户要求重新选择现有iOS27模拟器，实际选用此前未用于App专项的iPhone18Pro（4F260618-7381-44E2-AEB8-1A2B10985753），R13完整执行并终态exit1。普通App注册/AX通过；挂起后原TCP消息01a11fba-8898-7607-ab0e-adb6b9fb9f5b/sequence2提交成功，45秒后台投影未完成；系统日志读取成功，remoteCallbackCount=0、missingBackgroundModeCount=1、simctl返回121。实际xcresult共3通过1失败0跳过，两个范围清理通过，owned服务与PG关闭。日志 /tmp/imv2-system-push-new-ios27-r13-20261009.log，摘要 /tmp/imv2-system-push-new-ios27-r13-summary.json，原观察 system-push-observation.json保留。换设备后同样失败，不能据此宣称所有模拟器不支持；EX23未通过，恢复后阻塞审计重新计数，不复用此前blocked轮次。
+
+### 本次修复验收收尾（排除 APNs）
+
+用户明确要求“不验证和apns相关的”。原56项保留编号，EX23标为用户排除，系统Push失败不改为通过；当前55项本机功能验收完成。逐项证据与范围核对见 /tmp/imv2-functional-acceptance-20261008/final-non-apns-acceptance-audit-20261009.json。已核对最新真实HTTPS/TLS扩展套件、各命名App功能阶段的实际xcresult、原消息/工作身份与PG/SQLite事实；后台下载四轮所有实际UI结果再次读取均通过。原聚合失败、注册审计历史及未选择的opt-in跳过保持原样，不视作通过；共用注册/AX及主要UI流程由修复后完整R8、当前账号切换R1和原生下载整轮补足。
+
+主要修复包括首次登出任务所有权、离线原命令重放、私聊拒绝提示与去重、主动退群和群头像、typing订阅ACK、终止订阅ACK与成员入群即时投影、界面无障碍/冷邀请恢复、账号后台下载持久任务接管、缓存重新授权与字节校验、撤回/登出取消排空。本机范围含1000房间跨Gateway恢复及尾通知补偿、真实丢ACK自动重连、两安装多设备同步与权限变更、后台挂起传输及实际SIGKILL后原任务恢复；不扩展为生产容量、真机或APNs送达验证。本轮owned服务/PG测试已关闭；本次收尾只更新验收记录，不自动提交推送。
