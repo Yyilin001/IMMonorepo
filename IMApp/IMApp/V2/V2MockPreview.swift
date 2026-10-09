@@ -67,6 +67,7 @@ struct V2MockPreview: View {
                         pushWakeSettingsStore: nil,
                         deviceSessionsStore: nil,
                         groupInvitationStore: nil,
+                        pendingGroupInvitationURL: .constant(nil),
                         pendingGroupAvatarsStore: nil,
                         localE2EConversationLaunchFixture: nil,
                         passwordLifecycleClient: nil,

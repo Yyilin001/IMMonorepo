@@ -1235,10 +1235,10 @@ public actor V2DeviceConnectionRegistry {
         await removePresenceSubscription(connectionID: connectionID)
     }
 
-    public func subscribeTyping(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async {
+    public func subscribeTyping(_ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID) async throws {
         guard directory.identityByConnection[connectionID] != nil,
               let lifecycle = directory.lifecycleByConnection[connectionID]
-        else { return }
+        else { throw CancellationError() }
         let mutation = makeGeneration()
         subscriptions.typingMutationByConnection[connectionID] = mutation
         defer {
@@ -1249,10 +1249,30 @@ public actor V2DeviceConnectionRegistry {
         await removeTypingSubscription(connectionID: connectionID)
         guard directory.lifecycleByConnection[connectionID] == lifecycle,
               subscriptions.typingMutationByConnection[connectionID] == mutation
-        else { return }
+        else { throw CancellationError() }
         subscriptions.typingRoomByConnection[connectionID] = roomID
         subscriptions.typingWatchersByRoom[roomID, default: [:]][connectionID] = stream
-        await beginScopeRecovery(connection: connectionID, kind: .roomTyping, id: roomID.rawValue)
+        let key = RecoveryKey(connection: connectionID, kind: .roomTyping, id: roomID.rawValue)
+        guard let generation = recoveryCoordinator.requestScope(key, lifecycle: lifecycle) else {
+            await removeTypingSubscription(connectionID: connectionID)
+            throw V2RealtimePublicationBackpressure.receiverQueue
+        }
+        do {
+            try await recoveryCoordinator.acquireTypingInterestBeforeAcknowledgement(connection: connectionID,
+                roomID: roomID, generation: generation, lifecycle: lifecycle)
+            guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                  subscriptions.typingMutationByConnection[connectionID] == mutation else { throw CancellationError() }
+            await recoveryCoordinator.beginScopeRecovery(connection: connectionID, kind: .roomTyping, id: roomID.rawValue,
+                scopeGeneration: generation, lifecycle: lifecycle)
+            guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                  subscriptions.typingMutationByConnection[connectionID] == mutation,
+                  recoveryCoordinator.generation(for: key) == generation else { throw CancellationError() }
+        } catch {
+            if subscriptions.typingMutationByConnection[connectionID] == mutation {
+                await removeTypingSubscription(connectionID: connectionID)
+            }
+            throw error
+        }
     }
 
     public func unsubscribeTyping(connectionID: UUID, roomID: RoomID) async {

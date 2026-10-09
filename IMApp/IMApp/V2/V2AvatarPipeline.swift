@@ -177,10 +177,11 @@ private struct V2AuthorizedProfileView: View {
                 .frame(width: size, height: size).clipShape(Circle()).accessibilityHidden(true)
                 if showsName { Text(displayName).font(.caption2).lineLimit(1) }
             case .name:
-                Text(displayName).lineLimit(2).multilineTextAlignment(.leading)
+                Text(displayName).fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
             }
         }
-        .accessibilityElement(children: .ignore)
+        .accessibilityElement(children: .combine)
         .accessibilityLabel(displayName)
         .task(id: TaskKey(key: key, phase: phase, generation: pipeline?.generation ?? 0, visible: isVisible, refresh: refresh,
                           activation: sharedPage?.activation, pageRevision: sharedPage?.revision(for: key), appearance: appearance)) {

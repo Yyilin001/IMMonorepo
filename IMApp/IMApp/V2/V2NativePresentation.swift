@@ -22,7 +22,7 @@ struct V2ConversationEmptyState: View {
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityAddTraits(.isHeader)
                         .accessibilityIdentifier("v2.conversation.empty.title")
-                    Text(description).font(.body).foregroundStyle(.secondary)
+                    Text(description).font(.body).foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("v2.conversation.empty.description")
                 }

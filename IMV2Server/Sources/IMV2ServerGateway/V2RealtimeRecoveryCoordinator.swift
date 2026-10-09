@@ -504,6 +504,26 @@ actor V2RealtimeRecoveryCoordinator {
         pumpRealtimeRecovery()
     }
 
+    /// Ephemeral typing cannot recover a notification missed between ACK and
+    /// interest installation. Acquire its exact owner before acknowledging;
+    /// the subsequent recovery queue reuses this already-acquired ticket.
+    func acquireTypingInterestBeforeAcknowledgement(connection: UUID, roomID: RoomID,
+        generation: UInt64, lifecycle: UInt64) async throws {
+        let key = RecoveryKey(connection: connection, kind: .roomTyping, id: roomID.rawValue)
+        let demand = RealtimeRecoveryDemand(generation: lifecycle, scopeGeneration: generation,
+            scope: nil, nextAttempt: .now)
+        try Task.checkCancellation()
+        guard scopeIsCurrent(key, demand), !realtimeRecoveryClosed else { throw CancellationError() }
+        // Without a cross-node broker, the registry's local watcher is the
+        // complete delivery path and has already been installed by the caller.
+        guard typingInterests != nil else { return }
+        let ticket = try interestTicket(key, demand: demand)
+        if !ticket.isAcquired { try await activateInterest(ticket) }
+        try Task.checkCancellation()
+        guard scopeIsCurrent(key, demand), ticket.isActive, ticket.isAcquired,
+              !realtimeRecoveryClosed else { throw CancellationError() }
+    }
+
     func beginScopeRecovery(connection: UUID, kind: V2RealtimeTopicKind, id: String,
         scopeGeneration requestedGeneration: UInt64? = nil, lifecycle expectedLifecycle: UInt64? = nil) async {
         guard kind != .roomEvents else { return }

@@ -433,7 +433,7 @@ struct V2GatewayDomainCommandHandlerTests {
         switch kind {
         case "group": await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: room)
         case "presence": await registry.subscribePresence(stream, connectionID: connectionID, roomID: room, targetUserID: subject)
-        default: await registry.subscribeTyping(stream, connectionID: connectionID, roomID: room)
+        default: try await registry.subscribeTyping(stream, connectionID: connectionID, roomID: room)
         }
         func publish() async {
             let expiry = fixture.now.addingTimeInterval(6)

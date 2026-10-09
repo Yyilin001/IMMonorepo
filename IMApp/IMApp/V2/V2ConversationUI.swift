@@ -1956,7 +1956,7 @@ struct V2ConversationDetailView: View {
                         }
                     }
                     if store.timeline.isEmpty {
-                        ContentUnavailableView("暂无消息", systemImage: "bubble")
+                        V2ConversationEmptyState(title: "暂无消息", symbol: "bubble", description: "发送第一条消息，开始会话。")
                     } else {
                         ScrollViewReader { proxy in
                             ScrollView {
@@ -2235,17 +2235,27 @@ struct V2ConversationDetailView: View {
         .navigationTitle(store.isGroupConversation ? store.title : "会话")
         .toolbar {
             if let key = store.presentationKey {
-                ToolbarItem(placement: .principal) { V2AuthorizedAvatarView(key: key, showsName: true, size: 24) }
+                ToolbarItem(placement: .principal) {
+                    V2AuthorizedAvatarView(key: key, size: 24)
+                        .accessibilityHidden(true)
+                }
             } else if store.isGroupConversation, let room = try? RoomID(store.roomID) {
                 ToolbarItem(placement: .principal) {
-                    HStack(spacing: 6) {
-                        V2AuthorizedGroupAvatarView(roomID: room, size: 24)
-                        Text(store.title).font(.headline).lineLimit(1)
-                    }
+                    V2AuthorizedGroupAvatarView(roomID: room, size: 24)
+                        .accessibilityHidden(true)
                 }
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .top) {
+            if let key = store.presentationKey {
+                V2AuthorizedProfileNameView(key: key)
+                    .font(.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16).padding(.vertical, 8)
+                    .accessibilityAddTraits(.isHeader)
+            }
+        }
         .toolbar(.hidden, for: .tabBar)
         .toolbar { conversationToolbar }
         .sheet(item: $presentedDetailSheet) { sheet in
@@ -2690,6 +2700,7 @@ private struct V2ConversationMessageBubble: View {
                 message.isOutgoing && !message.isWithdrawn ? Color.accentColor : Color(.secondarySystemBackground),
                 in: RoundedRectangle(cornerRadius: 20)
             )
+            .contextMenu { messageActions }
             Text(message.createdAt, format: .dateTime.hour().minute())
                 .font(.caption)
                 .foregroundStyle(.primary)
@@ -2716,53 +2727,55 @@ private struct V2ConversationMessageBubble: View {
                 V2ConversationReactionControls(store: store, message: message)
             }
         }
-        .contextMenu {
-            if !message.isWithdrawn {
-                Button("回复", systemImage: "arrowshape.turn.up.left") { store.beginReply(to: message) }
-                    .accessibilityIdentifier("v2.message.reply.\(message.id)")
+    }
+
+    @ViewBuilder
+    private var messageActions: some View {
+        if !message.isWithdrawn {
+            Button("回复", systemImage: "arrowshape.turn.up.left") { store.beginReply(to: message) }
+                .accessibilityIdentifier("v2.message.reply.\(message.id)")
+        }
+        if store.canReactToMessage(message) {
+            V2ReactionPickerMenu(store: store, message: message)
+        }
+        if message.isOutgoing && store.isGroupConversation && !message.isWithdrawn {
+            Button("查看已读", systemImage: "checkmark.message") { showReadReceipts() }
+                .accessibilityIdentifier("v2.message.group-readers.\(message.id)")
+        }
+        if !message.isWithdrawn {
+            Button("转发", systemImage: "arrowshape.turn.up.right") { beginForward() }
+                .accessibilityIdentifier("v2.message.forward.\(message.id)")
+            if !message.media.isEmpty {
+                Button("复制附件到会话", systemImage: "doc.on.doc", action: beginCopyAttachments)
             }
-            if store.canReactToMessage(message) {
-                V2ReactionPickerMenu(store: store, message: message)
+        }
+        if store.canEditMessage(message) {
+            Button("编辑") { beginEditing() }
+                .accessibilityIdentifier("v2.message.edit.\(message.id)")
+        }
+        if store.canWithdrawMessage(message) {
+            Button("撤回", role: .destructive) {
+                Task { await store.withdrawMessage(message) }
             }
-            if message.isOutgoing && store.isGroupConversation && !message.isWithdrawn {
-                Button("查看已读", systemImage: "checkmark.message") { showReadReceipts() }
-                    .accessibilityIdentifier("v2.message.group-readers.\(message.id)")
+            .disabled(!store.canWithdrawMessage(message))
+            .accessibilityValue(store.isMessageActionInFlight(message) ? "正在保存消息操作" : "")
+            .accessibilityIdentifier("v2.message.withdraw.\(message.id)")
+        }
+        if !message.isWithdrawn {
+            Menu("收藏设置", systemImage: "star") {
+                Button("设为收藏") { Task { await store.setFavorite(message, desired: true) } }
+                Button("取消收藏") { Task { await store.setFavorite(message, desired: false) } }
             }
-            if !message.isWithdrawn {
-                Button("转发", systemImage: "arrowshape.turn.up.right") { beginForward() }
-                    .accessibilityIdentifier("v2.message.forward.\(message.id)")
-                if !message.media.isEmpty {
-                    Button("复制附件到会话", systemImage: "doc.on.doc", action: beginCopyAttachments)
+            .accessibilityIdentifier("v2.message.favorite.\(message.id)")
+            if store.canManageMessages && !message.isWithdrawn {
+                Button("管理移除消息", systemImage: "trash", role: .destructive) {
+                    Task { await store.prepareMessageRemoval(message) }
                 }
+                .accessibilityIdentifier("v2.group.message.remove.\(message.id)")
             }
-            if store.canEditMessage(message) {
-                Button("编辑") { beginEditing() }
-                    .accessibilityIdentifier("v2.message.edit.\(message.id)")
-            }
-            if store.canWithdrawMessage(message) {
-                Button("撤回", role: .destructive) {
-                    Task { await store.withdrawMessage(message) }
-                }
-                .disabled(!store.canWithdrawMessage(message))
-                .accessibilityValue(store.isMessageActionInFlight(message) ? "正在保存消息操作" : "")
-                .accessibilityIdentifier("v2.message.withdraw.\(message.id)")
-            }
-            if !message.isWithdrawn {
-                Menu("收藏设置", systemImage: "star") {
-                    Button("设为收藏") { Task { await store.setFavorite(message, desired: true) } }
-                    Button("取消收藏") { Task { await store.setFavorite(message, desired: false) } }
-                }
-                .accessibilityIdentifier("v2.message.favorite.\(message.id)")
-                if store.canManageMessages && !message.isWithdrawn {
-                    Button("管理移除消息", systemImage: "trash", role: .destructive) {
-                        Task { await store.prepareMessageRemoval(message) }
-                    }
-                    .accessibilityIdentifier("v2.group.message.remove.\(message.id)")
-                }
-                if store.isGroupConversation {
-                    Button(message.isPinnedInGroup ? "取消置顶消息" : "置顶消息", systemImage: message.isPinnedInGroup ? "pin.slash" : "pin") { Task { await store.pinInGroup(message) } }
-                        .accessibilityIdentifier("v2.group.message.pin.\(message.id)")
-                }
+            if store.isGroupConversation {
+                Button(message.isPinnedInGroup ? "取消置顶消息" : "置顶消息", systemImage: message.isPinnedInGroup ? "pin.slash" : "pin") { Task { await store.pinInGroup(message) } }
+                    .accessibilityIdentifier("v2.group.message.pin.\(message.id)")
             }
         }
     }

@@ -1747,7 +1747,7 @@ public actor V2GatewayByteStream {
             await registry.unsubscribePresence(connectionID: connectionID, roomID: try .init(request.roomID))
         case .subscribeTyping(let request):
             guard case .acknowledged? = response.body else { return }
-            await registry.subscribeTyping(self, connectionID: connectionID, roomID: try .init(request.roomID))
+            try await registry.subscribeTyping(self, connectionID: connectionID, roomID: try .init(request.roomID))
         case .unsubscribeTyping(let request):
             guard case .acknowledged? = response.body else { return }
             await registry.unsubscribeTyping(connectionID: connectionID, roomID: try .init(request.roomID))

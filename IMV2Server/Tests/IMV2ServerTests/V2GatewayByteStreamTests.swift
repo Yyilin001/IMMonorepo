@@ -295,7 +295,7 @@ struct V2GatewayByteStreamTests {
                 switch kind {
                 case "unsubscribe-group": await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: oldRoom)
                 case "unsubscribe-presence": await registry.subscribePresence(stream, connectionID: connectionID, roomID: oldRoom, targetUserID: subject)
-                default: await registry.subscribeTyping(stream, connectionID: connectionID, roomID: oldRoom)
+                default: try await registry.subscribeTyping(stream, connectionID: connectionID, roomID: oldRoom)
                 }
             }
             func publish() async {

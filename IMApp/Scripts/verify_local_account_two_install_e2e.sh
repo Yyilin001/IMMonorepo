@@ -536,9 +536,22 @@ SWIFT
     xcrun simctl pbcopy "${sender_simulator_id}" < "${result_directory}/invite-link.txt"
   }
   open_applicant_invite
-  run_stage "${sender_simulator_id}" testApplicantSubmitsActualGroupJoinRequest
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_COLD_INVITE_ONLY:-false}" == true ]]; then
+    # XCTest opens the real QR URL while synchronously cold-launching the
+    # owned scope. Delivery cannot race the test runner's app installation.
+    export TEST_RUNNER_IMAPP_COLD_INVITE_SCOPE="${sender_scope}"
+    export TEST_RUNNER_IMAPP_COLD_INVITE_URL="$(cat "${result_directory}/invite-link.txt")"
+    run_stage "${sender_simulator_id}" testApplicantSubmitsInvitationOpenedDuringColdRestore
+  else
+    run_stage "${sender_simulator_id}" testApplicantSubmitsActualGroupJoinRequest
+  fi
   join_facts first-pending
   jq --exit-status '.pending == 1 and .members == 1' "${result_directory}/first-pending-join-facts.json" >/dev/null
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_COLD_INVITE_ONLY:-false}" == true ]]; then
+    [[ "${audit_failure_count}" -eq 0 ]] || exit 1
+    printf '%s\n' 'local cold restore invitation deep-link E2E: pass'
+    exit 0
+  fi
   if [[ "${IMAPP_LOCAL_TWO_INSTALL_GROUP_JOIN_REJECT_ONLY:-false}" == true ]]; then
     launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
     run_stage "${receiver_simulator_id}" testGroupOwnerRejectsActualJoinRequest

@@ -1,4 +1,5 @@
 import IMV2ClientKit
+import OSLog
 import SwiftUI
 import UIKit
 
@@ -95,6 +96,7 @@ struct V2RootView: View {
                             pushWakeSettingsStore: store.pushWakeSettingsStore,
                             deviceSessionsStore: store.deviceSessionsStore,
                             groupInvitationStore: store.groupInvitationStore,
+                            pendingGroupInvitationURL: $pendingGroupInvitationURL,
                             pendingGroupAvatarsStore: store.pendingGroupAvatarsStore,
                             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                             passwordLifecycleClient: store.passwordLifecycleClient(),
@@ -191,12 +193,9 @@ struct V2RootView: View {
         }
         .onOpenURL { url in
             guard url.scheme?.lowercased() == "iim", url.host == "group-invite" else { return }
+            Logger(subsystem: "com.stskcxfz.imapp", category: "GroupInvitationRouting")
+                .info("Invitation URL received; scene active: \(scenePhase == .active, privacy: .public)")
             pendingGroupInvitationURL = url
-            openPendingGroupInvitationIfPossible()
-        }
-        .onChange(of: store.groupInvitationStore != nil) { _, isAvailable in
-            guard isAvailable else { return }
-            openPendingGroupInvitationIfPossible()
         }
     }
 
@@ -242,14 +241,6 @@ struct V2RootView: View {
         if let revocationVisualFixture { return revocationVisualFixture }
         #endif
         return store.deviceRevocationPresentation
-    }
-
-    private func openPendingGroupInvitationIfPossible() {
-        guard let url = pendingGroupInvitationURL,
-              let invitations = store.groupInvitationStore
-        else { return }
-        pendingGroupInvitationURL = nil
-        Task { await invitations.open(url.absoluteString) }
     }
 
     #if DEBUG
@@ -432,6 +423,11 @@ struct V2SignInView: View {
 }
 
 struct V2SignedInRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
+    private struct InvitationPresentationKey: Equatable {
+        let url: URL?
+        let isActive: Bool
+    }
     private enum PresentedSettingsSheet: String, Identifiable {
         case accountSecurity
         case privacy
@@ -451,6 +447,7 @@ struct V2SignedInRootView: View {
     let pushWakeSettingsStore: V2PushWakeSettingsStore?
     let deviceSessionsStore: V2DeviceSessionsStore?
     let groupInvitationStore: V2GroupInvitationStore?
+    @Binding var pendingGroupInvitationURL: URL?
     let pendingGroupAvatarsStore: V2PendingGroupAvatarsStore?
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let passwordLifecycleClient: V2PasswordLifecycleClient?
@@ -502,6 +499,20 @@ struct V2SignedInRootView: View {
             .tag(V2RootNavigationStore.Tab.account)
 
         }
+            .task(id: InvitationPresentationKey(url: pendingGroupInvitationURL, isActive: scenePhase == .active)) {
+                guard scenePhase == .active,
+                      let url = pendingGroupInvitationURL, let invitations = groupInvitationStore else { return }
+                // The signed-in presentation owns this work. Cold-start URLs
+                // remain pending until its conversation sheet host is mounted.
+                rootNavigation.selectedTab = .conversations
+                Logger(subsystem: "com.stskcxfz.imapp", category: "GroupInvitationRouting")
+                    .info("Opening pending invitation on active signed-in presentation")
+                await invitations.open(url.absoluteString)
+                Logger(subsystem: "com.stskcxfz.imapp", category: "GroupInvitationRouting")
+                    .info("Invitation preview returned; cancelled: \(Task.isCancelled, privacy: .public), presenting: \(invitations.isPresentingJoin, privacy: .public)")
+                guard !Task.isCancelled, pendingGroupInvitationURL == url else { return }
+                pendingGroupInvitationURL = nil
+            }
             .onDisappear { signOutTask?.cancel() }
             .sheet(item: $presentedSettingsSheet) { sheet in
                 switch sheet {

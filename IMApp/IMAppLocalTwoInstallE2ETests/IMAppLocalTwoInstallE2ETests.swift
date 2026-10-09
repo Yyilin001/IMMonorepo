@@ -1179,6 +1179,27 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
     }
 
     @MainActor
+    func testApplicantSubmitsInvitationOpenedDuringColdRestore() throws {
+        let scope = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_COLD_INVITE_SCOPE"])
+        let value = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_COLD_INVITE_URL"])
+        let url = try XCTUnwrap(URL(string: value))
+        let app = XCUIApplication()
+        app.launchArguments = ["-v2-ui-testing-live-local-account", "-v2-ui-testing-restore-local-account", "-v2-ui-testing-e2e-scope", scope]
+        app.open(url)
+        let title = try XCTUnwrap(ProcessInfo.processInfo.environment["IMAPP_JOIN_OWNER_GROUP"])
+        XCTAssertTrue(app.staticTexts[title].waitForExistence(timeout: 30))
+        let submit = app.buttons["v2.group-join.submit"]
+        let ready = expectation(for: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"), evaluatedWith: submit)
+        wait(for: [ready], timeout: 30)
+        submit.tap()
+        let status = app.staticTexts["v2.group-join.status"]
+        let pending = expectation(for: NSPredicate(format: "label == %@", "入群申请正在等待审批。"), evaluatedWith: status)
+        wait(for: [pending], timeout: 45)
+        XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
+        app.terminate()
+    }
+
+    @MainActor
     func testApplicantResubmitsAfterActualCancellation() throws {
         try testApplicantSubmitsActualGroupJoinRequest()
     }
@@ -1327,6 +1348,11 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         // than the offscreen SwiftUI presentation node carrying the modifier.
         let confirmation = alert.buttons["退出群聊"]
         XCTAssertTrue(confirmation.waitForExistence(timeout: 10))
+        XCTContext.runActivity(named: "group-exit-native-alert-state") { activity in
+            let attachment = XCTAttachment(string: app.debugDescription + "\nconfirmation frame=\(confirmation.frame) enabled=\(confirmation.isEnabled) hittable=\(confirmation.isHittable)")
+            attachment.lifetime = .keepAlways
+            activity.add(attachment)
+        }
         let canConfirm = expectation(for: NSPredicate(format: "hittable == true"), evaluatedWith: confirmation)
         wait(for: [canConfirm], timeout: 10)
         confirmation.tap()

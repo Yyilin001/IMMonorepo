@@ -1332,19 +1332,9 @@ extension V2LiveResourceAuthorTests {
             #expect(presence.expiresAt > Date())
             print("Live acceptance stage: direct-room uniqueness and online presence verified.")
             try await viewerTransport.subscribeTyping(roomID: first.roomID)
-            // Subscribe ACK and confirmed acceleration coverage are separate
-            // protocol boundaries. Observe the actual installation witness.
+            // Publish immediately after the ACK. Ephemeral typing must not
+            // depend on the client waiting for a later coverage notification.
             let coverage = await viewerSocket.realtimeCoverageChanges()
-            _ = try await bounded {
-                for await state in coverage {
-                    if state.scope == .typing {
-                        print("Live acceptance stage: typing coverage status=\(state.status.rawValue) reason=\(state.reason.rawValue)")
-                    }
-                    if state.scope == .typing, state.scopeID.lowercased() == first.roomID.rawValue.lowercased(), state.subscriptionInstalled { return state }
-                }
-                throw ResourceLiveFailure.timeout
-            }
-            print("Live acceptance stage: typing coverage installed.")
             for isTyping in [true, false] {
                 try await authorTransport.setTyping(roomID: first.roomID, isTyping: isTyping)
                 print("Live acceptance stage: awaiting typing state \(isTyping).")
@@ -1357,6 +1347,13 @@ extension V2LiveResourceAuthorTests {
                 if isTyping { #expect(event.expiresAt > Date()) }
                 print("Live acceptance stage: received typing state \(isTyping).")
             }
+            _ = try await bounded {
+                for await state in coverage {
+                    if state.scope == .typing, state.scopeID.lowercased() == first.roomID.rawValue.lowercased(), state.subscriptionInstalled { return state }
+                }
+                throw ResourceLiveFailure.timeout
+            }
+            print("Live acceptance stage: typing coverage verified after immediate start/stop delivery.")
             try await viewerTransport.unsubscribeTyping(roomID: first.roomID)
             try await viewerTransport.unsubscribePresence(roomID: first.roomID)
             await authorSocket.disconnect(); await viewerSocket.disconnect()

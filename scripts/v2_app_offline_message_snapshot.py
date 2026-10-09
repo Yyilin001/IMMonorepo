@@ -4,6 +4,7 @@ Only test identities and content digests are exported, never credentials or
 full command/receipt payloads. The database is opened read-only.
 """
 import argparse
+from contextlib import closing
 import hashlib
 import json
 from pathlib import Path
@@ -12,11 +13,14 @@ import uuid
 
 
 def snapshot(container, scope, sender, original):
-    filename = "sync-local-e2e-" + str(uuid.UUID(scope)) + ".sqlite"
-    paths = list(container.rglob(filename))
+    filename = "sync-local-e2e-" + str(uuid.UUID(scope)) + ".sqlite.accounts"
+    roots = list(container.rglob(filename))
+    if len(roots) != 1:
+        raise RuntimeError("expected exactly one owned acceptance account root")
+    paths = list(roots[0].rglob("V2.sqlite"))
     if len(paths) != 1:
         raise RuntimeError("expected exactly one owned acceptance database")
-    with sqlite3.connect(paths[0].as_uri() + "?mode=ro", uri=True, timeout=3) as database:
+    with closing(sqlite3.connect(paths[0].as_uri() + "?mode=ro", uri=True, timeout=3)) as database:
         database.row_factory = sqlite3.Row
         result = {}
         if sender:

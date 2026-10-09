@@ -238,6 +238,8 @@ def main():
                     success_marker='local group join rejection E2E: pass'
                 if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_GROUP_EXIT_ONLY') == 'true':
                     success_marker='local voluntary group exit E2E: pass'
+                if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_COLD_INVITE_ONLY') == 'true':
+                    success_marker='local cold restore invitation deep-link E2E: pass'
             if args.group_read_ui:
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_GROUP_READ_ONLY']='true'
                 success_marker='local group readers E2E: pass'

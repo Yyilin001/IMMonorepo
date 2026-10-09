@@ -166,6 +166,58 @@ struct V2RealtimeRecoveryCoordinatorTests {
         await warmConnection.handle.stream.closeForAccountRecovery(); await registry.shutdownRealtimeRecovery()
     }
 
+    @Test("typing acknowledgement barrier waits for actual interest and rejects revoked owners", arguments: [false, true])
+    func typingAcknowledgementWaitsForInterest(revokeDuringActivation: Bool) async throws {
+        let coordinator = V2RealtimeRecoveryCoordinator()
+        let interests = RecoveryTicketGatedInterests(pauseActivation: true)
+        await coordinator.configureLiveActivity(interests)
+        let fixture = try makeContext(lifecycle: 81)
+        coordinator.installConnection(fixture)
+        let room = RoomID(uuid: UUID())
+        let key = V2RealtimeRecoveryKey(connection: fixture.handle.connectionID, kind: .roomTyping, id: room.rawValue)
+        let generation = try #require(coordinator.requestScope(key, lifecycle: 81))
+        let returned = Mutex(false)
+        let installation = Task {
+            try await coordinator.acquireTypingInterestBeforeAcknowledgement(connection: key.connection,
+                roomID: room, generation: generation, lifecycle: 81)
+            returned.withLock { $0 = true }
+        }
+        do {
+            try await waitForInterest { await interests.activationHeld }
+            #expect(!returned.withLock { $0 })
+            if revokeDuringActivation {
+                let revoked = coordinator.revokeConnection(key.connection, lifecycle: 81)
+                await coordinator.detachConnection(key.connection, revokedScopes: revoked)
+            }
+            await interests.releaseActivation()
+            if revokeDuringActivation {
+                switch await installation.result {
+                case .success: Issue.record("revoked typing installation returned success")
+                case .failure(let error): #expect(error is CancellationError)
+                }
+                #expect(!returned.withLock { $0 })
+                await coordinator.shutdown()
+                #expect(await interests.active.isEmpty)
+                return
+            }
+            try await installation.value
+            #expect(returned.withLock { $0 })
+            #expect(await interests.active.contains(room))
+            await coordinator.beginScopeRecovery(connection: key.connection, kind: key.kind, id: key.id,
+                scopeGeneration: generation, lifecycle: 81)
+            try await waitForInterest { await coordinator.realtimeRecoverySnapshot().actual == 0 }
+            #expect(await interests.activations == 1)
+            #expect(await coordinator.realtimeInterestSnapshot().owners == 1)
+        } catch {
+            await interests.releaseActivation()
+            installation.cancel(); _ = await installation.result
+            await coordinator.shutdown()
+            throw error
+        }
+        await coordinator.shutdown()
+        #expect(await interests.active.isEmpty)
+    }
+
     @Test("one device's exact release preserves another device's typing interest")
     func exactMultiDeviceInterestRelease() async throws {
         let coordinator = V2RealtimeRecoveryCoordinator()

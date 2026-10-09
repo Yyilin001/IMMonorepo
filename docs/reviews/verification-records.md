@@ -2794,7 +2794,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-05 | readReceipt | 真实TCP已读提交、读者列表及隐私开关过滤通过；真实App私聊阅读→发送端冷启动同消息对方已读通过；App群主原消息读者页真实成员+已读通过 | extendedLiveResourcesR7, peerReadUIR1, groupReadUIR2 |
 | OP-06 | directRoom | 真实HTTPS打开私聊通过；双向重复打开同房间已核对 | extendedLiveResourcesR9 |
 | OP-07 | groupRoom | 真实SDK群创建/恢复及App普通UI建群、成员核对、群消息双向收发和@all投影通过 | extendedLiveResourcesR4, twoInstallUIR14 |
-| OP-08 | membership | 主动退出已实现：核心/5种PG权限边界/模拟器Store回归通过；真实HTTPS自退、原操作重放恢复、旧TCP发送拒绝通过；普通App退出及冷恢复仍在验证 | extendedLiveResourcesR4, membershipExitSourceInspection, fixSelfExitCoreR1, fixSelfExitPGR1, fixSelfExitAppUnitR2, fixSelfExitLiveR1 |
+| OP-08 | membership | 主动退出已实现：核心/5种PG权限边界/模拟器Store回归通过；真实HTTPS自退、原操作重放恢复、旧TCP发送拒绝通过；普通App退出及冷恢复通过，独立PG与原本地工作一致 | extendedLiveResourcesR4, membershipExitSourceInspection, fixSelfExitCoreR1, fixSelfExitPGR1, fixSelfExitAppUnitR2, fixSelfExitLiveR1, fixSelfExitAppLiveR4 |
 | OP-09 | moderation | 真实管理删除和原结果恢复通过 | extendedLiveResourcesR4 |
 | OP-10 | memberMute | 真实禁言/恢复及后续TCP拒绝通过 | extendedLiveResourcesR4 |
 | OP-11 | moderatedMemberRemoval | 真实成员移除/恢复/roster及后续TCP拒绝通过 | extendedLiveResourcesR4 |
@@ -2830,7 +2830,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-09 | 私聊唯一性 | 通过：双方并发首次创建及后续重新打开均得到同一私聊房间；真实HTTPS回执核对 | extendedLiveResourcesR16 |
 | EX-10 | 实时收发与历史恢复 | 真实App私聊提交/撤回恢复及群消息双向收发/@all投影通过；离线自动重放失败单列；批准入群后原已提交消息正常App冷启动恢复唯一正文通过 | twoInstallUIR13, twoInstallUIR14, groupJoinColdSendUIR1 |
 | EX-11 | 发送结果不确定后恢复 | 通过：真实App丢ACK前独立PG确认原提交，跨Gateway自动重连、原身份恢复、双端游标与SQLite重开一致 | appACKCutR5 |
-| EX-12 | 离线发送持久化与重放 | 群R3/R4原工作及PG通过；私聊修复R1普通离线入队、冷恢复及接收端q正文通过；原身份/唯一性独立核对仍待完成，保留R14历史失败 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4, fixOfflineAppR1 |
+| EX-12 | 离线发送持久化与重放 | 修复后私聊普通离线入队/冷恢复及独立原身份验证通过：intent/冻结命令不变，PG唯一原消息/成功记录及双端唯一对应投影；整UI AX失败另列，历史失败保留 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4, fixOfflineAppR1, fixOfflineOriginalAppR4 |
 | EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
 | EX-14 | 多设备已读 | 已验证：同账号两设备progress/单条群用户已读与跨设备隐私暂停；独立接收阅读后私聊发送端冷恢复对方已读；群主读者页显示真实独立阅读成员与已读，PG一致 | multiDeviceUIR2, multiDeviceUIR4, peerReadUIR1, groupReadUIR2 |
 | EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；两独立安装App登录和正常冷恢复完整258成员ID/名字、3页及PG两设备记录通过，历史UI遍历超时保留 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3, appLargeDirectoryUIR4, appLargeDirectoryUIR6, appLargeDirectoryUIR8 |
@@ -2842,7 +2842,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
 | EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；系统后台下载未实现 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7 |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；外部APNs和真机唤醒待验：当前无已连接物理设备且测试进程无APNs配置，等待指定设备与测试环境 | liveAccountUIR6, apnsEnvironmentAudit20261009 |
-| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area/Contrast审计失败；新增冷启动邀请深链接未打开申请页；批准入群后发送已提交但正文未即时投影，正常冷启动可恢复原消息 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1 |
+| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area/Contrast审计失败；冷URL启动修复后真实预览/普通申请/PG核对通过；批准入群后消息即时投影仍待修复，正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
 
 <!-- acceptance-matrix-end -->
 
@@ -3248,3 +3248,25 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - OP08普通App R2终态exit1，owned stack stopped。注册/会话/群详情真实审计与邀请申请审批通过，自退仍停在原生alert确认按钮立即isHittable断言；未提交退群、不关闭OP08。摘要 /tmp/imv2-self-exit-app-live-r2-leave-summary.json、活动 /tmp/imv2-self-exit-app-live-r2-leave-activities.json。原录像精确15秒图 /tmp/imv2-self-exit-app-live-r2-confirmation-exact-15.png 确认alert两动作已显示；测试改为10秒有界等待hittable真实状态再点击，保留业务断言。R3运行session88818，日志 /tmp/imv2-self-exit-app-live-r3-20261009.log，继续完整普通邀请入群/退出/独立PG及SQLite/冷恢复范围。R2测试冷恢复预期按源代码修正：原批准历史仍存在，真实邀请预览应显示历史批准而非当前成员，不凭空要求旧邀请能重新申请；该阶段R2未执行，尚无通过证据。
 
 - 提交前验证更新：OP08普通App R3已终态失败，失败阶段为testApplicantLeavesApprovedGroupThroughOrdinaryUI（passed0/failed1），尚不能关闭普通App退群验收；两安装清理阶段完成，owned stack stopped。原日志 /tmp/imv2-self-exit-app-live-r3-20261009.log，结果 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.yMY7Iq 保留。新增EX12只读身份验证脚本：离线原intent/冻结命令摘要、恢复后PG唯一消息与成功记录、双端SQLite投影关联；仅语法验证通过，完整原链路尚未运行，不计为验收通过。提交前git diff --check、shell bash -n、两Python文件py_compile通过。
+
+- OP08普通App R4终态exit0：移除原生Alert动作上的SwiftUI accessibilityIdentifier后，实际按钮frame(205,473,140,48)、enabled/hittable均true；真实点击及退出反馈通过，PG成员由2降为1，原membership工作committed/finished，普通冷启动邀请预览保留历史批准但不显示当前成员，会话刷新后原群不存在。完整普通注册/邀请申请取消再申请审批/退出/冷恢复流程及两安装清理通过，owned stack stopped。证据 /tmp/imv2-self-exit-app-live-r4-summary.json、/tmp/imv2-self-exit-app-live-r4-20261009.log；保留R1/R2/R3失败，不把它们改记通过。EX12读取脚本隔离SQLite校验通过（原身份/恢复投影/冻结命令变化拒绝），仍待真实App完整链路。
+
+- EX12原身份完整双安装R2已启动session32682，日志 /tmp/imv2-offline-original-app-r2-20261009.log；沿普通私聊发送/离线入队/冷恢复验证原intent、冻结命令、PG唯一消息及成功记录、双端独立SQLite投影，尚未有终态结论。
+
+- EX12原身份双安装R2终态exit1，owned stack stopped：普通离线入队阶段通过，独立脚本误按旧单文件布局查找，实际账号隔离目录为sync-local-e2e-<scope>.sqlite.accounts/<账号目录>/V2.sqlite，因此身份/唯一性尚未证明。脚本改为只匹配本scope账号根并要求唯一V2.sqlite。私聊两阶段真实AX失败保留，发送端附件定位作者展示节点与暂无消息空态；改为combine可见文本语义及明确动态字体空态，尚待复验。冷邀请链接任务改为已登录页面挂载后拥有.task(id:URL)，保留待处理URL直到预览完成；新增OS openurl专项待执行。
+
+- EX12原身份R3终态exit1并清理：发送前作者标题仍Dynamic Type失败，空态标题已不在失败附件，但新说明文字低对比度导致contrast抛出并提前结束，未运行离线核对。改为说明primary，导航principal显式沿用内容页dynamicTypeSize，避免导航宿主覆盖字号。R4 session37877启动，日志 /tmp/imv2-offline-original-app-r4-20261009.log；原失败保留，不删除审计类别。
+
+- EX12原身份App R4终态exit1（2个真实AX失败，0撤回投影失败），owned stack stopped。关键业务独立证明通过：原intent/clientMessageID/roomID/immutableDigest与冻结commandDigest恢复前后相同；原工作awaitingConfirmation/waitingForNetwork转committed/finished；PG原消息1、该房间q消息1、原成功记录1；双方独立SQLite同一messageID、seq5、revision1未撤回且各仅1行。证据 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.JhjdYg/offline-{original,restored-sender,restored-receiver,pg-facts}.json；未以功能通过掩盖整UI失败。导航字号传递仍未解决principal名称DynamicType/裁剪，改为装饰头像留导航栏、可展开的授权作者名放内容区；消息时间44点区域；待复验。
+
+- EX24冷恢复邀请链接专项R1已启动session73145，日志 /tmp/imv2-cold-invite-app-r1-20261009.log；真实二维码识别原链接，正常账号cold restore启动后立即OS openurl，普通申请按钮与PG pending证明，不注入预览状态；尚未终态。
+
+- 冷邀请R1终态exit1、owned stack stopped：预览标题30秒未出现，原结果hOiSbU保留。UI树显示原App消息列表及隐私遮罩；指定模拟器已安装App中iim scheme仅com.stskcxfz.imapp一个处理者，排除另一安装接管。进一步将已登录页面邀请任务绑定scenePhase active，inactive期间保留URL，取消预览后活跃再处理；尚待实际复验，不将推断当确定根因。
+
+- 冷邀请R2终态exit1、owned stack stopped，预览未出现；scene active gating未被证明确实解决。新路由日志在初始安装后才加入，不能凭无日志认定onOpenURL未调用。查阅本机Xcode XCUIApplication.h确认openURL同步启动并携带真实URL，R3改为测试内app.open(url)+原scope restore启动参数，避免外部投递发生在测试启动安装之前；不是注入预览状态。R3 session76738运行，日志 /tmp/imv2-cold-invite-app-r3-20261009.log，仍待终态。
+
+- EX24冷邀请R3终态exit0，6 UI阶段0失败0跳过，owned stack stopped。XCTest官方app.open真实二维码URL同时冷启动原scope；路由日志10:06:03收到URL/活跃、10:06:03.703已登录页面打开、10:06:04.077预览返回未取消且presenting。普通申请按钮提交后PG pending1/members1，与原二维码群一致；摘要 /tmp/imv2-cold-invite-app-r3-summary.json，原结果KwkpCJ/first-pending-join-facts.json。关闭冷URL启动缺口，保留外部simctl投递R1/R2失败；不关闭整个EX24。
+
+- 完整双安装R5运行session21947，日志 /tmp/imv2-offline-original-app-r5-20261009.log，验证最新作者内容区/导航装饰头像、时间44点、私聊控制操作/群双向/离线原身份及全部既有AX类别；不将冷邀请专项替代这套完整回归。
+
+- 完整双安装R5终态exit1，owned stack stopped：发送端私聊全部AX/控制操作通过；接收端仅时间文字hitRegion失败，其余字号/裁剪通过；独立离线原identity/commandDigest/PG唯一性/双端投影再次通过。将整行contextMenu改挂到消息气泡，时间保持只读；R6启动日志 /tmp/imv2-offline-original-app-r6-20261009.log，原审计不删。EX18开始修复：registry取得原generation/lifecycle的typing票据并等待实际跨节点interest激活后再返回ACK，正常恢复复用票据；失败清理本mutation、拒绝成功ACK。Coordinator13项/网关59项回归通过；真实TLS立即ACK后typing start/stop（不先等Coverage Ready）R1 session44023运行，尚未关闭EX18。

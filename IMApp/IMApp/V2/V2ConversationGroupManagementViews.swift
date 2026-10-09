@@ -481,7 +481,6 @@ struct V2GroupMembersSheet: View {
             }
             .alert("确认退出群聊？", isPresented: $confirmsLeave) {
                 Button("退出群聊", role: .destructive) { runLeaveGroup() }
-                    .accessibilityIdentifier("v2.group.members.leave.confirm")
                 Button("取消", role: .cancel) {}
             } message: {
                 Text("退出后将不能接收或发送该群的新消息。")
