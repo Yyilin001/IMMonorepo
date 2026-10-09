@@ -91,8 +91,6 @@ public enum V2HTTPRouteRegistry {
         .init("GET", "/v2/rooms/*/avatar", .authorityRead, maximumResponseBytes: 65536),
         .init("POST", "/v2/rooms/*/avatar", .submission, maximumResponseBytes: 16384),
         .init("POST", "/v2/rooms/*/avatar/recovery", .recovery, maximumResponseBytes: 16384),
-        .init("POST", "/v2/rooms/*/message-operations/send", .submission, maximumResponseBytes: 65536),
-        .init("POST", "/v2/rooms/*/message-operations/recover", .recovery, maximumResponseBytes: 65536),
         .init("POST", "/v2/rooms/*/message-mutations/edit", .submission, maximumResponseBytes: 65536),
         .init("POST", "/v2/rooms/*/message-mutations/withdraw", .submission, maximumResponseBytes: 65536),
         .init("POST", "/v2/rooms/*/message-mutations/operations/recover", .recovery, maximumResponseBytes: 65536),

@@ -313,6 +313,14 @@ run_stage() {
     return 0
   fi
   if [[ "${xcode_status}" -ne 0 || "${test_result}" != "Passed" || "${failed_test_count}" != "0" || "${passed_test_count}" != "1" || "${total_test_count}" != "1" ]]; then
+    if [[ "${test_name}" == "testApplicantRestoresApprovedGroupAndSendsMessage" ]]; then
+      local recovery_container
+      recovery_container="$(xcrun simctl get_app_container "${simulator_id}" "${app_bundle_id}" data)"
+      /usr/bin/python3 "${repo_root}/scripts/v2_app_room_recovery_snapshot.py" \
+        "${recovery_container}" "${sender_scope}" "${receiver_self_group_title}" \
+        "${result_directory}/failed-member-room-recovery.json" || \
+        printf '%s\n' 'could not capture the original room recovery metadata.' >&2
+    fi
     printf 'local two-install stage mismatch: stage=%s result=%s passed=%s failed=%s total=%s\n' \
       "${test_name}" "${test_result}" "${passed_test_count}" "${failed_test_count}" "${total_test_count}" >&2
     return 1

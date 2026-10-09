@@ -20,9 +20,13 @@ struct V2MessageOperationRecoveryTests {
         let original=try await f.store.messageSendCommand(workID:work.id)
         try await service.execute(f.claim(try #require(await f.store.operationWork(id:work.id))))
         #expect(try await f.store.operationWork(id:work.id)?.execution == .awaitingConfirmation)
+        #expect(try await f.store.operationWork(id:work.id)?.scheduling == .needsAttention)
+        // Expired, unresolved sends require another explicit confirmation.
+        // Neither an automatic resubmit nor a new identity proves absence.
+        try await service.resumeConfirmation(intentID:intent.id)
         try await service.execute(f.claim(try #require(await f.store.operationWork(id:work.id))))
         #expect(try await f.store.operationWork(id:work.id)?.execution == .closed)
-        #expect(await remote.actions == [.closeIfAbsent,.closeIfAbsent])
+        #expect(await remote.actions == [.query,.query])
         let replacement=try await f.store.replaceProvenUnsentSendIntent(intent.id)
         #expect(try await f.store.replaceProvenUnsentSendIntent(intent.id)==replacement)
         let draft=try #require(try await f.store.preparingSendIntents().first)

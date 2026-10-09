@@ -2836,13 +2836,13 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；两独立安装App登录和正常冷恢复完整258成员ID/名字、3页及PG两设备记录通过，历史UI遍历超时保留 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3, appLargeDirectoryUIR4, appLargeDirectoryUIR6, appLargeDirectoryUIR8 |
 | EX-16 | 消息搜索 | 真实TLS历史进入SQLite搜索通过；编辑旧文本消失，撤回命中消失 | extendedLiveResourcesR7 |
 | EX-17 | 资源下载与撤销 | 真实下载字节/校验及撤回后拒绝新计划通过；拉黑后展示收敛通过 | extendedLiveResourcesR7 |
-| EX-18 | 在线状态与输入提示 | 真实在线状态通过；typing安装确认后开始/停止通过；冷订阅ACK后立即发送曾丢失 | extendedLiveResourcesR9, extendedLiveResourcesR10 |
+| EX-18 | 在线状态与输入提示 | 修复后真实TLS冷订阅ACK后立即开始/停止通过，不等待Coverage Ready；安装期间撤销连接拒绝成功ACK、原票据清理通过；历史丢失保留 | extendedLiveResourcesR9, extendedLiveResourcesR10, fixTypingAcknowledgementLiveR1, fixTypingAcknowledgementRevocationR2 |
 | EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标通过；R13功能通过但驱动清理失败已修正，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
 | EX-20 | 断线重连 | 1000房间冷补拉122.62秒/重连11.34秒及真实跨Gateway在线更新R13通过；R12在线超时保留，不宣称稳定性；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
 | EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；系统后台下载未实现 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7 |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；外部APNs和真机唤醒待验：当前无已连接物理设备且测试进程无APNs配置，等待指定设备与测试环境 | liveAccountUIR6, apnsEnvironmentAudit20261009 |
-| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线重放及DynamicType/Text clipped/Hit area/Contrast审计失败；冷URL启动修复后真实预览/普通申请/PG核对通过；批准入群后消息即时投影仍待修复，正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
+| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线原身份及全部原AX/contrast修复后完整R8通过；冷URL启动真实预览/普通申请/PG核对通过；批准入群后消息即时投影待R5复验，正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
 
 <!-- acceptance-matrix-end -->
 
@@ -3270,3 +3270,19 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 完整双安装R5运行session21947，日志 /tmp/imv2-offline-original-app-r5-20261009.log，验证最新作者内容区/导航装饰头像、时间44点、私聊控制操作/群双向/离线原身份及全部既有AX类别；不将冷邀请专项替代这套完整回归。
 
 - 完整双安装R5终态exit1，owned stack stopped：发送端私聊全部AX/控制操作通过；接收端仅时间文字hitRegion失败，其余字号/裁剪通过；独立离线原identity/commandDigest/PG唯一性/双端投影再次通过。将整行contextMenu改挂到消息气泡，时间保持只读；R6启动日志 /tmp/imv2-offline-original-app-r6-20261009.log，原审计不删。EX18开始修复：registry取得原generation/lifecycle的typing票据并等待实际跨节点interest激活后再返回ACK，正常恢复复用票据；失败清理本mutation、拒绝成功ACK。Coordinator13项/网关59项回归通过；真实TLS立即ACK后typing start/stop（不先等Coverage Ready）R1 session44023运行，尚未关闭EX18。
+
+- EX18真实TLS R1终态exit0：立即订阅ACK后发布开始/停止，收到两项真实typing事件后才验证Coverage Ready；directUniquenessPresenceTypingAcceptance实际通过，日志 /tmp/imv2-typing-ack-live-r1-20261009/client.log。此入口两客户端使用同一Gateway，不能替代跨两个Gateway专项证明。最终撤销边界R2实际1测试/2参数通过：激活期间撤销原lifecycle后拒绝ACK并清理票据；日志 /tmp/imv2-typing-ack-revocation-r2-20261009.log。
+
+- 双安装R6终态exit1，owned stack stopped：全部功能阶段及离线原身份/PG唯一性/双端投影通过，保留1个接收端AX hitRegion失败，元素截图仍为时间10:13。仅移动contextMenu未解决。时间改为隐藏视觉Text并通过44点语义容器提供本地化时间label，原全部审计保留；R7运行session74724，日志 /tmp/imv2-offline-original-app-r7-20261009.log，尚未终态。
+
+- 双安装R7终态exit1、owned stack stopped：离线身份/PG唯一性/两端投影通过，接收端时间10:19仍有1项hitRegion失败（原结果i1WkFA）。44点容器未解决原Text节点；改为正文accessibilityValue读出时间，纯附件由摘要读出时间，视觉时间不重复成为小节点。接收端新增断言原正文value非空，全部审计保留，R8启动日志 /tmp/imv2-offline-original-app-r8-20261009.log。
+
+- 双安装R8终态exit0，全部9 UI阶段各1通过/0失败/0跳过、owned stack stopped。正文保留非空时间accessibilityValue，原完整AX和contrast通过；私聊编辑/撤回、群双向/提及、普通离线原身份重放、PG唯一消息/成功记录及两端唯一投影全部通过。摘要 /tmp/imv2-offline-original-app-r8-summary.json，日志 /tmp/imv2-offline-original-app-r8-20261009.log。EX24作者字号/裁剪/时间触达缺口修复验证通过，批准入群即时正文仍待R5原流程复验，不关闭整个EX24。
+
+- ClientKit全量R1终态失败：1040项/172套件、3 issues；日志 /tmp/imv2-client-full-regression-20261009-r1.log。定位旧HTTP send断言、旧schema指纹（独立比对两真实SQLite schema仅3处成员版本约束>0改>=0）和expired unresolved后自动claim旧假设。移除已退役两HTTP策略，保留全量服务端路由登记检查并禁止旧路径；更新明确schema指纹；恢复测试保留原身份替换禁令并验证needsAttention/显式继续/原query结果。专项R1运行，尚未通过。
+
+- ClientKit修复专项R1终态exit0：8项/3套件通过，日志 /tmp/imv2-client-contract-repair-20261009-r1.log。重新运行全量R2（/tmp/imv2-client-full-regression-20261009-r2.log），未用专项通过代替全量通过。批准成员即时投影R5普通App流程运行 /tmp/imv2-approved-member-live-projection-r5-20261009.log。
+
+- ClientKit全量修复后R2终态exit0：Swift Testing汇总1040项/172套件通过，171.291秒，日志 /tmp/imv2-client-full-regression-20261009-r2.log。真实环境opt-in用例默认禁用，另有真实TLS/App专项证据；不将全量单元汇总当作所有真实环境专项执行证明。原R1的3项失败记录保留。
+
+- 批准成员即时投影R5终态exit1、owned stack stopped，仍在testApplicantRestoresApprovedGroupAndSendsMessage等待原正文30秒失败。实际UI树正文完整位于accepted pending区域，时间线暂无消息、实时覆盖恢复中；PG唯一原消息accepted、roomHead3，不能归因输入截断。证据 /tmp/imv2-approved-member-r5-all-attachments/31D3E488-5688-457D-A9C2-A287BF8B3493.txt、/tmp/imv2-approved-member-live-projection-r5-20261009.log。新增只读精确scope房间恢复快照，清理前采集授权/成员/游标/恢复工作/原send接受ID，不输出凭据、命令及回执内容；真实schema查询与错误scope拒绝校验通过，shell语法/diff检查通过。R6 session79126运行 /tmp/imv2-approved-member-live-projection-r6-20261009.log，尚未终态。

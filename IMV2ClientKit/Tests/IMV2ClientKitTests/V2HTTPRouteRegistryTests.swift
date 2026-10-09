@@ -23,7 +23,12 @@ struct V2HTTPRouteRegistryTests {
         }
         #expect(seen.contains("POST /v2/device-credentials"))
         #expect(seen.contains("POST /v2/resource-uploads/targets"))
-        #expect(seen.contains("POST /v2/rooms/*/message-operations/send"))
+        // Message submission/recovery are registered on TCP, with no retired
+        // HTTP fallback exposed through the account transport policy.
+        for action in ["send", "recover"] {
+            #expect(!seen.contains("POST /v2/rooms/*/message-operations/" + action))
+            #expect(V2HTTPRouteRegistry.policy(method: "POST", path: "/v2/rooms/room/message-operations/" + action) == nil)
+        }
         #expect(Set(V2HTTPRouteRegistry.policies.map { $0.method + " " + $0.path }).count == V2HTTPRouteRegistry.policies.count)
     }
 

@@ -522,6 +522,8 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let withdrawalRecovered = expectation(for: NSPredicate(format: "exists == true AND label == %@", "消息已撤回"),
             evaluatedWith: withdrawnBody)
         wait(for: [withdrawalRecovered], timeout: 30)
+        XCTAssertFalse((withdrawnBody.value as? String ?? "").isEmpty,
+            "消息的无障碍语义必须保留发送时间，不能仅隐藏独立时间节点。")
         try auditOrdinaryChatSurface(in: app)
         // This is a populated, receiver-side projection rather than the
         // sender's draft-only detail state. Keep contrast gated here too so

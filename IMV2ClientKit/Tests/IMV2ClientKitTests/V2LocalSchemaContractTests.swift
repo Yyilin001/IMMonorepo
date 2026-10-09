@@ -35,7 +35,9 @@ struct V2LocalSchemaContractTests {
             #expect(try schemaObjectExists(named: table, in: primary) == false)
         }
         let primaryFingerprint = try schemaFingerprint(in: primary)
-        #expect(primaryFingerprint == 0xd64604e42567c696)
+        // Direct rooms use membership revision zero in recovery state/work
+        // and latest-visible snapshots; group membership retains its checks.
+        #expect(primaryFingerprint == 0x5d3ae036c5318601)
         #expect(try schemaObjectCount(in: search) == 5)
         #expect(try schemaFingerprint(in: search) == 0x39f4_35c6_3f7a_01b5)
 

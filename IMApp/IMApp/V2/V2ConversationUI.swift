@@ -2656,6 +2656,7 @@ private struct V2ConversationMessageBubble: View {
                     .frame(minWidth: 44, minHeight: 44, alignment: message.isOutgoing ? .trailing : .leading)
                     .accessibilityElement()
                     .accessibilityLabel(message.text)
+                    .accessibilityValue(Text(message.createdAt, format: .dateTime.hour().minute()))
                     .accessibilityIdentifier("v2.message.body.\(message.id)")
                 }
                 if !message.mentions.isEmpty {
@@ -2679,7 +2680,9 @@ private struct V2ConversationMessageBubble: View {
                             .font(.subheadline)
                             .foregroundStyle(message.isOutgoing && !message.isWithdrawn ? Color.white : Color.secondary)
                             .accessibilityLabel("消息附件")
-                            .accessibilityValue(attachmentSummary)
+                            .accessibilityValue(message.text.isEmpty
+                                ? attachmentSummary + ", " + message.createdAt.formatted(.dateTime.hour().minute())
+                                : attachmentSummary)
                         ForEach(Array(message.media.enumerated()), id: \.element.mediaID) { index, media in
                             V2ConversationMediaAttachmentRow(
                                 store: store,
@@ -2701,9 +2704,12 @@ private struct V2ConversationMessageBubble: View {
                 in: RoundedRectangle(cornerRadius: 20)
             )
             .contextMenu { messageActions }
+            // The message body (or attachment summary) announces this time.
+            // Keep one readable message target instead of a second tiny node.
             Text(message.createdAt, format: .dateTime.hour().minute())
                 .font(.caption)
                 .foregroundStyle(.primary)
+                .accessibilityHidden(true)
             if message.isOutgoing && message.isReadByPeer {
                 Text("已读")
                     .font(.caption2)
