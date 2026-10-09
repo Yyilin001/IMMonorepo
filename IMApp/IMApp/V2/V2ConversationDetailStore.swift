@@ -96,6 +96,7 @@ final class V2ConversationDetailStore {
     private(set) var isReturningToLatestTimeline = false
     private(set) var canSendInDirectConversation: Bool?
     private(set) var state: State = .loading
+    private(set) var trackedSendIntentID: UUID?
     private(set) var sendFeedback: String?
     private(set) var isSending = false
     private(set) var messageActionFeedback: String?
@@ -1179,6 +1180,23 @@ final class V2ConversationDetailStore {
         catch { sendFeedback = "暂时无法取消，原消息和附件仍保留。" }
     }
 
+    func observeSendConfirmation() async {
+        guard let id = trackedSendIntentID, let tracking = sender as? any V2ConversationSendTracking else { return }
+        do {
+            for try await execution in await tracking.sendConfirmations(intentID: id) {
+                try Task.checkCancellation()
+                guard trackedSendIntentID == id else { return }
+                switch execution {
+                case .committed: sendFeedback = nil; return
+                case .rejected, .conflicted: sendFeedback = "消息发送失败，请查看待处理消息。"; return
+                case .closed, .expiredUnsubmitted: sendFeedback = "消息未发送，请查看待处理消息。"; return
+                default: break
+                }
+            }
+        } catch is CancellationError { }
+        catch { if trackedSendIntentID == id { sendFeedback = "暂时无法确认发送状态，请查看待处理消息。" } }
+    }
+
     func sendDraft() async {
         guard !isSending else { return }
         guard isGroupConversation || canSendInDirectConversation != false else {
@@ -1217,7 +1235,13 @@ final class V2ConversationDetailStore {
                 return
             }
             let replyTo = replyTarget.flatMap { try? V2MessageReplyReference(messageID: .init($0.id)) }
-            let outcome = try await sender.send(text: text, media: [], mentions: mentions, entities: [], replyTo: replyTo, in: roomID)
+            let outcome: V2ConversationSendOutcome
+            if let tracking = sender as? any V2ConversationSendTracking {
+                trackedSendIntentID = try await tracking.enqueueTracked(text: text, mentions: mentions, entities: [], replyTo: replyTo, roomID: roomID)
+                outcome = .queuedForRetry
+            } else {
+                outcome = try await sender.send(text: text, media: [], mentions: mentions, entities: [], replyTo: replyTo, in: roomID)
+            }
             try Task.checkCancellation()
             switch outcome {
             case .accepted:
@@ -1227,7 +1251,7 @@ final class V2ConversationDetailStore {
                 mentionHandlesText = ""
                 replyTarget = nil
             case .queuedForRetry:
-                sendFeedback = "已安全保存，连接恢复后会重试。"
+                sendFeedback = sender is any V2ConversationSendTracking ? "正在发送…" : "已安全保存，连接恢复后会重试。"
                 await discardAttachmentsAfterDurableSend()
                 draft = ""
                 mentionHandlesText = ""

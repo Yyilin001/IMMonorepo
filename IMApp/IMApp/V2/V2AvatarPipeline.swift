@@ -12,6 +12,7 @@ final class V2AvatarPipeline {
     struct Snapshot: Sendable {
         let key: V2ProfileViewLookupKey
         let name: String
+        let identity: V2PublicIdentity?
         let image: V2SendableImage?
         let deadline: ContinuousClock.Instant
     }
@@ -54,7 +55,7 @@ final class V2AvatarPipeline {
         if current.avatar?.mediaID != initial.avatar?.mediaID || current.avatar?.variantID != initial.avatar?.variantID
             || current.avatar?.version != initial.avatar?.version || current.avatar?.checksum != initial.avatar?.checksum { image = nil }
         return .init(key: key, name: current.presentation.contactAlias?.remarkName ?? current.presentation.groupMember?.groupNickname ?? current.presentation.view.publicIdentity?.displayName ?? "用户",
-                     image: image, deadline: min(initial.deadline, current.deadline))
+                     identity: current.presentation.view.publicIdentity, image: image, deadline: min(initial.deadline, current.deadline))
     }
     struct GroupSnapshot: Sendable {
         let image: V2SendableImage?
@@ -130,15 +131,23 @@ struct V2AuthorizedProfileNameView: View {
     var body: some View { V2AuthorizedProfileView(key: key, appearance: .name, placeholder: placeholder) }
 }
 
+struct V2AuthorizedPublicHandleView: View {
+    let key: V2ProfileViewLookupKey
+    var onIdentity: ((V2PublicIdentity?) -> Void)? = nil
+    var body: some View { V2AuthorizedProfileView(key: key, appearance: .handle, placeholder: "公开 ID 暂不可用", onIdentity: onIdentity) }
+}
+
 private enum V2ProfileAppearance: Equatable {
     case avatar(size: CGFloat, showsName: Bool)
     case name
+    case handle
 }
 
 private struct V2AuthorizedProfileView: View {
     let key: V2ProfileViewLookupKey
     let appearance: V2ProfileAppearance
     var placeholder = "用户"
+    var onIdentity: ((V2PublicIdentity?) -> Void)? = nil
     #if DEBUG
     @Environment(\.v2MockProfileNames) private var mockProfileNames
     #endif
@@ -172,17 +181,20 @@ private struct V2AuthorizedProfileView: View {
             case .avatar(let size, let showsName):
                 Group {
                     if canDisplay, let image = snapshot?.image { Image(uiImage: image.image).resizable().scaledToFill() }
-                    else { Image(systemName: "person.crop.circle.fill").resizable().foregroundStyle(.secondary) }
+                    else { V2AvatarPlaceholder(title: placeholderTitle, size: size) }
                 }
-                .frame(width: size, height: size).clipShape(Circle()).accessibilityHidden(true)
+                .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.32)).accessibilityHidden(true)
                 if showsName { Text(displayName).font(.caption2).lineLimit(1) }
+            case .handle:
+                Text(canDisplay ? snapshot?.identity?.handle.description ?? placeholder : placeholder)
+                    .accessibilityIdentifier("v2.user.public-handle")
             case .name:
                 Text(displayName).fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(displayName)
+        .accessibilityLabel(appearance == .handle ? (canDisplay ? snapshot?.identity?.handle.description ?? placeholder : placeholder) : displayName)
         .task(id: TaskKey(key: key, phase: phase, generation: pipeline?.generation ?? 0, visible: isVisible, refresh: refresh,
                           activation: sharedPage?.activation, pageRevision: sharedPage?.revision(for: key), appearance: appearance)) {
             snapshot = nil
@@ -208,9 +220,16 @@ private struct V2AuthorizedProfileView: View {
         .onChange(of: phase) { _, newPhase in
             if newPhase != .active { snapshot = nil; if let pipeline { Task { await pipeline.suspend() } } }
         }
+        .onChange(of: canDisplay ? snapshot?.identity : nil) { _, identity in onIdentity?(identity) }
         .onAppear { isVisible = true }
         .onScrollVisibilityChange(threshold: 0.1) { isVisible = $0; if !$0 { snapshot = nil } }
         .onDisappear { isVisible = false; snapshot = nil }
+    }
+    private var placeholderTitle: String? {
+        #if DEBUG
+        if let name = mockProfileNames[key.userID.rawValue] { return name }
+        #endif
+        return canDisplay ? snapshot?.name : nil
     }
     private var displayName: String {
         #if DEBUG

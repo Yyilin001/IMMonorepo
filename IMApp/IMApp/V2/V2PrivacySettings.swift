@@ -16,6 +16,9 @@ protocol V2ReadReceiptPreferenceReading: Sendable { func readReceiptPreference()
 @MainActor
 @Observable
 final class V2UserBlockSettingsStore {
+    private let localStore: GRDBV2LocalSyncStore?
+    private let projectionChangeNotifier: V2ProjectionChangeNotifier?
+    private(set) var blockedUsers: [V2ClientUserBlockProjection] = []
     private let resolver: any V2PublicIdentityResolving
     private(set) var socialPending:[V2SocialOperationPending]=[]
     private(set) var socialProposals:[V2SocialOperationProposal]=[]
@@ -29,11 +32,39 @@ final class V2UserBlockSettingsStore {
     init(
         resolver: any V2PublicIdentityResolving,
         changer: any V2UserBlockChanging,
-        currentUserID: UserID
+        currentUserID: UserID,
+        localStore: GRDBV2LocalSyncStore? = nil,
+        projectionChangeNotifier: V2ProjectionChangeNotifier? = nil
     ) {
+        self.localStore = localStore
+        self.projectionChangeNotifier = projectionChangeNotifier
         self.resolver = resolver
         self.changer = changer
         self.currentUserID = currentUserID
+    }
+
+    func observeBlockedUsers() async {
+        await loadBlockedUsers()
+        guard let projectionChangeNotifier else { return }
+        await V2ProjectionRefreshObserver.run(await projectionChangeNotifier.updates(scopes: .contacts)) {
+            await self.loadBlockedUsers()
+        }
+    }
+    func loadBlockedUsers() async {
+        guard let localStore else { return }
+        do { blockedUsers = try await localStore.blocks() }
+        catch { feedback = "暂时无法读取已屏蔽用户。" }
+    }
+    func unblockKnownUser(_ user: UserID) async {
+        guard !isChanging, let manager = changer as? any V2SocialOperationManaging else { return }
+        isChanging = true
+        defer { isChanging = false }
+        do {
+            let baseline = try await manager.socialBaseline(target: user)
+            guard baseline.isBlocked else { await loadBlockedUsers(); return }
+            try await manager.enqueueSocial(action: .userBlock(.unblock), snapshot: baseline)
+            feedback = "正在解除屏蔽…"
+        } catch { feedback = "无法解除屏蔽，请重试。" }
     }
 
     func observeSocialProposals() async {
@@ -50,7 +81,7 @@ final class V2UserBlockSettingsStore {
     }
     func observeSocialOperations() async {
         guard let manager=changer as? any V2SocialOperationManaging else { return }
-        do { for try await values in await manager.socialUpdates() { guard !Task.isCancelled else { return };socialPending=values.filter { $0.work.identity.kind == .userBlock } } }
+        do { for try await values in await manager.socialUpdates() { guard !Task.isCancelled else { return };socialPending=values.filter { $0.work.identity.kind == .userBlock }; await loadBlockedUsers() } }
         catch is CancellationError {} catch { feedback="屏蔽操作状态暂时无法读取。" }
     }
     func confirmSocialOperation() async {
@@ -565,6 +596,7 @@ struct V2PrivacySettingsView: View {
                 }
             }
         }
+        .v2PageSurface()
         .navigationTitle("消息与隐私")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge:.bottom) { VStack { ForEach(store.accountPreferenceDrafts,id:\.id) { draft in HStack { Text(draft.patch.confirmationDescription + (draft.paused ? "；等待重新确认。" : "；已保存，正在准备原版本。"))
@@ -596,7 +628,7 @@ private struct V2PrivacyToggleRow: View {
             get: { isOn },
             set: { desiredValue in setValue(desiredValue) }
         ))
-        .tint(.green)
+        .tint(V2VisualStyle.outgoing)
         .disabled(isDisabled)
         .accessibilityIdentifier(identifier)
         .accessibilityHint("更改此设置后会同步到你的设备")
@@ -609,13 +641,25 @@ private struct V2UserBlockSettingsSection: View {
     @State private var changeTask: Task<Void, Never>?
 
     var body: some View {
-        Section("屏蔽用户") {
+        Section("已屏蔽用户") {
+            if store.blockedUsers.isEmpty { Text("暂无已屏蔽用户").foregroundStyle(.secondary) }
+            ForEach(store.blockedUsers, id: \.targetUserID) { user in
+                HStack {
+                    V2AuthorizedAvatarView(key: .init(userID: user.targetUserID, context: .relationship), showsName: true)
+                    Spacer()
+                    Button("解除屏蔽") { Task { await store.unblockKnownUser(user.targetUserID) } }
+                        .disabled(store.isChanging)
+                }
+            }
+        }
+        .task { await store.observeBlockedUsers() }
+        Section("通过公开 ID 管理") {
             TextField("公开 ID（例如 @alice）", text: $handle)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .disabled(store.isChanging)
                 .accessibilityIdentifier("v2.privacy.block.handle")
-            Text("屏蔽后，你们之间不能再发送新的私聊消息。解除屏蔽时输入同一公开 ID。")
+            Text("屏蔽会解除已有好友关系并阻止新的私聊消息。可从上方列表解除屏蔽；解除后不会自动恢复好友。")
                 .font(.body)
                 .foregroundStyle(.secondary)
             HStack {
@@ -644,7 +688,7 @@ private struct V2UserBlockSettingsSection: View {
                     .accessibilityIdentifier("v2.privacy.block.feedback")
             }
         }
-        .confirmationDialog("确认屏蔽设置",isPresented:Binding(get:{store.socialConfirmation != nil},set:{if !$0 {store.socialConfirmation=nil}})) { Button("确认保存原操作") { Task {await store.confirmSocialOperation()} } } message: { Text(store.socialConfirmation?.description ?? "") }
+        .confirmationDialog("确认屏蔽设置",isPresented:Binding(get:{store.socialConfirmation != nil},set:{if !$0 {store.socialConfirmation=nil}})) { Button("确认") { Task {await store.confirmSocialOperation()} } } message: { Text(store.socialConfirmation?.description ?? "") }
         .task { await store.observeSocialProposals() }
             .task { await store.observeSocialOperations() }
         .overlay(alignment:.bottom) { VStack { V2SocialProposalList(proposals:store.socialProposals,prepare:{await store.prepareSocialProposal($0)},discard:{await store.discardSocialProposal($0)})

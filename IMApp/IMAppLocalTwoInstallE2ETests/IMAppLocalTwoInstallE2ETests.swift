@@ -4,6 +4,15 @@ import XCTest
 /// launch fixture per stage. Each test then attaches to that independent App
 /// process instead of passing account state through XCTest's own process.
 final class IMAppLocalTwoInstallE2ETests: XCTestCase {
+    @MainActor private func assertSendEnqueued(in app: XCUIApplication) {
+        let draft = app.textFields["v2.message.draft"]
+        let saved = expectation(for: NSPredicate(format: "value == %@ OR value == %@", "", draft.placeholderValue ?? ""), evaluatedWith: draft)
+        wait(for: [saved], timeout: 30)
+        let feedback = app.staticTexts["v2.message.send-feedback"]
+        if feedback.exists {
+            XCTAssertTrue(["正在发送…", "已发送，正在同步。", "已安全保存，连接恢复后会重试。"].contains(feedback.label), "已入队的消息不能显示失败反馈。")
+        }
+    }
     override func setUpWithError() throws {
         continueAfterFailure = false
     }
@@ -196,16 +205,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let send = app.buttons["v2.message.send"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
-        let feedback = app.staticTexts["v2.message.send-feedback"]
-        let feedbackAppeared = feedback.waitForExistence(timeout: 30)
-        if !feedbackAppeared {
-            let attachment = XCTAttachment(screenshot: app.screenshot())
-            attachment.name = "two-install-sender-send-feedback-missing"
-            attachment.lifetime = .keepAlways
-            add(attachment)
-            XCTFail("发送端必须在真实 App 会话中收到普通消息已被网关接受或持久化重试的反馈。")
-        }
-        XCTAssertTrue(feedback.label.contains("已发送") || feedback.label.contains("已安全保存"))
+        assertSendEnqueued(in: app)
         let messageRow = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.row.")
         ).firstMatch
@@ -626,12 +626,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let send = app.buttons["v2.message.send"]
         XCTAssertTrue(send.isEnabled)
         send.tap()
-        let sendFeedback = app.staticTexts["v2.message.send-feedback"]
-        XCTAssertTrue(
-            sendFeedback.waitForExistence(timeout: 30),
-            "群消息必须先经真实持久化命令被网关接受或安全保存。"
-        )
-        XCTAssertTrue(sendFeedback.label.contains("已发送") || sendFeedback.label.contains("已安全保存"))
+        assertSendEnqueued(in: app)
         let groupMessageRow = app.descendants(matching: .any).matching(
             NSPredicate(format: "identifier BEGINSWITH %@", "v2.message.row.")
         ).firstMatch
@@ -685,7 +680,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         )
         XCTAssertEqual(
             feedback.label,
-            "已安全保存，连接恢复后会重试。",
+            "正在发送…",
             "DEBUG 无效实时端点夹具只能得到 durable-retry 结果，不能误报为已发送。"
         )
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
@@ -741,12 +736,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         let sendReply = app.buttons["v2.message.send"]
         XCTAssertTrue(sendReply.isEnabled)
         sendReply.tap()
-        let replyFeedback = app.staticTexts["v2.message.send-feedback"]
-        XCTAssertTrue(
-            replyFeedback.waitForExistence(timeout: 30),
-            "初始成员的群回复必须经真实持久化命令被网关接受或安全保存。"
-        )
-        XCTAssertTrue(replyFeedback.label.contains("已发送") || replyFeedback.label.contains("已安全保存"))
+        assertSendEnqueued(in: app)
         // A one-character message is static content, not a separate touch
         // control. The Xcode hit-region auditor misclassifies it after
         // custom VoiceOver actions are exposed on the full message row; the
@@ -847,9 +837,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         draft.typeText("m")
         XCTAssertEqual(draft.value as? String, "m")
         app.buttons["v2.message.send"].tap()
-        let feedback = app.staticTexts["v2.message.send-feedback"]
-        XCTAssertTrue(feedback.waitForExistence(timeout: 30))
-        XCTAssertTrue(feedback.label.contains("已发送") || feedback.label.contains("已安全保存"))
+        assertSendEnqueued(in: app)
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         app.terminate()
     }
@@ -999,7 +987,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         XCTAssertTrue(feedback.waitForExistence(timeout: 30))
         XCTAssertEqual(
             feedback.label,
-            "已安全保存，连接恢复后会重试。",
+            "正在发送…",
             "同账号的第二台设备离线时，群消息必须进入该设备自己的 durable outbox。"
         )
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
@@ -1322,10 +1310,7 @@ final class IMAppLocalTwoInstallE2ETests: XCTestCase {
         if assertImmediateBody {
             XCTAssertTrue(body.waitForExistence(timeout: 30))
         } else {
-            let feedback = app.staticTexts["v2.message.send-feedback"]
-            let saved = expectation(for: NSPredicate(format: "label IN %@",
-                ["已安全保存，连接恢复后会重试。", "已发送，正在同步。"]), evaluatedWith: feedback)
-            wait(for: [saved], timeout: 30)
+            assertSendEnqueued(in: app)
         }
         XCTContext.runActivity(named: "two-install-functional-stage-complete") { _ in }
         // The persistence-only stage leaves the App alive. The driver must

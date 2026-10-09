@@ -302,83 +302,102 @@ struct V2SignInView: View {
     }
 
     var body: some View {
-        Form {
-            if !dynamicTypeSize.isAccessibilitySize {
-                Section {
-                    Image(systemName: "bubble.left.and.bubble.right.fill")
-                        .font(.system(size: 44))
-                        .foregroundStyle(.tint)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 16)
-                        .accessibilityHidden(true)
+        ScrollView {
+            VStack(alignment: .leading, spacing: dynamicTypeSize.isAccessibilitySize ? 12 : 24) {
+                if !dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Image(systemName: "bubble.left.and.bubble.right.fill")
+                            .font(.system(size: 32, weight: .semibold))
+                            .foregroundStyle(V2VisualStyle.accent)
+                            .frame(width: 72, height: 72)
+                            .background(V2VisualStyle.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 24))
+                            .accessibilityHidden(true)
+                        Text(mode == .register ? "开启新的交流" : "欢迎回来")
+                            .font(.largeTitle.weight(.bold))
+                            .accessibilityAddTraits(.isHeader)
+                        Text(mode == .register ? "创建账号，与朋友保持联系。" : "让每一次交流，更近一点。")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }.padding(.top, 24).padding(.bottom, 8)
                 }
-                .listRowBackground(Color.clear)
-            }
-            Section {
-                Picker("操作", selection: $mode) {
-                    Text("登录").tag(V2AppStore.PasswordMode.signIn)
-                    Text("注册").tag(V2AppStore.PasswordMode.register)
+                VStack {
+                    Picker("操作", selection: $mode) {
+                        Text("登录").tag(V2AppStore.PasswordMode.signIn)
+                        Text("注册").tag(V2AppStore.PasswordMode.register)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("v2.password.mode")
                 }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("v2.password.mode")
-            }
-            if let feedbackMessage {
-                Section {
-                    Text(feedbackMessage)
-                        .font(.body)
-                        .foregroundStyle(.red)
-                        .accessibilityIdentifier("v2.authentication.message")
+                if let feedbackMessage {
+                    VStack {
+                        Text(feedbackMessage)
+                            .font(.body)
+                            .foregroundStyle(.red)
+                            .accessibilityIdentifier("v2.authentication.message")
+                    }
                 }
-            }
-            Section("账号密码") {
-                TextField("账号", text: $accountHandle)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .accessibilityIdentifier("v2.password.account-handle")
-                SecureField("密码", text: $password)
-                    .textContentType(mode == .register ? .newPassword : .password)
-                .accessibilityIdentifier("v2.password.value")
-                if mode == .register {
-                    TextField("公开 ID", text: $publicHandle)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("账号信息").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    TextField("账号", text: $accountHandle)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                        .accessibilityHint("例如 @alice")
-                        .accessibilityIdentifier("v2.identity.public-handle")
-                    TextField("显示名称", text: $displayName)
-                        .accessibilityIdentifier("v2.identity.display-name")
-                }
-                Button(mode == .register ? "注册" : "使用密码登录") {
-                    guard canSubmitPasswordAction else {
-                        inputValidationMessage = validationMessage
-                        return
+                        .accessibilityIdentifier("v2.password.account-handle")
+                        .v2InputSurface()
+                    SecureField("密码", text: $password)
+                        .textContentType(mode == .register ? .newPassword : .password)
+                        .accessibilityIdentifier("v2.password.value")
+                        .v2InputSurface()
+                    if mode == .register {
+                        TextField("公开 ID", text: $publicHandle)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .accessibilityHint("例如 @alice")
+                            .accessibilityIdentifier("v2.identity.public-handle")
+                            .v2InputSurface()
+                        TextField("显示名称", text: $displayName)
+                            .accessibilityIdentifier("v2.identity.display-name")
+                            .v2InputSurface()
                     }
+                    Button(mode == .register ? "注册" : "登录") {
+                        guard canSubmitPasswordAction else {
+                            inputValidationMessage = validationMessage
+                            return
+                        }
 
-                    inputValidationMessage = nil
-                    let submittedPassword = password
-                    password = ""
-                    run {
-                        await store.authenticatePassword(
-                            accountHandle: accountHandle,
-                            password: submittedPassword,
-                            mode: mode,
-                            publicHandle: publicHandle,
-                            displayName: displayName
-                        )
+                        inputValidationMessage = nil
+                        let submittedPassword = password
+                        password = ""
+                        run {
+                            await store.authenticatePassword(
+                                accountHandle: accountHandle,
+                                password: submittedPassword,
+                                mode: mode,
+                                publicHandle: publicHandle,
+                                displayName: displayName
+                            )
+                        }
                     }
+                    .buttonStyle(V2PrimaryButtonStyle())
+                    .controlSize(.large)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("v2.password.submit")
                 }
-                .buttonStyle(.glassProminent)
-                .controlSize(.large)
-                .frame(maxWidth: .infinity)
-                .accessibilityIdentifier("v2.password.submit")
-            }
 
-            Section {
-                Button("找回账号与账号安全") { securityPresented = true }
+                VStack {
+                    Button { securityPresented = true } label: {
+                        Text("找回账号与账号安全")
+                            .font(.subheadline)
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                     .accessibilityIdentifier("v2.security.open")
-            }
+                }
+            }.padding(dynamicTypeSize.isAccessibilitySize ? 16 : 24).frame(maxWidth: 480).frame(maxWidth: .infinity)
         }
-        .formStyle(.grouped)
+        .scrollDismissesKeyboard(.interactively)
+        .v2PageSurface()
         .navigationTitle(mode == .register ? "注册" : "登录")
+        .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $securityPresented) {
             if let client = store.passwordLifecycleClient() {
                 NavigationStack { V2AccountSecurityView(client: client, initialAction: .recover) }
@@ -465,10 +484,12 @@ struct V2SignedInRootView: View {
                 rootNavigation: rootNavigation,
                 groupInvitationStore: groupInvitationStore
             )
+            .environment(\.v2UserInteractionContext, .init(contacts: contactsStore, conversations: conversationStore, navigation: rootNavigation))
             .tabItem { Label("消息", systemImage: "message") }
             .tag(V2RootNavigationStore.Tab.conversations)
 
             V2ContactsRootView(store: contactsStore, rootNavigation: rootNavigation)
+                .environment(\.v2UserInteractionContext, .init(contacts: contactsStore, conversations: conversationStore, navigation: rootNavigation))
                 .tabItem { Label("联系人", systemImage: "person.2") }
                 .badge(contactsStore.incomingRequestCount)
                 .tag(V2RootNavigationStore.Tab.contacts)

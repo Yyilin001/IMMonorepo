@@ -236,3 +236,27 @@ public actor V2MessageSendOperationService {
         }
     }
 }
+
+extension V2MessageSendOperationService {
+    /// Observes exactly the send clicked by this page, including a lost ACK recovered later.
+    public func confirmationUpdates(intentID: UUID) -> AsyncThrowingStream<V2OperationExecutionState?, any Error> {
+        let pool = store.databasePool
+        let account = accountID
+        return AsyncThrowingStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let observer = Task {
+                do {
+                    let observation = ValueObservation.tracking { db -> V2OperationExecutionState? in
+                        guard try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") == account.rawValue else { throw V2OperationWorkError.accountMismatch }
+                        guard let row = try Row.fetchOne(db, sql: "SELECT w.* FROM v2_send_intents i JOIN v2_operation_work w ON w.work_id=i.work_id WHERE i.intent_id=?", arguments: [intentID.uuidString]) else { return nil }
+                        return try GRDBV2LocalSyncStore.decodeOperationWork(row).execution
+                    }.removeDuplicates()
+                    for try await state in observation.values(in: pool, bufferingPolicy: .bufferingNewest(1)) {
+                        continuation.yield(state)
+                    }
+                    continuation.finish()
+                } catch { continuation.finish(throwing: error) }
+            }
+            continuation.onTermination = { _ in observer.cancel() }
+        }
+    }
+}

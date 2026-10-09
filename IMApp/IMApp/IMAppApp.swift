@@ -18,12 +18,12 @@ struct IMAppApp: App {
         WindowGroup {
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("-v2-mock-preview") {
-                V2MockPreview()
+                V2MockPreview().tint(V2VisualStyle.accent)
             } else {
-                V2RootView(appPushDelegate: appPushDelegate)
+                V2RootView(appPushDelegate: appPushDelegate).tint(V2VisualStyle.accent)
             }
             #else
-            V2RootView(appPushDelegate: appPushDelegate)
+            V2RootView(appPushDelegate: appPushDelegate).tint(V2VisualStyle.accent)
             #endif
         }
     }

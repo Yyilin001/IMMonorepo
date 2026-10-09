@@ -7,6 +7,7 @@ import SwiftUI
 struct V2AuthorizedGroupAvatarView: View {
     let roomID: RoomID
     var size: CGFloat = 36
+    var fallbackTitle: String? = nil
     @Environment(\.v2AvatarPipeline) private var pipeline
     @Environment(\.scenePhase) private var phase
     @Environment(\.displayScale) private var scale
@@ -22,11 +23,10 @@ struct V2AuthorizedGroupAvatarView: View {
             if visible, phase == .active, snapshotGeneration == pipeline?.generation, snapshotRefresh == refresh, let image = snapshot?.image {
                 Image(uiImage: image.image).resizable().scaledToFill()
             } else {
-                Circle().fill(Color(.tertiarySystemFill))
-                    .overlay { Image(systemName: "person.2.fill").font(.system(size: size * 0.42)).foregroundStyle(.secondary) }
+                V2AvatarPlaceholder(symbol: "person.2.fill", title: fallbackTitle, size: size)
             }
         }
-        .frame(width: size, height: size).clipShape(Circle())
+        .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.32))
         .accessibilityLabel("群头像")
         .accessibilityIdentifier("v2.group.avatar.image")
         .task(id: LoadKey(room: roomID, visible: visible, phase: phase, generation: pipeline?.generation ?? 0, refresh: refresh)) {

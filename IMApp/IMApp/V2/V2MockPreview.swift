@@ -29,57 +29,66 @@ struct V2MockPreview: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !ProcessInfo.processInfo.arguments.contains("-v2-mock-hide-controls") {
-            HStack {
-                Text("Mock 界面预览").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Menu("切换页面") {
-                    ForEach(["messages", "chat", "contacts", "me", "privacy", "login", "register"], id: \.self) { item in
-                        Button(title(item)) {
-                            navigation.selectedTab = item == "contacts" ? .contacts : item == "me" ? .account : .conversations
-                            screen = item
-                        }
-                    }
-                }.accessibilityIdentifier("mock.screens")
-            }.padding(.horizontal).padding(.vertical, 8)
-            }
-            Group {
-                switch screen {
-                case "chat":
-                    if conversations.state == .loaded {
-                        NavigationStack { V2ConversationDetailView(store: conversations.detailStore(for: V2MockPreviewSource.room)) }
-                    } else { ProgressView("正在载入示例消息…") }
-                case "privacy": NavigationStack { V2PrivacySettingsView(store: privacy, pushWakeSettingsStore: nil, userBlockSettingsStore: nil) }
-                case "login", "register":
-                    NavigationStack {
-                        V2SignInView(store: V2AppStore(startupMode: .uiTestingSignedOut), authenticationMessage: nil,
-                            initialPasswordMode: screen == "register" ? .register : .signIn,
-                            initialAccountHandle: nil, initialPassword: nil, initialPublicHandle: nil, initialDisplayName: nil)
-                    }
-                default:
-                    V2SignedInRootView(
-                        conversationStore: conversations,
-                        contactsStore: contacts,
-                        privacySettingsStore: privacy,
-                        userBlockSettingsStore: nil,
-                        publicIdentitySettingsStore: nil,
-                        pushWakeSettingsStore: nil,
-                        deviceSessionsStore: nil,
-                        groupInvitationStore: nil,
-                        pendingGroupInvitationURL: .constant(nil),
-                        pendingGroupAvatarsStore: nil,
-                        localE2EConversationLaunchFixture: nil,
-                        passwordLifecycleClient: nil,
-                        signOut: { screen = "login" },
-                        rootNavigation: navigation
-                    )
-                }
-
+        Group {
+            if ProcessInfo.processInfo.arguments.contains("-v2-mock-hide-controls") {
+                previewContent
+            } else {
+                VStack(spacing: 0) { previewControls; previewContent }
             }
         }
         .environment(\.v2MockProfileNames, Dictionary(uniqueKeysWithValues: [201: "小林", 202: "陈晨", 203: "阿青", 211: "李晓", 221: "周宁"].map { (String(format: "00000000-0000-0000-0000-%012d", $0.key), $0.value) }))
         .task { await conversations.refresh() }
+    }
+
+    private var previewControls: some View {
+        HStack {
+            Text("Mock 界面预览").font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Menu("切换页面") {
+                ForEach(["messages", "chat", "contacts", "me", "privacy", "login", "register"], id: \.self) { item in
+                    Button(title(item)) {
+                        navigation.selectedTab = item == "contacts" ? .contacts : item == "me" ? .account : .conversations
+                        screen = item
+                    }
+                }
+            }.accessibilityIdentifier("mock.screens")
+        }.padding(.horizontal).padding(.vertical, 8)
+    }
+
+    @ViewBuilder private var previewContent: some View {
+        switch screen {
+        case "chat":
+            if conversations.state == .loaded {
+                NavigationStack { V2ConversationDetailView(store: conversations.detailStore(for: V2MockPreviewSource.room)) }
+            } else {
+                ProgressView("正在载入示例消息…")
+            }
+        case "privacy":
+            NavigationStack { V2PrivacySettingsView(store: privacy, pushWakeSettingsStore: nil, userBlockSettingsStore: nil) }
+        case "login", "register":
+            NavigationStack {
+                V2SignInView(store: V2AppStore(startupMode: .uiTestingSignedOut), authenticationMessage: nil,
+                    initialPasswordMode: screen == "register" ? .register : .signIn,
+                    initialAccountHandle: nil, initialPassword: nil, initialPublicHandle: nil, initialDisplayName: nil)
+            }
+        default:
+            V2SignedInRootView(
+                conversationStore: conversations,
+                contactsStore: contacts,
+                privacySettingsStore: privacy,
+                userBlockSettingsStore: nil,
+                publicIdentitySettingsStore: nil,
+                pushWakeSettingsStore: nil,
+                deviceSessionsStore: nil,
+                groupInvitationStore: nil,
+                pendingGroupInvitationURL: .constant(nil),
+                pendingGroupAvatarsStore: nil,
+                localE2EConversationLaunchFixture: nil,
+                passwordLifecycleClient: nil,
+                signOut: { screen = "login" },
+                rootNavigation: navigation
+            )
+        }
     }
     private func title(_ value: String) -> String {
         switch value { case "me": "我的"; case "chat": "聊天详情"; case "contacts": "联系人"; case "privacy": "消息接收设置"; case "login": "登录"; case "register": "注册"; default: "会话列表" }

@@ -1093,7 +1093,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             let userBlockSettings = V2UserBlockSettingsStore(
                 resolver: publicIdentityDirectory,
                 changer: realtime.userBlockChanger,
-                currentUserID: userID
+                currentUserID: userID,
+                localStore: localStore,
+                projectionChangeNotifier: realtime.projectionChangeNotifier
             )
             let profileService = V2ProfileIntentService(
                 store: localStore, accountID: userID,

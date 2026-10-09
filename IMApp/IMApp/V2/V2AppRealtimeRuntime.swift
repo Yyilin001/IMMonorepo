@@ -15,6 +15,11 @@ protocol V2ConversationSending: Sendable {
     func send(text: String, media: [V2MediaReference], mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, in roomID: String) async throws -> V2ConversationSendOutcome
 }
 
+protocol V2ConversationSendTracking: Sendable {
+    func enqueueTracked(text: String, mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, roomID: String) async throws -> UUID
+    func sendConfirmations(intentID: UUID) async -> AsyncThrowingStream<V2OperationExecutionState?, any Error>
+}
+
 /// 群已读回执读取能力。
 ///
 /// 回执详情只在用户显式操作之后才去获取，刻意不保存在常规时间线投影中。
@@ -310,9 +315,15 @@ protocol V2ModeratedGroupMemberRemoving: Sendable {
 ///
 /// 它在尝试传输之前先持久化命令，因此前台连接失败会转化为持久化重试，
 /// 而不是丢失界面意图。
-actor V2OperationConversationSender: V2ConversationSending {
+actor V2OperationConversationSender: V2ConversationSending, V2ConversationSendTracking {
     private let service: V2MessageSendOperationService
     init(service:V2MessageSendOperationService) { self.service=service }
+    func enqueueTracked(text: String, mentions: [V2MentionTarget], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?, roomID: String) async throws -> UUID {
+        try await service.enqueueMessage(roomID: .init(roomID), text: text, mentions: mentions, entities: entities, replyTo: replyTo)
+    }
+    func sendConfirmations(intentID: UUID) async -> AsyncThrowingStream<V2OperationExecutionState?, any Error> {
+        await service.confirmationUpdates(intentID: intentID)
+    }
     func send(text:String,media:[V2MediaReference],in roomID:String) async throws -> V2ConversationSendOutcome {
         try await send(text:text,media:media,mentions:[],entities:[],replyTo:nil,in:roomID)
     }

@@ -256,6 +256,17 @@ final class V2ContactsStore {
             : friendSearchNextCursor != nil
     }
 
+    func profileActions(for target: UserID) -> V2UserProfileActionStore? {
+        guard target != currentUserID, let manager = relationshipChanger as? any V2SocialOperationManaging else { return nil }
+        return .init(target: target, manager: manager, notifier: projectionChangeNotifier)
+    }
+
+    func openProfileConversation(with identity: V2PublicIdentity) async -> String? {
+        guard identity.userID != currentUserID else { return nil }
+        do { return try await directConversationOpener.openConversation(with: identity) }
+        catch { feedback = "暂时无法打开会话，请稍后重试。"; return nil }
+    }
+
     func item(userID: String) -> V2ContactListItem? {
         allItems.first { $0.id == userID }
     }
@@ -663,11 +674,11 @@ final class V2ContactsStore {
         do {
             if let manager=relationshipChanger as? any V2SocialOperationManaging {
                 let confirmationGeneration = refreshingGeneration
-                let id=try await manager.saveSocialProposal(action:.relationship(action),target:target)
                 let baseline=try await manager.socialBaseline(target:target)
                 try Task.checkCancellation()
                 guard confirmationGeneration == refreshingGeneration, canConfirmSocialAction(.relationship(action)) else { return }
-                socialConfirmation = .init(snapshot:baseline,action:.relationship(action),proposalID:id)
+                try await manager.enqueueSocial(action: .relationship(action), snapshot: baseline)
+                feedback = "正在处理…"
                 return
             }
             switch try await relationshipChanger.changeRelationship(targetUserID: target.rawValue, action: action) {
@@ -1056,6 +1067,7 @@ struct V2ContactsRootView: View {
                     contactList
                 }
             }
+            .v2PageSurface()
             .navigationTitle("联系人")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -1073,12 +1085,12 @@ struct V2ContactsRootView: View {
                 case .addFriend:
                     V2AddFriendView(store: store)
                 case .contact(let userID):
-                    V2ContactDetailView(store: store, userID: userID, rootNavigation: rootNavigation)
+                    if let user = try? UserID(userID) { V2UserProfileSheet(key: .init(userID: user, context: .relationship)) }
                 }
             }
             .safeAreaInset(edge:.bottom) { VStack { V2SocialProposalList(proposals:store.socialProposals,prepare:{await store.prepareSocialProposal($0)},discard:{await store.discardSocialProposal($0)})
                 V2SocialPendingStatusView(pending:store.socialPending) { id in await store.resumeSocialOperation(id) } } }
-            .confirmationDialog("确认联系人操作",isPresented:Binding(get:{store.socialConfirmation != nil},set:{if !$0 {store.socialConfirmation=nil}})) { Button("确认保存原操作") { Task {await store.confirmSocialOperation()} } } message: { Text(store.socialConfirmation?.description ?? "") }
+            .confirmationDialog("确认联系人操作",isPresented:Binding(get:{store.socialConfirmation != nil},set:{if !$0 {store.socialConfirmation=nil}})) { Button("确认") { Task {await store.confirmSocialOperation()} } } message: { Text(store.socialConfirmation?.description ?? "") }
             .task { await store.observeSocialProposals() }
             .task { await store.observeSocialOperations() }
             .task { await store.observeProjectionChanges() }
@@ -1093,7 +1105,18 @@ struct V2ContactsRootView: View {
                 Text(message).foregroundStyle(.secondary).accessibilityIdentifier("v2.contacts.readFeedback")
             }
             NavigationLink(value: V2ContactsRoute.requests) {
-                Label("新的朋友", systemImage: "person.crop.circle.badge.plus")
+                HStack(spacing: 14) {
+                    Image(systemName: "person.badge.plus")
+                        .font(.title3).foregroundStyle(V2VisualStyle.accent)
+                        .frame(width: 48, height: 48)
+                        .background(V2VisualStyle.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 16))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("新的朋友").font(.body.weight(.semibold))
+                        Text("好友申请与邀请").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if store.incomingRequestCount > 0 { V2UnreadBadge(count: UInt64(store.incomingRequestCount)) }
+                }.padding(.vertical, 8)
             }
             .accessibilityValue(store.incomingRequestCount == 0 ? "" : "\(store.incomingRequestCount) 个待处理申请")
             .accessibilityIdentifier("v2.contacts.requests")
@@ -1126,6 +1149,7 @@ struct V2ContactsRootView: View {
             }
         }
         .listStyle(.insetGrouped)
+        .v2PageSurface()
         .modifier(V2ListViewportContainer(viewport: store.friendsViewport, coordinateSpace: "v2.contacts.friends.viewport"))
         .searchable(text: $store.searchQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索好友")
         .task(id: store.searchQuery) {
@@ -1151,6 +1175,7 @@ struct V2ContactsRootView: View {
                 ProgressView().accessibilityLabel("正在加载更多联系人")
             } else {
                 Button(title) { Task { await action() } }
+                    .onAppear { Task { await action() } }
             }
             Spacer()
         }
@@ -1161,6 +1186,7 @@ struct V2FriendRequestsView: View {
     @Bindable var store: V2ContactsStore
     @State private var actionTask: Task<Void, Never>?
     @State private var profilePageID = UUID()
+    @State private var userProfile: V2UserProfileTarget?
 
     var body: some View {
         List {
@@ -1174,7 +1200,7 @@ struct V2FriendRequestsView: View {
                 }
                 ForEach(store.incomingRequests) { item in
                     VStack(alignment: .leading, spacing: 8) {
-                        V2ContactRow(item: item)
+                        Button { userProfile = .init(key: .init(userID: item.userID, context: .relationship)) } label: { V2ContactRow(item: item) }.buttonStyle(.plain)
                         HStack {
                             Button("接受") { run { await store.accept(item) } }
                                 .buttonStyle(.borderedProminent)
@@ -1203,7 +1229,7 @@ struct V2FriendRequestsView: View {
                 }
                 ForEach(store.outgoingRequests) { item in
                     VStack(alignment: .leading, spacing: 8) {
-                        V2ContactRow(item: item)
+                        Button { userProfile = .init(key: .init(userID: item.userID, context: .relationship)) } label: { V2ContactRow(item: item) }.buttonStyle(.plain)
                         Button("撤销申请", role: .destructive) { run { await store.remove(item) } }
                             .buttonStyle(.bordered)
                             .disabled(store.isUpdating(item))
@@ -1221,8 +1247,10 @@ struct V2FriendRequestsView: View {
             }
         }
         .modifier(V2ListViewportContainer(viewport: store.requestsViewport, coordinateSpace: "v2.contacts.requests.viewport"))
+        .v2PageSurface()
         .navigationTitle("新的朋友")
         .authorPresentationPage(context: .list(profilePageID))
+        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
         .onDisappear { actionTask?.cancel() }
     }
 
@@ -1268,6 +1296,11 @@ private struct V2AddFriendView: View {
                let item = store.item(userID: snapshot.identity.userID.rawValue) {
                 Section("当前关系") {
                     V2ContactRow(item: item)
+                    switch item.relationship {
+                    case .friend: NavigationLink("查看资料", value: V2ContactsRoute.contact(item.id))
+                    case .incomingRequest: Button("接受好友申请") { run { await store.accept(item) } }
+                    case .outgoingRequest: Button("撤销好友申请") { run { await store.remove(item) } }
+                    }
                 }
             } else if scenePhase == .active, let snapshot = store.resolvedAddFriend {
                 Section("用户") {
@@ -1284,6 +1317,7 @@ private struct V2AddFriendView: View {
                 Section { Text(feedback).foregroundStyle(.secondary) }
             }
         }
+        .v2PageSurface()
         .navigationTitle("添加好友")
         .task(id: store.addFriendExpiration) {
             guard let deadline = store.addFriendExpiration else { return }
@@ -1308,145 +1342,16 @@ private struct V2AddFriendView: View {
     }
 }
 
-private struct V2ContactDetailView: View {
-    enum PendingAction: Identifiable {
-        case remove(V2ContactListItem)
-        case block(V2ContactListItem)
-        var id: String {
-            switch self {
-            case .remove: "remove"
-            case .block: "block"
-            }
-        }
-    }
-
-    @Bindable var store: V2ContactsStore
-    let userID: String
-    let rootNavigation: V2RootNavigationStore
-    @State private var actionTask: Task<Void, Never>?
-    @State private var pendingAction: PendingAction?
-    @State private var nameEditor: V2NameEditorStore?
-    @State private var showsNameEditor = false
-
-    var body: some View {
-        Group {
-            if let item = store.item(userID: userID) {
-                List {
-                    Section("联系人") { V2ContactRow(item: item) }
-                    actions(for: item)
-                    if let feedback = store.feedback {
-                        Section { Text(feedback).foregroundStyle(.secondary) }
-                    }
-                }
-                .navigationTitle("联系人资料")
-                .confirmationDialog(
-                    confirmationTitle,
-                    isPresented: Binding(
-                        get: { pendingAction != nil },
-                        set: { if !$0 { pendingAction = nil } }
-                    ),
-                    presenting: pendingAction
-                ) { action in
-                    switch action {
-                    case .remove(let target):
-                        Button("删除好友", role: .destructive) {
-                            pendingAction = nil
-                            run { await store.remove(target) }
-                        }
-                    case .block(let target):
-                        Button("屏蔽用户", role: .destructive) {
-                            pendingAction = nil
-                            run { await store.block(target) }
-                        }
-                    }
-                } message: { _ in
-                    Text(confirmationMessage)
-                }
-            } else {
-                ContentUnavailableView("联系人已不可用", systemImage: "person.crop.circle.badge.questionmark")
-            }
-        }
-        .onDisappear { actionTask?.cancel() }
-        .sheet(isPresented: $showsNameEditor) {
-            if let nameEditor { V2NameEditorView(store: nameEditor) }
-        }
-    }
-
-    @ViewBuilder
-    private func actions(for item: V2ContactListItem) -> some View {
-        switch item.relationship {
-        case .friend:
-            Section {
-                Button("发消息") {
-                    run {
-                        if let roomID = await store.openConversation(with: item) {
-                            rootNavigation.showConversation(roomID: roomID)
-                        }
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(store.isUpdating(item) || item.publicIdentity == nil)
-                .accessibilityIdentifier("v2.contacts.detail.message.\(item.id)")
-                Button("编辑备注") {
-                    nameEditor = store.nameEditor(for: item)
-                    showsNameEditor = nameEditor != nil
-                }
-                .accessibilityIdentifier("v2.contacts.detail.remark.\(item.id)")
-                Button("删除好友", role: .destructive) { pendingAction = .remove(item) }
-                    .disabled(store.isUpdating(item))
-                    .accessibilityIdentifier("v2.contacts.detail.remove.\(item.id)")
-                Button("屏蔽用户", role: .destructive) { pendingAction = .block(item) }
-                    .disabled(store.isUpdating(item))
-                    .accessibilityIdentifier("v2.contacts.detail.block.\(item.id)")
-            }
-        case .incomingRequest:
-            Section {
-                Button("接受") { run { await store.accept(item) } }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(store.isUpdating(item))
-                Button("拒绝", role: .destructive) { run { await store.reject(item) } }
-                    .disabled(store.isUpdating(item))
-            }
-        case .outgoingRequest:
-            Section {
-                Button("撤销申请", role: .destructive) { run { await store.remove(item) } }
-                    .disabled(store.isUpdating(item))
-            }
-        }
-    }
-
-    private func run(_ operation: @escaping @MainActor @Sendable () async -> Void) {
-        actionTask?.cancel()
-        actionTask = Task { await operation() }
-    }
-
-    private var confirmationTitle: String {
-        switch pendingAction {
-        case .remove: "确认删除好友？"
-        case .block: "确认屏蔽用户？"
-        case nil: ""
-        }
-    }
-
-    private var confirmationMessage: String {
-        switch pendingAction {
-        case .remove: "删除后，你们不再属于好友关系。"
-        case .block: "屏蔽后，你们之间不能继续发起新的私聊消息。"
-        case nil: ""
-        }
-    }
-}
-
-private struct V2ContactRow: View {
+struct V2ContactRow: View {
     let item: V2ContactListItem
 
     var body: some View {
         let key = V2ProfileViewLookupKey(userID: item.userID, context: .relationship)
         HStack(spacing: 14) {
-            V2AuthorizedAvatarView(key: key, size: 44)
+            V2AuthorizedAvatarView(key: key, size: 48)
             V2AuthorizedProfileNameView(key: key, placeholder: "资料暂不可用")
-                .font(.body)
+                .font(.body.weight(.medium))
                 .frame(maxWidth: .infinity, alignment: .leading)
-        }
+        }.padding(.vertical, 6)
     }
 }

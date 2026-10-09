@@ -322,8 +322,11 @@ struct V2GroupReadReceiptsSheet: View {
 ///
 /// 提供成员列表、成员增删与角色调整入口，所有变更都以任务串行化。
 struct V2GroupMembersSheet: View {
+    @Environment(\.v2UserInteractionContext) private var userContext
+    @State private var choosingFriend = false
     @Bindable var store: V2ConversationDetailStore
     @Environment(\.dismiss) private var dismiss
+    @State private var userProfile: V2UserProfileTarget?
     @State private var newMemberUserID = ""
     @State private var confirmsLeave = false
     @State private var membershipChangeTask: Task<Void, Never>?
@@ -334,13 +337,16 @@ struct V2GroupMembersSheet: View {
     var body: some View {
         NavigationStack {
             List {
-                if let revision = store.groupMemberRevision {
-                    Text("成员版本 \(revision)")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
                 if store.canAddGroupMembers {
                     Section("添加成员") {
+                        if userContext != nil {
+                            Button("从好友中选择", systemImage: "person.badge.plus") { choosingFriend = true }
+                                .sheet(isPresented: $choosingFriend) {
+                                    if let context = userContext {
+                                        V2FriendPickerView(store: context.contacts, maximumSelection: 1, excludedUserIDs: Set(store.groupMembers.map(\.id))) { handles in newMemberUserID = handles.first ?? "" }
+                                    }
+                                }
+                        }
                         TextField("成员公开 ID（@handle）", text: $newMemberUserID)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -370,7 +376,7 @@ struct V2GroupMembersSheet: View {
                 }
                 if store.groupActorRole == "群主" || store.groupActorRole == "管理员" {
                     Section {
-                        Text("管理确认有两分钟授权窗口；超时需重新确认。已发送的请求会继续核对原操作结果。")
+                        Text("管理操作将在确认后提交；处理中请避免重复操作。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
@@ -381,7 +387,8 @@ struct V2GroupMembersSheet: View {
                 ForEach(store.groupMembers) { member in
                     HStack {
                         if let user = try? UserID(member.id), let key = store.groupPresentationKey(for: user) {
-                            V2AuthorizedAvatarView(key: key, showsName: true)
+                            Button { userProfile = .init(key: key) } label: { V2AuthorizedAvatarView(key: key, showsName: true) }
+                                .buttonStyle(.plain).accessibilityLabel("查看成员资料")
                         }
                         Spacer()
                         Text(member.role).foregroundStyle(.secondary)
@@ -493,6 +500,7 @@ struct V2GroupMembersSheet: View {
                 }
             }
         }
+        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
         .authorPresentationPage(context: .list(profilePageID))
     }
 

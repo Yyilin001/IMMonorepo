@@ -15,7 +15,9 @@ struct V2ConversationEmptyState: View {
             ScrollView {
                 VStack(spacing: 16) {
                     Image(systemName: symbol)
-                        .font(.largeTitle).foregroundStyle(.secondary)
+                        .font(.largeTitle).foregroundStyle(V2VisualStyle.accent)
+                        .frame(width: 88, height: 88)
+                        .background(V2VisualStyle.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 28))
                         .accessibilityHidden(true)
                     Text(title).font(.title2.weight(.semibold))
                         .foregroundStyle(.primary)
@@ -36,7 +38,7 @@ struct V2ConversationEmptyState: View {
 
 struct V2UnreadBadge: View {
     let count: UInt64
-    @ScaledMetric(relativeTo: .caption2) private var diameter: CGFloat = 26
+    @ScaledMetric(relativeTo: .caption2) private var diameter: CGFloat = 22
 
     var body: some View {
         Text(count > 99 ? "99+" : "\(count)")
@@ -46,7 +48,7 @@ struct V2UnreadBadge: View {
             .minimumScaleFactor(0.75)
             .lineLimit(1)
             .frame(width: diameter, height: diameter)
-            .background(.tint, in: Circle())
+            .background(V2VisualStyle.outgoing, in: Capsule())
             .accessibilityLabel("\(count) 条未读")
     }
 }
@@ -60,12 +62,9 @@ struct V2ConversationSummaryRow: View {
             if let key = item.presentationKey {
                 V2AuthorizedAvatarView(key: key, size: avatarSize)
             } else if item.kind == .group, let room = try? RoomID(item.id) {
-                V2AuthorizedGroupAvatarView(roomID: room, size: avatarSize)
+                V2AuthorizedGroupAvatarView(roomID: room, size: avatarSize, fallbackTitle: item.title)
             } else {
-                Image(systemName: "person.crop.circle.fill")
-                    .resizable().foregroundStyle(.secondary)
-                    .frame(width: avatarSize, height: avatarSize)
-                    .accessibilityHidden(true)
+                V2AvatarPlaceholder(size: avatarSize)
             }
             VStack(alignment: .leading, spacing: 5) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -86,7 +85,7 @@ struct V2ConversationSummaryRow: View {
                 HStack(spacing: 10) {
                     Text((item.isOutgoing ? "我：" : "") + item.preview)
                         .font(.subheadline).foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if item.muteUntil.map({ $0 > .now }) == true {
                         Image(systemName: "bell.slash.fill").font(.caption2).foregroundStyle(.secondary).accessibilityLabel("免打扰")
@@ -98,14 +97,14 @@ struct V2ConversationSummaryRow: View {
                 }
             }
         }
-        .padding(.vertical, 7)
+        .padding(.vertical, 12)
     }
 }
 
 struct V2SettingsLabel: View {
     let title: String
     let symbol: String
-    var tint: Color = .accentColor
+    var tint: Color = V2VisualStyle.accent
 
     var body: some View {
         HStack {
@@ -113,10 +112,10 @@ struct V2SettingsLabel: View {
                 Text(title).foregroundStyle(Color.primary)
             } icon: {
                 Image(systemName: symbol)
-                    .font(.body)
-                    .foregroundStyle(.white)
-                    .frame(width: 29, height: 29)
-                    .background(tint, in: RoundedRectangle(cornerRadius: 7))
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(tint)
+                    .frame(width: 36, height: 36)
+                    .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
             }
             Spacer()
             Image(systemName: "chevron.right")
@@ -143,32 +142,41 @@ struct V2AccountHomeView: View {
     let openFavorites: () -> Void
     let signOut: () -> Void
 
+    private var profileHeader: some View {
+        HStack(spacing: 16) {
+            V2AvatarPlaceholder(size: 72)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(displayName.isEmpty ? "我的资料" : displayName)
+                    .font(.title2.weight(.bold)).foregroundStyle(.primary)
+                if !handle.isEmpty { Text(handle).font(.subheadline).foregroundStyle(.secondary) }
+                Text(canOpenPublicIdentity ? "查看和编辑个人资料" : "个人空间")
+                    .font(.caption).foregroundStyle(V2VisualStyle.accent)
+            }
+            Spacer(minLength: 4)
+            if canOpenPublicIdentity {
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary).accessibilityHidden(true)
+            }
+        }.padding(.vertical, 20)
+    }
+
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    Button(action: openPublicIdentity) {
-                        HStack(spacing: 16) {
-                            Image(systemName: "person.crop.circle.fill")
-                                .resizable().foregroundStyle(.secondary)
-                                .frame(width: 64, height: 64).accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(displayName.isEmpty ? "我的资料" : displayName)
-                                    .font(.title3).foregroundStyle(.primary)
-                                if !handle.isEmpty { Text(handle).font(.subheadline).foregroundStyle(.secondary) }
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-                        }.padding(.vertical, 8)
+                    if canOpenPublicIdentity {
+                        Button(action: openPublicIdentity) { profileHeader }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("v2.identity.open")
+                    } else {
+                        profileHeader
                     }
-                    .disabled(!canOpenPublicIdentity)
-                    .accessibilityIdentifier("v2.identity.open")
                 }
-                Section {
-                    Button(action: openFavorites) { V2SettingsLabel(title: "收藏", symbol: "star.fill", tint: .orange) }
+                Section("常用功能") {
+                    Button(action: openFavorites) { V2SettingsLabel(title: "收藏", symbol: "star.fill") }
                         .accessibilityIdentifier("v2.message.favorites")
                     if canOpenDevices {
-                        Button(action: openDevices) { V2SettingsLabel(title: "登录设备", symbol: "iphone", tint: .green) }
+                        Button(action: openDevices) { V2SettingsLabel(title: "登录设备", symbol: "iphone") }
                             .accessibilityIdentifier("v2.device-sessions.open")
                     }
                     if canOpenPendingAvatars {
@@ -176,11 +184,11 @@ struct V2AccountHomeView: View {
                             .accessibilityIdentifier("v2.group.avatar.pending.open")
                     }
                 }
-                Section {
+                Section("设置") {
                     Button(action: openPrivacy) { V2SettingsLabel(title: "消息与隐私", symbol: "hand.raised.fill") }
                         .accessibilityIdentifier("v2.privacy.open")
                     if canOpenSecurity {
-                        Button(action: openSecurity) { V2SettingsLabel(title: "账号安全", symbol: "lock.fill", tint: .gray) }
+                        Button(action: openSecurity) { V2SettingsLabel(title: "账号安全", symbol: "lock.fill") }
                             .accessibilityIdentifier("v2.security.open")
                     }
                 }
@@ -190,6 +198,8 @@ struct V2AccountHomeView: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .listRowSpacing(4)
+            .v2PageSurface()
             .navigationTitle("我的")
             .accessibilityIdentifier("v2.account.home")
         }

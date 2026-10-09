@@ -827,6 +827,13 @@ final class V2ConversationListStore {
         }
     }
 
+    func displayedConversationState(_ item: V2ConversationListItem) async -> V2ConversationListItem {
+        guard let manager = conversationStateChanger as? any V2PersonalPreferenceManaging,
+              let desired = try? await manager.desiredPreferenceTarget(.conversation(roomID: .init(item.id), isPinned: item.isPinned, isArchived: item.isArchived, muteUntil: item.muteUntil)),
+              case .conversation(_, let pinned, let archived, let mute) = desired else { return item }
+        return V2ConversationListItem(id: item.id, title: item.title, preview: item.preview, lastActivity: item.lastActivity, isOutgoing: item.isOutgoing, kind: item.kind, isPinned: pinned, isArchived: archived, muteUntil: mute, unreadCount: item.unreadCount, presentationKey: item.presentationKey)
+    }
+
     func updateConversationState(_ item: V2ConversationListItem, isPinned: Bool? = nil, isArchived: Bool? = nil, muteUntil: Date?? = nil) async {
         guard let conversationStateChanger else { conversationStateFeedback = "会话设置暂不可用。"; return }
         guard changingPreferenceRooms.insert(item.id).inserted else { return }
@@ -1047,6 +1054,8 @@ struct V2ConversationListView: View {
         let messageID: String
     }
 
+    @Environment(\.v2UserInteractionContext) private var userContext
+    @State private var choosingGroupFriends = false
     @Bindable var store: V2ConversationListStore
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     private let accountMenu: V2ConversationAccountMenu?
@@ -1106,7 +1115,7 @@ struct V2ConversationListView: View {
                         V2ConversationEmptyState(
                             title: store.isShowingArchived ? "没有已归档会话" : "暂无会话",
                             symbol: store.isShowingArchived ? "archivebox" : "bubble.left.and.bubble.right",
-                            description: store.isShowingArchived ? "归档的会话会显示在这里。" : "连接实时网关并完成同步后，消息会显示在这里。"
+                            description: store.isShowingArchived ? "归档的会话会显示在这里。" : "与朋友聊聊，或创建群聊开启新的讨论。"
                         )
                     } else {
                     ScrollViewReader { scrollProxy in
@@ -1120,7 +1129,7 @@ struct V2ConversationListView: View {
                                     if case .opened(let roomID,_)?=request.receipt?.outcome {
                                         NavigationLink("打开会话",value:roomID.rawValue)
                                     } else if request.work.scheduling == .needsAttention {
-                                        Button("继续核对") { Task { await store.resumeDirectConversationRequest(request) } }
+                                        Button("重试") { Task { await store.resumeDirectConversationRequest(request) } }
                                     }
                                 }
                             }
@@ -1139,16 +1148,16 @@ struct V2ConversationListView: View {
                         }
                         .contextMenu {
                             Menu("会话置顶", systemImage: "pin") {
-                                Button("置顶会话") { Task { await store.updateConversationState(item, isPinned: true) } }
-                                Button("取消置顶会话") { Task { await store.updateConversationState(item, isPinned: false) } }
+                                Button(item.isPinned ? "取消置顶会话" : "置顶会话") { Task { await store.updateConversationState(item, isPinned: !item.isPinned) } }
                             }
                             Menu("会话归档", systemImage: "archivebox") {
-                                Button("归档会话") { Task { await store.updateConversationState(item, isArchived: true) } }
-                                Button("取消归档") { Task { await store.updateConversationState(item, isArchived: false) } }
+                                Button(item.isArchived ? "取消归档" : "归档会话") { Task { await store.updateConversationState(item, isArchived: !item.isArchived) } }
                             }
                             Menu("消息提醒", systemImage: "bell") {
                                 Button("免打扰 1 小时") { Task { await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(60 * 60))) } }
-                                Button("取消免打扰") { Task { await store.updateConversationState(item, muteUntil: .some(nil)) } }
+                                Button("免打扰 8 小时") { Task { await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(28800))) } }
+                                Button("持续免打扰") { Task { await store.updateConversationState(item, muteUntil: .some(Date().addingTimeInterval(315_576_000))) } }
+                                if item.muteUntil.map({ $0 > Date() }) == true { Button("取消免打扰") { Task { await store.updateConversationState(item, muteUntil: .some(nil)) } } }
                             }
                         }
                         .accessibilityIdentifier("v2.conversation.\(item.kind.accessibilityIdentifierComponent).\(item.id)")
@@ -1164,6 +1173,7 @@ struct V2ConversationListView: View {
                                 Button("加载更多会话") {
                                     Task { await store.loadMoreConversations() }
                                 }
+                                .onAppear { Task { await store.loadMoreConversations() } }
                                 .accessibilityIdentifier("v2.conversation.load-more")
                             }
                             Spacer()
@@ -1171,6 +1181,8 @@ struct V2ConversationListView: View {
                     }
                     }
                     .listStyle(.plain)
+                    .listRowSeparatorTint(V2VisualStyle.separator)
+                    .v2PageSurface()
                     .refreshable { await store.refresh() }
                     .accessibilityIdentifier("v2.conversation.list")
                     .coordinateSpace(name: "v2.conversation.viewport")
@@ -1187,11 +1199,13 @@ struct V2ConversationListView: View {
                 }
             }
             .navigationTitle(store.isShowingArchived ? "已归档" : "消息")
+            .navigationBarTitleDisplayMode(.inline)
+            .v2PageSurface()
             .safeAreaInset(edge: .top) {
                 HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass").font(.body)
                         .foregroundStyle(.secondary).accessibilityHidden(true)
-                    TextField("搜索会话摘要", text: $conversationQuery, axis: .vertical)
+                    TextField("搜索会话", text: $conversationQuery, axis: .vertical)
                         .font(.body).foregroundStyle(.primary).lineLimit(1...3)
                         .submitLabel(.search)
                         .accessibilityIdentifier("v2.conversation.summary-search")
@@ -1205,9 +1219,10 @@ struct V2ConversationListView: View {
                     }
                 }
                 .padding(12)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                .padding(.horizontal, 16).padding(.vertical, 8)
-                .background(.background)
+                .background(V2VisualStyle.surface, in: RoundedRectangle(cornerRadius: 16))
+                .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(V2VisualStyle.separator) }
+                .padding(.horizontal, 20).padding(.vertical, 8)
+                .background(V2VisualStyle.canvas)
             }
             .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 4) {
@@ -1220,6 +1235,11 @@ struct V2ConversationListView: View {
                 }
             }
             .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text(store.isShowingArchived ? "已归档" : "消息")
+                        .font(.headline)
+                        .accessibilityAddTraits(.isHeader)
+                }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Menu {
                     Button("新建群聊", systemImage: "person.3") {
@@ -1341,6 +1361,7 @@ struct V2ConversationListView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
+                    .v2PageSurface()
                     .navigationTitle("新建私聊")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
@@ -1384,6 +1405,17 @@ struct V2ConversationListView: View {
                                 .accessibilityIdentifier("v2.conversation.group-title")
                         }
                         Section("初始成员") {
+                            if userContext != nil {
+                                Button("从好友中选择", systemImage: "person.2") { choosingGroupFriends = true }
+                                    .sheet(isPresented: $choosingGroupFriends) {
+                                        if let context = userContext {
+                                            V2FriendPickerView(store: context.contacts) { handles in
+                                                let existing = groupMemberUserIDs.components(separatedBy: CharacterSet(charactersIn: ",\n"))
+                                                groupMemberUserIDs = Array(Set(existing.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } + handles)).sorted().joined(separator: ", ")
+                                            }
+                                        }
+                                    }
+                            }
                             TextEditor(text: $groupMemberUserIDs)
                                 .frame(minHeight: 110)
                                 .textInputAutocapitalization(.never)
@@ -1405,6 +1437,7 @@ struct V2ConversationListView: View {
                                 .accessibilityIdentifier("v2.conversation.group-feedback")
                         }
                     }
+                    .v2PageSurface()
                     .navigationTitle("新建群聊")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
@@ -1750,6 +1783,7 @@ struct V2FavoriteMessagesSheet: View {
 
 struct V2ConversationDetailView: View {
     private enum PresentedDetailSheet: Identifiable {
+        case settings
         case groupMembers
         case groupAvatar
         case ownGroupNickname
@@ -1763,6 +1797,7 @@ struct V2ConversationDetailView: View {
 
         var id: String {
             switch self {
+            case .settings: "settings"
             case .groupMembers:
                 "groupMembers"
             case .groupAvatar:
@@ -1787,6 +1822,9 @@ struct V2ConversationDetailView: View {
         }
     }
 
+    @Environment(\.v2UserInteractionContext) private var userContext
+    @State private var userProfile: V2UserProfileTarget?
+    @State private var peerActions: V2UserProfileActionStore?
     @State private var store: V2ConversationDetailStore
     @State private var presentedDetailSheet: PresentedDetailSheet?
     @State private var isPresentingAttachmentImporter = false
@@ -1794,6 +1832,8 @@ struct V2ConversationDetailView: View {
     @State private var isPresentingMessageSearch = false
     @State private var focusedMessageID: String?
     @State private var showsMentionInput = false
+    @State private var followsOwnSend = false
+    @State private var lastMessageBeforeSend: String?
     private let groupInvitationStore: V2GroupInvitationStore?
 
     init(store: V2ConversationDetailStore, initiallyFocusedMessageID: String? = nil, groupInvitationStore: V2GroupInvitationStore? = nil) {
@@ -1815,6 +1855,17 @@ struct V2ConversationDetailView: View {
                 }
             case .loaded:
                 VStack(spacing: 0) {
+                    if let peerActions, let key = store.presentationKey, peerActions.relationship != nil, peerActions.relationship != .friend {
+                        HStack(spacing: 12) {
+                            Text(peerActions.relationshipTitle).font(.footnote).foregroundStyle(.secondary)
+                            Spacer()
+                            Button(peerActions.relationship == .stranger ? "添加好友" : "查看资料") { userProfile = .init(key: key) }
+                                .font(.footnote.weight(.semibold))
+                                .accessibilityIdentifier("v2.chat.relationship-action")
+                        }.padding(.horizontal).padding(.vertical, 10)
+                            .background(V2VisualStyle.surface)
+                            .accessibilityIdentifier("v2.chat.relationship-banner")
+                    }
                     if store.readSyncNeedsAttention {
                         HStack {
                             Text("已读状态同步已暂停，本地阅读记录仍保留。")
@@ -1836,9 +1887,9 @@ struct V2ConversationDetailView: View {
                         DisclosureGroup("已归档的已读核对（\(store.readSyncArchives.count)）") {
                             ForEach(store.readSyncArchives) { archive in
                                 VStack(alignment: .leading) {
-                                    Text("结果未知 · 已读位置 \(archive.requestedSequence)")
-                                    Text(archive.id.uuidString).font(.caption2).textSelection(.enabled)
-                                    Button("按原记录继续核对") {
+                                    Text("已读状态暂未同步")
+
+                                    Button("重试同步") {
                                         Task { await store.restoreReadSyncArchive(archive.id) }
                                     }.disabled(store.isResumingReadSync)
                                 }.font(.footnote)
@@ -1856,12 +1907,12 @@ struct V2ConversationDetailView: View {
                             else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未执行，请刷新后重新操作") }
                             else if pending.work?.scheduling == .needsAttention {
                                 Text("原操作结果待确认")
-                                Button("继续核对") { Task { await store.continueGroupCapability(pending) } }
+                                Button("重试") { Task { await store.continueGroupCapability(pending) } }
                             } else if pending.confirmationRequired {
                                 Text("需要重新确认")
                                 Button("查看并确认") { Task { await store.prepareGroupCapabilityReconfirmation(pending) } }
                             }
-                            else { Text(pending.work==nil ? "正在核对短期授权" : "正在核对原操作") }
+                            else { Text(pending.work==nil ? "正在准备操作" : "正在处理") }
                             if pending.work==nil { Button("取消确认") { Task { await store.discardGroupCapability(pending) } } }
                         }.font(.caption).padding(.horizontal)
                     }
@@ -1873,11 +1924,11 @@ struct V2ConversationDetailView: View {
                             else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未获准执行，请刷新成员状态") }
                             else if pending.work?.scheduling == .needsAttention {
                                 Text("原操作结果待确认")
-                                Button("继续核对") { Task { await store.continueMembership(pending) } }
+                                Button("重试") { Task { await store.continueMembership(pending) } }
                             } else if pending.confirmationRequired {
-                                Text("需要重新确认权限与成员版本")
+                                Text("成员状态已变化，请重新确认")
                                 Button("重新确认") { Task { await store.continueMembership(pending) } }
-                            } else { Text(pending.work==nil ? "正在核对短期授权" : "正在核对原操作") }
+                            } else { Text(pending.work==nil ? "正在准备操作" : "正在处理") }
                             if pending.work==nil { Button("取消确认") { Task { await store.discardMembership(pending) } } }
                         }.font(.caption).padding(.horizontal)
                     }
@@ -1889,11 +1940,11 @@ struct V2ConversationDetailView: View {
                             else if pending.work?.execution == .rejected || pending.work?.execution == .conflicted { Text("未获准执行，请刷新成员状态") }
                             else if pending.work?.scheduling == .needsAttention {
                                 Text("原操作结果待确认")
-                                Button("继续核对") { Task { await store.continueMemberAdministration(pending) } }
+                                Button("重试") { Task { await store.continueMemberAdministration(pending) } }
                             } else if pending.confirmationRequired {
                                 Text("确认窗口已结束或权限需重新核对")
                                 Button("重新确认") { Task { await store.continueMemberAdministration(pending) } }
-                            } else { Text(pending.work == nil ? "正在核对短期授权" : "正在核对原操作") }
+                            } else { Text(pending.work == nil ? "正在准备操作" : "正在处理") }
                             if pending.work==nil { Button("取消确认") { Task { await store.discardMemberAdministration(pending) } } }
                         }.font(.caption).padding(.horizontal)
                     }
@@ -1960,7 +2011,7 @@ struct V2ConversationDetailView: View {
                     } else {
                         ScrollViewReader { proxy in
                             ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 10) {
+                                LazyVStack(alignment: .leading, spacing: 16) {
                                     // 服务端按保留窗口裁剪过这个房间：缺口是永久的，
                                     // 必须显式告知，不能让用户以为往上滚就能看到全部历史。
                                     if store.isHistoryIncomplete {
@@ -2024,12 +2075,22 @@ struct V2ConversationDetailView: View {
                                 }
                                 .padding()
                             }
+                            .defaultScrollAnchor(.bottom, for: .initialOffset)
                             .onAppear { scrollToFocusedMessage(with: proxy) }
                             .onChange(of: focusedMessageID) { _, _ in
                                 scrollToFocusedMessage(with: proxy)
                             }
                             .onChange(of: store.timelineRevision) { _, _ in
                                 scrollToFocusedMessage(with: proxy)
+                                if followsOwnSend, let message = store.messages.last,
+                                   message.isOutgoing, message.id != lastMessageBeforeSend,
+                                   let target = store.timeline.first(where: {
+                                       if case .message(let value, _) = $0 { return value.id == message.id }
+                                       return false
+                                   }) {
+                                    proxy.scrollTo(target.id, anchor: .bottom)
+                                    followsOwnSend = false
+                                }
                             }
                         }
                         .accessibilityIdentifier("v2.message.list")
@@ -2117,17 +2178,21 @@ struct V2ConversationDetailView: View {
                                 }
                             } label: {
                                 Image(systemName: "plus")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundStyle(.primary)
+                                    .frame(width: 32, height: 32)
+                                    .background(Color.secondary.opacity(0.08), in: Circle())
                                     .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
                             }
-                            .buttonStyle(.glass)
-                            .buttonBorderShape(.circle)
+                            .buttonStyle(.plain)
                             .accessibilityLabel("消息附件与提及")
                             .accessibilityIdentifier("v2.message.composer.options")
 
                             HStack(alignment: .bottom, spacing: 8) {
                                 V2ComposerTextInput(
                                     text: $store.draft,
-                                    placeholder: "消息",
+                                    placeholder: "发送消息…",
                                     accessibilityLabel: "消息内容",
                                     accessibilityHint: "输入要发送的消息"
                                 )
@@ -2139,12 +2204,20 @@ struct V2ConversationDetailView: View {
                                         .frame(width: 36, height: 36)
                                         .accessibilityLabel("正在保存消息")
                                 } else {
-                                    Button { Task { await store.sendDraft() } } label: {
+                                    Button {
+                                        focusedMessageID = nil
+                                        lastMessageBeforeSend = store.messages.last?.id
+                                        followsOwnSend = true
+                                        Task {
+                                            await store.sendDraft()
+                                            if !store.draft.isEmpty { followsOwnSend = false }
+                                        }
+                                    } label: {
                                         Image(systemName: "arrow.up")
                                             .font(.body.weight(.semibold))
                                             .foregroundStyle(.white)
                                             .frame(width: 36, height: 36)
-                                            .background(canSendDraft ? Color.accentColor : Color.secondary, in: Circle())
+                                            .background(canSendDraft ? V2VisualStyle.outgoing : Color.secondary, in: Circle())
                                             .padding(4)
                                             .contentShape(Circle())
                                     }
@@ -2157,7 +2230,8 @@ struct V2ConversationDetailView: View {
                             .padding(.leading, 14)
                             .padding(.trailing, 2)
                             .padding(.vertical, 2)
-                            .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 26))
+                            .background(V2VisualStyle.surface, in: RoundedRectangle(cornerRadius: 24))
+                            .overlay { RoundedRectangle(cornerRadius: 24).strokeBorder(V2VisualStyle.separator) }
                         }
                     }
                     .padding(.horizontal, 12)
@@ -2232,34 +2306,33 @@ struct V2ConversationDetailView: View {
                 }
             }
         }
+        .v2PageSurface()
         .navigationTitle(store.isGroupConversation ? store.title : "会话")
         .toolbar {
             if let key = store.presentationKey {
                 ToolbarItem(placement: .principal) {
-                    V2AuthorizedAvatarView(key: key, size: 24)
-                        .accessibilityHidden(true)
+                    Button { userProfile = .init(key: key) } label: {
+                        HStack(spacing: 8) {
+                            V2AuthorizedAvatarView(key: key, size: 32)
+                            V2AuthorizedProfileNameView(key: key).font(.headline).lineLimit(1)
+                        }
+                    }.buttonStyle(.plain).accessibilityLabel("查看对方资料").accessibilityIdentifier("v2.chat.peer-profile")
                 }
             } else if store.isGroupConversation, let room = try? RoomID(store.roomID) {
                 ToolbarItem(placement: .principal) {
-                    V2AuthorizedGroupAvatarView(roomID: room, size: 24)
-                        .accessibilityHidden(true)
+                    HStack(spacing: 8) {
+                        V2AuthorizedGroupAvatarView(roomID: room, size: 32, fallbackTitle: store.title)
+                        Text(store.title).font(.headline).lineLimit(1)
+                    }
                 }
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .safeAreaInset(edge: .top) {
-            if let key = store.presentationKey {
-                V2AuthorizedProfileNameView(key: key)
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .padding(.horizontal, 16).padding(.vertical, 8)
-                    .accessibilityAddTraits(.isHeader)
-            }
-        }
         .toolbar(.hidden, for: .tabBar)
         .toolbar { conversationToolbar }
         .sheet(item: $presentedDetailSheet) { sheet in
             switch sheet {
+            case .settings: V2ConversationSettingsView(roomID: store.roomID, peerKey: store.presentationKey)
             case .groupMembers:
                 V2GroupMembersSheet(store: store)
             case .groupAvatar:
@@ -2281,6 +2354,12 @@ struct V2ConversationDetailView: View {
             case .groupInvitations:
                 if let groupInvitationStore { V2GroupInvitationManagementSheet(store: groupInvitationStore, roomID: store.roomID) }
             }
+        }
+        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
+        .task(id: store.presentationKey) {
+            guard let key = store.presentationKey else { return }
+            peerActions = userContext?.contacts.profileActions(for: key.userID)
+            await peerActions?.run()
         }
         .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
             messageSearchStore = nil
@@ -2305,6 +2384,7 @@ struct V2ConversationDetailView: View {
         .task { await store.observeProjectionChanges() }
         .task { await store.pollVisibleHybridGroupEvents() }
         .authorPresentationPage(context: store.authorPresentationContext)
+        .task(id: store.trackedSendIntentID) { await store.observeSendConfirmation() }
         .task(id: store.pendingResourceSendPage) { await store.observeResourceSends() }
         .task { await store.observeReadSync() }
         .task { await store.observeMessageMutations() }
@@ -2348,7 +2428,7 @@ struct V2ConversationDetailView: View {
                             Text(permissions.isEmpty ? "不授予上述群权限" : permissions.map(\.title).sorted().joined(separator:"、"))
                         case .memberRole(_,let role,_): Text(role == .admin ? "将原目标成员设为管理员" : "将原目标成员设为普通成员")
                         }
-                        Text("确认后将在两分钟内核对权限与版本；不会修改已经提交的原操作。")
+                        Text("请确认操作内容，提交后将在后台处理。")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
                     Button("确认提交") { Task { await store.confirmGroupCapability(proposal) } }
@@ -2398,6 +2478,8 @@ struct V2ConversationDetailView: View {
         } else {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
+                    Button("聊天详情", systemImage: "info.circle") { presentedDetailSheet = .settings }
+                        .accessibilityIdentifier("v2.chat.details")
                     Button("多选转发", systemImage: "arrowshape.turn.up.right") { store.beginForwardSelection() }
                         .disabled(store.messages.allSatisfy(\.isWithdrawn))
                         .accessibilityIdentifier("v2.message.forward.begin")
@@ -2555,6 +2637,7 @@ private struct V2ConversationTimelineActivityRow: View {
 }
 
 private struct V2ConversationMessageRow: View {
+    @State private var userProfile: V2UserProfileTarget?
     @Bindable var store: V2ConversationDetailStore
     let message: V2ConversationMessageItem
     let beginEditing: () -> Void
@@ -2564,7 +2647,14 @@ private struct V2ConversationMessageRow: View {
 
     var body: some View {
         HStack(alignment: .top) {
-            if message.isOutgoing { Spacer(minLength: 44) }
+            if message.isOutgoing { Spacer(minLength: 56) }
+            if !message.isOutgoing, let key = store.authorPresentationKey(for: message) {
+                Button { userProfile = .init(key: key) } label: {
+                    V2AuthorizedAvatarView(key: key, size: 32)
+                        .frame(minWidth: 44, minHeight: 44)
+                }.buttonStyle(.plain).accessibilityLabel("查看发送者资料")
+                    .accessibilityIdentifier("v2.message.author-profile.\(message.id)")
+            }
             VStack(alignment: message.isOutgoing ? .trailing : .leading, spacing: 4) {
                 if !message.isOutgoing, store.isGroupConversation, let key = store.authorPresentationKey(for: message) {
                     V2AuthorizedProfileNameView(key: key)
@@ -2594,6 +2684,7 @@ private struct V2ConversationMessageRow: View {
         .onTapGesture {
             if store.isSelectingMessagesForForward { store.toggleForwardSelection(for: message) }
         }
+        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
         .onAppear { Task { await store.reportVisibleMessage(message) } }
         // VoiceOver message operations belong to the whole row, whose target
         // includes the complete bubble and surrounding touch area. Attaching
@@ -2700,15 +2791,17 @@ private struct V2ConversationMessageBubble: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(
-                message.isOutgoing && !message.isWithdrawn ? Color.accentColor : Color(.secondarySystemBackground),
-                in: RoundedRectangle(cornerRadius: 20)
+                message.isOutgoing && !message.isWithdrawn ? V2VisualStyle.outgoing : V2VisualStyle.incoming,
+                in: UnevenRoundedRectangle(topLeadingRadius: message.isOutgoing ? 19 : 5,
+                    bottomLeadingRadius: 19, bottomTrailingRadius: 19, topTrailingRadius: message.isOutgoing ? 5 : 19)
             )
             .contextMenu { messageActions }
             // The message body (or attachment summary) announces this time.
             // Keep one readable message target instead of a second tiny node.
             Text(message.createdAt, format: .dateTime.hour().minute())
-                .font(.caption)
-                .foregroundStyle(.primary)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
                 .accessibilityHidden(true)
             if message.isOutgoing && message.isReadByPeer {
                 Text("已读")

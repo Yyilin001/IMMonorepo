@@ -12,7 +12,7 @@ struct V2SocialPendingStatusView:View {
                 HStack {
                     Text(message(item)).font(.footnote)
                     if item.work.scheduling == .needsAttention {
-                        Button("继续确认") { Task { await resume(item.work.id) } }
+                        Button("重试") { Task { await resume(item.work.id) } }
                     }
                 }
             }
@@ -24,7 +24,7 @@ struct V2SocialPendingStatusView:View {
         case .conflicted:return "联系人状态已变化，请刷新后重新确认操作。"
         case .closed,.expiredUnsubmitted:return "原操作已结束，新的操作需要重新确认。"
         case .rejected:return "原联系人操作未获准。"
-        default:return item.work.scheduling == .needsAttention ? "原操作结果尚未确认，同步已暂停。" : "联系人操作已保存，正在核对原操作结果。"
+        default:return item.work.scheduling == .needsAttention ? "暂时无法确认结果，请重试。" : "联系人操作处理中…"
         }
     }
 }
@@ -36,8 +36,9 @@ struct V2SocialConfirmationProposal {
     let expiresAt=ContinuousClock.now.advanced(by:.seconds(30))
     var description:String {
         switch action {
-        case .relationship(let action):return "目标：\(snapshot.targetUserID.rawValue)；当前关系：\(snapshot.relationshipState.rawValue)；操作：\(action.rawValue)。确认后固定当前版本，不会自动改用新版本。"
-        case .userBlock(let action):return "目标：\(snapshot.targetUserID.rawValue)；当前屏蔽状态：\(snapshot.isBlocked ? "已屏蔽" : "未屏蔽")；操作：\(action.rawValue)。确认窗口为两分钟。"
+        case .relationship(let action):
+            switch action { case .request: return "向此用户发送好友申请？"; case .accept: return "接受此用户的好友申请？"; case .reject: return "拒绝此用户的好友申请？"; case .remove: return "删除好友或撤销此申请？" }
+        case .userBlock(let action): return action == .block ? "屏蔽后，你们将无法发送新的私聊消息，已有好友关系也会解除。" : "解除屏蔽后，将恢复正常的私聊权限判断。"
         }
     }
 }
@@ -51,7 +52,7 @@ struct V2AccountPreferencePendingView:View {
                 ForEach(pending.filter { $0.work.execution != .committed },id:\.work.id) { item in
                     HStack {
                         Text(message(item)).font(.footnote)
-                        if item.work.scheduling == .needsAttention { Button("继续确认") { Task { await resume(item.work.id) } } }
+                        if item.work.scheduling == .needsAttention { Button("重试") { Task { await resume(item.work.id) } } }
                     }
                 }
             }}.frame(maxHeight:180).padding(8).background(.regularMaterial)
@@ -62,7 +63,7 @@ struct V2AccountPreferencePendingView:View {
         case .conflicted:return "设置版本已变化，请刷新后重新确认。"
         case .closed,.expiredUnsubmitted:return "原设置操作已结束，新的设置需要重新确认。"
         case .rejected:return "原设置操作未获准。"
-        default:return item.work.scheduling == .needsAttention ? "原设置结果尚未确认，同步已暂停。" : "设置已保存，正在核对原操作结果。"
+        default:return item.work.scheduling == .needsAttention ? "原设置结果尚未确认，同步已暂停。" : "设置正在同步…"
         }
     }
 }
@@ -89,8 +90,8 @@ struct V2SocialProposalList:View {
         if !proposals.isEmpty { ScrollView { LazyVStack(alignment:.leading) {
             ForEach(proposals,id:\.id) { proposal in
                 HStack {
-                    Text("待确认联系人提案：\(proposal.targetUserID.rawValue)").font(.footnote)
-                    Button("读取基线并确认") { Task { await prepare(proposal) } }
+                    Text("有一项联系人操作需要确认").font(.footnote)
+                    Button("查看并确认") { Task { await prepare(proposal) } }
                     Button("取消提案") { Task { await discard(proposal.id) } }
                 }
             }
