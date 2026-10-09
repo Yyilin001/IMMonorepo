@@ -5,6 +5,7 @@ import shlex, subprocess, sys, tempfile, threading, time, urllib.error, urllib.p
 from pathlib import Path
 import yaml
 from v2_native_background_upload_gate import NativeBackgroundUploadGate
+from v2_native_background_download_gate import NativeBackgroundDownloadGate
 from v2_native_push_wake_gate import NativePushWakeGate
 
 REPO = Path(__file__).resolve().parents[2]
@@ -31,7 +32,7 @@ def main():
     parser.add_argument('--receiver-simulator',help='Explicitly owned, booted receiver simulator for --two-install-ui.')
     parser.add_argument('--sender-simulator',help='Explicitly owned, booted sender simulator for --two-install-ui.')
     args=parser.parse_args()
-    if os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY') == 'true':
+    if any(os.environ.get(name) == 'true' for name in ('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY', 'IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_ONLY')):
         if not args.two_install_ui:
             parser.error('native background upload requires --two-install-ui')
         if any(os.environ.get(name) == 'true' for name in (
@@ -66,7 +67,9 @@ def main():
     processes=[]; logs=[]; pg_started=False; edge=None; gateway_process=None; push_gate=None; push_cleanup_error=None
     http_responses=collections.Counter(); http_lock=threading.Lock()
     app_refresh_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY') == 'true'
-    background_upload_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY') == 'true'
+    background_download_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_ONLY') == 'true'
+    background_upload_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY') == 'true' or background_download_mode
+    download_gate=NativeBackgroundDownloadGate() if background_download_mode else None
     background_gate=NativeBackgroundUploadGate() if background_upload_mode else None
     background_fixture_token=secrets.token_hex(32) if background_upload_mode else None
     push_fixture_token=secrets.token_hex(32) if args.push_wake_ui else None
@@ -133,6 +136,37 @@ def main():
                 length=int(self.headers.get('Content-Length','0'))
                 if not 0 <= length <= 1024*1024: self.send_error(413);return
                 path=urllib.parse.urlsplit(self.path).path
+                if download_gate is not None and path.startswith('/__fixture__/background-download/'):
+                    if self.headers.get('X-Background-Fixture') != background_fixture_token or length > 1024:
+                        self.send_error(403);return
+                    try:
+                        container=Path(run(['xcrun','simctl','get_app_container',args.receiver_simulator,'com.stskcxfz.imapp','data'],timeout=5).stdout.decode().strip())
+                        if self.command == 'POST' and path == '/__fixture__/background-download/arm':
+                            download_gate.arm(json.loads(self.rfile.read(length))['scope'])
+                        elif self.command == 'POST' and path in ('/__fixture__/background-download/release', '/__fixture__/background-download/capture') and length == 0:
+                            download_gate.capture_durable_mapping(container)
+                            if path.endswith('/release'): download_gate.release()
+                        elif self.command == 'POST' and path == '/__fixture__/background-download/crash' and length == 0 and os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_RESTART') == 'true':
+                            download_gate.capture_durable_mapping(container)
+                            observed=download_gate.snapshot(container)
+                            if observed['durableActiveMappings'] != 1 or observed['pendingJobs'] != 1 or observed['processKills'] != 0 or observed['released']:
+                                raise RuntimeError('original held system task is required before owned crash')
+                            inventory=run(['xcrun','simctl','spawn',args.receiver_simulator,'launchctl','list'],timeout=5).stdout.decode().splitlines()
+                            matching=[line.split() for line in inventory if len(line.split()) == 3 and line.split()[2].startswith('UIKitApplication:com.stskcxfz.imapp[')]
+                            if len(matching) != 1 or not matching[0][0].isdigit(): raise RuntimeError('expected one owned App process')
+                            pid=int(matching[0][0])
+                            bundle=Path(run(['xcrun','simctl','get_app_container',args.receiver_simulator,'com.stskcxfz.imapp','app'],timeout=5).stdout.decode().strip())
+                            command=Path(run(['/bin/ps','-ww','-p',pid,'-o','comm='],timeout=5).stdout.decode().strip())
+                            if pid <= 1 or not command.samefile(bundle/'IMApp'): raise RuntimeError('owned App executable identity mismatch')
+                            os.kill(pid,signal.SIGKILL)
+                            download_gate.record_process_kill()
+                        elif not (self.command == 'GET' and path == '/__fixture__/background-download/state' and length == 0):
+                            self.send_error(404);return
+                        diagnostic=json.dumps(download_gate.snapshot(container)).encode()
+                    except (ValueError, KeyError, RuntimeError):
+                        self.send_error(400);return
+                    self.send_response(200);self.send_header('Content-Type','application/json')
+                    self.send_header('Content-Length',str(len(diagnostic)));self.end_headers();self.wfile.write(diagnostic);return
                 if background_gate is not None and path.startswith('/__fixture__/background-upload/'):
                     if self.headers.get('X-Background-Fixture') != background_fixture_token or length != 0:
                         self.send_error(403);return
@@ -199,7 +233,11 @@ def main():
                     self.send_response(status)
                     for k,v in response.getheaders():
                         if k.lower() not in {'connection','transfer-encoding','content-length'}: self.send_header(k,v)
-                    self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+                    self.send_header('Content-Length',str(len(data)));self.end_headers()
+                    if download_gate is not None and self.command == 'GET' and download_gate.claim(path,status,data,self.headers):
+                        download_gate.write(self,data)
+                    else:
+                        self.wfile.write(data)
                 finally: connection.close()
             do_GET = do_POST = do_PUT = do_DELETE = dispatch
         edge=http.server.ThreadingHTTPServer(('127.0.0.1',ports['edge']),Edge)
@@ -275,7 +313,7 @@ def main():
             if args.two_install_ui and background_upload_mode:
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
                 ui_environment['IMAPP_BACKGROUND_FIXTURE_TOKEN']=background_fixture_token
-                success_marker='local App native background upload E2E: pass'
+                success_marker='local App native background download E2E: pass' if background_download_mode else 'local App native background upload E2E: pass'
             if args.two_install_ui and os.environ.get('IMAPP_LOCAL_TWO_INSTALL_MEMBER_DIRECTORY_ONLY') == 'true':
                 ui_environment['IMAPP_LOCAL_TWO_INSTALL_PG_PORT']=str(ports['pg'])
                 success_marker='local App member directory E2E: pass'
@@ -339,7 +377,7 @@ def main():
             ui_log.flush()
             if success_marker not in (root/'two-install-ui.log').read_text().splitlines():
                 raise RuntimeError('two-install driver exited without completing all functional stages')
-            print('PASS real two-install App messaging, offline recovery and group scenario',flush=True)
+            print('PASS '+success_marker,flush=True)
         if args.hold_seconds:
             print('test endpoint config='+str(root/'test-endpoints.json'),flush=True)
             deadline=time.monotonic()+args.hold_seconds
@@ -358,6 +396,9 @@ def main():
             (root/'room-subscription-metrics.txt').write_text('\n'.join(lines)+'\n')
         except Exception as error:
             (root/'room-subscription-metrics-error.log').write_text(type(error).__name__+'\n')
+        if download_gate is not None:
+            download_gate.release()
+            (root/'background-download-observation.json').write_text(json.dumps(download_gate.snapshot(),indent=2)+'\n')
         if background_gate is not None:
             (root/'background-upload-observation.json').write_text(json.dumps(background_gate.snapshot(),indent=2)+'\n')
             background_gate.release()  # Drain only this owned observation on any failed stage.

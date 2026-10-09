@@ -395,7 +395,7 @@ if [[ "${IMAPP_LOCAL_TWO_INSTALL_SYSTEM_PUSH_ONLY:-false}" == true ]]; then
   exit 0
 fi
 
-if [[ "${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY:-false}" == true ]]; then
+if [[ "${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY:-false}" == true || "${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_ONLY:-false}" == true ]]; then
   [[ "${external_stack}" == true ]] || exit 1
   : "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT:?owned PG port required}"
   : "${IMAPP_BACKGROUND_FIXTURE_TOKEN:?owned fixture token required}"
@@ -427,6 +427,37 @@ PY
   curl --fail --silent --show-error --cacert "${local_ca}" --header "X-Background-Fixture: ${IMAPP_BACKGROUND_FIXTURE_TOKEN}" 'https://localhost:8443/__fixture__/background-upload/state' > "${result_directory}/background-upload-observation.json"
   jq --exit-status '.hits == 1 and .completed == 1 and .status >= 200 and .status < 300 and .readBytes == 524288 and .checksumMatches and .released and .durableActiveMappings == 1 and (.expired | not)' "${result_directory}/background-upload-observation.json" >/dev/null
   if [[ "${audit_failure_count}" -gt 0 ]]; then printf '%s\n' 'App native background upload stages complete; retained accessibility failure.' >&2; exit 1; fi
+  if [[ "${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_ONLY:-false}" == true ]]; then
+    export TEST_RUNNER_IMAPP_BACKGROUND_SCOPE="${receiver_scope}"
+    launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+    cancellation_mode="${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_CANCELLATION:-}"
+    if [[ -n "${cancellation_mode}" ]]; then
+      [[ "${cancellation_mode}" == withdrawal || "${cancellation_mode}" == logout ]] || exit 1
+      export TEST_RUNNER_IMAPP_BACKGROUND_CANCEL_MODE="${cancellation_mode}"
+      run_stage "${receiver_simulator_id}" testRealAppCancelsAnActiveBackgroundDownload
+      /opt/homebrew/opt/postgresql@16/bin/psql -X -A -t -h 127.0.0.1 -p "${IMAPP_LOCAL_TWO_INSTALL_PG_PORT}" -U imv2_e2e -d imv2_e2e -v ON_ERROR_STOP=1 -c "SELECT json_build_object('messages',count(*),'withdrawn',coalesce(bool_or(withdrawn_at IS NOT NULL),false),'activeDevices',(SELECT count(*) FROM im_v2.auth_devices WHERE revoked_at IS NULL AND user_id IN (SELECT sender_user_id FROM im_v2.messages)))::text FROM im_v2.messages" > "${result_directory}/background-cancel-server-facts.json"
+      if [[ "${cancellation_mode}" == withdrawal ]]; then
+        jq --exit-status '.messages == 1 and .withdrawn == true and .activeDevices == 1' "${result_directory}/background-cancel-server-facts.json" >/dev/null
+      else
+        jq --exit-status '.messages == 1 and .withdrawn == false and .activeDevices == 0' "${result_directory}/background-cancel-server-facts.json" >/dev/null
+      fi
+      printf '%s\n' 'local App native background download E2E: pass'
+      exit 0
+    fi
+    if [[ "${IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_RESTART:-false}" == true ]]; then
+      run_stage "${receiver_simulator_id}" testRealAppStartsDownloadAndSurvivesProcessTermination
+      launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+      run_stage "${receiver_simulator_id}" testRealAppColdAdoptsOriginalBackgroundDownload
+    else
+      run_stage "${receiver_simulator_id}" testRealAppDownloadsAttachmentWhileSuspended
+    fi
+    launch_fixture "${receiver_simulator_id}" -v2-ui-testing-live-local-account -v2-ui-testing-restore-local-account -v2-ui-testing-e2e-scope "${receiver_scope}"
+    run_stage "${receiver_simulator_id}" testRealAppColdReusesBackgroundDownloadedAttachment
+    curl --fail --silent --show-error --cacert "${local_ca}" --header "X-Background-Fixture: ${IMAPP_BACKGROUND_FIXTURE_TOKEN}" 'https://localhost:8443/__fixture__/background-download/state' > "${result_directory}/background-download-observation.json"
+    jq --exit-status '.hits == 1 and .foregroundHits == 0 and .completed == 1 and .sentBytes == 524288 and .persistedBytes == 524288 and .checksumMatches and .artifactCount == 1 and .released and .durableActiveMappings == 1 and (.expired | not)' "${result_directory}/background-download-observation.json" >/dev/null
+    printf '%s\n' 'local App native background download E2E: pass'
+    exit 0
+  fi
   printf '%s\n' 'local App native background upload E2E: pass'
   exit 0
 fi

@@ -60,7 +60,7 @@ public actor V2BackgroundDownloadCoordinator {
         guard !closed else { throw V2BackgroundTransferError.closed }
         if initialized { return }
         if let initialization { try await initialization.value; return }
-        let work = Task {
+        let work = Task { [self] in
             await self.driver.installWake { [weak self] in await self?.wake() }
             try await self.reconcile()
         }
@@ -96,8 +96,7 @@ public actor V2BackgroundDownloadCoordinator {
         try await initialize()
         guard !closed else { throw V2BackgroundTransferError.closed }
         let job = try await store.beginBackgroundDownload(id: UUID(), mediaID: mediaID, message: message,
-                                                         accountID: accountID, adoptMatching: true)
-        if case .paused = job.state { throw V2BackgroundTransferError.mappingConflict }
+                                                         accountID: accountID, adoptMatching: true, retryPaused: true)
         if case .preparing = job.state { initialTargets[job.id] = initialTarget }
         wake()
         try await reconcile()

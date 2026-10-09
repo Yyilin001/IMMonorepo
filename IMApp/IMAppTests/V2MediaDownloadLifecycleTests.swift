@@ -6,6 +6,38 @@ import Testing
 
 @MainActor
 struct V2MediaDownloadLifecycleTests {
+    @Test("cold cache reuse requires new authorization and exact bytes", arguments: ["valid", "corrupt", "revoked"])
+    func coldCacheRecovery(mode: String) async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "im-media-cold-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let resolver = ColdCacheResolver(), transfer = ColdCacheTransfer()
+        let service = V2ClientMediaDownloadService(targetResolver: resolver, byteTransfer: transfer)
+        let first = try V2ForegroundConversationMediaDownloader(downloader: service, directory: root)
+        let media = V2MediaReference(mediaID: .init(uuid: UUID()))
+        let original = try await first.download(media)
+        if mode == "corrupt" { try Data([2]).write(to: original.fileURL) }
+        if mode == "revoked" { await resolver.revoke() }
+        // A new owner has no in-memory verification/publication state. Only the
+        // account's protected disk cache survives this normal cold reconstruction.
+        let restored = try V2ForegroundConversationMediaDownloader(downloader: service, directory: root)
+        if mode == "revoked" {
+            await #expect(throws: V2ClientMediaTransferError.serverStatus(403)) {
+                try await restored.download(media)
+            }
+            #expect(await transfer.count == 1)
+        } else {
+            let recovered = try await restored.download(media)
+            #expect((recovered.fileURL == original.fileURL) == (mode == "valid"))
+            #expect(await transfer.count == (mode == "valid" ? 1 : 2))
+            let lease = try await recovered.borrowFile()
+            #expect(try Data(contentsOf: lease.fileURL) == Data([1]))
+            await lease.release()
+        }
+        #expect(await resolver.count == 2)
+        try await restored.close()
+        try await first.close()
+    }
+
     @Test("account close drains a late download and removes only its cache", arguments: [false, true])
     func closeDownload(cancelCaller: Bool) async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "im-media-lifecycle-\(UUID())")
@@ -75,5 +107,24 @@ private actor LateMediaTransfer: V2ClientMediaByteTransfer {
     func release() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor ColdCacheResolver: V2ClientMediaDownloadTargetResolver {
+    private(set) var count = 0
+    private var revoked = false
+    func revoke() { revoked = true }
+    func resolveDownloadTarget(mediaID: MediaID, message: V2MediaMessageLocation?) throws -> V2ClientMediaTransferTarget {
+        count += 1
+        if revoked { throw V2ClientMediaTransferError.serverStatus(403) }
+        return try .init(downloadPlan: .init(mode: .httpGet, url: URL(string: "https://media.invalid/object")!, expiresAt: .distantFuture, expectedByteCount: 1, checksum: .init(value: "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a")))
+    }
+}
+private actor ColdCacheTransfer: V2ClientMediaByteTransfer {
+    private(set) var count = 0
+    func upload(fileURL: URL, target: V2ClientMediaTransferTarget) throws { throw CancellationError() }
+    func download(target: V2ClientMediaTransferTarget, destinationURL: URL) throws {
+        count += 1
+        try Data([1]).write(to: destinationURL)
     }
 }

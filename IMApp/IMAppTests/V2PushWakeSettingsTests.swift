@@ -2,10 +2,20 @@ import Foundation
 import IMV2ClientKit
 import IMV2Core
 import Testing
+import UIKit
 @testable import IMApp
 
 @MainActor
 struct V2PushWakeSettingsTests {
+    @Test("the UIApplication bridge exposes the actual remote-notification selector")
+    func systemDelegateCallbackExposure() throws {
+        let selector = #selector(UIApplicationDelegate.application(_:didReceiveRemoteNotification:fetchCompletionHandler:))
+        let applicationDelegate = try #require(UIApplication.shared.delegate)
+        let businessDelegate = V2AppPushDelegate(makeStore: { _ in .init(startupMode: .uiTestingSignedOut) })
+        #expect(businessDelegate.responds(to: selector))
+        #expect(applicationDelegate.responds(to: selector), "The installed UIKit/SwiftUI delegate bridge must advertise the remote callback to the OS.")
+    }
+
     @Test("disabled activation settles remote state without asking UIKit for a token")
     func disabledActivation() async throws {
         let f = try await Fixture.make(enabled: false)

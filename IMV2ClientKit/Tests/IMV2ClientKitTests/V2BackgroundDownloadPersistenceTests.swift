@@ -74,6 +74,31 @@ struct V2BackgroundDownloadPersistenceTests {
         try await upgraded.close()
     }
 
+    @Test func automaticRetriesPauseButAnExplicitRequestPreservesAndRestartsTheIntent() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let account = UserID(uuid: UUID()), id = UUID(), media = MediaID(uuid: UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: root.appendingPathComponent("db.sqlite"),
+            installationBinding: .init(value: UUID()), userID: account)
+        _ = try await store.beginBackgroundDownload(id: id, mediaID: media, message: nil, accountID: account)
+        for _ in 0..<8 { try await store.failBackgroundDownloadPreparation(id: id, accountID: account) }
+        let paused = try #require(try await store.backgroundDownloads(accountID: account).first)
+        #expect(paused.state == .paused && paused.attemptCount == 5)
+        #expect(try await store.beginBackgroundDownload(id: UUID(), mediaID: media, message: nil,
+            accountID: account, adoptMatching: true) == paused)
+        let restarted = try await store.beginBackgroundDownload(id: UUID(), mediaID: media, message: nil,
+            accountID: account, adoptMatching: true, retryPaused: true)
+        #expect(restarted.id == id && restarted.mediaID == media && restarted.state == .preparing)
+        #expect(restarted.attemptCount == 0 && restarted.retryAtMilliseconds == 0)
+        let task = try makeTask(identifier: 1)
+        try await store.installBackgroundDownloadTask(id: id, task: task, accountID: account)
+        let active = try await store.beginBackgroundDownload(id: UUID(), mediaID: media, message: nil,
+            accountID: account, adoptMatching: true, retryPaused: true)
+        #expect(active.id == id && active.state == .transferring(task))
+        #expect(try await store.backgroundDownloads(accountID: account).count == 1)
+        try await store.close()
+    }
+
     private func makeTask(identifier: Int, sessionID: UUID = UUID()) throws -> V2BackgroundDownloadTask {
         try .init(id: UUID(), sessionID: sessionID, identifier: identifier, grantID: UUID(), expectedByteCount: 3,
             checksum: .init(value: String(repeating: "a", count: 64)), originDigest: String(repeating: "b", count: 64),

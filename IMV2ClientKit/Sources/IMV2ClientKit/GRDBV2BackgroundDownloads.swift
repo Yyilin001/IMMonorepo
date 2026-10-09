@@ -33,7 +33,7 @@ extension GRDBV2LocalSyncStore {
         """
 
     /// Persist intent before creating the OS task. A restart keeps this exact UUID.
-    func beginBackgroundDownload(id: UUID, mediaID: MediaID, message: V2MediaMessageLocation?, accountID: UserID, adoptMatching: Bool = false) throws -> V2BackgroundDownloadJob {
+    func beginBackgroundDownload(id: UUID, mediaID: MediaID, message: V2MediaMessageLocation?, accountID: UserID, adoptMatching: Bool = false, retryPaused: Bool = false) throws -> V2BackgroundDownloadJob {
         try databasePool.write { db in
             try Self.requireDownloadAccount(accountID, db: db)
             let matching = adoptMatching ? try Row.fetchOne(db,
@@ -42,6 +42,12 @@ extension GRDBV2LocalSyncStore {
             if let row = try matching ?? Row.fetchOne(db, sql: "SELECT * FROM v2_background_download_jobs WHERE job_id=?", arguments: [id.uuidString]) {
                 let existing = try Self.readBackgroundDownload(row)
                 guard existing.mediaID == mediaID, existing.message == message else { throw V2BackgroundTransferError.mappingConflict }
+                // A fresh user request may restart a paused intent. Automatic
+                // reconciliation never resets the bounded failure counter.
+                if retryPaused, case .paused = existing.state {
+                    try db.execute(sql: "UPDATE v2_background_download_jobs SET state='preparing',attempt_count=0,retry_at_milliseconds=0 WHERE job_id=? AND state='paused'", arguments: [existing.id.uuidString])
+                    return .init(id: existing.id, mediaID: existing.mediaID, message: existing.message, state: .preparing)
+                }
                 return existing
             }
             guard try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM v2_background_download_jobs") ?? 0 < 16,

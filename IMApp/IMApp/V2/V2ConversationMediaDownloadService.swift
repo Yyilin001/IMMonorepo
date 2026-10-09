@@ -53,7 +53,7 @@ nonisolated final class V2ConversationMediaFileLease: Sendable, Identifiable {
 }
 
 protocol V2ConversationMediaDownloading: Sendable {
-    /// 在返回可借用的本地文件之前，先重新授权并发布新的缓存代次。
+    /// 在返回可借用的本地文件之前，先重新授权并校验缓存或下载字节。
     ///
     /// 实现绝不能返回提供方目标地址。
     ///
@@ -364,6 +364,9 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         // decoded thumbnail bound to the original bytes during a fresh download.
         let destination = directory.appendingPathComponent(cacheStem(for: media.mediaID) + "." + UUID().uuidString + ".media")
         let target = try await downloader.authorizedTarget(mediaID: media.mediaID, message: message)
+        try Task.checkCancellation()
+        guard !isClosed else { throw CancellationError() }
+        if let cached = try await authorizedCachedFile(media: media, target: target) { return cached }
         // Account directory + media identity + authoritative checksum form the
         // stable recovery key. Signed targets and headers remain in memory.
         let temporary = directory.appendingPathComponent("." + cacheStem(for: media.mediaID) + "." + target.checksum.value + ".download")
@@ -418,9 +421,51 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         return .init(mediaID: media.mediaID, fileURL: destination, owner: self)
     }
 
+    /// A cold cache is only a hint: current authorization and a full byte digest
+    /// must agree before it can become a presentation source again.
+    private func authorizedCachedFile(media: V2MediaReference, target: V2ClientMediaTransferTarget) async throws -> V2DownloadedConversationMedia? {
+        let stem = cacheStem(for: media.mediaID)
+        let entries = try fileManager.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        for file in entries where file.pathExtension == "media" &&
+            (file.lastPathComponent == stem + ".media" || file.lastPathComponent.hasPrefix(stem + ".")) {
+            let url = file.standardizedFileURL
+            guard !pendingDeletion.contains(url) else { continue }
+            let facts = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+            guard facts.isRegularFile == true, facts.isSymbolicLink != true,
+                  Int64(facts.fileSize ?? 0) == target.expectedByteCount else {
+                retireCachedFile(url); continue
+            }
+            // Pin the candidate while hashing so maintenance/withdrawal cannot
+            // remove bytes under the reader. This task is owned and drained here;
+            // blocking file I/O must not occupy the cache actor's executor.
+            filePins[url, default: 0] += 1
+            defer { releaseFile(url) }
+            let verification = Task.detached(priority: .utility) {
+                try Task.checkCancellation()
+                return try V2ResourceFileDigest.sha256(fileURL: url, expectedByteCount: target.expectedByteCount)
+            }
+            let checksum = await withTaskCancellationHandler {
+                await verification.result
+            } onCancel: { verification.cancel() }
+            try Task.checkCancellation()
+            guard !isClosed, !pendingDeletion.contains(url) else { throw CancellationError() }
+            guard target.expiresAt > now() else { throw V2ClientMediaTransferError.targetExpired }
+            guard case .success(let digest) = checksum, digest == target.checksum.value else {
+                retireCachedFile(url); continue
+            }
+            publishedFiles[url] = media.mediaID
+            try fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: url.path)
+            return .init(mediaID: media.mediaID, fileURL: url, owner: self)
+        }
+        return nil
+    }
+
     func discard(_ media: V2MediaReference) async {
-        try? await backgroundDownloads?.cancel(mediaID: media.mediaID)
+        // Fence foreground waiters before awaiting the system task drain. A
+        // concurrent authorization/hash completion cannot publish during drain.
         for (id,target) in transferMedia where target == media.mediaID { transfers[id]?.cancel() }
+        try? await backgroundDownloads?.cancel(mediaID: media.mediaID)
         let stem = cacheStem(for: media.mediaID)
         for temporary in activeTemporaryFiles where temporary.pathExtension == "download" && temporary.lastPathComponent.hasPrefix("." + stem + ".") {
             discardedTemporaryFiles.insert(temporary)

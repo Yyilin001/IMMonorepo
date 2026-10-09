@@ -17,7 +17,11 @@ class NativePushWakeGate:
         self.lock = threading.Lock()
         self.cancelled = threading.Event()
         self.worker = None
-        self.state = {"stage": "idle", "delivered": False, "projected": False}
+        self.observation_started_at = None
+        self.state = {"stage": "idle", "delivered": False, "projected": False,
+                      "osLogReadSucceeded": False, "remoteCallbackCount": 0,
+                      "fetchActionCount": 0, "remoteActionCount": 0,
+                      "missingBackgroundModeCount": 0, "noNewDataCount": 0}
 
     def snapshot(self):
         with self.lock:
@@ -26,6 +30,31 @@ class NativePushWakeGate:
     def update(self, **values):
         with self.lock:
             self.state.update(values)
+
+    def observe_system_dispatch(self):
+        if self.observation_started_at is None or self.snapshot()['osLogReadSucceeded']:
+            return
+        # Fixed system routing messages and the content-free App callback marker
+        # only. Raw OS logs stay private and are never saved or returned to UI.
+        predicate = '(process == "IMApp" AND (eventMessage CONTAINS "UIFetchContentInBackgroundAction" OR eventMessage CONTAINS "UIRemoteNotification")) OR (process == "SpringBoard" AND eventMessage CONTAINS "com.stskcxfz.imapp" AND (eventMessage CONTAINS "Fetch" OR eventMessage CONTAINS "Notification" OR eventMessage CONTAINS "UIBackgroundMode" OR eventMessage CONTAINS "NoNewDataAvailable")) OR (subsystem == "com.stskcxfz.imapp" AND category == "BackgroundWake")'
+        try:
+            result = subprocess.run(['xcrun', 'simctl', 'spawn', self.simulator, 'log', 'show',
+                '--style', 'json', '--info', '--debug', '--start', self.observation_started_at,
+                '--predicate', predicate], check=True, capture_output=True, timeout=15)
+            if len(result.stdout) > 2097152:
+                raise ValueError('bounded system observation exceeded')
+            entries = json.loads(result.stdout)
+            if not isinstance(entries, list):
+                raise ValueError('unexpected system log shape')
+            messages = [entry.get('eventMessage', '') for entry in entries if isinstance(entry, dict)]
+            self.update(osLogReadSucceeded=True,
+                remoteCallbackCount=sum('Received system remote-notification fetch callback' in message for message in messages),
+                fetchActionCount=sum('UIFetchContentInBackgroundAction' in message for message in messages),
+                remoteActionCount=sum('UIRemoteNotification' in message for message in messages),
+                missingBackgroundModeCount=sum('UIBackgroundMode' in message and ('does not declare' in message or 'RequestDenied' in message) for message in messages),
+                noNewDataCount=sum('NoNewDataAvailable' in message for message in messages))
+        except Exception as error:
+            self.update(osLogError=type(error).__name__)
 
     def start(self, request):
         if not isinstance(request, dict) or set(request) != {"accountHandle", "scope", "title"} or not all(isinstance(value, str) for value in request.values()):
@@ -60,8 +89,14 @@ class NativePushWakeGate:
             self.update(stage="delivering", messageID=message["messageID"], roomSequence=message["roomSequence"])
             if self.cancelled.is_set():
                 return
-            delivery = subprocess.run(["xcrun", "simctl", "push", self.simulator, "com.stskcxfz.imapp", "-"],
-                                      input=b'{"aps":{"content-available":1}}',
+            # Apple's documented APNs-file entry point carries only the
+            # simulator target plus the same content-free background payload.
+            payload_file = self.root / 'system-push.apns'
+            payload_file.write_text(json.dumps({'Simulator Target Bundle': 'com.stskcxfz.imapp',
+                                               'aps': {'content-available': 1}}) + '\n')
+            self.update(deliveryForm='apns-file-with-target')
+            self.observation_started_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+            delivery = subprocess.run(["xcrun", "simctl", "push", self.simulator, str(payload_file)],
                                       capture_output=True, timeout=10)
             visible_rejection = (delivery.returncode != 0 and b"UNErrorDomain" in delivery.stderr
                                  and b"code=1401" in delivery.stderr
@@ -80,12 +115,16 @@ class NativePushWakeGate:
                 if len(matches) == 1 and any(row["applied_room_sequence"] >= message["roomSequence"]
                                              for row in after["cursor"]):
                     (self.root / "push-after-notification.json").write_text(json.dumps(after, indent=2) + "\n")
+                    self.observe_system_dispatch()
+                    if not self.snapshot()['osLogReadSucceeded'] or self.snapshot()['remoteCallbackCount'] == 0:
+                        raise RuntimeError('original projection without proven OS remote callback')
                     self.update(stage="passed", delivered=True, projected=True, originalMessageCount=1)
                     return
                 self.cancelled.wait(.2)
             if not self.cancelled.is_set():
                 raise TimeoutError("system Push did not commit original room message")
         except Exception as error:
+            self.observe_system_dispatch()
             # Error types only: credentials and signed targets stay process-private.
             reason = None
             if isinstance(error, subprocess.CalledProcessError):

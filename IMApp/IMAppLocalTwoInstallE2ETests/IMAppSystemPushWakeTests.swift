@@ -8,6 +8,8 @@ extension IMAppLocalTwoInstallE2ETests {
         let projected: Bool
         let messageID: String?
         let originalMessageCount: Int?
+        let remoteCallbackCount: Int
+        let osLogReadSucceeded: Bool
     }
 
     @MainActor
@@ -84,6 +86,8 @@ extension IMAppLocalTwoInstallE2ETests {
         XCTAssertEqual(observation.stage, "passed")
         XCTAssertTrue(observation.delivered && observation.projected)
         XCTAssertEqual(observation.originalMessageCount, 1)
+        XCTAssertTrue(observation.osLogReadSucceeded)
+        XCTAssertGreaterThan(observation.remoteCallbackCount, 0, "必须证明系统远程通知回调实际到达，其他同步唤醒不能替代。")
         let messageID = try XCTUnwrap(UUID(uuidString: try XCTUnwrap(observation.messageID))).uuidString
         XCTContext.runActivity(named: "system-push-original-message-persisted-in-background") { _ in }
         app.activate()
