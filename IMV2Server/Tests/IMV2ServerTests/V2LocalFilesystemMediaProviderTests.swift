@@ -9,6 +9,27 @@ import Testing
 
 @Suite("V2 local filesystem media provider")
 struct V2LocalFilesystemMediaProviderTests {
+    @Test func nativeDownloadGrantPreservesExactSignedObjectAndChecksum() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let now = Date(), expiry = now.addingTimeInterval(30)
+        let provider = try V2LocalFilesystemMediaProvider(rootDirectory: root,
+            targetBaseURL: #require(URL(string: "https://media.local.test")),
+            signingKey: Data(repeating: 13, count: 32), now: { now })
+        let media = MediaID(uuid: UUID()), bytes = Data([1, 2, 3])
+        let upload = try await provider.issueUploadTarget(mediaID: media, contentType: "application/octet-stream",
+            byteCount: 3, expiresAt: expiry)
+        try await provider.storeUploadedObject(mediaID: media, targetURL: upload.url,
+            contentType: "application/octet-stream", bytes: bytes)
+        let download = try await provider.issueDownloadTarget(mediaID: media, expiresAt: expiry)
+        let grant = try #require(download.backgroundDownloadAuthorization)
+        #expect(grant.checksum == download.checksum && grant.expectedByteCount == 3)
+        #expect(grant.expiresAtMilliseconds == download.expiresAtUnixMilliseconds)
+        #expect(try await provider.readDownloadedObject(mediaID: media, targetURL: download.url) == bytes)
+        await #expect(throws: V2LocalFilesystemMediaProviderError.invalidTarget) {
+            _ = try await provider.readDownloadedObject(mediaID: MediaID(uuid: UUID()), targetURL: download.url)
+        }
+    }
     @Test("Media deadline rounding cannot make expired or submillisecond targets usable",
           arguments: [Double(-1.0005), -1_000_000_000.1255, 1_750_000_000.1255])
     func signedDeadlineRounding(seconds: Double) async throws {

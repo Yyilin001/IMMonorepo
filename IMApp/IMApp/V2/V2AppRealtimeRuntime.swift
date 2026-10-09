@@ -949,6 +949,7 @@ struct V2AppRealtimeRuntime {
     let groupAvatarIntents: V2GroupAvatarIntentEngine
     let groupAvatarManager: V2GroupAvatarManagementService
     let mediaDownloader: any V2ConversationMediaDownloading
+    let mediaDownloadResolver: V2HTTPMediaDownloadTargetResolver
     let mediaCacheMaintenance: V2ForegroundConversationMediaDownloader
     let activeHybridGroupSynchronizer: any V2ActiveHybridGroupSynchronizing
     let roomSubscriptions: V2RoomSubscriptionCoordinator
@@ -1039,6 +1040,7 @@ struct V2AppRealtimeRuntime {
             endpoint: configuration.mediaEdgeEndpoint,
             credentials: accountHTTP, transport: accountHTTP
         )
+        self.mediaDownloadResolver = mediaDownloadResolver
         let mediaDownloader = V2ClientMediaDownloadService(
             targetResolver: mediaDownloadResolver,
             byteTransfer: V2URLSessionMediaByteTransfer(scheduler: accountRuntime.scheduler, diagnostics: accountRuntime.networkDiagnostics)

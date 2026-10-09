@@ -154,6 +154,7 @@ enum V2DeviceLocalStoragePolicy {
 /// 关闭后拒绝新请求；迟到传输不能重新发布已经结束账号的文件。
 actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V2ConversationMediaCacheDiscarding {
     private var isClosed = false
+    private var backgroundDownloads: V2BackgroundDownloadCoordinator?
     private var transfers: [UUID: Task<V2DownloadedConversationMedia, Error>] = [:]
     private var transferMedia: [UUID: MediaID] = [:]
     private let downloader: V2ClientMediaDownloadService
@@ -216,6 +217,7 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     /// - Throws: 目录删除失败时返回文件系统错误；可再次调用以重试清理。
     func close() async throws {
         isClosed = true
+        await backgroundDownloads?.close()
         let avatarTasks = Array(avatarFlights.values)
         for task in avatarTasks { task.cancel() }
         for task in avatarTasks { _ = await task.result }
@@ -381,7 +383,15 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
         let existing = (try? fileManager.attributesOfItem(atPath: partial.path)[.size] as? NSNumber)?.int64Value ?? 0
         let reservation = try reserve(bytes: expected,alreadyStaged: existing)
         defer { reservedBytes -= reservation }
-        try await downloader.download(target: target, to: temporary)
+        let backgroundFile: V2BackgroundDownloadedFile?
+        // Provider delegation is explicit. Other plans continue through the
+        // foreground adapter, which never persists object requests in the OS.
+        if let backgroundDownloads, target.backgroundDownloadAuthorization != nil {
+            backgroundFile = try await backgroundDownloads.download(mediaID: media.mediaID, message: message, initialTarget: target)
+        } else {
+            backgroundFile = nil
+            try await downloader.download(target: target, to: temporary)
+        }
         try Task.checkCancellation()
         guard !isClosed else { throw CancellationError() }
 
@@ -390,13 +400,15 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
             // the staging file becomes visible at the stable cache URL there
             // is no later fallible step that can report failure while leaving
             // a partially configured cache entry behind.
-            try V2DeviceLocalStoragePolicy.applyToManagedFile(temporary, fileManager: fileManager)
-            try fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: temporary.path)
-            try fileManager.moveItem(at: temporary, to: destination)
+            let source = backgroundFile?.fileURL ?? temporary
+            try V2DeviceLocalStoragePolicy.applyToManagedFile(source, fileManager: fileManager)
+            try fileManager.setAttributes([.modificationDate: now()], ofItemAtPath: source.path)
+            try fileManager.moveItem(at: source, to: destination)
         } catch {
             throw V2DeviceLocalStorageError.fileSystemFailure
         }
         publishedFiles[destination] = media.mediaID
+        if let backgroundFile { try await backgroundDownloads?.didPublish(backgroundFile) }
         for (url, id) in publishedFiles where id == media.mediaID && url != destination {
             retireCachedFile(url)
         }
@@ -407,6 +419,7 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
     }
 
     func discard(_ media: V2MediaReference) async {
+        try? await backgroundDownloads?.cancel(mediaID: media.mediaID)
         for (id,target) in transferMedia where target == media.mediaID { transfers[id]?.cancel() }
         let stem = cacheStem(for: media.mediaID)
         for temporary in activeTemporaryFiles where temporary.pathExtension == "download" && temporary.lastPathComponent.hasPrefix("." + stem + ".") {
@@ -420,6 +433,11 @@ actor V2ForegroundConversationMediaDownloader: V2ConversationMediaDownloading, V
                 try? fileManager.removeItem(at: file)
             }
         }
+    }
+
+    func attachBackgroundDownloads(_ coordinator: V2BackgroundDownloadCoordinator) {
+        precondition(backgroundDownloads == nil && !isClosed)
+        backgroundDownloads = coordinator
     }
 
     private func retireCachedFile(_ url: URL) {

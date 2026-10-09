@@ -201,18 +201,23 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
             }
             return size.int64Value
         }
-        let url = try signedTarget(
-            kind: .download,
-            mediaID: mediaID,
-            contentType: nil,
-            byteCount: byteCount,
-            expiresAt: expiresAt
-        )
         let digest = try await Self.performBlocking {
             try ForwardMediaFileIO.digest(objectURL, byteCount: byteCount)
         }
+        let checksum = try V2ResourceChecksum(value: digest.map { String(format: "%02x", $0) }.joined())
+        _ = try validatedExpiryMilliseconds(expiresAt)
+        let instant = now()
+        // Legacy long-lived/empty foreground targets do not delegate persistence to the OS.
+        let grant: V2ResourceBackgroundDownloadAuthorization?
+        if byteCount > 0, byteCount <= 512 * 1_024 * 1_024,
+           instant.timeIntervalSince1970 > 0, expiresAt > instant, expiresAt.timeIntervalSince(instant) <= 900 {
+            grant = try .init(id: UUID(), expectedByteCount: byteCount, checksum: checksum,
+                              issuedAt: instant, expiresAt: expiresAt)
+        } else { grant = nil }
+        let url = try signedTarget(kind: .download, mediaID: mediaID, contentType: nil,
+            byteCount: byteCount, expiresAt: expiresAt, backgroundDownloadAuthorization: grant)
         return try .init(mode: .httpGet, url: url, expiresAt: expiresAt, expectedByteCount: byteCount,
-                         checksum: .init(value: digest.map { String(format: "%02x", $0) }.joined()))
+                         checksum: checksum, backgroundDownloadAuthorization: grant)
     }
 
     /// 在接收 HTTP 正文之前校验上传目标的签名声明，并在私有暂存目录中预留随机文件。
@@ -470,7 +475,8 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
         mediaID: MediaID,
         contentType: String?,
         byteCount: Int64,
-        expiresAt: Date, backgroundAuthorization: V2ResourceBackgroundAuthorization? = nil
+        expiresAt: Date, backgroundAuthorization: V2ResourceBackgroundAuthorization? = nil,
+        backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization? = nil
     ) throws -> URL {
         // 下载元数据查询会挂起 Actor。此处再次校验，
         // 确保目标在实际签名时仍可使用。
@@ -480,7 +486,8 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
             mediaID: mediaID.rawValue,
             contentType: contentType,
             byteCount: byteCount,
-            expiresAtMilliseconds: milliseconds, backgroundAuthorization: backgroundAuthorization
+            expiresAtMilliseconds: milliseconds, backgroundAuthorization: backgroundAuthorization,
+            backgroundDownloadAuthorization: backgroundDownloadAuthorization
         )
         let payload = try JSONEncoder().encode(claims)
         let encodedPayload = Self.base64URL(payload)
@@ -527,6 +534,12 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
         }
         if let grant = claims.backgroundAuthorization {
             guard kind == .upload, claims.byteCount>0,claims.byteCount<=8*1_024*1_024,
+                  grant.expiresAtMilliseconds == claims.expiresAtMilliseconds
+            else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
+        }
+        if let grant = claims.backgroundDownloadAuthorization {
+            guard kind == .download, claims.backgroundAuthorization == nil,
+                  grant.expectedByteCount == claims.byteCount,
                   grant.expiresAtMilliseconds == claims.expiresAtMilliseconds
             else { throw V2LocalFilesystemMediaProviderError.invalidTarget }
         }
@@ -595,6 +608,7 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
         let byteCount: Int64
         let expiresAtMilliseconds: Int64
         let backgroundAuthorization: V2ResourceBackgroundAuthorization?
+        let backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization?
     }
 }
 

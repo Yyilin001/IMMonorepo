@@ -14,6 +14,7 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
     public let expiresAt: Date
     public let expectedByteCount: Int64
     public let checksum: V2ResourceChecksum
+    public let backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization?
 
     public init(downloadPlan:V2ResourceTransferPlan) throws {
         guard downloadPlan.mode == .httpGet, let checksum = downloadPlan.checksum else {throw V2ClientMediaTransferError.invalidTarget}
@@ -22,6 +23,7 @@ public struct V2ClientMediaTransferTarget: Equatable, Sendable {
         self.expiresAt=downloadPlan.expiresAt
         self.expectedByteCount=downloadPlan.expectedByteCount
         self.checksum=checksum
+        self.backgroundDownloadAuthorization=downloadPlan.backgroundDownloadAuthorization
     }
 }
 

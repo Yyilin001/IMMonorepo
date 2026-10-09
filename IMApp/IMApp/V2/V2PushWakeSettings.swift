@@ -1,6 +1,7 @@
 import Foundation
 import IMV2ClientKit
 import Observation
+import OSLog
 import UIKit
 
 /// 推送开关偏好的存储能力。
@@ -328,6 +329,8 @@ final class V2AppPushDelegate: NSObject, UIApplicationDelegate, V2RemoteNotifica
         didReceiveRemoteNotification _: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
+        Logger(subsystem: "com.stskcxfz.imapp", category: "BackgroundWake")
+            .notice("Received system remote-notification fetch callback")
         Task { [weak self] in
             guard let handler = self?.wakeHandler else {
                 completionHandler(.noData)

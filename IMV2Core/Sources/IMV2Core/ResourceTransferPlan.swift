@@ -84,6 +84,7 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
     public let partNumber: Int?
     public let checksum: V2ResourceChecksum?
     public let backgroundAuthorization: V2ResourceBackgroundAuthorization?
+    public let backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization?
 
     public var expiresAt: Date { V2ResourceTime.date(expiresAtUnixMilliseconds) }
     public var httpMethod: String { mode.httpMethod }
@@ -92,16 +93,18 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
                 headers: [V2ResourceTransferHeader] = [], formFields: [String: String] = [:],
                 formFileField: String? = nil, expiresAt: Date, expectedByteCount: Int64,
                 byteRange: V2ResourceByteRange? = nil, partNumber: Int? = nil,
-                checksum: V2ResourceChecksum? = nil, backgroundAuthorization: V2ResourceBackgroundAuthorization? = nil) throws {
+                checksum: V2ResourceChecksum? = nil, backgroundAuthorization: V2ResourceBackgroundAuthorization? = nil,
+                backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization? = nil) throws {
         try self.init(version: version, mode: mode, url: url, headers: headers, formFields: formFields,
                       formFileField: formFileField, expiresAtUnixMilliseconds: V2ResourceTime.milliseconds(expiresAt),
-                      expectedByteCount: expectedByteCount, byteRange: byteRange, partNumber: partNumber, checksum: checksum, backgroundAuthorization: backgroundAuthorization)
+                      expectedByteCount: expectedByteCount, byteRange: byteRange, partNumber: partNumber, checksum: checksum, backgroundAuthorization: backgroundAuthorization, backgroundDownloadAuthorization: backgroundDownloadAuthorization)
     }
 
     private init(version: Int, mode: V2ResourceTransferMode, url: URL,
                  headers: [V2ResourceTransferHeader], formFields: [String: String], formFileField: String?,
                  expiresAtUnixMilliseconds: Int64, expectedByteCount: Int64,
-                 byteRange: V2ResourceByteRange?, partNumber: Int?, checksum: V2ResourceChecksum?, backgroundAuthorization: V2ResourceBackgroundAuthorization?) throws {
+                 byteRange: V2ResourceByteRange?, partNumber: Int?, checksum: V2ResourceChecksum?, backgroundAuthorization: V2ResourceBackgroundAuthorization?,
+                 backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization?) throws {
         guard version == Self.currentVersion, url.scheme?.lowercased() == "https",
               let host = url.host, !host.isEmpty, url.user == nil, url.password == nil, url.fragment == nil,
               url.absoluteString.utf8.count <= 8_192, expectedByteCount >= 0,
@@ -137,6 +140,14 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
                   headers.allSatisfy({ $0.kind == .content && $0.name.lowercased() != "authorization" })
             else { throw V2ResourceValidationError.invalidTransferPlan }
         }
+        if let grant = backgroundDownloadAuthorization {
+            guard backgroundAuthorization == nil, mode == .httpGet,
+                  expectedByteCount == grant.expectedByteCount, checksum == grant.checksum,
+                  expiresAtUnixMilliseconds == grant.expiresAtMilliseconds,
+                  headers.allSatisfy({ $0.kind == .content && $0.name.lowercased() != "authorization" })
+            else { throw V2ResourceValidationError.invalidTransferPlan }
+        }
+        self.backgroundDownloadAuthorization = backgroundDownloadAuthorization
         self.backgroundAuthorization = backgroundAuthorization
         self.version = version
         self.mode = mode
@@ -159,7 +170,7 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case version, mode, url, headers, formFields, formFileField, expiresAtUnixMilliseconds
-        case expectedByteCount, byteRange, partNumber, checksum, backgroundAuthorization
+        case expectedByteCount, byteRange, partNumber, checksum, backgroundAuthorization, backgroundDownloadAuthorization
     }
 
     public init(from decoder: any Decoder) throws {
@@ -170,6 +181,7 @@ public struct V2ResourceTransferPlan: Equatable, Codable, Sendable {
                       expiresAtUnixMilliseconds: values.decode(Int64.self, forKey: .expiresAtUnixMilliseconds),
                       expectedByteCount: values.decode(Int64.self, forKey: .expectedByteCount),
                       byteRange: values.decodeIfPresent(V2ResourceByteRange.self, forKey: .byteRange),
-                      partNumber: values.decodeIfPresent(Int.self, forKey: .partNumber), checksum: values.decodeIfPresent(V2ResourceChecksum.self, forKey: .checksum), backgroundAuthorization: values.decodeIfPresent(V2ResourceBackgroundAuthorization.self, forKey: .backgroundAuthorization))
+                      partNumber: values.decodeIfPresent(Int.self, forKey: .partNumber), checksum: values.decodeIfPresent(V2ResourceChecksum.self, forKey: .checksum), backgroundAuthorization: values.decodeIfPresent(V2ResourceBackgroundAuthorization.self, forKey: .backgroundAuthorization),
+                      backgroundDownloadAuthorization: values.decodeIfPresent(V2ResourceBackgroundDownloadAuthorization.self, forKey: .backgroundDownloadAuthorization))
     }
 }

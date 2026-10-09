@@ -29,13 +29,19 @@ public struct V2BackgroundTransferResult: Codable, Sendable, Equatable {
         self.receivedBytes=receivedBytes;self.sentBytes=sentBytes;self.originDigest=originDigest;self.retryNotBefore=retryNotBefore
     }
 }
-public protocol V2BackgroundSessionDriving: Sendable {
+public protocol V2BackgroundTaskSessionDriving: Sendable {
     func tasks() async -> [V2BackgroundSystemTask]
-    func create(request: URLRequest, file: URL, mappingID: UUID) async throws -> Int
     func resume(_ identifier: Int) async throws
     /// Returns only after the real system task completion callback.
     func cancelAndDrain(_ identifiers: [Int]) async
     func installWake(_ wake: @escaping @Sendable () async -> Void) async
+}
+public protocol V2BackgroundSessionDriving: V2BackgroundTaskSessionDriving {
+    func create(request: URLRequest, file: URL, mappingID: UUID) async throws -> Int
+}
+public protocol V2BackgroundDownloadSessionDriving: V2BackgroundTaskSessionDriving {
+    /// Only an explicit provider delegation permits the OS to persist this request.
+    func create(target: V2ClientMediaTransferTarget, mappingID: UUID) async throws -> Int
 }
 public struct V2BackgroundTaskMapping: Sendable, Equatable {
     public let id:UUID,sessionID:UUID,jobID:UUID,activationID:UUID,sourceToken:UUID

@@ -679,6 +679,8 @@ private struct V2PushWakeSettingsSection: View {
             )
             .disabled(store.state == .loading || store.isSigningOut)
             .accessibilityIdentifier("v2.push-wake.enabled")
+            Text(pushRegistrationStatus)
+                .accessibilityIdentifier("v2.push-wake.registration-status")
             Text("仅发送无内容唤醒，用于提示应用拉取已授权的同步数据；不在通知中包含消息内容。")
                 // This is actionable privacy information, not decorative
                 // caption text. Use a fully Dynamic-Type-scaled body style.
@@ -706,5 +708,16 @@ private struct V2PushWakeSettingsSection: View {
             }
         }
         .onDisappear { preferenceTask?.cancel() }
+    }
+
+    private var pushRegistrationStatus: String {
+        switch store.state {
+        case .loading: "正在读取设置"
+        case .disabled: "后台同步唤醒已关闭"
+        case .waitingForToken: "正在获取设备唤醒令牌"
+        case .registering: "正在注册后台同步唤醒"
+        case .enabled: "后台同步唤醒已就绪"
+        case .retryableFailure: "后台同步唤醒尚未就绪"
+        }
     }
 }

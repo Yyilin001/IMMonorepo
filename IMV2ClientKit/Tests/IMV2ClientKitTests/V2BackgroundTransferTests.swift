@@ -7,7 +7,9 @@ import IMV2Core
 @testable import IMV2ClientKit
 import Testing
 
-@Suite("Background task adoption and opaque handoff")
+// These cases exercise the process-wide disk budget and its aggregate counters.
+// Running them concurrently lets another case change the very snapshot under test.
+@Suite("Background task adoption and opaque handoff", .serialized)
 struct V2BackgroundTransferTests {
     @Test(arguments: [false, true]) func stagingBusinessFailureDoesNotCountAsQuotaRejection(sameFailureType: Bool) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

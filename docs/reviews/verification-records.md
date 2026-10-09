@@ -2840,8 +2840,8 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-19 | 通知丢失补偿 | 1000房间真实跨Gateway尾通知丢弃2次、无相关替代唤醒、自动补回正文与游标R14完整exit0，owned清理通过，旧失败保留 | liveAccountUIR8, roomScaleR10, roomScaleR12, roomScaleR13 |
 | EX-20 | 断线重连 | 1000房间冷恢复/重连及真实跨Gateway在线更新R14完整exit0，owned清理通过；R12在线超时及R13清理失败保留；App丢ACK自动重连另已通过 | liveAccountUIR8, appACKCutR5, roomScaleR12, roomScaleR13 |
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
-| EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；系统后台下载未实现 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7 |
-| EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；外部APNs和真机唤醒待验：当前无已连接物理设备且测试进程无APNs配置，等待指定设备与测试环境 | liveAccountUIR6, apnsEnvironmentAudit20261009 |
+| EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；下载授权、独立系统下载驱动、持久化迁移与账号运行时/缓存发布已接入，组件验证通过；真实挂起下载尚未验收 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7 |
+| EX-23 | Push端点与唤醒 | 真实headless入口通过；普通UI注册就绪与系统挂起R9/R10通过，但纯后台simctl载荷实际分派后台fetch，远程通知回调及后台原消息投影未证明；系统Push验收仍未完成 | liveAccountUIR6, systemPushLiveR9, systemPushLiveR10 |
 | EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线原身份及全部原AX/contrast修复后完整R8通过；冷URL启动真实预览/普通申请/PG核对通过；批准入群即时投影终止ACK修复后R10/R11连续通过，原波动失败保留；正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
 
 <!-- acceptance-matrix-end -->
@@ -3324,3 +3324,17 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 系统Push R6终态exit1、owned stack stopped：TCP原消息01a11ec4-779f-7b65-9203-4975dc86d2b0/sequence2唯一落盘，实际投递前App SQLite messages为空。发送修复已越过原失败点。simctl纯content-available载荷返回exit121/UNErrorDomain1401 Notification has no user visible content；独立同命令复现。驱动此前因非零返回提前结束，尚无实际后台结果证据；不能宣称OS回调成功或失败。R7保留此具体可见通知错误，继续实际原消息/游标观察，UI不得进入前台；其他工具错误仍失败，未加入alert或手动代理调用。日志 /tmp/imv2-system-push-live-r7-20261009.log。
 
 - 系统Push R7终态exit1，owned stack stopped：真实TCP原消息01a11ec8-08ec-74b9-b9d0-e31395208ee3/sequence2已提交，投递前App SQLite仍为空；保留simctl exit121/1401后继续观察45秒，未出现后台原消息持久化，最终TimeoutError。日志 /tmp/imv2-system-push-live-r7-20261009.log。后续OS日志显示App without push registration；本轮UI尚未通过普通设置开启Push，需补齐注册前置后复验，不能据此认定模拟器不支持。构建产物Simulated.xcent包含aps-environment=development，普通模拟器签名无entitlements不足以判定能力缺失；系统Push验收仍未通过。
+
+- 系统Push R8终态exit1、owned stack stopped：新增普通设置开启前置与实际注册状态展示后，UI最终仍显示后台同步唤醒已关闭，尚未启动消息/系统Push。外层SwiftUI Toggle点击未改变设置；改用已有隐私UI测试的内层Switch点击。日志 /tmp/imv2-system-push-live-r8-20261009.log，原结果保留，不判定OS注册失败。
+
+- 系统Push R9终态exit1、owned stack stopped：普通隐私UI内层Switch开启成功，注册状态已就绪且系统确认令牌注册；App实际挂起。原TCP消息01a11ed3-d110-76f0-89e6-6a541a81cc04/sequence2落盘，45秒未后台投影。OS固定原因RequestDenied/Disabled：app does not declare proper UIBackgroundMode；安装包实查UIBackgroundModes含remote-notification。保留失败，下一轮补充fetch模式诊断且增加真实远程通知回调固定标记，不以其他回调替代验收。日志 /tmp/imv2-system-push-live-r9-20261009.log。
+
+- 系统Push R10终态exit1、owned stack stopped：普通UI注册已就绪、系统挂起、原TCP消息01a11ed7-246a-704b-a06e-cbb26e3f937e/sequence2提交均通过，45秒后台投影超时。补充fetch模式后启动拒绝消失，但OS明确发送UIFetchContentInBackgroundAction、执行SBBackgroundFetchTask并返回NoNewDataAvailable；远程通知委托固定标记不存在。证据 /tmp/imv2-system-push-r10-fetch.log、/tmp/imv2-system-push-r10-delegate.log。撤回实验fetch模式，不增加performFetch替代处理骗过Push验收；保留普通注册前置、可访问注册状态及远程通知无敏感信息固定日志。系统Push与后台下载验收均仍未完成。
+
+- EX-22系统后台下载改造阶段R1：新增明确GET委托V2ResourceBackgroundDownloadAuthorization，绑定原字节数/SHA256/整数毫秒期限，拒绝PUT、Range、凭据头、计划与委托不一致及无委托的系统请求。两套本地提供方将委托绑定进原签名对象能力；客户端保持前台无委托计划兼容。Core R2 14项/2套件通过，服务端R2 12项/2套件通过，日志 /tmp/imv2-background-download-core-r2-20261009.log、/tmp/imv2-background-download-server-r2-20261009.log。
+- 独立系统下载会话imv2.background.download.UUID复用串行URLSession委托和不透明完成inbox，但与上传会话/恢复队列隔离；OS下载临时文件回调内接管，暂存字节保持Complete保护，先保留文件再记录不透明完成。下载目录沿用全局暂存预算；这里只完成驱动和iOS编译，尚无真实OS下载结果，不将组件构建视为验收通过。
+- 下载原意图与每次尝试mapping UUID分离，任务ID复用也不能让旧回调推进新尝试。新增addV2BackgroundDownloadJobs独立GRDB迁移，保存媒体/消息身份、系统任务与授权字节事实，不保存URL/头/令牌。账户绑定检查、原意图重启、旧库迁移及取消后迟到回调测试通过。R6曾发现SQLite浮点Date读回精度丢失，已改为授权原整数毫秒；R7最终24项/4套件exit0，日志 /tmp/imv2-background-download-client-r7-20261009.log。R2测试曾因同套件并发修改进程级磁盘预算计数失败，已对共享预算套件声明serialized，未放宽产品预算；R5编译遗漏await已修复，旧失败日志保留。
+- 真实资源边界回归 /tmp/imv2-background-download-contract-live-r1-20261009 终态exit0，独立PG/Actor/HTTPS资源/TLS Gateway及owned清理通过；必需的实际资源上传、头像授权与GET字节、拉黑撤销通过，客户端显式要求下载委托并构造受限GET。该轮未启用的11个专项跳过保留，不算整体14项业务验收通过。客户端日志client.log、summary.json与外层日志 /tmp/imv2-background-download-contract-live-r1-20261009.log。最新模拟器build-for-testing R3 exit0，日志 /tmp/imv2-background-download-app-build-r3-20261009.log。
+- EX-22仍未完成：须将持久化下载任务接入账号运行时，在初始化时接管实际系统任务并占用/释放真实传输预算，完成后重新授权才发布受保护缓存，登出/撤回取消并排空；还须执行App实际挂起期间GET、恢复原任务与文件、取消清理的本机模拟器验收。EX-23纯系统远程通知回调证明仍未完成，不以后台fetch替代。
+
+- 后台下载账号协调器已接入App运行时和缓存发布：先持久化映射再恢复系统任务，冷恢复接管原尝试，完成后重新授权，取消排空前保留传输预算。提交前最新源码验证8项/3套件exit0，日志 /tmp/imv2-background-download-precommit-20261009.log；App运行时build-for-testing exit0，日志 /tmp/imv2-background-download-runtime-app-build-r1-20261009.log。真实模拟器挂起下载、冷文件复用与完整取消场景尚未验收，EX-22仍未完成。

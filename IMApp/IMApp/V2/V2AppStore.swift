@@ -987,6 +987,11 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             activation.onDiscard { await backgroundTransfers.close() }
             // Adopt existing system I/O before any foreground activity can request the same slots.
             try await realtime.resourceTransfers.attachBackground(backgroundTransfers)
+            let backgroundDownloads = try await V2BackgroundDownloadCoordinator.native(accountID: userID,
+                store: localStore, scheduler: realtime.accountRuntime.scheduler, resolver: realtime.mediaDownloadResolver)
+            activation.onDiscard { await backgroundDownloads.close() }
+            try await backgroundDownloads.initialize()
+            await realtime.mediaCacheMaintenance.attachBackgroundDownloads(backgroundDownloads)
             try Task.checkCancellation()
             try await authSession.requireAuthenticatedEpoch(authEpoch)
             // No source reader is running yet. Multipart slices and interrupted
@@ -1303,6 +1308,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             }
             await realtime.accountRuntime.startActivity(id:"backgroundByteTransfers") {
                 try await backgroundTransfers.run()
+            }
+            await realtime.accountRuntime.startActivity(id: "backgroundDownloads") {
+                try await backgroundDownloads.run()
             }
             await realtime.accountRuntime.startActivity(id: "resourcePreparation", operation: {
                 try await realtime.attachmentUploader.durable.runRecovery()

@@ -5107,6 +5107,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
             try db.execute(sql: groupAvatarIntentsSchemaSQL)
             try db.execute(sql: groupNicknameInvalidationSchemaSQL)
         }
+        migrator.registerMigration("addV2BackgroundDownloadJobs") { db in
+            try db.execute(sql: backgroundDownloadSchemaSQL)
+        }
         return migrator
     }()
 

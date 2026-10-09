@@ -8,6 +8,19 @@ import Testing
 
 @Suite("V2 native media transfer")
 struct V2MediaTransferTests {
+    @Test func downloadTargetRetainsExplicitOSDelegationAndDoesNotInventOne() throws {
+        let now = Date(), expiry = now.addingTimeInterval(60)
+        let checksum = try V2ResourceChecksum(value: String(repeating: "a", count: 64))
+        let grant = try V2ResourceBackgroundDownloadAuthorization(id: UUID(), expectedByteCount: 3,
+            checksum: checksum, issuedAt: now, expiresAt: expiry)
+        let url = try #require(URL(string: "https://objects.invalid/opaque"))
+        let permitted = try V2ResourceTransferPlan(mode: .httpGet, url: url, expiresAt: expiry,
+            expectedByteCount: 3, checksum: checksum, backgroundDownloadAuthorization: grant)
+        #expect(try V2ClientMediaTransferTarget(downloadPlan: permitted).backgroundDownloadAuthorization == grant)
+        let foreground = try V2ResourceTransferPlan(mode: .httpGet, url: url, expiresAt: expiry,
+            expectedByteCount: 3, checksum: checksum)
+        #expect(try V2ClientMediaTransferTarget(downloadPlan: foreground).backgroundDownloadAuthorization == nil)
+    }
     @Test("download publishes a file only after size and checksum verification", arguments: ["valid", "digest", "length", "partial"])
     func verifiesDownloadedFileBeforePublishing(mode: String) async throws {
         let configuration = URLSessionConfiguration.ephemeral

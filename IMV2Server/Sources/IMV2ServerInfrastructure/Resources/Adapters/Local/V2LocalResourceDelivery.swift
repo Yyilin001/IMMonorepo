@@ -36,15 +36,22 @@ public actor V2LocalResourceDelivery: V2ResourceDelivery, V2ResourceByteServing 
         guard request.expiresAt>instant,request.expiresAt<=instant.addingTimeInterval(120),request.facts.byteCount<=maximumObjectBytes
         else { throw V2ResourceProviderError.preconditionFailed }
         _ = try registry.storage(for:request.facts.reference.binding)
+        let checksum = try V2ResourceChecksum(value: request.facts.sha256.map { String(format: "%02x", $0) }.joined())
+        let grant: V2ResourceBackgroundDownloadAuthorization?
+        if request.facts.byteCount <= 512 * 1_024 * 1_024, instant.timeIntervalSince1970 > 0 {
+            grant = try .init(id: UUID(), expectedByteCount: request.facts.byteCount,
+                checksum: checksum, issuedAt: instant, expiresAt: request.expiresAt)
+        } else { grant = nil }
         let claims=DeliveryClaims(reference:request.facts.reference,byteCount:request.facts.byteCount,
-            sha256:request.facts.sha256,expiresAt:request.expiresAt.timeIntervalSince1970,audience:"resource-bytes-v1",method:"GET")
+            sha256:request.facts.sha256,expiresAt:request.expiresAt.timeIntervalSince1970,audience:"resource-bytes-v1",method:"GET",
+            backgroundDownloadAuthorization: grant)
         let encrypted=try AES.GCM.seal(JSONEncoder().encode(claims),using:SymmetricKey(data:keys[keyID]!))
         guard let combined=encrypted.combined else { throw V2ResourceProviderError.configurationInvalid }
         let token=keyID+"."+combined.base64EncodedString().replacingOccurrences(of:"+",with:"-").replacingOccurrences(of:"/",with:"_").replacingOccurrences(of:"=",with:"")
         var url=URLComponents(url:baseURL.appendingPathComponent("v2/resource-bytes").appendingPathComponent(request.facts.reference.placementID.uuidString.lowercased()),resolvingAgainstBaseURL:false)!
         url.queryItems=[.init(name:"cap",value:token)]
         return try .init(mode:.httpGet,url:url.url!,expiresAt:request.expiresAt,expectedByteCount:request.facts.byteCount,
-            checksum:.init(value:request.facts.sha256.map { String(format:"%02x",$0) }.joined()))
+            checksum: checksum, backgroundDownloadAuthorization: grant)
     }
     public func bytes(placementID:UUID,capability:String) async throws -> Data {
         let claims=try verify(placementID:placementID,capability:capability)
@@ -124,6 +131,12 @@ public actor V2LocalResourceDelivery: V2ResourceDelivery, V2ResourceByteServing 
               claims.reference.placementID==placementID,claims.audience=="resource-bytes-v1",claims.method=="GET",
               claims.expiresAt>now().timeIntervalSince1970,claims.sha256.count==32,claims.byteCount>0,claims.byteCount<=maximumObjectBytes
         else { throw V2ResourceProviderError.notFound }
+        if let grant = claims.backgroundDownloadAuthorization {
+            guard grant.expectedByteCount == claims.byteCount,
+                  grant.checksum.value == claims.sha256.map({ String(format: "%02x", $0) }).joined(),
+                  Int64(exactly: (claims.expiresAt * 1_000).rounded(.down)) == grant.expiresAtMilliseconds
+            else { throw V2ResourceProviderError.notFound }
+        }
         return claims
     }
 }
@@ -139,6 +152,7 @@ private struct DeliveryFlight:Sendable {
 private struct DeliveryClaims:Codable,Sendable {
     let reference:V2StoredObjectReference;let byteCount:Int64;let sha256:Data
     let expiresAt:TimeInterval;let audience:String;let method:String
+    let backgroundDownloadAuthorization: V2ResourceBackgroundDownloadAuthorization?
 }
 
 private actor CachedResourceReader {

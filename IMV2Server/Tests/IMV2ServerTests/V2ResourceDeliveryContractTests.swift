@@ -8,6 +8,27 @@ import Testing
 @testable import IMV2ServerInfrastructure
 
 struct V2ResourceDeliveryContractTests {
+    @Test func authorizedDownloadDelegationBindsTheSignedCapabilityToExactBytes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = try V2LocalResourceStorage(root: root, binding: .init(id: "background-download", configurationRevision: 1))
+        let reference = try storage.allocate(), bytes = Data("download".utf8)
+        let source = DeliveryTestChunks(bytes)
+        let facts = try await storage.write(reference, byteCount: Int64(bytes.count), sha256: Data(SHA256.hash(data: bytes)),
+            bytes: .init { await source.next() })
+        let registry = try V2ResourceStorageRegistry(storages: [storage], defaultBinding: storage.binding)
+        let delivery = try V2LocalResourceDelivery(registry: registry, baseURL: URL(string: "https://resources.example")!,
+            keyID: "test", keys: ["test": Data(repeating: 3, count: 32)])
+        let plan = try await delivery.issue(.init(facts: facts, expiresAt: Date().addingTimeInterval(30)))
+        let grant = try #require(plan.backgroundDownloadAuthorization)
+        #expect(grant.checksum == plan.checksum && grant.expectedByteCount == Int64(bytes.count))
+        #expect(grant.expiresAtMilliseconds == plan.expiresAtUnixMilliseconds)
+        let token = try #require(URLComponents(url: plan.url, resolvingAgainstBaseURL: false)?.queryItems?.first?.value)
+        #expect(try await delivery.bytes(placementID: reference.placementID, capability: token) == bytes)
+        await #expect(throws: V2ResourceProviderError.notFound) {
+            _ = try await delivery.bytes(placementID: UUID(), capability: token)
+        }
+    }
     @Test func aSlowOriginCannotReleaseBytesAfterCapabilityExpiry() async throws {
         let clock=DeliveryTestClock(Date())
         let binding=try V2StorageBinding(id:"slow-origin",configurationRevision:1)

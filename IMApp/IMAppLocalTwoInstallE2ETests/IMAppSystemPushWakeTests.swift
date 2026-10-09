@@ -18,6 +18,32 @@ extension IMAppLocalTwoInstallE2ETests {
         let app = XCUIApplication()
         app.activate()
         XCTAssertTrue(app.buttons["v2.conversation.new-direct"].waitForExistence(timeout: 30))
+        app.tabBars.buttons["我的"].tap()
+        let privacy = app.descendants(matching: .any).matching(identifier: "v2.privacy.open").firstMatch
+        XCTAssertTrue(privacy.waitForExistence(timeout: 10) && privacy.isHittable)
+        privacy.tap()
+        let toggle = app.switches["v2.push-wake.enabled"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 15))
+        for _ in 0..<8 where !toggle.isHittable { app.swipeUp() }
+        XCTAssertTrue(toggle.isHittable && toggle.isEnabled)
+        if toggle.value as? String != "1" {
+            let control = toggle.switches.firstMatch
+            XCTAssertTrue(control.exists && control.isHittable)
+            control.tap()
+        }
+        let status = app.staticTexts["v2.push-wake.registration-status"]
+        let readyBy = ContinuousClock.now + .seconds(60)
+        while status.label != "后台同步唤醒已就绪" && ContinuousClock.now < readyBy {
+            if app.staticTexts["v2.push-wake.feedback"].exists {
+                XCTFail("普通Push注册未完成：" + app.staticTexts["v2.push-wake.feedback"].label)
+                return
+            }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        XCTAssertEqual(status.label, "后台同步唤醒已就绪")
+        guard status.label == "后台同步唤醒已就绪" else { return }
+        app.buttons["v2.privacy.done"].tap()
+        app.tabBars.buttons["消息"].tap()
         let group = app.staticTexts[title].firstMatch
         XCTAssertTrue(group.waitForExistence(timeout: 30) && group.isHittable)
         group.tap()
