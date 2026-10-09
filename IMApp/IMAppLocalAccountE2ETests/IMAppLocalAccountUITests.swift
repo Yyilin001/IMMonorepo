@@ -115,7 +115,7 @@ final class IMAppLocalAccountUITests: XCTestCase {
             try await receiver.setBlock(target: sender.userID, blocked: false)
             // Keep the authenticated old connection and its directory interests
             // alive while the same device restores on the other Gateway.
-            _ = try await receiverTransport.startAccountRoomChanges()
+            _ = try await waitForLocalAccountCoverage(receiverTransport)
             _ = try await receiverTransport.userRoomDirectory(cursor: nil, pageSize: 100)
             _ = try await receiverTransport.subscribeToGroupEvents(roomID: directRoom.roomID, afterRoomSequence: 0)
             let reconnected = try await restoredReceiverConnection.connectAndAuthenticate(
@@ -411,7 +411,7 @@ private func verifyCrossGatewaySiblingDevice(account: LocalE2EAccountCredentials
         XCTAssertEqual(session.userID, account.userID)
         XCTAssertNotEqual(deviceID, account.deviceID)
         let transport = V2ProtobufSyncTransport(wire: sibling, protocolVersion: session.protocolVersion)
-        _ = try await transport.startAccountRoomChanges()
+        _ = try await waitForLocalAccountCoverage(transport)
         _ = try await transport.userRoomDirectory(cursor: nil, pageSize: 100)
         _ = try await transport.subscribeToGroupEvents(roomID: roomID, afterRoomSequence: 0)
         // A real reply establishes mutual messaging before this delivery test;
@@ -577,6 +577,29 @@ private func assertPrivateHintSurvivesAppRelaunch(
                 XCTAssertEqual(app.descendants(matching: .any).matching(identifier: identifier).count, 1)
             }
             print("IMV2_THREE_FOREGROUND_RECOVERY_CYCLES_PASSED")
+        }
+    }
+}
+
+/// The account-owned bootstrap can outlive the first listener request. A
+/// retryable UNAVAILABLE is not Ready; keep requesting the same idempotent start
+/// until its real response arrives, without changing the delivery assertions.
+private func waitForLocalAccountCoverage(_ transport: V2ProtobufSyncTransport) async throws -> UUID {
+    let deadline = ContinuousClock.now + .seconds(10)
+    var attempts = 0
+    while true {
+        try Task.checkCancellation()
+        attempts += 1
+        do {
+            let epoch = try await transport.startAccountRoomChanges()
+            print("IMV2_ACCOUNT_COVERAGE_READY attempts=\(attempts)")
+            return epoch
+        } catch let error as V2RealtimeTransportError {
+            guard case .server(code: "UNAVAILABLE", retryable: true,
+                retryAfterSeconds: let seconds, currentRevision: _) = error else { throw error }
+            let delay = Duration.milliseconds(max(50, Int64(seconds) * 1_000))
+            guard ContinuousClock.now + delay < deadline else { throw error }
+            try await Task.sleep(for: delay)
         }
     }
 }

@@ -1222,7 +1222,9 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 throw V2MessageOperationValidationError.invalidReceipt
             }
         } catch V2SendOperationResponseError.directPolicyDenied {
-            try await rollbackBody(sql, savepoint: savepoint)
+            // Keep the sender-only presentation hint, but never persist a
+            // rejection receipt or message. The outer transaction owns commit.
+            try await sql.raw("RELEASE SAVEPOINT \(savepoint)").run()
             return (.receipt(try makeReceipt(identity: identity, fingerprint: fingerprint, outcome: .rejected(.directPolicyDenied), now: resolvedAt)), nil, nil)
         } catch V2DirectAuthorizationIntentError.identityConflict {
             // A scoped grant carries a control-side fingerprint committed before

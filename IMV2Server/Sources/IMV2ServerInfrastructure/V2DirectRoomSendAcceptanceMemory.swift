@@ -190,6 +190,16 @@ final class V2DirectRoomSendAcceptanceMemory: Sendable {
         }
 
         mutating func committed(commands: [V2MessageSendOperationCommand], results: [V2RoomMessagingResult], token: V2RoomActivationToken) {
+            if results.contains(where: {
+                if case .sendOperation(.receipt(let receipt)) = $0 {
+                    return receipt.outcome == .rejected(.directPolicyDenied)
+                }
+                return false
+            }) {
+                // A private restriction hint may have advanced the timeline
+                // without advancing the public message sequence.
+                invalidate(token); return
+            }
             guard commands.count == results.count, var state = states[token] else { return }
             for (command, result) in zip(commands, results) {
                 guard case .sendOperation(.receipt(let receipt)) = result, case .accepted(let accepted) = receipt.outcome else { continue }

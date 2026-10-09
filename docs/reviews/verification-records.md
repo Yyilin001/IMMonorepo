@@ -2818,7 +2818,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | OP-29 | groupJoinRequest | 真实入群申请/取消及审核可见性通过；App普通粘贴预览、申请、取消、同邀请再次申请和PG记录一致通过 | extendedLiveResourcesR9, groupJoinUIR4 |
 | OP-30 | groupJoinDecision | 真实SDK及App批准/拒绝均通过：申请人冷启动恢复批准成员或拒绝状态，PG成员数与状态一致；批准后发送正文即时投影失败另列 | extendedLiveResourcesR15, groupJoinUIR4, groupJoinRejectUIR1 |
 | OP-31 | mediaUpload | 真实个人头像/消息附件上传处理、下载和撤回授权收敛通过；后台与群头像另列 | extendedLiveResourcesR7 |
-| OP-32 | groupAvatar | 失败：真实上传创建返回422；服务端明确拒绝groupAvatar用途 | extendedLiveResourcesR4 |
+| OP-32 | groupAvatar | 修复后通过：入口允许并声明群头像；17项PG权限/恢复回归通过；真实HTTPS上传处理/绑定/字节下载/移除/原操作恢复通过，保留422历史失败 | extendedLiveResourcesR4, fixGroupAvatarPGR1, fixGroupAvatarLiveR1 |
 | EX-01 | 注册与登录 | 真实SDK及App密码注册/密码登录通过；同账号两安装设备列表>=2已核对 | liveAccountSDK, nativeSmoke, multiDeviceUIR1 |
 | EX-02 | 凭据刷新 | 真实SDK及App业务401刷新、原15分钟令牌自然到期自动刷新、冷启动使用新凭据通过 | liveAccountSDK, nativeSmoke, appCredentialRefreshUIR1, appNaturalExpiryUIR2 |
 | EX-03 | 当前设备登出 | 修复后真实App两次首次退出无需手动重试，A→B→A账号切换及冷恢复通过；22项相关回归通过，历史失败保留 | liveAccountSDK, accountSwitchUIR1, accountSwitchUIR4, fixSignOutUnitR2, fixSignOutAppR1 |
@@ -2826,11 +2826,11 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-05 | 账号封禁 | 通过：真实Operator封禁/幂等、原已认证TCP在8秒观察边界内由服务端终止、HTTP凭据清除、登录及TLS重新认证拒绝 | extendedLiveResourcesR16 |
 | EX-06 | 账号切换与冷启动 | 修复后真实App首次退出、A→B→A及正常冷恢复账号投影隔离通过，各自消息可见且互不可见，历史需重试失败保留 | accountSwitchUIR4, fixSignOutAppR1 |
 | EX-07 | 陌生消息拒绝/允许 | 通过：无好友关系私聊预热发送成功；同一TLS连接策略关闭后新发送directPolicyDenied、重新允许后成功 | extendedLiveResourcesR16 |
-| EX-08 | 拉黑后即时授权失效 | 真实拉黑后发送拒绝及恢复unresolved通过；失败：发送者持久限制提示缺失 | liveAccountUIR5 |
+| EX-08 | 拉黑后即时授权失效 | 修复后通过：PG原消息身份提示去重/单侧隐私；真实App提示冷恢复及3次后台恢复、跨Gateway多设备投递、解除拉黑后发送全部通过；保留历史失败 | liveAccountUIR5, fixRestrictionPGR2, fixRestrictionLiveR1, fixRestrictionLiveR2 |
 | EX-09 | 私聊唯一性 | 通过：双方并发首次创建及后续重新打开均得到同一私聊房间；真实HTTPS回执核对 | extendedLiveResourcesR16 |
 | EX-10 | 实时收发与历史恢复 | 真实App私聊提交/撤回恢复及群消息双向收发/@all投影通过；离线自动重放失败单列；批准入群后原已提交消息正常App冷启动恢复唯一正文通过 | twoInstallUIR13, twoInstallUIR14, groupJoinColdSendUIR1 |
 | EX-11 | 发送结果不确定后恢复 | 通过：真实App丢ACK前独立PG确认原提交，跨Gateway自动重连、原身份恢复、双端游标与SQLite重开一致 | appACKCutR5 |
-| EX-12 | 离线发送持久化与重放 | 群R3/R4自动重放正文/PG/原工作committed通过；私聊R14失败：needsAttention且PG无q，整体未通过 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4 |
+| EX-12 | 离线发送持久化与重放 | 群R3/R4原工作及PG通过；私聊修复R1普通离线入队、冷恢复及接收端q正文通过；原身份/唯一性独立核对仍待完成，保留R14历史失败 | twoInstallUIR14, multiDeviceUIR3, multiDeviceUIR4, fixOfflineAppR1 |
 | EX-13 | 多设备编辑撤回同步 | 通过：真实同账号两安装编辑和撤回双端投影、前后台保持及Operator快照重置后重建验证，PG提交一致 | multiDeviceUIR4 |
 | EX-14 | 多设备已读 | 已验证：同账号两设备progress/单条群用户已读与跨设备隐私暂停；独立接收阅读后私聊发送端冷恢复对方已读；群主读者页显示真实独立阅读成员与已读，PG一致 | multiDeviceUIR2, multiDeviceUIR4, peerReadUIR1, groupReadUIR2 |
 | EX-15 | 目录分页与权限过滤 | 真实群昵称及258条/9页两独立设备SDK读取、拉黑过滤通过；两独立安装App登录和正常冷恢复完整258成员ID/名字、3页及PG两设备记录通过，历史UI遍历超时保留 | extendedLiveResourcesR7, largeNicknameDirectoryR2, largeNicknameDirectoryR3, appLargeDirectoryUIR3, appLargeDirectoryUIR4, appLargeDirectoryUIR6, appLargeDirectoryUIR8 |
@@ -3228,3 +3228,12 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - 回归R1因新增夹具API引用及actor复合读取编译失败已修正，原日志保留；R2发送工作13项通过。最终R3共18项/2套件通过，包含SQLite冷重开原命令、恢复前/后/连续入队时序、旧暂停任务及未知/容量错误边界；/tmp/imv2-fix-offline-work-r3-20261009.log。真实双安装App R1已启动，exec13452，服务 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/imv2-native-e2e-rwohad_p，日志 /tmp/imv2-fix-offline-app-r1-20261009.log，尚未终态，EX12旧失败保留。
 
 - 私聊离线修复App R1已终态exit1：离线普通UI入队、发送者正常冷恢复和最后接收者恢复阶段均通过；最后阶段testReceiverRestoresIndependentGroupMemberReply原xcresult摘要为1通过0失败0跳过。整轮仍保留3个无障碍审计失败阶段，不宣称全绿；两个范围清理完成，owned stack stopped。原结果目录 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.nWdkUn，进一步独立事实核对和矩阵更新仍待完成。
+
+- EX08根因确认：operation标量路径遇到私聊限制直接抛出且回滚savepoint，旧私有时间线/能力投影未提交。修复将私有提示与拒绝操作结果分离：只保留timeline_activity和能力变化，不写direct_message_denials/成功记录，查询拒绝操作仍unresolved；提示使用room/sender/clientMessage三元组派生的稳定身份去重，同一命令重试无重复，新的受限命令可生成新提示以满足后台恢复验收。拒绝后的房间内存游标失效，避免私有时间线推进后使用旧缓存。
+- 数据库回归R1按限制周期去重通过，但核对现有后台App验收要求新命令产生新提示，已改为按原命令身份去重，不采用R1设计。最终R2正在独立本机双数据库执行，session86912，日志 /tmp/imv2-fix-restriction-pg-r2-20261009.log。真实账号/双Gateway/SQLite重开及App后台提示R1已启动，session19458，日志 /tmp/imv2-fix-restriction-live-r1-20261009.log，结果 /tmp/imv2-fix-restriction-live-r1-20261009；两项均未终态，EX08不计通过。
+- EX08最终数据库R2终态exit0，1测试/1套件通过，0.829秒；同一消息重试去重、不同消息两条私有提示、对方0提示、无拒绝/成功/消息持久结果、恢复查询unresolved全部通过。owned postgres stopped。真实账号与App R1仍运行（session19458/驱动73294），不得按数据库局部通过关闭EX08。
+- EX08真实账号/App R1终态exit1：5个HTTPS SDK测试通过；原提示SQLite重开/重连及真实App冷恢复、精确原提示只显示一次、3次后台生成不同命令提示再回前台均通过（IMV2_THREE_FOREGROUND_RECOVERY_CYCLES_PASSED）。私聊整用例随后在另Gateway的account_room_changes_start收到UNAVAILABLE失败，Journal authority同时记录coverageChanged；尚未证明此波动的完整原因，不缩减跨Gateway范围。两项真实App撤销用例各通过（38.724/39.172秒）；整UI为2通过1失败0跳过。摘要 /tmp/imv2-fix-restriction-live-r1-summary.json、活动 /tmp/imv2-fix-restriction-live-r1-activities.json、原日志 /tmp/imv2-fix-restriction-live-r1-20261009/app.log。测试范围清理、专用模拟器移除已完成，拥有进程确认不存在。EX08仅记局部修复证据，后续需解决目录Ready波动后完整复测。
+- EX08后续UNAVAILABLE根因细化：Registry的start仅观察账号拥有的异步bootstrap，未完成时按正式协议返回retryable UNAVAILABLE；真实账号用例旧代码仅请求一次。验收驱动改为10秒有界重试同一幂等start，只处理此明确可重试错误并保留Ready/跨Gateway消息/解除拉黑全部断言；不改变生产传输或伪造Ready。R2完整私聊用例已通过36.175秒，两个start实际attempts1/2；另外撤销与整轮清理尚待终态，session22070，日志 /tmp/imv2-fix-restriction-live-r2-20261009.log。
+- OP32修复：V2ResourceService开启头像能力时声明groupAvatar，并移除入口无条件unsupportedCapability。保留路由Actor群主授权、事务内结构群主/角色/修订复核和能力关闭拒绝。数据库上传权限验收改为经过真正service而非直接调用持久Store，覆盖valid/disabled/owner-before/role-before/owner-after/role-after。本机隔离PG整套17测试通过（1.382秒），/tmp/imv2-fix-group-avatar-pg-r1-20261009.log；原字节上传/展示/移除/恢复真实HTTPS/TCP整套正在运行session2953，日志 /tmp/imv2-fix-group-avatar-live-r1-20261009.log，未关闭OP32。
+- EX08真实R2终态exit0：5个HTTPS SDK测试通过；完整私聊限制/SQLite重开/原提示App冷恢复/三次后台新提示/跨Gateway多设备/解除拉黑后发送用例36.175秒通过，listener真实Ready attempts1/2。两项App撤销回归40.508/39.371秒通过；整UI3通过0失败1跳过（未启用B07_SCENE_RETRY专项，不以此证明EX12）。摘要 /tmp/imv2-fix-restriction-live-r2-summary.json、活动 /tmp/imv2-fix-restriction-live-r2-activities.json；范围清理和专用模拟器移除完成。EX08更新修复后通过，原R1及历史失败保留；这不是EX20规模重连全项通过证据。
+- OP32真实资源R1终态exit0：实际群头像上传/图片处理/set/128px字节校验/download/remove/原操作recover用例1.515秒通过。整资源11个命名用例实际执行通过，2个独立opt-in（大昵称目录、slowResource）跳过，Swift Testing汇总13项/1套件passed18.723秒；不将跳过专项计为通过。原summary.clientExitCode0/requiredTestPassed=true；HTTP三次资源上传创建/最终化200和签名PUT204，群头像GET/POST/recovery200，独立PG resourceFacts保留，owned-service cleanup完成。证据 /tmp/imv2-fix-group-avatar-live-r1-20261009/client.log 与 summary.json；OP32修复后通过，保留旧422失败。

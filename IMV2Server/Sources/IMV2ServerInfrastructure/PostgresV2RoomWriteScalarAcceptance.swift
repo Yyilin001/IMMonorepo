@@ -1,6 +1,7 @@
 import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
+import Crypto
 import Foundation
 import IMV2ActorContracts
 import IMV2Core
@@ -88,8 +89,14 @@ struct V2RoomWriteScalarAcceptancePath {
                     if V2SendSuccessMetadata.current.contains(where: {
                         $0.room == roomID && $0.sender == senderID && $0.operation == clientMessageID
                     }) {
-                        // Operation sends return the current policy failure;
-                        // no denial event, projection or durable result is made.
+                        // The rejected operation has no durable result. Its
+                        // sender-only room hint is a separate presentation fact.
+                        try await persistDirectRestrictionHint(
+                            roomUUID: roomID, senderID: senderID,
+                            clientMessageID: clientMessageID,
+                            nextTimelineSequence: try roomWriteNextSequence(room.timelineSequence),
+                            createdAt: now, reason: restriction,
+                            currentCanSend: context.senderCanSend, sql: sql)
                         throw V2SendOperationResponseError.directPolicyDenied
                     }
                     let denied = try await persistDirectMessageDenied(
@@ -315,16 +322,38 @@ extension V2RoomWriteScalarAcceptancePath {
         return true
     }
 
-    /// 一次拒绝只是属于发送者的私有事实，既不是消息，也不是房间事件。
-    ///
-    /// 操作表让传输层重试保持幂等，并防止同一个客户端消息 ID 产生重复的活动行。
-    ///
-    /// - Parameters:
-    ///   - fingerprint: 请求指纹。
-    ///   - roomID: 目标房间标识。
-    ///   - sql: 参与当前事务的数据库连接。
-    /// - Returns: 拒绝的特有记录。
-    /// - Throws: 持久化状态损坏或写入失败时抛出。
+    /// Retain a sender-only restriction presentation without a durable rejected
+    /// operation. The room's serialized transaction owns the capability change.
+    func persistDirectRestrictionHint(
+        roomUUID: UUID, senderID: UUID, clientMessageID: UUID,
+        nextTimelineSequence: UInt64, createdAt: Date,
+        reason: V2DirectMessageDenied.Reason, currentCanSend: Bool?,
+        sql: any SQLDatabase
+    ) async throws {
+        let activityType = directMessageTimelineActivityType(for: reason)
+        // Stable presentation identity deduplicates retries without freezing a
+        // rejected operation's result. Separate attempted messages keep their
+        // own hints, including messages submitted while the App is backgrounded.
+        var bytes = Array(SHA256.hash(data: Data("v2-direct-restriction:v1:\(roomUUID.uuidString):\(senderID.uuidString):\(clientMessageID.uuidString)".utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        let sourceEventID = UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+        if try await sql.raw("SELECT source_event_id FROM im_v2.room_timeline_activities WHERE source_event_id = \(bind: sourceEventID) AND room_id = \(bind: roomUUID) AND recipient_user_id = \(bind: senderID) LIMIT 1").first() != nil {
+            return
+        }
+        let timelineSequence = try scalarAcceptanceSigned(nextTimelineSequence)
+        let milliseconds = try v2GatewayMilliseconds(roomWritePersistedDate(createdAt))
+        try await sql.raw("UPDATE im_v2.rooms SET timeline_sequence = \(bind: timelineSequence) WHERE room_id = \(bind: roomUUID)").run()
+        try await sql.raw("INSERT INTO im_v2.room_timeline_activities (source_event_id, room_id, timeline_sequence, activity_type, recipient_user_id, created_at) VALUES (\(bind: sourceEventID), \(bind: roomUUID), \(bind: timelineSequence), \(bind: activityType), \(bind: senderID), \(bind: createdAt))").run()
+        let payload = try JSONSerialization.data(withJSONObject: ["event_type": activityType, "room_id": roomUUID.uuidString, "timeline_sequence": timelineSequence, "server_created_at_ms": milliseconds])
+        try await enqueuePrivateStateEvent(sourceRoomID: roomUUID, userID: senderID, sourceEventID: sourceEventID, projectionKind: "timeline_activity", payload: payload, createdAt: createdAt, sql: sql)
+        try await appendDirectSendingCapabilityIfChanged(roomID: roomUUID,
+            recipientID: senderID, sourceEventID: sourceEventID, canSend: false,
+            currentCanSend: currentCanSend, createdAt: createdAt,
+            createdAtMilliseconds: milliseconds, timelineSequence: timelineSequence, sql: sql)
+    }
+
+    /// Legacy scalar sends retain their original per-command denial identity.
     func persistDirectMessageDenied(
         fingerprint: V2SendMessageFingerprint,
         roomID: RoomID,

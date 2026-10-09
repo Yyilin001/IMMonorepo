@@ -18,7 +18,7 @@ import VaporTesting
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
 struct V2ResourceGroupAvatarPostgresTests {
     @Test("upload admission and owner transaction both require the structural group owner",
-          arguments: ["valid", "owner-before", "role-before", "owner-after", "role-after"])
+          arguments: ["valid", "disabled", "owner-before", "role-before", "owner-after", "role-after"])
     func uploadAuthority(scenario: String) async throws {
         try await withFixture { f in
             let device = try await f.account(on: f.database)
@@ -43,16 +43,27 @@ struct V2ResourceGroupAvatarPostgresTests {
             let request = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()), mediaID: .init(uuid: UUID()),
                 usage: .groupAvatar(f.room), contentType: "image/png", byteCount: 8,
                 checksum: .init(value: String(repeating: "a", count: 64)))
-            let create: @Sendable () async throws -> V2PersistedResourceUpload = {
-                let store = try await router.resolve(home: .room(f.room), usage: request.usage, actorUserID: f.owner, deviceID: device)
-                return try await store.create(homeKind: "room", homeID: f.room.uuidValue!, usageKind: "group_avatar",
-                    actor: f.owner.uuidValue!, device: device.uuidValue!, operation: request.operationID.uuidValue!,
-                    mediaID: request.mediaID.uuidValue!, contentType: request.contentType, byteCount: request.byteCount,
-                    requestJSON: String(decoding: JSONEncoder().encode(request), as: UTF8.self),
-                    allocate: { try .init(placementID: UUID(), binding: .init(id: "upload-authority-test", configurationRevision: 1), handle: Data([1])) },
-                    expiresAt: Date().addingTimeInterval(60), now: Date())
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("avatar-upload-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let binding = try V2StorageBinding(id: "avatar-upload", configurationRevision: 1)
+            let storage = try V2LocalResourceStorage(root: root.appendingPathComponent("objects"), binding: binding)
+            let provider = try V2LocalFilesystemMediaProvider(rootDirectory: root.appendingPathComponent("staging"),
+                targetBaseURL: #require(URL(string: "https://avatar-upload.test")), signingKey: Data(repeating: 1, count: 32))
+            try await provider.prepare()
+            let service = try V2ResourceService(resolve: { home, usage, actor, device in
+                try await router.resolve(home: home, usage: usage, actorUserID: actor, deviceID: device)
+            }, registry: .init(storages: [storage], defaultBinding: binding),
+                transports: [V2LocalResourceUploadTransport(binding: binding, provider: provider)],
+                maximumBytes: 1_000_000, supportsAvatars: scenario != "disabled",
+                allocate: { _ in try storage.allocate() })
+            #expect(try service.capabilities().allowedUsages.contains(.groupAvatar) == (scenario != "disabled"))
+            let create: @Sendable () async throws -> V2ResourceUploadSession = {
+                try await service.create(request, actor: f.owner, device: device)
             }
-            if scenario == "valid" { #expect(try await create().mediaID == request.mediaID.uuidValue) }
+            if scenario == "valid" { #expect(try await create().mediaID == request.mediaID) }
+            else if scenario == "disabled" {
+                await #expect(throws: V2ResourceProviderError.unsupportedCapability) { _ = try await create() }
+            }
             else { await #expect(throws: V2MediaStoreError.uploadNotAuthorized) { _ = try await create() } }
             #expect(try await f.sql.raw("SELECT count(*) AS value FROM im_v2.resource_upload_sessions WHERE media_id=\(bind:request.mediaID.uuidValue!)")
                 .first(decoding: AvatarCountRow.self)?.value == (scenario == "valid" ? 1 : 0))

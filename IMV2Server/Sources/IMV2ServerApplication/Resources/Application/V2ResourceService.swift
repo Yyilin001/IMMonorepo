@@ -36,7 +36,7 @@ public struct V2ResourceService: Sendable {
         let supported = transport.capabilities
         let limit = min(maximumBytes, supported.maximumBytes)
         return try .init(version: 1, uploadModes: Self.sessionModes(transport), maximumBytes: limit,
-            allowedUsages: supportsAvatars ? [.messageAttachment,.userAvatar] : [.messageAttachment],
+            allowedUsages: supportsAvatars ? [.messageAttachment,.userAvatar,.groupAvatar] : [.messageAttachment],
             maximumParts: (transport as? any V2MultipartUploadTransport)?.maximumParts ?? 0, backgroundTransfer: transport is any V2BackgroundUploadTransport,
             maximumImageBytes: maximumImageBytes.map { min($0, limit) })
     }
@@ -49,7 +49,6 @@ public struct V2ResourceService: Sendable {
                 if !supportsAvatars {
                     guard case .messageAttachment = request.usage else { throw V2ResourceProviderError.unsupportedCapability }
                 }
-                if case .groupAvatar = request.usage { throw V2ResourceProviderError.unsupportedCapability }
                 if request.contentType.hasPrefix("image/"), let maximumImageBytes {
                     guard request.byteCount <= maximumImageBytes else { throw V2ResourceProviderError.unsupportedCapability }
                 }
