@@ -33,6 +33,10 @@ public actor V2AccountRoomChangeService {
         var membershipRefreshTask: Task<Void, Never>?
         var bootstrapTask: Task<Void, Error>?
         var bootstrapped = false
+        var bootstrapStartedAt: ContinuousClock.Instant?
+        var bootstrapLastReportAt: ContinuousClock.Instant?
+        var bootstrapStage = "directory"
+        var bootstrapOwnerRetries = 0
     }
     private final class Session {
         let ticket: Ticket
@@ -79,6 +83,7 @@ public actor V2AccountRoomChangeService {
         }
         if !account.bootstrapped {
             if account.bootstrapTask == nil {
+                account.bootstrapStartedAt = .now
                 account.bootstrapTask = Task {
                     while self.accounts[ticket.userID] === account, !account.recovering {
                         try Task.checkCancellation()
@@ -143,7 +148,23 @@ public actor V2AccountRoomChangeService {
         guard current(ticket) != nil, let account = accounts[ticket.userID], !account.recovering else {
             throw Failure.staleConnection
         }
-        guard account.bootstrapped else { throw V2RealtimePublicationBackpressure.receiverQueue }
+        guard account.bootstrapped else {
+            reportBootstrapWait(account)
+            throw V2RealtimePublicationBackpressure.receiverQueue
+        }
+    }
+
+    /// Listener retries reveal which owned installation is still pending,
+    /// without logging account/room identifiers or creating another timer.
+    private func reportBootstrapWait(_ account: Account) {
+        let instant = ContinuousClock.now
+        guard let started = account.bootstrapStartedAt, instant - started >= .seconds(5),
+              account.bootstrapLastReportAt.map({ instant - $0 >= .seconds(30) }) ?? true else { return }
+        account.bootstrapLastReportAt = instant
+        logger.warning("Account coverage installation still pending", metadata: [
+            "stage": "account_bootstrap", "waiting_on": .string(account.bootstrapStage),
+            "owner_retries": .string(String(account.bootstrapOwnerRetries)),
+            "elapsed_seconds": .string(String((instant - started).components.seconds))])
     }
 
     /// Reserve only after all listener admission checks have succeeded.
@@ -160,6 +181,7 @@ public actor V2AccountRoomChangeService {
         repeat {
             try Task.checkCancellation()
             guard current(ticket) != nil else { throw Failure.staleConnection }
+            accounts[ticket.userID]?.bootstrapStage = "directory"
             let page = try await directoryPage(ticket.userID, cursor)
             guard current(ticket) != nil else { throw Failure.staleConnection }
             if let topology, topology != page.topologyGeneration {
@@ -333,6 +355,7 @@ public actor V2AccountRoomChangeService {
                 requests.append((roomID: entry.roomID, scope: scope))
             }
             for request in requests {
+                account.bootstrapStage = "owner_installation"
                 let reference = request.scope
                 guard account.routes[request.roomID] == request.scope else { continue }
                 do {
@@ -342,6 +365,8 @@ public actor V2AccountRoomChangeService {
                             try await onlineDelivery.activate(ticket.userID, request.roomID, reference)
                             break
                         } catch V2GatewayRoomSubscriptionCoordinationError.refused(let reason) where reason == .overloaded || reason == .unavailable {
+                            account.bootstrapStage = reason == .unavailable ? "owner_unavailable" : "owner_overloaded"
+                            account.bootstrapOwnerRetries += 1
                             guard current(ticket) != nil, accounts[ticket.userID] === account,
                                   !account.recovering, account.routes[request.roomID] == request.scope else {
                                 throw Failure.staleConnection

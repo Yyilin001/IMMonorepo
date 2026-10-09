@@ -159,7 +159,10 @@ public actor V2RoomSubscriptionOwner {
         try enter(token: token, deadline: deadline); defer { leave() }
         // Preserve the old terminal until its actual Gateway receipt. Once
         // drained, the needsBaseline branch below must admit a fresh fence.
-        guard !(await relay.controlInvalidationPending(gateway: identity)) else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
+        guard !(await relay.controlInvalidationPending(gateway: identity)) else {
+            V2RoomSubscriptionOwnerFailureMetrics.shared.record(.subscribeTerminalPending)
+            throw V2RoomSubscriptionOwnerError.catchUpRequired
+        }
         await prune()
         guard !identity.nodeID.isEmpty, identity.nodeID.utf8.count <= 128,
               !identity.serviceID.isEmpty, identity.serviceID.utf8.count <= 128,
@@ -171,11 +174,17 @@ public actor V2RoomSubscriptionOwner {
             let proofStarted = ContinuousClock.now
             let cut = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: [userID])
             guard cut.roomID == roomID, cut.owner == owner else { throw V2RoomSubscriptionSourceError.wrongOwner }
-            guard cut.roomControlVersion == appliedRoomControlVersion, cut.roomControlVersion >= requiredControlVersion else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
+            guard cut.roomControlVersion == appliedRoomControlVersion, cut.roomControlVersion >= requiredControlVersion else {
+                V2RoomSubscriptionOwnerFailureMetrics.shared.record(.subscribeControlCutMismatch)
+                throw V2RoomSubscriptionOwnerError.catchUpRequired
+            }
             guard cut.members.count == 1,
                   let member = cut.members.first, member.userID == userID else { throw V2RoomSubscriptionOwnerError.stale }
             let progress = try await advance(through: cut.highWatermark)
-            guard progress.consumedThrough == cut.highWatermark else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
+            guard progress.consumedThrough == cut.highWatermark else {
+                V2RoomSubscriptionOwnerFailureMetrics.shared.record(.subscribeLogGap)
+                throw V2RoomSubscriptionOwnerError.catchUpRequired
+            }
             guard member.authorized else { throw V2RoomSubscriptionOwnerError.unauthorized }
             try await relay.seedAuthorizations(from: cut)
             trackedUserIDs.insert(userID)

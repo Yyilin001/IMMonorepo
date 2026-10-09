@@ -590,9 +590,13 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         let digest = V2RoomSubscriptionDeliveryFingerprint.digest(delivery)
         return withState { value in
             let id = delivery.fence.roomID
-            guard !value.closed, var room = value.rooms[id], !room.retired, room.fence == delivery.fence,
+            guard !value.closed, var room = value.rooms[id], room.fence == delivery.fence,
                   room.serviceID == authenticatedServiceID else { return .stale }
-            guard room.deadline > now() else {
+            let terminal = delivery.payload == .authorizationInvalidated
+            // Closing an exact, authenticated fence grants no authority. Its
+            // actual receipt must remain possible after local expiry/retirement;
+            // otherwise the Owner cannot finish this cut or issue a fresh fence.
+            guard terminal || (!room.retired && room.deadline > now()) else {
                 room.authorization.ready = false; room.authorization.members.removeAll(); value.rooms[id] = room
                 return .stale
             }
@@ -605,8 +609,8 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                     guard room.authorization.history[delivery.authorizationSequence] == digest else { return .stale }
                     return .applied(permits: [])
                 }
-                guard room.authorization.sequence < UInt64.max,
-                      delivery.authorizationSequence == room.authorization.sequence + 1 else {
+                guard terminal || (room.authorization.sequence < UInt64.max &&
+                      delivery.authorizationSequence == room.authorization.sequence + 1) else {
                     room.authorization.ready = false; room.authorization.members.removeAll(); value.rooms[id] = room
                     return .snapshotRequired
                 }
@@ -697,7 +701,9 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                     }
                 }
             case .authorizationInvalidated:
-                guard room.authorization.ready else { return .snapshotRequired }
+                // A terminal can close a cut with missing preceding controls,
+                // including history cleared by retirement. It cannot apply a
+                // grant, revive a deadline or acknowledge a different fence.
                 room.authorization.ready = false; room.authorization.members.removeAll()
             case .head(let highWatermark):
                 guard room.authorization.ready else { return .snapshotRequired }

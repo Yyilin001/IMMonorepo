@@ -2842,7 +2842,7 @@ IMV2_SCHEMA_BOOTSTRAP_NATIVE=1 PGHOST=127.0.0.1 PGPORT=55449 PGUSER=im_v2_test \
 | EX-21 | 本地持久化清理 | 相关41项回归及真实TCP投影后清理通过；未将全量回归标为通过 | clientRetentionR2、extendedLiveResourcesR18 |
 | EX-22 | 后台上传下载 | 真实App挂起后台上传、持久化任务映射、512KiB校验/204、PG唯一原消息及正常冷启动原UUID正文/附件恢复通过；系统后台下载未实现 | extendedLiveResourcesR12, backgroundDownloadSourceAudit, appNativeBackgroundUploadUIR5, appNativeBackgroundUploadUIR6, appNativeBackgroundUploadUIR7 |
 | EX-23 | Push端点与唤醒 | 真实headless App Push入口通过；外部APNs和真机唤醒待验：当前无已连接物理设备且测试进程无APNs配置，等待指定设备与测试环境 | liveAccountUIR6, apnsEnvironmentAudit20261009 |
-| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线原身份及全部原AX/contrast修复后完整R8通过；冷URL启动真实预览/普通申请/PG核对通过；批准入群后消息即时投影待R5复验，正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
+| EX-24 | UI主流程 | 真实UI注册/隐私与身份导航、私聊控制操作、群成员/提及/双向消息通过；离线原身份及全部原AX/contrast修复后完整R8通过；冷URL启动真实预览/普通申请/PG核对通过；批准入群即时投影R5失败、同代码R6通过，波动待修复；正常冷启动可恢复 | twoInstallUIR13, twoInstallUIR14, groupJoinUIR2, groupJoinUIR4, groupJoinColdSendUIR1, fixColdInviteAppR3 |
 
 <!-- acceptance-matrix-end -->
 
@@ -3286,3 +3286,25 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 - ClientKit全量修复后R2终态exit0：Swift Testing汇总1040项/172套件通过，171.291秒，日志 /tmp/imv2-client-full-regression-20261009-r2.log。真实环境opt-in用例默认禁用，另有真实TLS/App专项证据；不将全量单元汇总当作所有真实环境专项执行证明。原R1的3项失败记录保留。
 
 - 批准成员即时投影R5终态exit1、owned stack stopped，仍在testApplicantRestoresApprovedGroupAndSendsMessage等待原正文30秒失败。实际UI树正文完整位于accepted pending区域，时间线暂无消息、实时覆盖恢复中；PG唯一原消息accepted、roomHead3，不能归因输入截断。证据 /tmp/imv2-approved-member-r5-all-attachments/31D3E488-5688-457D-A9C2-A287BF8B3493.txt、/tmp/imv2-approved-member-live-projection-r5-20261009.log。新增只读精确scope房间恢复快照，清理前采集授权/成员/游标/恢复工作/原send接受ID，不输出凭据、命令及回执内容；真实schema查询与错误scope拒绝校验通过，shell语法/diff检查通过。R6 session79126运行 /tmp/imv2-approved-member-live-projection-r6-20261009.log，尚未终态。
+
+- 批准成员即时投影R6终态exit0、owned stack stopped：原申请/取消/重申请/批准/正常恢复/发送/即时正文断言通过，PG原消息唯一、roomHead3；日志 /tmp/imv2-approved-member-live-projection-r6-20261009.log。同代码R5失败不删除，不能以单次通过关闭波动。R5服务端account_room_changes_start连续约70秒UNAVAILABLE，下一步定位覆盖bootstrap；R7原流程复测运行 /tmp/imv2-approved-member-live-projection-r7-20261009.log。
+
+- 批准成员R7终态exit1、owned stack stopped，精确原scope快照成功：成员版本2且授权有效，原房间游标2，发送work committed/finished并确认accepted sequence3，但projectionObserved0、messages为空，room recovery等待state。个人游标已应用/确认1且ready；不能归因权限未恢复或消息未入库。证据 /var/folders/vz/w13kf0d57l55dt1696pkpj1r0000gn/T/im-v2-local-two-install-e2e.bhwadF/failed-member-room-recovery.json。新增覆盖bootstrap阶段限频诊断（目录/Owner安装/Owner不可用重试），原账号服务23项通过、Gateway产品构建通过；R8原App流程使用新服务端复测 /tmp/imv2-approved-member-live-projection-r8-20261009.log。
+
+- 批准成员R8终态exit1、owned stack stopped；实际限频日志elapsed35s/owner_retries645/owner_overloaded，Prometheus细分确认Owner catchUpRequired（busy/overloaded/pumpBindRefused均0），证据 /tmp/imv2-approved-member-r8-subscription-metrics-20261009.txt。进一步增加subscribe终止控制待确认/控制版本不一致/日志未追平三固定计数，未放宽权限或围栏。另修复详情页补拉失败被当作idle继而等待新通知的缺陷：失败保留durable-pull责任，采用已有退避并尊重服务器retryAfter，成功后仍等待通知；专项新增无通知首次失败重试测试已实际通过，整个xcodebuild终态仍待检查。
+
+- Owner细分诊断相关回归R1终态exit0：68项/4套件通过，日志 /tmp/imv2-room-catchup-diagnostics-r1-20261009.log；Gateway产品构建exit0。App补拉修复R1实际135项/2套件汇总有1 issue：原periodicRecoveryStillPulls超时60秒，新增failedInitialRoomPullRetriesWithoutAnotherNotification实际1.423秒通过、整个ConversationStore套件通过。保留原断言，未用随后自动重试的0 tests输出充当通过；xcodebuild session45072仍活跃，待终态与该时序专项核对。新DerivedData构建因实际GitHub TLS取包失败主动终止exit143，改用已有依赖并禁止更新，不当作源码构建错误。
+
+- 周期历史补拉旧测试单独R2仍超时，真实driver终态exit65（5项/1 issue）。源码9347d818明确activity refresh不得调度历史读取，消息补偿由账号runner与收到的head负责；旧测试仍无限等待不存在的timer wake。更新为观察两次实际roomCursor刷新后无消息wake、无重复载荷，保留原冷订阅/重连/成员撤销验证。R1原失败汇总后自动重试0 tests，主动结束owned driver exit143，未当作通过。R3命令test-iterations1被Xcode参数校验拒绝exit64、未执行测试；R4去掉该参数重新运行 /tmp/imv2-room-pull-retry-unit-r4-20261009.log。
+
+- App补拉修复R4终态exit0：135项/2套件通过、2.152秒，新增无通知初始补拉失败重试1.377秒通过，周期活动刷新不唤醒历史0.330秒通过，日志 /tmp/imv2-room-pull-retry-unit-r4-20261009.log。测试编译期间补了run/nextWake的取消defer，因此最终测试源另用R5窄复测，不将R4覆盖后写出的清理行；R5日志 /tmp/imv2-room-subscription-app-unit-r5-20261009.log。
+
+- App最终测试源R5终态exit0，5项/1套件通过（0.326秒），包含明确取消所属run/nextWake；原成员撤销、重连、宽限期租约及活动刷新无历史wake均保留。批准成员原真实流程R9 session85336运行，日志 /tmp/imv2-approved-member-live-projection-r9-20261009.log，使用补拉失败重试App及subscribeTerminalPending/subscribeControlCutMismatch/subscribeLogGap三固定计数的新服务端；尚未终态，不关闭EX24。
+
+- 批准成员R9终态exit1、owned stack stopped，原流程仍即时正文失败；细分指标subscribeTerminalPending992、subscribeControlCutMismatch0、subscribeLogGap0，证据 /tmp/imv2-approved-member-r9-subscription-metrics-20261009.txt。确认旧授权终止ACK与新订阅之间的循环等待；详情页失败重试修复未单独消除此服务端缺陷。开始验证Gateway对同一已确认来源/围栏的终止控制在pause/expiry/local retirement后仍可实际应用并ACK，不能授予权限或延长有效期，旧围栏不得影响更高代次。
+
+- 终止ACK确定性回归：首次测试编译被#expect宏的Sendable闭包限制拒绝，改成先求值再断言；R2旧实现实际1测试/3参数失败6次，均为pause/expiry/local retirement后无法应用/重复ACK终止控制，日志 /tmp/imv2-terminal-receipt-before-fix-r2-20261009.log。Gateway修复仅允许同一已知围栏及认证来源的terminal monotonic denial跨过已结束本地授权/缺失前序控制，保持拒绝普通授予/延长旧有效期、拒绝新围栏受旧terminal影响。专项4套件复测运行 /tmp/imv2-terminal-receipt-after-fix-r1-20261009.log。
+
+- 终止ACK修复相关回归R1终态exit0：69项/4套件通过（0.867秒），暂停/过期/退休3参数实际ACK及重复ACK通过，原授权关闭/过期不可续/旧围栏不得影响新围栏继续验证。Gateway产品构建exit0，真实原批准成员流程R10运行 /tmp/imv2-approved-member-live-projection-r10-20261009.log，新增owned清理前固定订阅指标留存；未把单元回归当作真实App通过。
+
+- 提交前证据核对：终止ACK网络回归通过，服务端34项/3套件及真实Cluster TCP 3项/1套件，日志 /tmp/imv2-terminal-receipt-network-regression-r1-20261009.log。真实批准成员R10日志显示PASS real two-install App messaging, offline recovery and group scenario及owned stack stopped，日志 /tmp/imv2-approved-member-live-projection-r10-20261009.log；原R5/R7/R8/R9失败记录保留，不以单次通过宣称稳定性验收完成。最终脚本owned Gateway存活检查仅完成Python语法校验，尚未单独运行复验。

@@ -644,11 +644,11 @@ final class V2ConversationDetailStore {
     private func runSubscribedHybridGroup(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async {
         var requiresDurablePull = true
         while !Task.isCancelled {
-            if requiresDurablePull {
-                let shouldContinue = await synchronizeHybridGroupUntilIdle(synchronizer)
-                guard shouldContinue else { return }
-            }
             do {
+                if requiresDurablePull {
+                    let shouldContinue = try await synchronizeHybridGroupUntilIdle(synchronizer)
+                    guard shouldContinue else { return }
+                }
                 let wake = try await nextHybridWakeOrFallback(synchronizer)
                 if let wake, wake.roomID != roomID {
                     continue
@@ -673,7 +673,8 @@ final class V2ConversationDetailStore {
                 // A broken connection may fail immediately. Slow only this
                 // failure path so it cannot become a hot sync loop; normal
                 // foreground delivery still waits for a TLS wake.
-                await waitAfterRealtimeWakeFailure()
+                requiresDurablePull = true
+                await waitAfterRealtimeWakeFailure(error)
             }
         }
     }
@@ -725,38 +726,32 @@ final class V2ConversationDetailStore {
     /// - Parameter synchronizer: 当前混合大群同步实现。
     private func pollHybridGroupFallback(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async {
         while !Task.isCancelled {
-            let shouldContinue = await synchronizeHybridGroupUntilIdle(synchronizer)
-            guard shouldContinue else { return }
             do {
+                let shouldContinue = try await synchronizeHybridGroupUntilIdle(synchronizer)
+                guard shouldContinue else { return }
                 try await Task.sleep(for: .seconds(30))
             } catch is CancellationError {
                 return
             } catch {
-                return
+                await waitAfterRealtimeWakeFailure(error)
             }
         }
     }
 
-    private func synchronizeHybridGroupUntilIdle(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async -> Bool {
+    private func synchronizeHybridGroupUntilIdle(_ synchronizer: any V2ActiveHybridGroupSynchronizing) async throws -> Bool {
         while !Task.isCancelled {
-            do {
-                switch try await synchronizer.synchronizeOnePage(roomID: roomID) {
-                case .notHybridRoom:
-                    return false
-                case .synchronized(let appliedEventCount, let hasMore):
-                    if appliedEventCount > 0 {
-                        await projectionChangeNotifier?.publish()
-                    }
-                    if hasMore {
-                        await Task.yield()
-                    } else {
-                        return true
-                    }
-                }
-            } catch is CancellationError {
+            switch try await synchronizer.synchronizeOnePage(roomID: roomID) {
+            case .notHybridRoom:
                 return false
-            } catch {
-                return true
+            case .synchronized(let appliedEventCount, let hasMore):
+                if appliedEventCount > 0 {
+                    await projectionChangeNotifier?.publish()
+                }
+                if hasMore {
+                    await Task.yield()
+                } else {
+                    return true
+                }
             }
         }
         return false
@@ -805,9 +800,13 @@ final class V2ConversationDetailStore {
         }
     }
 
-    private func waitAfterRealtimeWakeFailure() async {
+    private func waitAfterRealtimeWakeFailure(_ error: any Error) async {
+        var seconds = 1
+        if case .server(_, true, let retryAfter, _) = error as? V2RealtimeTransportError {
+            seconds = max(seconds, Int(retryAfter))
+        }
         do {
-            try await Task.sleep(for: .seconds(1))
+            try await Task.sleep(for: .seconds(seconds))
         } catch {
             // The owning detail-view task will exit on cancellation.
         }

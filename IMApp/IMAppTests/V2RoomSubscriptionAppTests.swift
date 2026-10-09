@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
@@ -213,21 +214,39 @@ struct V2RoomSubscriptionAppTests {
         _ = await run.result
     }
 
-    @Test("periodic recovery strips an already-applied acceleration payload")
-    func periodicRecoveryStillPulls() async throws {
+    @Test("activity expiry refresh does not replay applied room payloads or trigger a history pull")
+    func activityRefreshDoesNotWakeHistory() async throws {
         let wire = AppSubscriptionWire()
-        let owner = makeAppSubscriptionOwner(wire, refreshInterval: .milliseconds(150))
+        let cursorReads = Mutex(0)
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true },
+            roomCursor: { _ in cursorReads.withLock { $0 += 1 }; return 3 },
+            retryDelay: .milliseconds(1), refreshInterval: .milliseconds(150))
         let room = try RoomID("periodic-room")
         let adapter = V2ScopedActiveRoomSynchronizer(roomID: room, owner: owner, base: AppSubscriptionSync())
         _ = try await adapter.subscribe(roomID: room.rawValue)
         let run = Task { try await owner.run(connectionID: UUID()) }
+        defer { run.cancel() }
         _ = try await adapter.nextWake()
         await wire.emitGroup(room: room, watermark: 8, events: [try appSubscriptionEvent(8)])
         var live = try await adapter.nextWake()
         while live.liveEvents.isEmpty { live = try await adapter.nextWake() }
         #expect(try await adapter.applyLiveEvent(live))
-        let recovery = try await adapter.nextWake()
-        #expect(recovery.highWatermark == 8 && recovery.liveEvents.isEmpty)
+        let readsBeforeRefresh = cursorReads.withLock { $0 }
+        let received = Mutex(false)
+        let nextWake = Task {
+            do { _ = try await adapter.nextWake(); received.withLock { $0 = true } }
+            catch { }
+        }
+        defer { nextWake.cancel() }
+        let deadline = ContinuousClock.now + .seconds(3)
+        while cursorReads.withLock({ $0 }) < readsBeforeRefresh + 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(cursorReads.withLock { $0 } >= readsBeforeRefresh + 2)
+        #expect(!received.withLock { $0 })
+        nextWake.cancel()
+        await nextWake.value
         await adapter.close()
         run.cancel()
         _ = await run.result

@@ -317,6 +317,34 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         #expect(!worker.offer(roomID: f.room, highWatermark: 13))
     }
 
+    @Test("an exact terminal receipt remains possible after pause, expiry or local retirement", arguments: [0, 1, 2])
+    func terminalReceiptAfterLocalAuthorityEnds(ending: Int) async throws {
+        let f = Fixture(), clock = Mutex(ContinuousClock.now)
+        let authority = V2GatewayRoomSubscriptionAuthority(now: { clock.withLock { $0 } })
+        await f.connect(authority); try await f.baseline(authority)
+        let permit = try #require(await authority.capturePermits(roomID: f.room).first)
+        switch ending {
+        case 0: #expect(await authority.pause(fence: f.fence()))
+        case 1: clock.withLock { $0 += .seconds(101) }
+        default: #expect(await authority.retire(fence: f.fence()))
+        }
+        let terminal = f.delivery(2, .authorizationInvalidated)
+        #expect(await authority.apply(terminal, authenticatedServiceID: "imposter") == .stale)
+        #expect(await authority.apply(terminal, authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(terminal, authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.captureOnlinePermits(roomID: f.room).isEmpty)
+        let submitted = authority.enqueueIfCurrent(permit, enqueue: { Issue.record("terminal restored a permit") })
+        #expect(!submitted)
+        #expect(!(await authority.renew(fence: f.fence(), serviceID: "owner", appliedControlSequence: 2,
+            deadline: clock.withLock { $0 } + .seconds(100))))
+        #expect(await authority.apply(f.delivery(3, .grant(member: f.member, baselineSequence: 10)),
+            authenticatedServiceID: "owner") != .applied(permits: []))
+        let replacement = f.fence(generation: 2)
+        #expect(await authority.install(fence: replacement, serviceID: "owner",
+            deadline: clock.withLock { $0 } + .seconds(100), afterAuthoritativeReset: true))
+        #expect(await authority.apply(terminal, authenticatedServiceID: "owner") == .stale)
+    }
+
     @Test("same-H terminal control retires permit socket authority and remains ACK-idempotent")
     func terminalInvalidationIsImmediate() async throws {
         let f = Fixture(), authority = f.authority()

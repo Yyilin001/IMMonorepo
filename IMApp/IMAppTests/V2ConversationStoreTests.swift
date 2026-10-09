@@ -2444,6 +2444,24 @@ struct V2ConversationStoreTests {
         #expect(await synchronizer.unsubscribedRoomIDs() == ["room-hybrid"])
     }
 
+    @Test func failedInitialRoomPullRetriesWithoutAnotherNotification() async throws {
+        let synchronizer = V2SubscribedHybridGroupSynchronizerFake(failsFirstPull: true)
+        let store = makeConversationDetailStore(
+            dataSource: V2ConversationDataSourceFake(summaries: [], messages: []), sender: nil,
+            userID: "current-user", roomID: "room-first-pull-retry", kind: .group,
+            activeHybridGroupSynchronizer: synchronizer)
+        let task = Task { await store.pollVisibleHybridGroupEvents() }
+        let deadline = ContinuousClock.now + .seconds(4)
+        while await synchronizer.synchronizations() < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await synchronizer.synchronizations() == 2)
+        await synchronizer.waitForWakeCount(1)
+        task.cancel()
+        await task.value
+        #expect(await synchronizer.unsubscribedRoomIDs() == ["room-first-pull-retry"])
+    }
+
     @Test func metadataWakeDoesNotPullWhenAContiguousLiveBatchArrivesWithinGrace() async throws {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let synchronizer = V2SubscribedHybridGroupSynchronizerFake(
@@ -3218,6 +3236,7 @@ private actor V2ActiveHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchroniz
 
 private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchronizing {
     private let appliesLiveEvents: Bool
+    private let failsFirstPull: Bool
     private var liveApplicationCount = 0
     private var synchronizationCount = 0
     private var wakeCount = 0
@@ -3227,13 +3246,18 @@ private actor V2SubscribedHybridGroupSynchronizerFake: V2ActiveHybridGroupSynchr
     private var subscribed: [String] = []
     private var unsubscribed: [String] = []
 
-    init(appliesLiveEvents: Bool = false) {
+    init(appliesLiveEvents: Bool = false, failsFirstPull: Bool = false) {
         self.appliesLiveEvents = appliesLiveEvents
+        self.failsFirstPull = failsFirstPull
     }
 
-    func synchronizeOnePage(roomID _: String) -> V2ActiveHybridGroupSyncOutcome {
+    func synchronizeOnePage(roomID _: String) throws -> V2ActiveHybridGroupSyncOutcome {
         synchronizationCount += 1
         resumeSynchronizationWaiters()
+        if failsFirstPull && synchronizationCount == 1 {
+            throw V2RealtimeTransportError.server(code: "UNAVAILABLE", retryable: true,
+                retryAfterSeconds: 1, currentRevision: nil)
+        }
         return .synchronized(appliedEventCount: 0, hasMore: false)
     }
 

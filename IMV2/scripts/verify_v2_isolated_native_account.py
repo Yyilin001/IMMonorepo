@@ -61,7 +61,7 @@ def main():
     signal.signal(signal.SIGTERM,interrupted)
     os.umask(0o077)
     root=Path(tempfile.mkdtemp(prefix='imv2-native-e2e-'))
-    processes=[]; logs=[]; pg_started=False; edge=None
+    processes=[]; logs=[]; pg_started=False; edge=None; gateway_process=None
     http_responses=collections.Counter(); http_lock=threading.Lock()
     app_refresh_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY') == 'true'
     background_upload_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_UPLOAD_ONLY') == 'true'
@@ -108,7 +108,7 @@ def main():
             log=(root/(name+'.log')).open('wb');logs.append(log)
             process=subprocess.Popen([str(binary)],env=env,stdout=log,stderr=subprocess.STDOUT);processes.append(process);return process
         spawn('account',REPO/'IMV2Server/.build/debug/IMV2AccountServerApp',account_env)
-        spawn('gateway',REPO/'IMV2Server/.build/debug/IMV2ServerApp',environment('gateway'))
+        gateway_process=spawn('gateway',REPO/'IMV2Server/.build/debug/IMV2ServerApp',environment('gateway'))
         def wait_listener(number):
             deadline=time.monotonic()+90
             while time.monotonic()<deadline:
@@ -290,6 +290,19 @@ def main():
             deadline=time.monotonic()+args.hold_seconds
             while time.monotonic()<deadline and not (root/'stop').exists(): time.sleep(.5)
     finally:
+        try:
+            if gateway_process is None or gateway_process.poll() is not None:
+                raise RuntimeError('owned Gateway is not live')
+            with urllib.request.urlopen(f'http://127.0.0.1:{ports["metrics"]}/metrics', timeout=3) as response:
+                metrics = response.read(4194305)
+            if len(metrics) > 4194304:
+                raise RuntimeError('owned metrics response exceeded limit')
+            # Only fixed subscription labels; no account identifiers or content.
+            lines = [line for line in metrics.decode().splitlines()
+                     if line.startswith('im_v2_room_subscription_')]
+            (root/'room-subscription-metrics.txt').write_text('\n'.join(lines)+'\n')
+        except Exception as error:
+            (root/'room-subscription-metrics-error.log').write_text(type(error).__name__+'\n')
         if background_gate is not None:
             (root/'background-upload-observation.json').write_text(json.dumps(background_gate.snapshot(),indent=2)+'\n')
             background_gate.release()  # Drain only this owned observation on any failed stage.
