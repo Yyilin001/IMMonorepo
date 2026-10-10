@@ -1,150 +1,56 @@
-# IM V2 Client Kit
+# IM V2 客户端 SDK
 
-`IMV2ClientKit` has its own local cache and protocol boundary. Its
-currently implemented durable boundaries are:
+`IMV2ClientKit` 拥有独立的本地缓存与协议边界。当前已实现以下持久化边界：
 
-- `V2AuthSession`: the sole owner of device credentials and refresh rotation.
-- `V2KeychainCredentialStore`: one device-only Keychain record using
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`.
-- `V2SyncEngine` and `GRDBV2LocalSyncStore`: persisted-before-ACK incremental
-  sync and snapshot-reset fencing in a separate SQLite schema. A reset fetches
-  a signed manifest, stages and verifies each opaque page durably, then swaps
-  the complete snapshot atomically before its ACK. A process interruption
-  resumes only missing pages; it never clears the last ready projection.
-  The opaque next-sync token and matching pending ACK receipt are stored with
-  the local watermark, so a restart cannot ACK a different range by mistake.
-  Accepted-message records are decoded into a queryable local message
-  projection in that same SQLite transaction; malformed message payloads roll
-  the batch back instead of advancing the watermark.
-- `GRDBV2LocalSyncStore` excludes its managed directory, SQLite database, WAL,
-  and SHM from device backup at creation and after each reopen. Local unsent
-  commands are deliberately device-local, never a restore/migration channel.
-- `V2CommandOutboxEngine` and `V2MembershipCommandOutboxEngine`: independent
-  durable outboxes for messages and membership mutations. Membership changes
-  retain their generated operation ID, expected revision, retry schedule, and
-  terminal result. A `REVISION_CONFLICT` stores the server's current revision
-  and is never retried as stale intent.
-- `V2LocalStoreBootstrapper` is the only production entry point for the local
-  store. It binds the SQLite database to a device-only Keychain marker. A
-  database with no marker or a mismatched marker is treated as imported data,
-  discarded, and rebuilt through authenticated sync; temporary Keychain
-  unavailability pauses startup without touching the database.
+- `V2AuthSession`：统一管理设备凭据与刷新轮换。
+- `V2KeychainCredentialStore`：使用 `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` 保存一份设备专属 Keychain 记录。
+- `V2SyncEngine` 与 `GRDBV2LocalSyncStore`：在独立 SQLite 结构中实现先持久化再 ACK 的增量同步和快照重置围栏。重置时先获取签名清单，再持久化暂存并验证各个不透明分页；完整快照原子替换后才发送 ACK。进程中断后只补齐缺失分页，不清空上一份已就绪投影。不透明的下一次同步令牌、对应待发送 ACK 回执与本地水位一起保存，避免重启后确认错误范围。已受理消息在同一 SQLite 事务中解码为可查询的本地消息投影；无效消息载荷会回滚整批，不推进水位。
+- `GRDBV2LocalSyncStore`：创建和每次重新打开时，将管理目录、SQLite 数据库、WAL 和 SHM 排除在设备备份之外。尚未发送的本地命令仅属于当前设备，不用于恢复或迁移。
+- `V2CommandOutboxEngine` 与 `V2MembershipCommandOutboxEngine`：分别管理消息和成员变更的持久化发件箱。成员变更保留操作 ID、预期版本、重试计划与终态结果。遇到 `REVISION_CONFLICT` 时保存服务端当前版本，不以过时意图继续重试。
+- `V2LocalStoreBootstrapper`：本地存储的唯一生产入口，将 SQLite 数据库绑定到设备专属 Keychain 标记。标记缺失或不匹配时，将数据库视为导入数据，丢弃后通过认证同步重建；Keychain 暂时不可用时暂停启动，不修改数据库。
 
-The unreleased local projection database installs the complete current schema
-in one initialization step; historical schema upgrades and projection backfills
-are removed. Reopening a current database retains its queued commands, completed
-receipts, membership fences, and snapshot import progress. The separate search
-database also has one current-schema initialization step.
+尚未发布的本地投影数据库在初始化时一次安装完整的当前结构，历史结构升级和投影回填已移除。重新打开当前数据库会保留排队命令、完成回执、成员围栏和快照导入进度。独立搜索数据库同样只初始化当前结构。
 
-`V2AuthSession.establish(_:)` is the sole credential-establishment boundary for
-the separately trusted account/device-registration service. It writes the first
-device credential record atomically and fences any older refresh. The session
-writes `(predecessor credential, pending refresh operation ID)` before
-contacting the refresh transport, shares one refresh task among callers, keeps
-a retryable pending ID after network failure, and only returns a successor token
-after the successor record is durable. Temporary Keychain unavailability pauses
-the session instead of deleting credentials. A confirmed terminal server
-rejection deletes the record and returns the session to unauthenticated state;
-a stale refresh cannot recreate it afterward.
+## 认证与设备凭据
 
-`V2ClientSessionBootstrapper` is the app-facing startup boundary: it requires
-an authenticated V2 session before opening the installation-bound local store,
-and accepts first credentials only from an injected trusted account/device
-provider. It accepts credentials only through that explicit current provider;
-there is no implicit login source.
+`V2AuthSession.establish(_:)` 是独立可信账户/设备注册服务建立凭据的唯一边界。它原子写入首份设备凭据，并阻止旧刷新结果覆盖新状态。联系刷新接口前，会先保存“前序凭据、待处理刷新操作 ID”；并发调用共享一个刷新任务，网络失败后保留可重试的操作 ID，后继凭据持久化后才返回令牌。Keychain 暂时不可用会暂停会话；确认服务端终态拒绝后才删除记录并回到未认证状态，旧刷新不能重新创建会话。
 
-`V2HTTPDeviceCredentialAuthTransport` is the native HTTPS refresh adapter for
-`POST /v2/device-credentials/refresh`. It sends the durable refresh operation
-ID with `no-store` request semantics, treats only 401/403 as terminal
-credential rejection, and leaves network, 5xx, and malformed-response failures
-retryable through `V2AuthSession`. The initial account-factor assertion and
-first-credential provider remain deployment-injected; this kit does not select
-or emulate a login method.
+`V2ClientSessionBootstrapper` 是面向 App 的启动边界。它要求先完成 V2 认证，再打开与安装绑定的本地存储；首份凭据只能来自显式注入的可信账户/设备提供者，没有隐式登录来源。
 
-`V2HTTPAccountAssertionDeviceCredentialProvider` is the corresponding generic
-initial-credential adapter for `POST /v2/device-credentials`. It receives an
-opaque assertion only from an injected account-factor provider and a device ID
-from an injected identity provider. The App's `V2DeviceRegistrationStore`
-keeps account-scoped device/operation identities and a purpose-limited random
-cancellation proof in device-local Keychain before requesting the factor;
-the generic `V2KeychainDeviceCredentialRegistrationOperationStore` remains a
-device-only adapter. Neither stores the account assertion. Registration replay
-still requires a valid account factor and the server's bounded replay window.
-HTTP issuance requires the exact cancellation identity and confirms it in the
-response. A missing or mismatched confirmation durably hands off any received
-revocation authority before rejecting login. New attempts have a ten-minute
-issuance deadline; expiry rotates both IDs while retaining the old proof.
-The issuer requires `V2IssuedCredentialRecovering`: production composition uses
-`V2IssuedCredentialRecoveryStore` to persist received revocation authority
-before returning credentials. After durable login adoption, finalization clears
-the operation and received-result record. Cold recovery must precede interactive
-registration so it does not abandon an in-flight result.
+`V2HTTPDeviceCredentialAuthTransport` 对接 `POST /v2/device-credentials/refresh`。请求携带已持久化的刷新操作 ID，使用 `no-store` 语义；只有 401/403 被视为凭据终态拒绝。网络错误、5xx 和无效响应仍可由 `V2AuthSession` 重试。初始账户认证断言和首份凭据提供者由部署注入，SDK 不自行选择或模拟登录方式。
 
-`V2HTTPDeviceRegistrationCancellationClient` sends a caller-owned
-`V2DeviceRegistrationCancellation` to
-`POST /v2/device-credentials/cancel-registration` without account authentication.
-Its exact device, operation, proof and issue deadline survive retries; only an
-empty 204 confirms cancellation, while an empty 410 reports server expiry.
-The cancellation JSON encodes its typed device as
-`"deviceID":{"rawValue":"CANONICAL-UUID"}`; the outer issuance request's
-`deviceID` remains a string. Non-Swift callers must preserve this distinction.
-The server can fence an unissued operation or revoke its bound issued session.
-The registration ledger uses format 3, atomically migrating format 2 proofs
-into jobs with durable retry state. Logout moves pending proofs to its
-abandoned collection; `pendingCancellations()` and exact-match
-`completeCancellation(_:)` allow recovery after a completely lost response.
-`V2DeviceRegistrationCancellationRunner` observes this queue, retries transient
-failures with bounded backoff, and pauses invalid requests/responses. Its App
-owner runs while active, cancels and drains on background entry, and shares
-aggregate cleanup status and manual retry with session revocation. Cold startup
-must call `recoverUnclaimed(ownedBy:)` before interactive registration: pending
-proofs matching an owned durable device are retired locally; unowned proofs
-are queued. Only server cancellation or expiry settles a queued proof.
-The registration ledger accepts only the current format; any other stored
-format fails closed without being upgraded.
+`V2HTTPAccountAssertionDeviceCredentialProvider` 对接 `POST /v2/device-credentials`。不透明账户断言来自注入的认证提供者，设备 ID 来自注入的身份提供者。App 的 `V2DeviceRegistrationStore` 在请求认证前，先将账户范围的设备/操作身份和用途受限的随机取消证明保存到设备本地 Keychain；通用 `V2KeychainDeviceCredentialRegistrationOperationStore` 仍是设备专属适配器，两者均不保存账户断言。
 
-The package contains framework-neutral WebAuthn building blocks, but the app
-does not expose them until the account service owns a complete challenge,
-origin, RP-ID, signature-counter and credential-revocation implementation.
-Password support currently lives in `V2HTTPPasswordAccountAuthenticator`;
-callers pass the password only to a one-shot method and it is never persisted
-by ClientKit.
+注册重放要求有效账户认证和服务端有界重放窗口。HTTP 签发要求精确的取消身份，并在响应中确认；确认缺失或不匹配时，先持久交接已收到的撤销能力，再拒绝登录。新尝试的签发期限为十分钟；过期后轮换两个 ID，并保留旧证明。签发方要求 `V2IssuedCredentialRecovering`，生产组合使用 `V2IssuedCredentialRecoveryStore` 在返回凭据前持久化撤销能力。登录结果持久接纳后，收尾过程清除操作和已收到结果记录。冷启动恢复必须先于交互注册，避免遗弃尚未完成的结果。
 
-`V2RealtimeSessionCoordinator` is the only app-facing transition from the
-device-auth session to `V2TLSFrameConnection`: it obtains one coherent
-user/device/access-token tuple (refreshing if needed), shares a concurrent
-handshake, accepts only a matching authenticated identity, and clears the
-local session after a terminal gateway rejection. The app can then pass the
-same connected `V2TLSFrameConnection` to `V2ProtobufSyncTransport`; no view or
-feature owns bearer-token handling.
+## 注册取消与恢复
 
-`V2ClientRuntime` is the foreground lifecycle owner after that handshake. Its
-`start()` shares concurrent attempts, completes the initial durable sync (and
-any pending snapshot reset) before starting live-hint and heartbeat loops, and
-its `stop()` owns cancellation plus connection shutdown. Views should only
-drive foreground/background intent through this boundary; a live hint is never
-treated as delivery state.
+`V2HTTPDeviceRegistrationCancellationClient` 将调用方持有的 `V2DeviceRegistrationCancellation` 发送到 `POST /v2/device-credentials/cancel-registration`，无需账户认证。重试保留相同设备、操作、证明和签发期限；只有空响应 204 确认取消，空响应 410 表示服务端记录已过期。
 
-The app must inject concrete V2 auth and sync transports, plus a
-`V2KeychainInstallationBindingStore` into `V2LocalStoreBootstrapper` before
-opening the local database. No external transport, cache, credential, or
-database-table state is read by this package.
+取消请求 JSON 中的设备编码为 `"deviceID":{"rawValue":"CANONICAL-UUID"}`，签发请求外层的 `deviceID` 则仍为字符串。非 Swift 调用方必须保留这一区别。服务端可以阻止未签发操作，或撤销与其绑定的已签发会话。
 
-## Verify
+注册台账使用格式 3，将格式 2 的证明原子迁移为带持久重试状态的任务。注册台账仅接受当前格式；其他已存格式直接拒绝，不自动升级。退出登录会将待处理证明移入已放弃集合；`pendingCancellations()` 与精确匹配的 `completeCancellation(_:)` 支持响应完全丢失后的恢复。
+
+`V2DeviceRegistrationCancellationRunner` 观察该队列，对暂时失败执行有界退避重试，对无效请求/响应暂停处理。App 在前台运行它，进入后台时取消并排空；它与会话撤销共享汇总清理状态和手动重试入口。冷启动必须先调用 `recoverUnclaimed(ownedBy:)`，再开始交互注册：与已持久持有设备匹配的证明在本地退役，未归属证明入队。队列中的证明仅由服务端取消或过期结清。
+
+## 登录能力边界
+
+SDK 包含与框架无关的 WebAuthn 构件；账户服务尚未实现完整的挑战、来源、RP-ID、签名计数器与凭据撤销前，App 不开放该入口。当前密码支持由 `V2HTTPPasswordAccountAuthenticator` 提供，调用方只向一次性方法传入密码，ClientKit 不持久化密码。
+
+## 实时连接与生命周期
+
+`V2RealtimeSessionCoordinator` 是设备认证会话进入 `V2TLSFrameConnection` 的唯一 App 边界。它获取一致的用户/设备/访问令牌组合，必要时刷新；并发调用共享握手，只接受匹配的认证身份，网关终态拒绝后清除本地会话。App 将同一个已连接的 `V2TLSFrameConnection` 交给 `V2ProtobufSyncTransport`，页面和功能模块不自行处理访问令牌。
+
+`V2ClientRuntime` 管理握手后的前台生命周期。`start()` 合并并发启动尝试，完成首次持久化同步及待处理快照重置后，才启动实时提示与心跳循环；`stop()` 负责取消任务并关闭连接。页面仅通过该边界表达前后台意图，实时提示不作为投递完成状态。
+
+打开本地数据库前，App 必须注入具体的 V2 认证与同步传输，并向 `V2LocalStoreBootstrapper` 注入 `V2KeychainInstallationBindingStore`。SDK 不读取外部传输、缓存、凭据或数据库表状态。
+
+## 验证
 
 ```sh
 swift test --package-path IMV2ClientKit
 ```
 
-For the native, disposable-scratch invocation used by this repository, run
-`scripts/run_v2_clientkit_native_tests.sh`. It defaults to four compiler jobs
-to avoid monopolizing the local Mac and explicitly uses the Xcode default Swift
-toolchain so it matches macOS's test helper; set
-`IMV2_CLIENTKIT_TEST_JOBS` when a different local resource limit is appropriate.
+仓库的原生测试使用可丢弃临时构建目录，可运行 `scripts/run_v2_clientkit_native_tests.sh`。默认使用四个编译任务，显式采用 Xcode 默认 Swift 工具链，以匹配 macOS 测试辅助程序；需要调整本机资源限制时，设置 `IMV2_CLIENTKIT_TEST_JOBS`。
 
-Unit tests use actor-isolated fake stores and transports. Keychain behavior
-under device lock, reboot-before-first-unlock, entitlement/access-group changes,
-and real terminal server errors still require simulator/device and backend
-integration validation.
-
-
+单元测试使用 Actor 隔离的模拟存储与传输。设备锁定、重启后首次解锁之前、签名权限或访问组变更时的 Keychain 行为，以及真实服务端终态错误，仍需模拟器/真机与后端集成验证。
