@@ -73,7 +73,6 @@ struct GatewayPreparedAssembly {
             userShardProjectionDelivery: projection.userShardProjectionDelivery,
             databaseWorkAdmission: frontdoor.databaseWorkAdmission,
             directSendPolicyCache: frontdoor.directSendPolicyCache,
-            directRoomLogFastAppendCache: frontdoor.directRoomLogFastAppendCache,
             directRoomLogAppendStageMetrics: frontdoor.directRoomLogAppendStageMetrics
         )
         return .init(
@@ -113,7 +112,6 @@ struct GatewayPreparedAssembly {
                 directRoomLogAppendStageMetrics: frontdoor.directRoomLogAppendStageMetrics,
                 gatewayEventLoopLagMetrics: frontdoor.gatewayEventLoopLagMetrics,
                 directSendPolicyCache: frontdoor.directSendPolicyCache,
-                directRoomLogFastAppendCache: frontdoor.directRoomLogFastAppendCache,
                 directRoomLogEventCache: projection.directRoomLogEventCache,
                 preparedGroupEventPageCache: projection.preparedGroupEventPageCache,
                 connectionRegistry: frontdoor.connectionRegistry, roomActors: actors,
@@ -150,64 +148,25 @@ struct GatewayPreparedAssembly {
     }
 }
 
-/// Exhaustive switches keep Infrastructure's closed labels out of Contracts.
+/// 内部观测与对外指标共享固定标签，仅转换聚合快照。
 private func v2LoanObservationMetrics(
     _ observations: [V2DatabaseLoanSource: V2DatabaseLoanSourceSnapshot]
 ) -> [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric] {
     var result: [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric] = [:]
     for source in V2DatabaseLoanSource.allCases {
-        let sourceLabel: V2DatabaseLoanObservationMetricSource
-        switch source {
-        case .durableOwner: sourceLabel = .durableOwner
-        case .roomSendInitialization: sourceLabel = .roomSendInitialization
-        case .preparationOwnerRead: sourceLabel = .preparationOwnerRead
-        case .controlReservation: sourceLabel = .controlReservation
-        case .policySnapshot: sourceLabel = .policySnapshot
-        case .lifecycle: sourceLabel = .lifecycle
-        case .renewal: sourceLabel = .renewal
-        case .presence: sourceLabel = .presence
-        case .roomWake: sourceLabel = .roomWake
-        case .routeLookup: sourceLabel = .routeLookup
-        case .realtimePartitionControl: sourceLabel = .realtimePartitionControl
-        case .realtimeOwnerSnapshot: sourceLabel = .realtimeOwnerSnapshot
-        case .realtimeRecoveryHead: sourceLabel = .realtimeRecoveryHead
-        case .groupEventPull: sourceLabel = .groupEventPull
-        case .groupEventSubscribe: sourceLabel = .groupEventSubscribe
-        case .roomRecovery: sourceLabel = .roomRecovery
-        case .sync: sourceLabel = .sync
-        case .userStateProjection: sourceLabel = .userStateProjection
-        case .query: sourceLabel = .query
-        case .maintenance: sourceLabel = .maintenance
-        case .other: sourceLabel = .other
-        }
         let observed = observations[source, default: .init()]
         var metric = V2DatabaseLoanObservationSourceMetric()
         metric.actualHeldCount = observed.actualHeldCount
         metric.actualHeldTotalMilliseconds = observed.actualHeldTotalMilliseconds
         metric.actualHeldMaxMilliseconds = observed.actualHeldMaxMilliseconds
         for (phase, item) in observed.sqlPhases {
-            let phaseLabel: V2DatabaseLoanObservationMetricSQLPhase
-            switch phase {
-            case .fence: phaseLabel = .fence
-            case .readBody: phaseLabel = .readBody
-            case .transactionControl: phaseLabel = .transactionControl
-            case .other: phaseLabel = .other
-            }
             var value = V2DatabaseLoanObservationSQLMetric()
             value.count = item.count
             value.totalMilliseconds = item.totalMilliseconds
             value.maxMilliseconds = item.maxMilliseconds
-            metric.sqlPhases[phaseLabel] = value
+            metric.sqlPhases[phase] = value
         }
         for stage in V2DatabaseLoanStage.allCases {
-            let stageLabel: V2DatabaseLoanObservationMetricStage
-            switch stage {
-            case .gateQueued: stageLabel = .gateQueued
-            case .awaitingDriver: stageLabel = .awaitingDriver
-            case .betweenSQL: stageLabel = .betweenSQL
-            case .sql: stageLabel = .sql
-            case .settled: stageLabel = .settled
-            }
             let item = observed.stages[stage, default: .init()]
             var value = V2DatabaseLoanObservationStageMetric()
             value.active = item.active
@@ -215,9 +174,9 @@ private func v2LoanObservationMetrics(
             value.count = item.count
             value.totalMilliseconds = item.totalMilliseconds
             value.maxMilliseconds = item.maxMilliseconds
-            metric.stages[stageLabel] = value
+            metric.stages[stage] = value
         }
-        result[sourceLabel] = metric
+        result[source] = metric
     }
     return result
 }

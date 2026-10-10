@@ -226,12 +226,6 @@ struct V2VaporMetricsRoutesTests {
                 entries: 49_999, hits: 211, misses: 31,
                 insertions: 61_000, evictions: 11_001, expirations: 7
             ),
-            directRoomLogFastAppend: .init(
-                entries: 17, lookupHits: 101, lookupMisses: 9,
-                attemptedAppends: 83, committedAppends: 79,
-                fallbackAppends: 4, insertions: 93,
-                evictions: 12, expirations: 3
-            ),
             directRoomLogEventCache: .init(
                 cachedEvents: 31, cachedRooms: 7, cachedBytes: 4096,
                 hits: 101, misses: 9, bypassedIneligibleEvents: 3,
@@ -513,13 +507,6 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_gateway_message_send_rejected_total{reason=\"connection_bytes\"} 0"))
             #expect(body.contains("im_v2_gateway_message_send_rejected_total{reason=\"process_bytes\"} 0"))
             #expect(body.contains("im_v2_gateway_event_loop_lag_milliseconds_max 11"))
-            #expect(body.contains("im_v2_direct_room_log_fast_append_entries 17"))
-            #expect(body.contains("im_v2_direct_room_log_fast_append_lookups_total{outcome=\"hit\"} 101"))
-            #expect(body.contains("im_v2_direct_room_log_fast_append_requests_total{outcome=\"committed\"} 79"))
-            #expect(body.contains("im_v2_direct_room_log_fast_append_requests_total{outcome=\"fallback\"} 4"))
-            #expect(body.contains("im_v2_direct_room_log_fast_append_insertions_total 93"))
-            #expect(body.contains("im_v2_direct_room_log_fast_append_removals_total{reason=\"capacity\"} 12"))
-            #expect(body.contains("im_v2_direct_room_log_fast_append_removals_total{reason=\"expired\"} 3"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_entries 31"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_lookups_total{outcome=\"hit\"} 101"))
             #expect(body.contains("im_v2_direct_room_log_event_cache_lookups_total{outcome=\"miss\"} 9"))

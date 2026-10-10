@@ -31,7 +31,6 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     let strangerMessagePolicy: V2StrangerMessagePolicy
     let contentReviewMode: V2ContentReviewMode
     private let directSendPolicyCache: V2DirectSendPolicyCache
-    private let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache
     private let roomWriteBatchRouteCache: V2RoomWriteBatchRouteCache
     private let appendStageMetrics: V2DirectRoomLogAppendStageMetrics?
 
@@ -42,21 +41,18 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     ///   - strangerMessagePolicy: 陌生人消息策略。
     ///   - contentReviewMode: 内容审核模式。
     ///   - directSendPolicyCache: 可选的私聊发送策略缓存。
-    ///   - directRoomLogFastAppendCache: 可选的私聊日志快速追加缓存。
     ///   - appendStageMetrics: 可选的追加阶段指标。
     public init(
         database: any Database,
         strangerMessagePolicy: V2StrangerMessagePolicy,
         contentReviewMode: V2ContentReviewMode,
         directSendPolicyCache: V2DirectSendPolicyCache = .init(),
-        directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache = .init(),
         appendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil
     ) {
         self.database = database
         self.strangerMessagePolicy = strangerMessagePolicy
         self.contentReviewMode = contentReviewMode
         self.directSendPolicyCache = directSendPolicyCache
-        self.directRoomLogFastAppendCache = directRoomLogFastAppendCache
         self.roomWriteBatchRouteCache = .init()
         self.appendStageMetrics = appendStageMetrics
     }
@@ -96,7 +92,6 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     package func invalidateActorHints(token: V2RoomActivationToken) async {
         guard let room = token.roomID.uuidValue else { return }
         await directSendPolicyCache.invalidate(roomID: room)
-        await directRoomLogFastAppendCache.invalidate(roomID: room)
     }
 
     /// Host 仅在执行器的 SQL 与批次处理结束后清除该房间的缓存提示。
@@ -899,7 +894,6 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     /// - Throws: 已提交结果无法解码时抛出。
     private var commitEffects: V2RoomWriteCommitEffects {
         .init(ownership: transactionOwnership, directSendPolicyCache: directSendPolicyCache,
-              directRoomLogFastAppendCache: directRoomLogFastAppendCache,
               appendStageMetrics: appendStageMetrics)
     }
 
@@ -1030,23 +1024,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
                     sender_id uuid,
                     client_message_id uuid
                 )
-            ), input AS MATERIALIZED (
-                SELECT (row_number() OVER (ORDER BY lock_key, ordinal) - 1)::integer AS ordinal, lock_key
-                FROM key_input
-            ), locked(ordinal, lock_acquired) AS (
-                SELECT input.ordinal, pg_advisory_xact_lock(input.lock_key)
-                FROM input
-                WHERE input.ordinal = 0
-
-                UNION ALL
-
-                SELECT input.ordinal, pg_advisory_xact_lock(input.lock_key)
-                FROM locked AS previous
-                JOIN input
-                  ON input.ordinal = previous.ordinal + 1
-            )
-            SELECT count(*)::bigint AS acquired_count
-            FROM locked
+            ), \(unsafeRaw: MessageOperationLockBatchStatement.orderedLocksSQL)
             """).first(decoding: MessageOperationLockBatchRow.self),
               row.acquiredCount == expectedCount
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -1204,8 +1182,6 @@ struct CurrentShardLeaseRow: Decodable {
     }
 }
 
-
-
 /// 集合式普通单聊房间日志追加所用的 JSONB 输入。
 ///
 /// 它刻意收窄：附件、@ 提及与审核任务仍走各自的专用路径，
@@ -1315,9 +1291,6 @@ struct PreparedDirectRoomLogAppend {
     let directContext: DirectMessageAcceptanceContext
     let policyCacheEntry: V2DirectSendPolicyCache.Entry
     let advancesReplyMarker: Bool
-    let fastAppendRoomShardID: String
-    let fastAppendCapacityProfileID: String
-    let fastAppendShardState: ShardAdmissionState?
     let commit: RoomWriteCommit
     var publishesPolicyHints: Bool = true
 }
@@ -1339,7 +1312,6 @@ struct DirectReplyCacheUpdate {
 struct RoomWriteCommit: Sendable {
     let outcome: V2SendMessageOutcome
     let directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry?
-    let directRoomLogFastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
     /// 当本次提交设置了某一侧单调的首次发送标记时，
     /// 反方向的缓存可以从紧邻其前的配对修订推进，而无需再做一次完整策略读取。
     ///
@@ -1351,13 +1323,11 @@ struct RoomWriteCommit: Sendable {
     init(
         outcome: V2SendMessageOutcome,
         directPolicyCacheUpdate: V2DirectSendPolicyCache.Entry? = nil,
-        directRoomLogFastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry? = nil,
         reciprocalDirectReplyCacheUpdate: DirectReplyCacheUpdate? = nil,
         shardAdmissionReservation: ShardAdmissionReservation? = nil
     ) {
         self.outcome = outcome
         self.directPolicyCacheUpdate = directPolicyCacheUpdate
-        self.directRoomLogFastAppendCacheUpdate = directRoomLogFastAppendCacheUpdate
         self.reciprocalDirectReplyCacheUpdate = reciprocalDirectReplyCacheUpdate
         self.shardAdmissionReservation = shardAdmissionReservation
     }

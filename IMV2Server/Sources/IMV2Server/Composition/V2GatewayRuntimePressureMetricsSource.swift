@@ -22,7 +22,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics?
     private let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics?
     private let directSendPolicyCache: V2DirectSendPolicyCache?
-    private let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache?
     private let directRoomLogEventCache: V2DirectRoomLogEventCache?
     private let preparedGroupEventPageCache: V2PreparedGroupEventPageCache?
     private let connectionRegistry: V2DeviceConnectionRegistry?
@@ -43,7 +42,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     ///   - directRoomLogAppendStageMetrics: 私聊追加阶段耗时收集器。
     ///   - gatewayEventLoopLagMetrics: 网关事件循环延迟收集器。
     ///   - directSendPolicyCache: 私聊发送策略提示缓存。
-    ///   - directRoomLogFastAppendCache: 条件式快速追加候选缓存。
     ///   - directRoomLogEventCache: 本地私聊事件缓存。
     ///   - preparedGroupEventPageCache: 共享群事件编码页缓存。
     ///   - connectionRegistry: 设备连接注册表，用于取得在线租约续期批处理指标。
@@ -56,7 +54,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
         gatewayEventLoopLagMetrics: V2EventLoopLagMetrics? = nil,
         directSendPolicyCache: V2DirectSendPolicyCache? = nil,
-        directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCache? = nil,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCache? = nil,
         connectionRegistry: V2DeviceConnectionRegistry? = nil,
@@ -79,7 +76,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.directRoomLogAppendStageMetrics = directRoomLogAppendStageMetrics
         self.gatewayEventLoopLagMetrics = gatewayEventLoopLagMetrics
         self.directSendPolicyCache = directSendPolicyCache
-        self.directRoomLogFastAppendCache = directRoomLogFastAppendCache
         self.directRoomLogEventCache = directRoomLogEventCache
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.connectionRegistry = connectionRegistry
@@ -102,7 +98,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         let appendStages = directRoomLogAppendStageMetrics?.snapshot()
         let eventLoopLag = gatewayEventLoopLagMetrics?.snapshot()
         let directSendPolicy = await directSendPolicyCache?.snapshot()
-        let fastAppend = await directRoomLogFastAppendCache?.snapshot()
         let eventCache = await directRoomLogEventCache?.snapshot()
         let preparedPageCache = preparedGroupEventPageCache?.snapshot()
         let livePresenceRenewals = await connectionRegistry?.livePresenceRenewalMetrics()
@@ -116,7 +111,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             directRoomLogAppendStages: appendStages,
             gatewayEventLoopLag: eventLoopLag,
             directSendPolicy: directSendPolicy,
-            directRoomLogFastAppend: fastAppend,
             directRoomLogEventCache: eventCache,
             preparedGroupEventPageCache: preparedPageCache,
             livePresenceRenewals: livePresenceRenewals,

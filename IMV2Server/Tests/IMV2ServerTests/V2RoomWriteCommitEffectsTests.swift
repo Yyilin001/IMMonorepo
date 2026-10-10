@@ -10,14 +10,13 @@ struct V2RoomWriteCommitEffectsTests {
     @Test("Only the transaction owner publishes acceptance cache effects", arguments: [false, true])
     func provisionalWriteDoesNotPublishCache(borrowed: Bool) async throws {
         let policy = V2DirectSendPolicyCache()
-        let fast = V2DirectRoomLogFastAppendCache()
         let key = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
         let entry = policyEntry()
         let command = try V2SendMessageCommand(roomID: .init(uuid: key.roomID),
             senderUserID: .init(uuid: key.senderID), clientMessageID: .init(uuid: UUID()),
             text: "message", limits: .init(maxUTF8Bytes: 64))
         let effects = V2RoomWriteCommitEffects(ownership: borrowed ? .operationReceipt : .store,
-            directSendPolicyCache: policy, directRoomLogFastAppendCache: fast,
+            directSendPolicyCache: policy,
             appendStageMetrics: nil)
         let outcome = try await effects.finalize(command: command, cacheKey: key,
             commit: .init(outcome: .rateLimited(retryAfterSeconds: 1), directPolicyCacheUpdate: entry))
@@ -28,7 +27,6 @@ struct V2RoomWriteCommitEffectsTests {
     @Test("Invalid accepted outcome leaves the policy cache unchanged")
     func invalidAcceptedOutcomeDoesNotPublishCache() async throws {
         let policy = V2DirectSendPolicyCache()
-        let fast = V2DirectRoomLogFastAppendCache()
         let key = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
         let command = try makeCommand(key: key)
         let accepted = V2AcceptedMessageDraft(
@@ -37,7 +35,7 @@ struct V2RoomWriteCommitEffectsTests {
             clientMessageID: command.clientMessageID, text: command.text,
             createdAt: Date(timeIntervalSince1970: 10_000_000_000_000)
         ).materialized(mediaPresentations: [])
-        let effects = makeEffects(policy: policy, fast: fast)
+        let effects = makeEffects(policy: policy)
 
         await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
             try await effects.finalize(command: command, cacheKey: key,
@@ -50,7 +48,6 @@ struct V2RoomWriteCommitEffectsTests {
     @Test("Invalid batch ordering leaves the policy cache unchanged")
     func invalidBatchOrderingDoesNotPublishCache() async throws {
         let policy = V2DirectSendPolicyCache()
-        let fast = V2DirectRoomLogFastAppendCache()
         let key = V2DirectSendPolicyCache.Key(roomID: UUID(), senderID: UUID())
         let command = try makeCommand(key: key)
         let request = V2RoomWriteRequest(command: command,
@@ -60,7 +57,7 @@ struct V2RoomWriteCommitEffectsTests {
             now: Date())
         let commit = RoomWriteCommit(outcome: .rateLimited(retryAfterSeconds: 1),
             directPolicyCacheUpdate: policyEntry())
-        let effects = makeEffects(policy: policy, fast: fast)
+        let effects = makeEffects(policy: policy)
 
         await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
             try await effects.finalize(requests: [request, request], committed: [
@@ -78,10 +75,9 @@ struct V2RoomWriteCommitEffectsTests {
     }
 
     private func makeEffects(
-        policy: V2DirectSendPolicyCache, fast: V2DirectRoomLogFastAppendCache
+        policy: V2DirectSendPolicyCache
     ) -> V2RoomWriteCommitEffects {
         .init(ownership: .store, directSendPolicyCache: policy,
-              directRoomLogFastAppendCache: fast,
               appendStageMetrics: nil)
     }
 

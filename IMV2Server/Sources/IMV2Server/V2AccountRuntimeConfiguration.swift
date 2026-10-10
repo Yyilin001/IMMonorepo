@@ -29,7 +29,6 @@ public struct V2AccountListenerConfiguration: Equatable, Sendable {
     }
 }
 
-
 /// 隔离的账号与设备凭据服务运行时配置。
 ///
 /// 它与 TLS 网关刻意分离，使凭据重放密钥与断言签名密钥永远不进入网关进程。
@@ -83,15 +82,15 @@ public struct V2AccountRuntimeConfiguration: Sendable {
     ///   密钥材料、监听配置、数据库策略、容量档位或任一限流策略非法时抛出
     ///   ``V2GatewayRuntimeConfigurationError/invalid(_:)``。
     public init(environment: any V2RuntimeEnvironment) throws {
-        databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
+        databaseURL = try v2RequiredEnvironmentValue("IM_V2_DATABASE_URL", environment: environment)
         databasePolicy = try .init(environment: environment)
         // Pair-route fencing holds a connection across an owner callback.
         // Reserve one route connection without consuming nested coordination capacity.
         guard databasePolicy.maximumConnectionsPerEventLoop >= 2 else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP")
         }
-        directRoomShardIDs=try V2DirectRoomShardRouter(rawValue:Self.required("IM_V2_DIRECT_ROOM_SHARD_ID",environment:environment)).shardIDs
-        groupRoomShardIDs=try V2GroupRoomShardSelector(rawValue:Self.required("IM_V2_GROUP_ROOM_SHARD_ID",environment:environment)).shardIDs
+        directRoomShardIDs=try V2DirectRoomShardRouter(rawValue:v2RequiredEnvironmentValue("IM_V2_DIRECT_ROOM_SHARD_ID",environment:environment)).shardIDs
+        groupRoomShardIDs=try V2GroupRoomShardSelector(rawValue:v2RequiredEnvironmentValue("IM_V2_GROUP_ROOM_SHARD_ID",environment:environment)).shardIDs
         if let raw = environment.value(for: "IM_V2_ROOM_SHARD_STORES_JSON") {
             roomShardStorage = try V2RoomShardStorageConfiguration.parseRegistryJSON(raw)
         } else { throw V2GatewayRuntimeConfigurationError.missing("IM_V2_ROOM_SHARD_STORES_JSON") }
@@ -106,40 +105,40 @@ public struct V2AccountRuntimeConfiguration: Sendable {
         try databasePolicy.validate(primaryDatabaseURL: databaseURL, userShardStorage: userShardStorage)
         try databasePolicy.validate(databaseURLs: [databaseURL] + roomShardStorage.map(\.databaseURL) + userShardStorage.map(\.databaseURL))
         listener = try .init(
-            host: Self.required("IM_V2_ACCOUNT_LISTEN_HOST", environment: environment),
-            port: Self.integer("IM_V2_ACCOUNT_LISTEN_PORT", environment: environment)
+            host: v2RequiredEnvironmentValue("IM_V2_ACCOUNT_LISTEN_HOST", environment: environment),
+            port: v2RequiredEnvironmentInteger("IM_V2_ACCOUNT_LISTEN_PORT", environment: environment)
         )
-        accessTokenKey = try .init(base64Encoded: Self.required("IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64", environment: environment))
-        replayEnvelopeKey = try .init(base64Encoded: Self.required("IM_V2_CREDENTIAL_REPLAY_ENVELOPE_KEY_BASE64", environment: environment))
-        pushEndpointEnvelopeKey = try .init(base64Encoded: Self.required("IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64", environment: environment))
-        edgeAuthorizationSecret = try .init(base64Encoded: Self.required("IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64", environment: environment))
+        accessTokenKey = try .init(base64Encoded: v2RequiredEnvironmentValue("IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64", environment: environment))
+        replayEnvelopeKey = try .init(base64Encoded: v2RequiredEnvironmentValue("IM_V2_CREDENTIAL_REPLAY_ENVELOPE_KEY_BASE64", environment: environment))
+        pushEndpointEnvelopeKey = try .init(base64Encoded: v2RequiredEnvironmentValue("IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64", environment: environment))
+        edgeAuthorizationSecret = try .init(base64Encoded: v2RequiredEnvironmentValue("IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64", environment: environment))
         do {
-            edgeClientRateLimitKey = try .init(base64Encoded: Self.required("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64", environment: environment))
+            edgeClientRateLimitKey = try .init(base64Encoded: v2RequiredEnvironmentValue("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64", environment: environment))
         } catch V2AccountEdgeClientRateLimitError.invalidKeyMaterial {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_HMAC_KEY_BASE64")
         }
-        let rawAccountAssertionKey = try Self.required("IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64", environment: environment)
+        let rawAccountAssertionKey = try v2RequiredEnvironmentValue("IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64", environment: environment)
         guard let accountAssertionKey = Data(base64Encoded: rawAccountAssertionKey), accountAssertionKey.count >= 32 else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_ASSERTION_HMAC_KEY_BASE64")
         }
         self.accountAssertionKey = accountAssertionKey
-        let rawGroupInviteKey = try Self.required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64", environment: environment)
+        let rawGroupInviteKey = try v2RequiredEnvironmentValue("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64", environment: environment)
         guard let groupInviteTokenHMACKey = Data(base64Encoded: rawGroupInviteKey), groupInviteTokenHMACKey.count >= 32 else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64")
         }
         self.groupInviteTokenHMACKey = groupInviteTokenHMACKey
         capacityProfile = try .init(
-            id: Self.required("IM_V2_CAPACITY_PROFILE_ID", environment: environment),
+            id: v2RequiredEnvironmentValue("IM_V2_CAPACITY_PROFILE_ID", environment: environment),
             limits: .init(
-                maxEligibleMembers: Self.integer("IM_V2_MAX_ELIGIBLE_MEMBERS", environment: environment),
-                maxCommandsPerWindow: Self.integer("IM_V2_MAX_COMMANDS_PER_WINDOW", environment: environment),
+                maxEligibleMembers: v2RequiredEnvironmentInteger("IM_V2_MAX_ELIGIBLE_MEMBERS", environment: environment),
+                maxCommandsPerWindow: v2RequiredEnvironmentInteger("IM_V2_MAX_COMMANDS_PER_WINDOW", environment: environment),
 
-                retryAfterSeconds: Self.integer("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
+                retryAfterSeconds: v2RequiredEnvironmentInteger("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
             )
         )
-        let maximumFailures = try Self.integer("IM_V2_PASSWORD_LOGIN_MAX_FAILURES", environment: environment)
-        let windowSeconds = try Self.integer("IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS", environment: environment)
-        let lockoutSeconds = try Self.integer("IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS", environment: environment)
+        let maximumFailures = try v2RequiredEnvironmentInteger("IM_V2_PASSWORD_LOGIN_MAX_FAILURES", environment: environment)
+        let windowSeconds = try v2RequiredEnvironmentInteger("IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS", environment: environment)
+        let lockoutSeconds = try v2RequiredEnvironmentInteger("IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS", environment: environment)
         do {
             passwordLoginRateLimit = try .init(
                 maximumFailures: maximumFailures,
@@ -149,15 +148,15 @@ public struct V2AccountRuntimeConfiguration: Sendable {
         } catch V2PasswordLoginRateLimitError.invalidPolicy {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PASSWORD_LOGIN_MAX_FAILURES/IM_V2_PASSWORD_LOGIN_WINDOW_SECONDS/IM_V2_PASSWORD_LOGIN_LOCKOUT_SECONDS")
         }
-        let edgeClientMaximumRequests = try Self.integer("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS", environment: environment)
-        let edgeClientWindowSeconds = try Self.integer("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS", environment: environment)
+        let edgeClientMaximumRequests = try v2RequiredEnvironmentInteger("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS", environment: environment)
+        let edgeClientWindowSeconds = try v2RequiredEnvironmentInteger("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS", environment: environment)
         do {
             edgeClientRateLimit = try .init(maximumRequests: edgeClientMaximumRequests, window: TimeInterval(edgeClientWindowSeconds))
         } catch V2AccountEdgeClientRateLimitError.invalidPolicy {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS/IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_WINDOW_SECONDS")
         }
-        let publicIdentityMaximumQueries = try Self.integer("IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES", environment: environment)
-        let publicIdentityWindowSeconds = try Self.integer("IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS", environment: environment)
+        let publicIdentityMaximumQueries = try v2RequiredEnvironmentInteger("IM_V2_PUBLIC_IDENTITY_LOOKUP_MAX_QUERIES", environment: environment)
+        let publicIdentityWindowSeconds = try v2RequiredEnvironmentInteger("IM_V2_PUBLIC_IDENTITY_LOOKUP_WINDOW_SECONDS", environment: environment)
         do {
             publicIdentityLookupRateLimit = try .init(maximumQueries: publicIdentityMaximumQueries, window: TimeInterval(publicIdentityWindowSeconds))
         } catch V2PublicIdentityLookupRateLimitError.invalidPolicy {
@@ -165,41 +164,13 @@ public struct V2AccountRuntimeConfiguration: Sendable {
         }
         do {
             deviceRegistrationPolicy = try .init(
-                maximumActiveDevices: Self.integer("IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT", environment: environment),
-                maximumNewDevicesPerWindow: Self.integer("IM_V2_MAX_NEW_DEVICES_PER_WINDOW", environment: environment),
-                window: TimeInterval(Self.integer("IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS", environment: environment))
+                maximumActiveDevices: v2RequiredEnvironmentInteger("IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT", environment: environment),
+                maximumNewDevicesPerWindow: v2RequiredEnvironmentInteger("IM_V2_MAX_NEW_DEVICES_PER_WINDOW", environment: environment),
+                window: TimeInterval(v2RequiredEnvironmentInteger("IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS", environment: environment))
             )
         } catch V2DeviceCredentialServiceError.invalidConfiguration {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_MAX_ACTIVE_DEVICES_PER_ACCOUNT/IM_V2_MAX_NEW_DEVICES_PER_WINDOW/IM_V2_DEVICE_REGISTRATION_WINDOW_SECONDS")
         }
     }
 
-    /// 读取必需的环境变量并去除首尾空白。
-    ///
-    /// - Parameters:
-    ///   - key: 环境变量名。
-    ///   - environment: 运行时环境视图。
-    /// - Returns: 非空的变量取值。
-    /// - Throws: 变量缺失或去除空白后为空时抛出
-    ///   ``V2GatewayRuntimeConfigurationError/missing(_:)``。
-    private static func required(_ key: String, environment: any V2RuntimeEnvironment) throws -> String {
-        guard let value = environment.value(for: key)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-            throw V2GatewayRuntimeConfigurationError.missing(key)
-        }
-        return value
-    }
-
-    /// 读取必需的整数环境变量。
-    ///
-    /// - Parameters:
-    ///   - key: 环境变量名。
-    ///   - environment: 运行时环境视图。
-    /// - Returns: 解析后的整数。
-    /// - Throws: 变量缺失时抛出 ``V2GatewayRuntimeConfigurationError/missing(_:)``；
-    ///   无法解析为整数时抛出 ``V2GatewayRuntimeConfigurationError/invalid(_:)``。
-    private static func integer(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int {
-        let value = try required(key, environment: environment)
-        guard let result = Int(value) else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
-        return result
-    }
 }

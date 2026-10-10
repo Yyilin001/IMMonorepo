@@ -498,13 +498,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 rooms.append(room.roomID)
             }
             let interval: TimeInterval = scenario == "precision" ? 0.1234567 : scenario == "tiny" ? 0.0000001 : 86_400
-            func writer(window: TimeInterval, cache: V2DirectRoomLogFastAppendCache = .init()) throws -> PostgresV2RoomWriteStore {
+            func writer(window: TimeInterval) throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: window), contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: cache)
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: window), contentReviewMode: .disabled)
             }
-            let fastCache = V2DirectRoomLogFastAppendCache()
-            let warm = try writer(window: interval, cache: fastCache)
+            let warm = try writer(window: interval)
             func request(_ index: Int, now: Date) throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: rooms[index], senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "quota window", limits: .init(maxUTF8Bytes: 64)),
@@ -557,13 +555,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             catch { #expect(error is V2RoomWriteStoreError || error is V2AtomicRoomWriteBatchError) }
             #expect(try await snapshot() == before)
             try await sql.raw("UPDATE im_v2.stranger_message_windows SET window_started_at = \(bind: cutoff)").run()
-            let beforeFast = await fastCache.snapshot()
             let outcomes = try await send(on: store, atomic: path == "hot")
-            if path == "hot" {
-                let afterFast = await fastCache.snapshot()
-                #expect(afterFast.committedAppends == beforeFast.committedAppends)
-                #expect(afterFast.fallbackAppends == beforeFast.fallbackAppends)
-            }
             #expect(outcomes.count == 2)
             for (input, outcome) in zip(inputs, outcomes) {
                 guard case .accepted(let message) = outcome else { throw CancellationError() }

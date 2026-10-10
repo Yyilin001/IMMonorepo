@@ -21,7 +21,7 @@ import Vapor
 import VaporTesting
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("overlapping warm multi-shard batches reserve capacity without deadlocks")
+    @Test("overlapping warm multi-shard batches preserve lock order without deadlocks")
     func overlappingMultiShardBatchesUseDeterministicLockOrder() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
@@ -98,13 +98,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 [roomActors[3], roomActors[4]],
                 [roomActors[5], roomActors[1]],
             ]
-            let sharedCache = V2DirectRoomLogFastAppendCache()
             let writers = try batches.map { _ in
                 PostgresV2RoomWriteStore(
                     database: resources.database(.psql),
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10_000, window: 86_400),
-                    contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: sharedCache)
+                    contentReviewMode: .disabled)
             }
             // Prime each direct room through the sole supported per-room path.
             // The shared revision cache then makes every measured batch a warm append.
@@ -180,7 +178,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.shard_admission_pools
                 WHERE capacity_profile_id = \(bind: profile.id)
                 """).first(decoding: CountRow.self)).value
-            #expect(shardUsageAfter - shardUsageBefore == Int64(rounds * 6))
+            #expect(shardUsageAfter == shardUsageBefore)
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()

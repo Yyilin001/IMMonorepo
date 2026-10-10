@@ -346,22 +346,6 @@ struct V2GatewayRuntimeConfigurationTests {
             environment: V2DictionaryRuntimeEnvironment(largerPolicyCache)
         ).directSendPolicyCacheMaximumEntries == 131_072)
 
-        var largerFastAppendCache = runtimeValues
-        largerFastAppendCache[
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES"
-        ] = "131072"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(largerFastAppendCache)
-        ).directRoomLogFastAppendCacheMaximumEntries == 131_072)
-
-        var longerFastAppendCache = runtimeValues
-        longerFastAppendCache[
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS"
-        ] = "900"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(longerFastAppendCache)
-        ).directRoomLogFastAppendCacheLifetimeSeconds == 900)
-
         var invalidPolicyCache = runtimeValues
         invalidPolicyCache["IM_V2_DIRECT_SEND_POLICY_CACHE_MAX_ENTRIES"] = "0"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
@@ -369,30 +353,6 @@ struct V2GatewayRuntimeConfigurationTests {
         )) {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(invalidPolicyCache)
-            )
-        }
-
-        var invalidFastAppendCache = runtimeValues
-        invalidFastAppendCache[
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES"
-        ] = "0"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(invalidFastAppendCache)
-            )
-        }
-
-        var invalidFastAppendCacheLifetime = runtimeValues
-        invalidFastAppendCacheLifetime[
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS"
-        ] = "0"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(invalidFastAppendCacheLifetime)
             )
         }
 

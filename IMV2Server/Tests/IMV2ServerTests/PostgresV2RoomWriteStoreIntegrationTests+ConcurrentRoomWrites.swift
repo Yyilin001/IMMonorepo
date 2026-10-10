@@ -1710,12 +1710,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 targetUserID: second
             , firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
 
-            let fastCache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 2, window: 86_400),
-                contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: fastCache)
+                contentReviewMode: .disabled)
             let selectedWriter: any V2RoomWriteStore
             if actorScoped {
                 let owner = try V2RoomDataOwner(shardID: "reciprocal-shard", epoch: 0)
@@ -1750,7 +1748,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // stranger conversation can use the conditional append. The
             // statement must consume the exact same durable quota row before
             // advancing the room cursor.
-            let beforeStrangerFastAppend = await fastCache.snapshot()
             guard case .accepted = try await messages.send(.init(
                 roomID: room.roomID,
                 actorUserID: first,
@@ -1760,11 +1757,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected quota-bearing fast append")
                 return
             }
-            let afterStrangerFastAppend = await fastCache.snapshot()
-            #expect(
-                afterStrangerFastAppend.committedAppends
-                    == beforeStrangerFastAppend.committedAppends + 1
-            )
             let quota = try #require(try await sql.raw("""
                 SELECT message_count::bigint AS value
                 FROM im_v2.stranger_message_windows
@@ -1773,7 +1765,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: CountRow.self))
             #expect(quota.value == 2)
 
-            let beforeQuotaDenial = await fastCache.snapshot()
             do {
                 _ = try await messages.send(.init(
                     roomID: room.roomID,
@@ -1787,8 +1778,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 // The gateway maps this domain error to RATE_LIMITED. Keeping
                 // it as an error at the service boundary is the existing API.
             }
-            let afterQuotaDenial = await fastCache.snapshot()
-            #expect(afterQuotaDenial.fallbackAppends == beforeQuotaDenial.fallbackAppends + 1)
 
             // A reply changes the business rule: this pair is no longer a
             // one-sided stranger conversation, so later messages correctly
@@ -1818,7 +1807,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
 
-            let beforeSteadyState = await fastCache.snapshot()
             for (actor, clientID, text) in [
                 (first, "00000000-0000-0000-0002-000000000016", "一方稳定发送"),
                 (second, "00000000-0000-0000-0002-000000000017", "另一方稳定发送"),
@@ -1833,19 +1821,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     return
                 }
             }
-            let afterSteadyState = await fastCache.snapshot()
-            #expect(afterSteadyState.committedAppends == beforeSteadyState.committedAppends + 2)
-            #expect(afterSteadyState.fallbackAppends == beforeSteadyState.fallbackAppends)
 
             if actorScoped {
                 let roomUUID = try #require(room.roomID.uuidValue)
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomUUID)").run()
                 let stale = V2AuthenticatedSendMessage(roomID: room.roomID, actorUserID: first, clientMessageID: .init(uuid: UUID()), text: "stale warm append")
-                let beforeStale = await fastCache.snapshot()
                 await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await messages.send(stale) }
-                let afterStale = await fastCache.snapshot()
-                #expect(afterStale.attemptedAppends == beforeStale.attemptedAppends + 1)
-                #expect(afterStale.committedAppends == beforeStale.committedAppends)
                 // Restore epoch only in this disposable fixture, then verify
                 // the failed append's credit was released and can be retried.
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=0 WHERE room_id=\(bind: roomUUID)").run()
@@ -1869,7 +1850,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SET direct_policy_revision = direct_policy_revision + 1
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).run()
-            let beforeBlockedSend = await fastCache.snapshot()
             let blocked = try await messages.send(.init(
                 roomID: room.roomID,
                 actorUserID: first,
@@ -1881,8 +1861,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
             #expect(denial.reason == .generic)
-            let afterBlockedSend = await fastCache.snapshot()
-            #expect(afterBlockedSend.fallbackAppends == beforeBlockedSend.fallbackAppends + 1)
 
             try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()

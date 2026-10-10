@@ -445,17 +445,7 @@ struct PlainDirectRoomLogBatchPreflightRow {
     let capacityProfileID: String
     let capacityClass: V2GroupCapacityClass
     let frozenAt: Date?
-    let roomEligibleMemberCount: Int?
-    let roomCommandWindowLimit: Int?
-    let roomCommandWindowUsed: Int?
-                            let roomShardLeaseID: UUID?
-    let roomShardLeaseGeneration: Int64?
-    let shardLeaseID: UUID?
-    let shardGeneration: Int64?
-    let shardValidUntil: Date?
-    let shardCommandWindowLimit: Int?
-    let shardCommandWindowUsed: Int?
-                            let actorRole: String?
+    let actorRole: String?
     let senderIsActive: Bool?
     let muted: Bool?
     let recipientUserID: UUID?
@@ -493,16 +483,6 @@ struct PlainDirectRoomLogBatchPreflightRow {
         capacityProfileID = try row.decode(column: "capacity_profile_id")
         capacityClass = try row.decode(column: "capacity_class")
         frozenAt = try row.decode(column: "frozen_at", as: Date?.self)
-        roomEligibleMemberCount = nil
-        roomCommandWindowLimit = nil
-        roomCommandWindowUsed = nil
-        roomShardLeaseID = nil
-        roomShardLeaseGeneration = nil
-        shardLeaseID = nil
-        shardGeneration = nil
-        shardValidUntil = nil
-        shardCommandWindowLimit = nil
-        shardCommandWindowUsed = nil
 
         actorRole = try row.decode(column: "actor_role", as: String?.self)
         senderIsActive = try row.decode(column: "sender_is_active", as: Bool?.self)
@@ -535,10 +515,7 @@ struct PlainDirectRoomLogBatchPreflightRow {
         roomSequence = room.roomSequence; timelineSequence = room.timelineSequence
         membershipRevision = room.membershipRevision; capacityProfileID = room.capacityProfileID
         capacityClass = room.capacityClass; frozenAt = room.frozenAt
-        roomEligibleMemberCount = nil; roomCommandWindowLimit = nil; roomCommandWindowUsed = nil
-        roomShardLeaseID = nil; roomShardLeaseGeneration = nil
-        shardLeaseID = nil; shardGeneration = nil; shardValidUntil = nil
-        shardCommandWindowLimit = nil; shardCommandWindowUsed = nil
+
         actorRole = "member"; senderIsActive = true; muted = false
         recipientUserID = context.recipientID; senderProfileVisibleToRecipient = context.senderProfileVisibleToRecipient
         self.directPolicyRevision = directPolicyRevision; senderPolicyRevision = 0; recipientPolicyRevision = 0
@@ -589,75 +566,13 @@ struct PlainDirectRoomLogBatchPreflightRow {
     }
 
     func directPolicyCacheEntry() throws -> V2DirectSendPolicyCache.Entry {
-        guard let directPolicyRevision, let senderPolicyRevision,
-              let recipientPolicyRevision
+        guard let directPolicyRevision, let senderPolicyRevision, let recipientPolicyRevision
         else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
-        let policy = try directPolicySnapshot()
-        return .init(
-            recipientID: policy.recipientUserID,
-            directPairRevision: directPolicyRevision,
-            senderPolicyRevision: senderPolicyRevision,
-            recipientPolicyRevision: recipientPolicyRevision,
-            senderProfileVisibleToRecipient: policy.senderProfileVisibleToRecipient,
-            senderCanSend: policy.senderCanSend,
-            senderIsActive: senderIsActive == true,
-            recipientIsActive: policy.recipientIsActive,
-            blocked: policy.blocked,
-            isFriend: policy.isFriend,
-            senderHasReplied: policy.senderHasReplied,
-            recipientHasReplied: policy.recipientHasReplied,
-            allowsStrangers: policy.allowsStrangers,
-            senderAccountKind: policy.senderAccountKind,
-            senderAccountStatus: policy.senderAccountStatus,
-            senderAllowsServiceMessages: policy.senderAllowsServiceMessages,
-            recipientAccountKind: policy.recipientAccountKind,
-            recipientAccountStatus: policy.recipientAccountStatus,
-            recipientAllowsCustomerMessages: policy.recipientAllowsCustomerMessages
-        )
+        return try directPolicySnapshot().cacheEntry(directPairRevision: directPolicyRevision,
+            senderPolicyRevision: senderPolicyRevision, recipientPolicyRevision: recipientPolicyRevision,
+            senderIsActive: senderIsActive == true)
     }
 
-    func admissionSnapshot() throws -> AdmissionSnapshotRow {
-        guard let roomEligibleMemberCount, let roomCommandWindowLimit,
-              let roomCommandWindowUsed, let roomShardLeaseID,
-              let roomShardLeaseGeneration, let shardLeaseID,
-              let shardGeneration, let shardValidUntil,
-              let shardCommandWindowLimit, let shardCommandWindowUsed
-        else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
-        return .init(
-            roomEligibleMemberCount: roomEligibleMemberCount,
-            roomCommandWindowLimit: roomCommandWindowLimit,
-            roomCommandWindowUsed: roomCommandWindowUsed,
-
-            roomShardLeaseID: roomShardLeaseID,
-            roomShardLeaseGeneration: roomShardLeaseGeneration,
-            shardLeaseID: shardLeaseID,
-            shardGeneration: shardGeneration,
-            shardValidUntil: shardValidUntil,
-            shardCommandWindowLimit: shardCommandWindowLimit,
-            shardCommandWindowUsed: shardCommandWindowUsed,
-
-            actorRole: actorRole,
-            senderIsActive: senderIsActive,
-            muted: muted
-        )
-    }
-
-    /// 已预扣费的房间信用路径不再次物化 `room_admission`；
-    /// 下方的分片行是传给持久额度池的确切状态。
-    ///
-    /// - Returns: 分片行。
-    /// - Throws: 分片字段缺失时抛出。
-    func shard() throws -> ShardRow {
-        guard let shardLeaseID, let shardGeneration, let shardValidUntil,
-              let shardCommandWindowLimit, let shardCommandWindowUsed
-        else { throw V2AtomicRoomWriteBatchError(reason: .preflightMismatch) }
-        return .init(
-            leaseID: shardLeaseID,
-            generation: shardGeneration,
-            validUntil: shardValidUntil,
-            commandWindowLimit: shardCommandWindowLimit,
-            commandWindowUsed: shardCommandWindowUsed)
-    }
 }
 
 /// Generated only from opaque runtime executions, never client input.

@@ -68,37 +68,37 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
     ///   Bearer 密钥、运维主体、分片注册表 JSON 或数据库策略）时抛出
     ///   ``V2GatewayRuntimeConfigurationError/invalid(_:)``。
     public init(environment: any V2RuntimeEnvironment) throws {
-        databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
+        databaseURL = try v2RequiredEnvironmentValue("IM_V2_DATABASE_URL", environment: environment)
         databasePolicy = try .init(environment: environment)
         listener = try .init(
-            host: Self.required("IM_V2_OPERATOR_REPLAY_LISTEN_HOST", environment: environment),
-            port: Self.integer("IM_V2_OPERATOR_REPLAY_LISTEN_PORT", environment: environment)
+            host: v2RequiredEnvironmentValue("IM_V2_OPERATOR_REPLAY_LISTEN_HOST", environment: environment),
+            port: v2RequiredEnvironmentInteger("IM_V2_OPERATOR_REPLAY_LISTEN_PORT", environment: environment)
         )
-        let token = try Self.required("IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64", environment: environment)
+        let token = try v2RequiredEnvironmentValue("IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64", environment: environment)
         do {
             authenticator = try .init(base64EncodedBearerToken: token)
         } catch {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_REPLAY_BEARER_TOKEN_BASE64")
         }
-        let principal = try Self.required("IM_V2_OPERATOR_REPLAY_PRINCIPAL", environment: environment)
+        let principal = try v2RequiredEnvironmentValue("IM_V2_OPERATOR_REPLAY_PRINCIPAL", environment: environment)
         guard V2DurableWorkOperatorReplayService.isValidPrincipal(principal) else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_REPLAY_PRINCIPAL")
         }
         operatorPrincipal = principal
-        let accountDisableToken = try Self.required("IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64", environment: environment)
+        let accountDisableToken = try v2RequiredEnvironmentValue("IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64", environment: environment)
         do {
             accountDisableAuthenticator = try .init(base64EncodedBearerToken: accountDisableToken)
         } catch {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_ACCOUNT_DISABLE_BEARER_TOKEN_BASE64")
         }
-        let accountDisablePrincipal = try Self.required("IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL", environment: environment)
+        let accountDisablePrincipal = try v2RequiredEnvironmentValue("IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL", environment: environment)
         guard V2DurableWorkOperatorReplayService.isValidPrincipal(accountDisablePrincipal) else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_OPERATOR_ACCOUNT_DISABLE_PRINCIPAL")
         }
         accountDisableOperatorPrincipal = accountDisablePrincipal
-        capabilityProfile = try Self.required("IM_V2_CAPABILITY_PROFILE", environment: environment)
+        capabilityProfile = try v2RequiredEnvironmentValue("IM_V2_CAPABILITY_PROFILE", environment: environment)
         userShardStorage = try V2UserShardStorageConfiguration.parseRegistryJSON(
-            Self.required("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
+            v2RequiredEnvironmentValue("IM_V2_USER_SHARD_STORES_JSON", environment: environment)
         )
         // 没有房间注册表时，个人事件和转发重放都没有已配置的来源所有者，
         // 也绝不回退到控制数据库。
@@ -117,32 +117,4 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
             additionalConnections: resolutionConnections)
     }
 
-    /// 读取必需的环境变量并去除首尾空白。
-    ///
-    /// - Parameters:
-    ///   - key: 环境变量名。
-    ///   - environment: 运行时环境视图。
-    /// - Returns: 非空的变量取值。
-    /// - Throws: 变量缺失或去除空白后为空时抛出
-    ///   ``V2GatewayRuntimeConfigurationError/missing(_:)``。
-    private static func required(_ key: String, environment: any V2RuntimeEnvironment) throws -> String {
-        guard let value = environment.value(for: key)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-            throw V2GatewayRuntimeConfigurationError.missing(key)
-        }
-        return value
-    }
-
-    /// 读取必需的整数环境变量。
-    ///
-    /// - Parameters:
-    ///   - key: 环境变量名。
-    ///   - environment: 运行时环境视图。
-    /// - Returns: 解析后的整数。
-    /// - Throws: 变量缺失时抛出 ``V2GatewayRuntimeConfigurationError/missing(_:)``；
-    ///   无法解析为整数时抛出 ``V2GatewayRuntimeConfigurationError/invalid(_:)``。
-    private static func integer(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int {
-        let value = try required(key, environment: environment)
-        guard let result = Int(value) else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
-        return result
-    }
 }

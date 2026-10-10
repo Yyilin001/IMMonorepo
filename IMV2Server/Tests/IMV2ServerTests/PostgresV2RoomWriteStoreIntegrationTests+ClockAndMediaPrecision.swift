@@ -1066,11 +1066,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     rooms.append(opened.roomID)
                 }
             } else { rooms = batch ? [roomID, roomID] : [roomID] }
-            let cache = V2DirectRoomLogFastAppendCache()
             func store(warm: Bool) throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: warm ? cache : .init())
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             }
             let warm = try store(warm: true)
             let replay = try store(warm: false)
@@ -1642,13 +1640,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     rooms.append(room.roomID)
                 }
             }
-            let fastCache = V2DirectRoomLogFastAppendCache()
-            func writer(cache: V2DirectRoomLogFastAppendCache) throws -> PostgresV2RoomWriteStore {
+            func writer() throws -> PostgresV2RoomWriteStore {
                 PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled,
-                    directRoomLogFastAppendCache: cache)
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
             }
-            let warm = try writer(cache: fastCache)
+            let warm = try writer()
             func request(_ index: Int) throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: rooms[index], senderUserID: hybrid && index == 1 ? .init(uuid: memberTwoUUID) : senderID,
                     clientMessageID: .init(uuid: UUID()), text: "Room log after mutation", limits: .init(maxUTF8Bytes: 64)),
@@ -1678,16 +1674,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                       edited.messageID == message.messageID, edited.messageRevision == 2 else { throw CancellationError() }
             }
             let eventCount = try await count("im_v2.room_events", on: sql)
-            let beforeFast = await fastCache.snapshot()
             let active = warm
             let requests = try [request(0), request(1)]
             let outcomes = try await active.acceptAtomically(requests: requests)
             #expect(outcomes.count == 2)
-            if path == "direct-hot" {
-                let afterFast = await fastCache.snapshot()
-                #expect(afterFast.committedAppends - beforeFast.committedAppends == 2)
-                #expect(afterFast.fallbackAppends == beforeFast.fallbackAppends)
-            }
             for (index, outcome) in outcomes.enumerated() {
                 guard case .accepted(let message) = outcome else { throw CancellationError() }
                 #expect(message.roomSequence == UInt64(hybrid ? index + 4 : 3))

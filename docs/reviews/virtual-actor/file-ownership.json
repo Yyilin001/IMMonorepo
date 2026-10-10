@@ -1226,10 +1226,6 @@
       "owner": "D1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomLogFastAppendCache.swift",
-      "owner": "D1"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift",
       "owner": "D6"
     },
@@ -1723,6 +1719,10 @@
     {
       "path": "scripts/generate_v2_protobuf.sh",
       "owner": "V1"
+    },
+    {
+      "path": "IMV2Server/Sources/IMV2Server/V2EnvironmentParsing.swift",
+      "owner": "C0"
     }
   ]
 }

@@ -840,7 +840,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 if let activationScope { return local.usingActivationScope(activationScope) }
                 return local
             }
-            let fastAppendCache = V2DirectRoomLogFastAppendCache()
             let isolatingWriterLocal = PostgresV2RoomWriteStore(
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(
@@ -886,10 +885,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     now: now
                 ),
             ]
-            // Cold direct batches cannot bypass per-room admission; the
-            // batcher retries each request through the scalar path.
+            // A mismatched profile is isolated by authorization preflight before any write.
             await #expect(throws: V2AtomicRoomWriteBatchError(
-                reason: .incompatibleConfiguration
+                reason: .authorizationState, isolatedRequestIndices: [1]
             )) {
                 try await isolatingWriter.acceptAtomically(
                     requests: profileIsolationRequests
@@ -907,14 +905,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writerLocal = PostgresV2RoomWriteStore(
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: fastAppendCache)
+                contentReviewMode: .disabled)
             let writer = try selected(writerLocal)
             let messages = V2SendMessageService(
                 store: writer, capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { now }
             )
-            // Cold commands use the scalar transaction path.
+            // Cold direct commands are eligible for transactional batch preparation.
             let coldRequests: [V2RoomWriteRequest] = [
                 .init(
                     command: try .init(
@@ -943,21 +940,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     now: now
                 ),
             ]
-            #expect(await writer.atomicBatchEligibility(requests: coldRequests) == [false, false])
-            await #expect(throws: V2AtomicRoomWriteBatchError(
-                reason: .incompatibleConfiguration
-            )) {
-                try await writer.acceptAtomically(requests: coldRequests)
-            }
-            var coldBatched: [V2SendMessageOutcome] = []
-            for request in coldRequests {
-                coldBatched.append(try await writer.accept(
-                    command: request.command,
-                    capacityProfile: request.capacityProfile,
-                    identifiers: request.identifiers,
-                    now: request.now
-                ))
-            }
+            #expect(await writer.atomicBatchEligibility(requests: coldRequests) == [true, true])
+            let coldBatched = try await writer.acceptAtomically(requests: coldRequests)
             #expect(coldBatched.allSatisfy {
                 if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
                 return false
@@ -1068,7 +1052,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("expected first post-revision cache warm acceptance")
                 return
             }
-            let mixedFastCacheRequests: [V2RoomWriteRequest] = [
+            let mixedPolicyRequests: [V2RoomWriteRequest] = [
                 .init(
                     command: try .init(
                         roomID: room.roomID,
@@ -1100,21 +1084,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     now: now
                 ),
             ]
-            await #expect(throws: V2AtomicRoomWriteBatchError(
-                reason: .incompatibleConfiguration
-            )) {
-                try await writer.acceptAtomically(requests: mixedFastCacheRequests)
-            }
-            var mixedFastCacheBatch: [V2SendMessageOutcome] = []
-            for request in mixedFastCacheRequests {
-                mixedFastCacheBatch.append(try await writer.accept(
-                    command: request.command,
-                    capacityProfile: request.capacityProfile,
-                    identifiers: request.identifiers,
-                    now: request.now
-                ))
-            }
-            #expect(mixedFastCacheBatch.allSatisfy {
+            let mixedPolicyBatch = try await writer.acceptAtomically(requests: mixedPolicyRequests)
+            #expect(mixedPolicyBatch.allSatisfy {
                 if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
                 return false
             })
@@ -1125,16 +1096,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: CountRow.self)
             if actorScoped {
                 let beforeMessages = try await count("im_v2.messages", on: sql)
-                let beforeFast = await fastAppendCache.snapshot()
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: secondRoom.roomID.uuidValue!)").run()
                 await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await writer.acceptAtomically(requests: coldRequests) }
                 #expect(try await count("im_v2.messages", on: sql) == beforeMessages)
-                let afterFast = await fastAppendCache.snapshot()
-                #expect(afterFast.attemptedAppends == beforeFast.attemptedAppends + 2)
-                #expect(afterFast.committedAppends == beforeFast.committedAppends)
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=0 WHERE room_id=\(bind: secondRoom.roomID.uuidValue!)").run()
             }
-            let fastAppendBeforeSteadyStateBatch = await fastAppendCache.snapshot()
             let batched = try await writer.acceptAtomically(requests: [
                 .init(
                     command: try .init(
@@ -1180,18 +1146,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 projectionRecordsAfterSteadyStateBatch?.value
                     == projectionRecordsBeforeSteadyStateBatch?.value
             )
-            let fastAppendAfterSteadyStateBatch = await fastAppendCache.snapshot()
-            #expect(
-                fastAppendAfterSteadyStateBatch.committedAppends
-                    == fastAppendBeforeSteadyStateBatch.committedAppends + 2
-            )
-            #expect(
-                fastAppendAfterSteadyStateBatch.fallbackAppends
-                    == fastAppendBeforeSteadyStateBatch.fallbackAppends
-            )
-            // A same-room set cannot use the conditional batch statement,
-            // because it advances one cursor per room. The batcher must fall
-            // back to the ordered one-command path.
+            // A same-room batch preserves consecutive committed room sequences.
             let sameRoomRequests: [V2RoomWriteRequest] = [
                 .init(
                     command: try .init(
@@ -1222,20 +1177,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     now: now
                 ),
             ]
-            await #expect(throws: V2AtomicRoomWriteBatchError(
-                reason: .incompatibleConfiguration
-            )) {
-                try await writer.acceptAtomically(requests: sameRoomRequests)
-            }
-            var sameRoomBatch: [V2SendMessageOutcome] = []
-            for request in sameRoomRequests {
-                sameRoomBatch.append(try await writer.accept(
-                    command: request.command,
-                    capacityProfile: request.capacityProfile,
-                    identifiers: request.identifiers,
-                    now: request.now
-                ))
-            }
+            let sameRoomBatch = try await writer.acceptAtomically(requests: sameRoomRequests)
             guard case .accepted(let firstSameRoomMessage) = sameRoomBatch[0],
                   case .accepted(let secondSameRoomMessage) = sameRoomBatch[1],
 
@@ -1249,7 +1191,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.room_admission
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: CapacityRow.self))
-            #expect(hotRoomAdmission.commandWindowUsed == 9)
+            #expect(hotRoomAdmission.commandWindowUsed == 0)
 
             try await sql.raw("""
                 DELETE FROM im_v2.user_relationships
@@ -1279,7 +1221,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.content_review_jobs", on: sql) == 1)
 
             _ = try await PostgresV2AccountPreferenceOperationStore(database: resources.database(.psql), projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: resources.database(.psql), ownerDatabases: [:])).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(try .init("00000000-0000-0000-0000-00000000c005")), value: .strangerMessage(.deny), now: now)
-            let fastAppendBeforeStalePolicy = await fastAppendCache.snapshot()
             let stalePolicyAttempt = try await messages.send(.init(
                 roomID: room.roomID, actorUserID: senderID,
                 clientMessageID: try .init("00000000-0000-0000-0000-00000000c006"),
@@ -1290,11 +1231,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return
             }
             #expect(stalePolicyDenial.reason == .generic)
-            let fastAppendAfterStalePolicy = await fastAppendCache.snapshot()
-            #expect(
-                fastAppendAfterStalePolicy.fallbackAppends
-                    == fastAppendBeforeStalePolicy.fallbackAppends + 1
-            )
 
             let roomLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: resources.database(.psql)))
             let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
@@ -1373,8 +1309,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.room_admission
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: CapacityRow.self))
-            #expect(roomAdmission.commandWindowUsed == 10)
-
+            #expect(roomAdmission.commandWindowUsed == 0)
 
             // Warm the actual cached append, then corrupt membership without
             // changing its revision. A cache revision match must not authorize
@@ -1388,7 +1323,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     return
                 }
             }
-            let beforeCorruptFast = await fastAppendCache.snapshot()
             let secondRoomUUID = try #require(secondRoom.roomID.uuidValue)
             try await sql.raw("""
                 INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
@@ -1405,10 +1339,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     clientMessageID: .init(uuid: UUID()), text: "must reject third member"
                 ))
             }
-            let afterCorruptFast = await fastAppendCache.snapshot()
-            #expect(afterCorruptFast.attemptedAppends == beforeCorruptFast.attemptedAppends + 1)
-            #expect(afterCorruptFast.fallbackAppends == beforeCorruptFast.fallbackAppends + 1)
-            #expect(afterCorruptFast.committedAppends == beforeCorruptFast.committedAppends)
             #expect(try await directWriteArtifactCounts(sql: sql) == beforeCorruptArtifacts)
             #expect(try await sql.raw("""
                 SELECT room_sequence AS value FROM im_v2.rooms

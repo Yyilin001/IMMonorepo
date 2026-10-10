@@ -46,7 +46,12 @@ struct MessageOperationLockBatchStatement: PostgresPreparedStatement {
             FROM unnest($1::uuid[], $2::uuid[], $3::uuid[]) WITH ORDINALITY AS input(
                 room_id, sender_id, client_message_id, ordinality
             )
-        ), input AS MATERIALIZED (
+        ), \(orderedLocksSQL)
+        """
+
+    /// 固定的排序和递归加锁 SQL，同时供类型化绑定与 SQLKit 绑定使用。
+    static let orderedLocksSQL = """
+        input AS MATERIALIZED (
             SELECT (row_number() OVER (ORDER BY lock_key, ordinal) - 1)::integer AS ordinal, lock_key
             FROM key_input
         ), locked(ordinal, lock_acquired) AS (

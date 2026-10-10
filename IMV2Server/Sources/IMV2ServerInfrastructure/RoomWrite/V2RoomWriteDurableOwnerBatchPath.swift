@@ -130,8 +130,7 @@ struct V2RoomWriteDurableOwnerBatchPath: Sendable {
             appends.append(.init(originalIndex: item.index, request: request, cacheKey: ordered[ordinal].cacheKey,
                 roomID: item.roomID, senderID: item.senderID, input: input, now: request.now, directContext: context,
                 policyCacheEntry: cacheEntry, advancesReplyMarker: !context.senderHasReplied,
-                fastAppendRoomShardID: room.roomShardID, fastAppendCapacityProfileID: room.capacityProfileID,
-                fastAppendShardState: nil, commit: .init(outcome: outcome),
+                commit: .init(outcome: outcome),
                 publishesPolicyHints: item.leasedPolicy == nil))
             nextSequences[item.roomID] = nextSequence + 1
             timelineSequences[item.roomID] = Int64(nextTimeline)

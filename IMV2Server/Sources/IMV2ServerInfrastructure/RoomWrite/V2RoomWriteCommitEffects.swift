@@ -8,7 +8,6 @@ import IMV2Core
 struct V2RoomWriteCommitEffects: Sendable {
     let ownership: V2RoomWriteTransactionOwnership
     let directSendPolicyCache: V2DirectSendPolicyCache
-    let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache
     let appendStageMetrics: V2DirectRoomLogAppendStageMetrics?
 
     func finalize(
@@ -26,18 +25,9 @@ struct V2RoomWriteCommitEffects: Sendable {
         if let entry = commit.directPolicyCacheUpdate {
             await directSendPolicyCache.insert(entry, for: cacheKey)
         }
-        if let entry = commit.directRoomLogFastAppendCacheUpdate {
-            await directRoomLogFastAppendCache.insert(entry, for: .init(
-                roomID: cacheKey.roomID, senderID: cacheKey.senderID
-            ))
-        }
         if let update = commit.reciprocalDirectReplyCacheUpdate {
             await directSendPolicyCache.markRecipientsHaveReplied([.init(
                 key: update.key,
-                expectedDirectPairRevision: update.expectedDirectPairRevision
-            )])
-            await directRoomLogFastAppendCache.markRecipientsHaveReplied([.init(
-                key: .init(roomID: update.key.roomID, senderID: update.key.senderID),
                 expectedDirectPairRevision: update.expectedDirectPairRevision
             )])
         }
@@ -59,13 +49,9 @@ struct V2RoomWriteCommitEffects: Sendable {
         let cacheFinalizationStartedAt = ContinuousClock.now
 
         var policyUpdates: [V2DirectSendPolicyCache.Update] = []
-        var fastAppendUpdates: [V2DirectRoomLogFastAppendCache.Update] = []
         var reciprocalPolicyUpdates: [V2DirectSendPolicyCache.RecipientReplyUpdate] = []
-        var reciprocalFastAppendUpdates: [V2DirectRoomLogFastAppendCache.RecipientReplyUpdate] = []
         policyUpdates.reserveCapacity(committed.count)
-        fastAppendUpdates.reserveCapacity(committed.count)
         reciprocalPolicyUpdates.reserveCapacity(committed.count)
-        reciprocalFastAppendUpdates.reserveCapacity(committed.count)
         for item in committed {
             guard requests.indices.contains(item.originalIndex) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -73,19 +59,9 @@ struct V2RoomWriteCommitEffects: Sendable {
             if let entry = item.commit.directPolicyCacheUpdate {
                 policyUpdates.append(.init(entry: entry, key: item.cacheKey))
             }
-            if let entry = item.commit.directRoomLogFastAppendCacheUpdate {
-                fastAppendUpdates.append(.init(
-                    entry: entry,
-                    key: .init(roomID: item.cacheKey.roomID, senderID: item.cacheKey.senderID)
-                ))
-            }
             if let update = item.commit.reciprocalDirectReplyCacheUpdate {
                 reciprocalPolicyUpdates.append(.init(
                     key: update.key,
-                    expectedDirectPairRevision: update.expectedDirectPairRevision
-                ))
-                reciprocalFastAppendUpdates.append(.init(
-                    key: .init(roomID: update.key.roomID, senderID: update.key.senderID),
                     expectedDirectPairRevision: update.expectedDirectPairRevision
                 ))
             }
@@ -93,14 +69,10 @@ struct V2RoomWriteCommitEffects: Sendable {
         }
 
         // 这些修改只是 Actor 隔离的少量字典和计数器更新。
-        // 每个 Actor 批量调用一次，比每个 PostgreSQL 微批次创建四个子任务
+        // 策略缓存批量更新，避免为每个 PostgreSQL 微批次创建额外子任务
         // 成本更低且更可预测。
         await directSendPolicyCache.insert(policyUpdates)
-        await directRoomLogFastAppendCache.insert(fastAppendUpdates)
         await directSendPolicyCache.markRecipientsHaveReplied(reciprocalPolicyUpdates)
-        await directRoomLogFastAppendCache.markRecipientsHaveReplied(
-            reciprocalFastAppendUpdates
-        )
         appendStageMetrics?.record(
             .cacheFinalization,
             duration: cacheFinalizationStartedAt.duration(to: .now)

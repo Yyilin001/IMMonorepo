@@ -20,7 +20,6 @@ struct GatewayFrontdoorAssembly {
     let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics
     let messageSendBudget: V2GatewayMessageSendBudget
     let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics
-    let directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache
     let directSendPolicyCache: V2DirectSendPolicyCache
 
     /// 根据网关配置建立前台限流和可观测性依赖，供后续装配阶段复用。
@@ -78,14 +77,6 @@ struct GatewayFrontdoorAssembly {
         let messageSendBudget = V2GatewayMessageSendBudget(
             maximumBytes: configuration.messageSendMaximumInFlightBytesProcess)
         let gatewayEventLoopLagMetrics = V2EventLoopLagMetrics()
-        // 所有同址房间写入者共享此有界提示缓存。
-        // 每次条件追加的策略与游标仍以 PostgreSQL 为权威。
-        let directRoomLogFastAppendCache = V2DirectRoomLogFastAppendCache(
-            capacity: configuration.directRoomLogFastAppendCacheMaximumEntries,
-            lifetime: .seconds(
-                configuration.directRoomLogFastAppendCacheLifetimeSeconds
-            )
-        )
         let directSendPolicyCache = V2DirectSendPolicyCache(
             capacity: configuration.directSendPolicyCacheMaximumEntries
         )
@@ -102,7 +93,6 @@ struct GatewayFrontdoorAssembly {
             directRoomLogAppendStageMetrics: directRoomLogAppendStageMetrics,
             messageSendBudget: messageSendBudget,
             gatewayEventLoopLagMetrics: gatewayEventLoopLagMetrics,
-            directRoomLogFastAppendCache: directRoomLogFastAppendCache,
             directSendPolicyCache: directSendPolicyCache
         )
     }

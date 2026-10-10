@@ -1,51 +1,6 @@
 import Foundation
 import IMV2Core
 
-/// 由传输边缘确认 actor 身份后的发送输入。
-///
-/// 公开协议解码不得直接提供可信 sender。该类型可被进程内代码构造，
-/// 因此调用方必须先完成认证，类型名称本身不构成授权证明。
-public struct V2AuthenticatedSendMessage: Sendable {
-    /// 目标房间标识。
-    public let roomID: RoomID
-    /// 传输边缘认证所得的发送者身份，不能直接信任客户端载荷。
-    public let actorUserID: UserID
-    /// 客户端生成并在重试间保持不变的消息操作标识。
-    public let clientMessageID: ClientMessageID
-    /// 待发送文本，实际限制由领域命令构造检查。
-    public let text: String
-    /// 有序媒体引用，默认无附件。
-    public let media: [V2MediaReference]
-    /// 消息提及目标，默认无提及。
-    public let mentions: [V2MentionTarget]
-    /// 文本实体及其范围，默认无实体。
-    public let entities: [V2MessageEntity]
-    /// 可选回复目标，由存储进一步检查有效性。
-    public let replyTo: V2MessageReplyReference?
-
-    /// 保存已认证发送输入，不在此处执行领域校验或认证。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - actorUserID: 边缘认证所得用户。
-    ///   - clientMessageID: 重试间稳定的客户端操作标识。
-    ///   - text: 消息文本。
-    ///   - media: 有序媒体引用。
-    ///   - mentions: 提及目标。
-    ///   - entities: 文本实体。
-    ///   - replyTo: 可选回复目标。
-    public init(roomID: RoomID, actorUserID: UserID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference] = [], mentions: [V2MentionTarget] = [], entities: [V2MessageEntity] = [], replyTo: V2MessageReplyReference? = nil) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.clientMessageID = clientMessageID
-        self.text = text
-        self.media = media
-        self.mentions = mentions
-        self.entities = entities
-        self.replyTo = replyTo
-    }
-}
-
 /// 消息接受边界返回的业务结果。
 ///
 /// 接受与幂等重放携带原始接受回执；容量拒绝、限流和策略拒绝不等于消息已写入。存储执行失败通过抛出错误报告。
@@ -246,7 +201,6 @@ public extension V2AtomicRoomWriteBatchStore {
     ) async -> [Bool] {
         Array(repeating: true, count: requests.count)
     }
-
 
     /// 将默认资格判断转换为普通批次类别。
     ///

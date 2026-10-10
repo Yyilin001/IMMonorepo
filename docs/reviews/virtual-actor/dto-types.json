@@ -743,7 +743,12 @@
         "public let mentions: [V2MentionTarget]",
         "public let entities: [V2MessageEntity]",
         "public let replyTo: V2MessageReplyReference?"
-      ]
+      ],
+      "status": "retired",
+      "replacedBy": [
+        "V2SendMessageCommand"
+      ],
+      "note": "生产接口使用 V2SendMessageCommand；旧输入仅保留于测试辅助服务。"
     },
     {
       "name": "V2CapacityProfile",

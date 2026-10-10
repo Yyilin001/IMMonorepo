@@ -1,3 +1,4 @@
+import IMV2ServerContracts
 import IMV2ServerApplication
 import Foundation
 import NIOCore

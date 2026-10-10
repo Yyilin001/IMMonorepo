@@ -237,7 +237,6 @@ struct V2RoomWriteScalarAcceptancePath {
                     )
                 }
             }
-            let fastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry? = nil
             let reciprocalReplyCacheUpdate: DirectReplyCacheUpdate?
             if replyMarkerAdvanced,
                let directContext,
@@ -255,7 +254,6 @@ struct V2RoomWriteScalarAcceptancePath {
             return .init(
                 outcome: .accepted(acceptedMessage),
                 directPolicyCacheUpdate: updatedDirectPolicyCacheEntry,
-                directRoomLogFastAppendCacheUpdate: fastAppendCacheUpdate,
                 reciprocalDirectReplyCacheUpdate: reciprocalReplyCacheUpdate,
                 shardAdmissionReservation: nil
 

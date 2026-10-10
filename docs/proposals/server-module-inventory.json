@@ -1,13 +1,13 @@
 {
   "scope": "IMV2Server/Sources/{IMV2Server,IMV2ServerContracts,IMV2ServerApplication,IMV2ServerInfrastructure,IMV2ServerGateway,IMV2ServerHTTP}/**/*.swift",
-  "sourceCount": 605,
+  "sourceCount": 606,
   "classification": {
-    "IMV2Server": 15,
+    "IMV2Server": 16,
     "IMV2ServerApplication": 141,
     "IMV2ServerContracts": 87,
     "IMV2ServerGateway": 28,
-    "IMV2ServerHTTP": 48,
-    "IMV2ServerInfrastructure": 286
+    "IMV2ServerHTTP": 49,
+    "IMV2ServerInfrastructure": 285
   },
   "files": [
     {
@@ -131,6 +131,15 @@
         "Synchronization"
       ],
       "migrationNote": "process configuration, readiness or concrete assembly"
+    },
+    {
+      "source": "IMV2Server/V2EnvironmentParsing.swift",
+      "proposedTarget": "IMV2Server",
+      "imports": [
+        "Foundation",
+        "IMV2ServerContracts"
+      ],
+      "migrationNote": "当前模块内的公共边界实现，合并重复辅助代码。"
     },
     {
       "source": "IMV2Server/V2GatewayRuntimeConfiguration.swift",
@@ -2722,6 +2731,18 @@
         "HTTPTypes",
         "Vapor"
       ]
+    },
+    {
+      "source": "IMV2ServerHTTP/V2HTTPOperationResponse.swift",
+      "proposedTarget": "IMV2ServerHTTP",
+      "imports": [
+        "Foundation",
+        "HTTPTypes",
+        "IMV2Core",
+        "IMV2ServerContracts",
+        "Vapor"
+      ],
+      "migrationNote": "当前模块内的公共边界实现，合并重复辅助代码。"
     },
     {
       "migrationNote": "candidate target; verify before physical move",
@@ -5893,17 +5914,6 @@
         "IMV2ServerApplication",
         "IMV2ServerContracts",
         "Synchronization"
-      ]
-    },
-    {
-      "migrationNote": "candidate target; verify before physical move",
-      "source": "IMV2ServerInfrastructure/V2DirectRoomLogFastAppendCache.swift",
-      "proposedTarget": "IMV2ServerInfrastructure",
-      "imports": [
-        "Foundation",
-        "IMV2Core",
-        "IMV2ServerApplication",
-        "IMV2ServerContracts"
       ]
     },
     {

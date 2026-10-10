@@ -54,60 +54,6 @@ struct RoomRow: Decodable {
     }
 }
 
-struct AdmissionSnapshotRow: Decodable {
-    let roomEligibleMemberCount: Int
-    let roomCommandWindowLimit: Int
-    let roomCommandWindowUsed: Int
-                            let roomShardLeaseID: UUID
-    let roomShardLeaseGeneration: Int64
-    let shardLeaseID: UUID
-    let shardGeneration: Int64
-    let shardValidUntil: Date
-    let shardCommandWindowLimit: Int
-    let shardCommandWindowUsed: Int
-                            let actorRole: String?
-    let senderIsActive: Bool?
-    let muted: Bool?
-
-    var room: AdmissionRow {
-        .init(
-            eligibleMemberCount: roomEligibleMemberCount,
-            commandWindowLimit: roomCommandWindowLimit,
-            commandWindowUsed: roomCommandWindowUsed,
-
-            shardLeaseID: roomShardLeaseID,
-            shardLeaseGeneration: roomShardLeaseGeneration
-        )
-    }
-
-    var shard: ShardRow {
-        .init(
-            leaseID: shardLeaseID,
-            generation: shardGeneration,
-            validUntil: shardValidUntil,
-            commandWindowLimit: shardCommandWindowLimit,
-            commandWindowUsed: shardCommandWindowUsed)
-    }
-
-    enum CodingKeys: String, CodingKey {
-        case roomEligibleMemberCount = "room_eligible_member_count"
-        case roomCommandWindowLimit = "room_command_window_limit"
-        case roomCommandWindowUsed = "room_command_window_used"
-
-        case roomShardLeaseID = "room_shard_lease_id"
-        case roomShardLeaseGeneration = "room_shard_lease_generation"
-        case shardLeaseID = "shard_lease_id"
-        case shardGeneration = "shard_generation"
-        case shardValidUntil = "shard_valid_until"
-        case shardCommandWindowLimit = "shard_command_window_limit"
-        case shardCommandWindowUsed = "shard_command_window_used"
-
-        case actorRole = "actor_role"
-        case senderIsActive = "sender_is_active"
-        case muted
-    }
-}
-
 struct AdmissionRow: Decodable {
     let eligibleMemberCount: Int
     let commandWindowLimit: Int

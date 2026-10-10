@@ -42,6 +42,21 @@ struct DirectMessagePolicySnapshotRow: Decodable {
 }
 
 extension DirectMessagePolicySnapshotRow {
+    /// 逐条和批量预检共享策略投影，持久版本与发送方状态仍由各路径校验。
+    func cacheEntry(directPairRevision: Int64, senderPolicyRevision: Int64,
+                    recipientPolicyRevision: Int64, senderIsActive: Bool) -> V2DirectSendPolicyCache.Entry {
+        .init(recipientID: recipientUserID, directPairRevision: directPairRevision,
+            senderPolicyRevision: senderPolicyRevision, recipientPolicyRevision: recipientPolicyRevision,
+            senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
+            senderCanSend: senderCanSend, senderIsActive: senderIsActive,
+            recipientIsActive: recipientIsActive, blocked: blocked, isFriend: isFriend,
+            senderHasReplied: senderHasReplied, recipientHasReplied: recipientHasReplied,
+            allowsStrangers: allowsStrangers, senderAccountKind: senderAccountKind,
+            senderAccountStatus: senderAccountStatus, senderAllowsServiceMessages: senderAllowsServiceMessages,
+            recipientAccountKind: recipientAccountKind, recipientAccountStatus: recipientAccountStatus,
+            recipientAllowsCustomerMessages: recipientAllowsCustomerMessages)
+    }
+
     func applyingControlPolicy(_ control: V2DirectSendControlPolicy) -> Self {
         .init(recipientUserID: recipientUserID,
             senderProfileVisibleToRecipient: senderProfileVisibleToRecipient, senderCanSend: senderCanSend,

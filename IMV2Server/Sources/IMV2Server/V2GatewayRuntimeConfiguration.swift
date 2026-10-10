@@ -231,16 +231,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     ///
     /// 该缓存只是加速提示；每次 PostgreSQL 追加仍保留持久的修订围栏。
     public let directSendPolicyCacheMaximumEntries: Int
-    /// 条件式房间日志追加快照的有界 LRU 容量。
-    ///
-    /// 这些条目只携带受修订围栏保护的提示；
-    /// 对每条已接受消息而言，PostgreSQL 仍是游标、成员与授权的权威。
-    public let directRoomLogFastAppendCacheMaximumEntries: Int
-    /// 受修订围栏保护的条件式追加提示的存活时长。
-    ///
-    /// 过期条目只会让 PostgreSQL 拒绝该快速尝试并回退；它永远无法授权消息，
-    /// 因此该时长可以安全地覆盖稀疏活跃房间的再次访问间隔，同时仍受 LRU 容量约束。
-    public let directRoomLogFastAppendCacheLifetimeSeconds: Int
     /// 取零会关闭进程本地单聊事件缓存。
     ///
     /// 缓存条目永远不是授权状态，在被提供出去之前总会先经 PostgreSQL 校验。
@@ -299,7 +289,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     }
 
     public init(environment: any V2RuntimeEnvironment) throws {
-        databaseURL = try Self.required("IM_V2_DATABASE_URL", environment: environment)
+        databaseURL = try v2RequiredEnvironmentValue("IM_V2_DATABASE_URL", environment: environment)
         databasePolicy = try .init(environment: environment)
         databaseWorkloadPoolBudget = try .init(environment: environment)
         databaseWorkloadPoolIsolationEnabled = try Self.explicitBoolean(
@@ -323,16 +313,16 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 : databasePolicy.maximumConnectionsPerEventLoop
         }
         tls = try .init(
-            host: try Self.required("IM_V2_TLS_HOST", environment: environment),
-            port: try Self.integer("IM_V2_TLS_PORT", environment: environment),
-            certificateChainPath: try Self.required("IM_V2_TLS_CERTIFICATE_CHAIN_PATH", environment: environment),
-            privateKeyPath: try Self.required("IM_V2_TLS_PRIVATE_KEY_PATH", environment: environment)
+            host: try v2RequiredEnvironmentValue("IM_V2_TLS_HOST", environment: environment),
+            port: try v2RequiredEnvironmentInteger("IM_V2_TLS_PORT", environment: environment),
+            certificateChainPath: try v2RequiredEnvironmentValue("IM_V2_TLS_CERTIFICATE_CHAIN_PATH", environment: environment),
+            privateKeyPath: try v2RequiredEnvironmentValue("IM_V2_TLS_PRIVATE_KEY_PATH", environment: environment)
         )
-        groupInviteSecretIssuer = try .init(base64EncodedKey: Self.required("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64", environment: environment))
-        accessTokenKey = try .init(base64Encoded: try Self.required("IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64", environment: environment))
-        capabilityProfile = try Self.required("IM_V2_CAPABILITY_PROFILE", environment: environment)
-        messageLimits = try .init(maxUTF8Bytes: try Self.integer("IM_V2_MAX_MESSAGE_UTF8_BYTES", environment: environment))
-        frameLimits = try .init(maximumPayloadBytes: try Self.integer("IM_V2_MAX_FRAME_BYTES", environment: environment), acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
+        groupInviteSecretIssuer = try .init(base64EncodedKey: v2RequiredEnvironmentValue("IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64", environment: environment))
+        accessTokenKey = try .init(base64Encoded: try v2RequiredEnvironmentValue("IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64", environment: environment))
+        capabilityProfile = try v2RequiredEnvironmentValue("IM_V2_CAPABILITY_PROFILE", environment: environment)
+        messageLimits = try .init(maxUTF8Bytes: try v2RequiredEnvironmentInteger("IM_V2_MAX_MESSAGE_UTF8_BYTES", environment: environment))
+        frameLimits = try .init(maximumPayloadBytes: try v2RequiredEnvironmentInteger("IM_V2_MAX_FRAME_BYTES", environment: environment), acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
         messageSendOperationsEnabled = try Self.optional("IM_V2_MESSAGE_SEND_OPERATIONS_ENABLED", environment: environment)
             .map { _ in try Self.explicitBoolean("IM_V2_MESSAGE_SEND_OPERATIONS_ENABLED", environment: environment) } ?? true
         messageSendMaximumInFlightPerConnection = try Self.positiveWithDefault(
@@ -404,7 +394,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 "IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_ENTRIES/IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_MAX_BYTES/IM_V2_PREPARED_GROUP_EVENT_PAGE_CACHE_SHARDS"
             )
         }
-        connectionLimits = try .init(maximumInFlightRequests: try Self.integer("IM_V2_MAX_IN_FLIGHT_REQUESTS", environment: environment))
+        connectionLimits = try .init(maximumInFlightRequests: try v2RequiredEnvironmentInteger("IM_V2_MAX_IN_FLIGHT_REQUESTS", environment: environment))
         maximumConnections = try Self.boundedPositive("IM_V2_MAX_CONNECTIONS", maximum: 1_000_000, environment: environment)
         onlineDeliveryMaximumRooms = try Self.positiveWithDefault("IM_V2_ONLINE_DELIVERY_MAX_ROOMS", defaultValue: 65_536, maximum: 1_000_000, environment: environment)
         onlineDeliveryMaximumRelations = try Self.positiveWithDefault("IM_V2_ONLINE_DELIVERY_MAX_RELATIONS", defaultValue: 262_144, maximum: 1_000_000, environment: environment)
@@ -621,7 +611,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         syncWakeCoalescingEnabled = try Self.explicitBoolean(
             "IM_V2_SYNC_WAKE_COALESCING_ENABLED", environment: environment
         )
-        commandSuccessLogSamplePermille = try Self.integer(
+        commandSuccessLogSamplePermille = try v2RequiredEnvironmentInteger(
             "IM_V2_COMMAND_SUCCESS_LOG_SAMPLE_PERMILLE", environment: environment
         )
         guard (0 ... 1_000).contains(commandSuccessLogSamplePermille) else {
@@ -746,32 +736,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             )
         }
         directSendPolicyCacheMaximumEntries = parsedDirectSendPolicyCacheMaximumEntries
-        let rawDirectRoomLogFastAppendCacheMaximumEntries = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES",
-            environment: environment
-        ) ?? "50000"
-        guard let parsedDirectRoomLogFastAppendCacheMaximumEntries = Int(
-            rawDirectRoomLogFastAppendCacheMaximumEntries
-        ), (1 ... 1_048_576).contains(parsedDirectRoomLogFastAppendCacheMaximumEntries) else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_MAX_ENTRIES"
-            )
-        }
-        directRoomLogFastAppendCacheMaximumEntries =
-            parsedDirectRoomLogFastAppendCacheMaximumEntries
-        let rawDirectRoomLogFastAppendCacheLifetimeSeconds = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS",
-            environment: environment
-        ) ?? "600"
-        guard let parsedDirectRoomLogFastAppendCacheLifetimeSeconds = Int(
-            rawDirectRoomLogFastAppendCacheLifetimeSeconds
-        ), (1 ... 3_600).contains(parsedDirectRoomLogFastAppendCacheLifetimeSeconds) else {
-            throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_DIRECT_ROOM_LOG_FAST_APPEND_CACHE_TTL_SECONDS"
-            )
-        }
-        directRoomLogFastAppendCacheLifetimeSeconds =
-            parsedDirectRoomLogFastAppendCacheLifetimeSeconds
         let rawDirectRoomLogEventCacheEntries = Self.optional(
             "IM_V2_DIRECT_ROOM_LOG_EVENT_CACHE_MAX_ENTRIES", environment: environment
         ) ?? "0"
@@ -879,8 +843,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_IDEMPOTENCY_RETENTION_SECONDS")
         }
         metrics = try .init(
-            host: Self.required("IM_V2_METRICS_HOST", environment: environment),
-            port: Self.integer("IM_V2_METRICS_PORT", environment: environment)
+            host: v2RequiredEnvironmentValue("IM_V2_METRICS_HOST", environment: environment),
+            port: v2RequiredEnvironmentInteger("IM_V2_METRICS_PORT", environment: environment)
         )
         metricsRefreshTimeoutMilliseconds = try Self.boundedPositive(
             "IM_V2_METRICS_REFRESH_TIMEOUT_MS", maximum: 60_000, environment: environment
@@ -897,10 +861,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         }
         gatewayNodeID = try Self.gatewayNodeID(environment: environment)
         userShardRoute = try .init(
-            bucket: Self.required("IM_V2_USER_SHARD_BUCKET", environment: environment),
+            bucket: v2RequiredEnvironmentValue("IM_V2_USER_SHARD_BUCKET", environment: environment),
             observedRouterEpoch: try Self.nonNegative("IM_V2_USER_SHARD_ROUTER_EPOCH", environment: environment)
         )
-        directRoomShardID = try Self.required("IM_V2_DIRECT_ROOM_SHARD_ID", environment: environment)
+        directRoomShardID = try v2RequiredEnvironmentValue("IM_V2_DIRECT_ROOM_SHARD_ID", environment: environment)
         do {
             directRoomShardRouter = try .init(rawValue: directRoomShardID)
         } catch {
@@ -908,7 +872,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         }
         do {
             groupRoomShardIDs = try V2GroupRoomShardSelector(
-                rawValue: Self.required(
+                rawValue: v2RequiredEnvironmentValue(
                     "IM_V2_GROUP_ROOM_SHARD_ID", environment: environment
                 )
             ).shardIDs
@@ -1019,7 +983,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             maximumMessagesPerWindow: try Self.positive("IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW", environment: environment),
             window: TimeInterval(try Self.positive("IM_V2_STRANGER_MESSAGE_WINDOW_SECONDS", environment: environment))
         )
-        let rawContentReviewMode = try Self.required("IM_V2_CONTENT_REVIEW_MODE", environment: environment).lowercased()
+        let rawContentReviewMode = try v2RequiredEnvironmentValue("IM_V2_CONTENT_REVIEW_MODE", environment: environment).lowercased()
         guard let parsedContentReviewMode = V2ContentReviewMode(rawValue: rawContentReviewMode) else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_CONTENT_REVIEW_MODE")
         }
@@ -1042,12 +1006,12 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             push = .disabled
         case "apns":
             let endpointKey = try V2PushEndpointEnvelopeKey(
-                base64Encoded: Self.required("IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64", environment: environment)
+                base64Encoded: v2RequiredEnvironmentValue("IM_V2_PUSH_ENDPOINT_ENVELOPE_KEY_BASE64", environment: environment)
             )
-            let apnsTeamID = try Self.required("IM_V2_APNS_TEAM_ID", environment: environment)
-            let apnsKeyID = try Self.required("IM_V2_APNS_KEY_ID", environment: environment)
-            let apnsPrivateKey = try Self.required("IM_V2_APNS_PRIVATE_KEY_RAW_BASE64", environment: environment)
-            let apnsTopic = try Self.required("IM_V2_APNS_TOPIC", environment: environment)
+            let apnsTeamID = try v2RequiredEnvironmentValue("IM_V2_APNS_TEAM_ID", environment: environment)
+            let apnsKeyID = try v2RequiredEnvironmentValue("IM_V2_APNS_KEY_ID", environment: environment)
+            let apnsPrivateKey = try v2RequiredEnvironmentValue("IM_V2_APNS_PRIVATE_KEY_RAW_BASE64", environment: environment)
+            let apnsTopic = try v2RequiredEnvironmentValue("IM_V2_APNS_TOPIC", environment: environment)
             let apns = try V2APNSJWTAuthorizer(
                 teamID: apnsTeamID,
                 keyID: apnsKeyID,
@@ -1065,21 +1029,14 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_PUSH_PROVIDER")
         }
         capacityProfile = try .init(
-            id: try Self.required("IM_V2_CAPACITY_PROFILE_ID", environment: environment),
+            id: try v2RequiredEnvironmentValue("IM_V2_CAPACITY_PROFILE_ID", environment: environment),
             limits: .init(
-                maxEligibleMembers: try Self.integer("IM_V2_MAX_ELIGIBLE_MEMBERS", environment: environment),
-                maxCommandsPerWindow: try Self.integer("IM_V2_MAX_COMMANDS_PER_WINDOW", environment: environment),
+                maxEligibleMembers: try v2RequiredEnvironmentInteger("IM_V2_MAX_ELIGIBLE_MEMBERS", environment: environment),
+                maxCommandsPerWindow: try v2RequiredEnvironmentInteger("IM_V2_MAX_COMMANDS_PER_WINDOW", environment: environment),
 
-                retryAfterSeconds: try Self.integer("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
+                retryAfterSeconds: try v2RequiredEnvironmentInteger("IM_V2_RATE_LIMIT_RETRY_AFTER_SECONDS", environment: environment)
             )
         )
-    }
-
-    private static func required(_ key: String, environment: any V2RuntimeEnvironment) throws -> String {
-        guard let value = environment.value(for: key)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-            throw V2GatewayRuntimeConfigurationError.missing(key)
-        }
-        return value
     }
 
     private static func optional(_ key: String, environment: any V2RuntimeEnvironment) -> String? {
@@ -1094,18 +1051,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
     }
 
-    private static func integer(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int {
-        guard let value = environment.value(for: key)?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
-            throw V2GatewayRuntimeConfigurationError.missing(key)
-        }
-        guard let integer = Int(value) else {
-            throw V2GatewayRuntimeConfigurationError.invalid(key)
-        }
-        return integer
-    }
-
     private static func positive(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int {
-        let result = try integer(key, environment: environment)
+        let result = try v2RequiredEnvironmentInteger(key, environment: environment)
         guard result > 0 else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
         return result
     }
@@ -1150,7 +1097,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     }
 
     private static func nonNegative(_ key: String, environment: any V2RuntimeEnvironment) throws -> Int64 {
-        let result = try integer(key, environment: environment)
+        let result = try v2RequiredEnvironmentInteger(key, environment: environment)
         guard result >= 0 else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
         return Int64(result)
     }
@@ -1164,7 +1111,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     /// - Returns: 合法且已规范化的节点 ID。
     /// - Throws: 变量缺失或格式非法时抛出。
     private static func gatewayNodeID(environment: any V2RuntimeEnvironment) throws -> String {
-        let value = try required("IM_V2_GATEWAY_NODE_ID", environment: environment)
+        let value = try v2RequiredEnvironmentValue("IM_V2_GATEWAY_NODE_ID", environment: environment)
         guard value.range(of: "^[A-Za-z0-9._:-]{1,128}$", options: .regularExpression) != nil else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_GATEWAY_NODE_ID")
         }
@@ -1172,7 +1119,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     }
 
     private static func percentage(_ key: String, environment: any V2RuntimeEnvironment) throws -> Double {
-        let result = try integer(key, environment: environment)
+        let result = try v2RequiredEnvironmentInteger(key, environment: environment)
         guard (0...100).contains(result) else { throw V2GatewayRuntimeConfigurationError.invalid(key) }
         return Double(result) / 100
     }
@@ -1181,7 +1128,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         _ key: String,
         environment: any V2RuntimeEnvironment
     ) throws -> Bool {
-        switch try required(key, environment: environment).lowercased() {
+        switch try v2RequiredEnvironmentValue(key, environment: environment).lowercased() {
         case "true", "1": return true
         case "false", "0": return false
         default: throw V2GatewayRuntimeConfigurationError.invalid(key)

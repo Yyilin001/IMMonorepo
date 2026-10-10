@@ -1,41 +1,6 @@
 import Foundation
+import IMV2ServerContracts
 import Synchronization
-
-/// Closed business vocabulary captured synchronously at loan admission.
-public enum V2DatabaseLoanSource: String, CaseIterable, Sendable {
-    case durableOwner = "durable_owner"
-    case roomSendInitialization = "room_send_initialization"
-    case preparationOwnerRead = "preparation_owner_read"
-    case controlReservation = "control_reservation"
-    case policySnapshot = "policy_snapshot"
-    case lifecycle, renewal, presence
-    case roomWake = "room_wake"
-    case routeLookup = "route_lookup"
-    case realtimePartitionControl = "realtime_partition_control"
-    case realtimeOwnerSnapshot = "realtime_owner_snapshot"
-    case realtimeRecoveryHead = "realtime_recovery_head"
-    case groupEventPull = "group_event_pull"
-    case groupEventSubscribe = "group_event_subscribe"
-    case roomRecovery = "room_recovery"
-    case sync
-    case userStateProjection = "user_state_projection"
-    case query, maintenance, other
-}
-
-public enum V2DatabaseLoanStage: String, CaseIterable, Sendable {
-    case gateQueued = "gate_queued"
-    case awaitingDriver = "awaiting_driver"
-    case betweenSQL = "between_sql"
-    case sql, settled
-}
-
-/// Semantic phase captured at the SQL API call, without inspecting SQL text.
-public enum V2DatabaseLoanSQLPhase: String, CaseIterable, Sendable {
-    case fence
-    case readBody = "read_body"
-    case transactionControl = "transaction_control"
-    case other
-}
 
 public struct V2DatabaseLoanSQLPhaseSnapshot: Equatable, Sendable {
     public var count: UInt64 = 0
@@ -332,3 +297,10 @@ private func v2LoanObservationAdd(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
     let sum = lhs.addingReportingOverflow(rhs)
     return sum.overflow ? .max : sum.partialValue
 }
+
+/// 准入和对外指标共用固定用途标签。
+public typealias V2DatabaseLoanSource = V2DatabaseLoanObservationMetricSource
+
+public typealias V2DatabaseLoanStage = V2DatabaseLoanObservationMetricStage
+
+public typealias V2DatabaseLoanSQLPhase = V2DatabaseLoanObservationMetricSQLPhase

@@ -27,7 +27,6 @@ struct GatewayRoomOwnerAssembly {
         userShardProjectionDelivery: V2PostgresUserShardProjectionDelivery,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
         directSendPolicyCache: V2DirectSendPolicyCache,
-        directRoomLogFastAppendCache: V2DirectRoomLogFastAppendCache,
         directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics
     ) throws -> Self {
         let database = topology.database
@@ -79,7 +78,6 @@ struct GatewayRoomOwnerAssembly {
                     strangerMessagePolicy: configuration.strangerMessagePolicy,
                     contentReviewMode: configuration.contentReviewMode,
                     directSendPolicyCache: directSendPolicyCache,
-                    directRoomLogFastAppendCache: directRoomLogFastAppendCache,
                     appendStageMetrics: directRoomLogAppendStageMetrics)
                     .usingControlDatabase(directSendControlPool.database,
                         authorizationResolutionDatabase: authorizationControlDatabase)

@@ -78,40 +78,6 @@ public struct V2PreparedGroupEventPageCacheSnapshot: Equatable, Sendable {
     }
 }
 
-public struct V2DirectRoomLogFastAppendCacheSnapshot: Sendable, Equatable {
-    public let entries: Int
-    public let lookupHits: Int64
-    public let lookupMisses: Int64
-    public let attemptedAppends: Int64
-    public let committedAppends: Int64
-    public let fallbackAppends: Int64
-    public let insertions: UInt64
-    public let evictions: UInt64
-    public let expirations: UInt64
-
-    public init(
-        entries: Int,
-        lookupHits: Int64,
-        lookupMisses: Int64,
-        attemptedAppends: Int64,
-        committedAppends: Int64,
-        fallbackAppends: Int64,
-        insertions: UInt64 = 0,
-        evictions: UInt64 = 0,
-        expirations: UInt64 = 0
-    ) {
-        self.entries = entries
-        self.lookupHits = lookupHits
-        self.lookupMisses = lookupMisses
-        self.attemptedAppends = attemptedAppends
-        self.committedAppends = committedAppends
-        self.fallbackAppends = fallbackAppends
-        self.insertions = insertions
-        self.evictions = evictions
-        self.expirations = expirations
-    }
-}
-
 public struct V2DirectSendPolicyCacheSnapshot: Equatable, Sendable {
     /// 当前条目数。
     public let entries: Int

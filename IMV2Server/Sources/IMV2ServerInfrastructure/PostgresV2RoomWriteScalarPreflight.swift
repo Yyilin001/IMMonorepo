@@ -361,17 +361,7 @@ struct MessageAcceptanceContextRow: Decodable {
     let priorDirectRecipientUserID: UUID?
     let priorDenialReason: String?
     let priorGroupCapacityClass: V2GroupCapacityClass?
-    let roomEligibleMemberCount: Int?
-    let roomCommandWindowLimit: Int?
-    let roomCommandWindowUsed: Int?
-                            let roomShardLeaseID: UUID?
-    let roomShardLeaseGeneration: Int64?
-    let shardLeaseID: UUID?
-    let shardGeneration: Int64?
-    let shardValidUntil: Date?
-    let shardCommandWindowLimit: Int?
-    let shardCommandWindowUsed: Int?
-                            let actorRole: String?
+    let actorRole: String?
     let senderIsActive: Bool?
     let muted: Bool?
     let recipientUserID: UUID?
@@ -418,17 +408,6 @@ struct MessageAcceptanceContextRow: Decodable {
         case priorDirectRecipientUserID = "prior_direct_recipient_user_id"
         case priorDenialReason = "prior_denial_reason"
         case priorGroupCapacityClass = "prior_group_capacity_class"
-        case roomEligibleMemberCount = "room_eligible_member_count"
-        case roomCommandWindowLimit = "room_command_window_limit"
-        case roomCommandWindowUsed = "room_command_window_used"
-
-        case roomShardLeaseID = "room_shard_lease_id"
-        case roomShardLeaseGeneration = "room_shard_lease_generation"
-        case shardLeaseID = "shard_lease_id"
-        case shardGeneration = "shard_generation"
-        case shardValidUntil = "shard_valid_until"
-        case shardCommandWindowLimit = "shard_command_window_limit"
-        case shardCommandWindowUsed = "shard_command_window_used"
 
         case actorRole = "actor_role"
         case senderIsActive = "sender_is_active"
@@ -502,32 +481,6 @@ struct MessageAcceptanceContextRow: Decodable {
         ).operation()
     }
 
-    func admissionSnapshot() throws -> AdmissionSnapshotRow {
-        guard let roomEligibleMemberCount, let roomCommandWindowLimit,
-              let roomCommandWindowUsed, let roomShardLeaseID,
-              let roomShardLeaseGeneration, let shardLeaseID,
-              let shardGeneration, let shardValidUntil,
-              let shardCommandWindowLimit, let shardCommandWindowUsed
-        else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        return .init(
-            roomEligibleMemberCount: roomEligibleMemberCount,
-            roomCommandWindowLimit: roomCommandWindowLimit,
-            roomCommandWindowUsed: roomCommandWindowUsed,
-
-            roomShardLeaseID: roomShardLeaseID,
-            roomShardLeaseGeneration: roomShardLeaseGeneration,
-            shardLeaseID: shardLeaseID,
-            shardGeneration: shardGeneration,
-            shardValidUntil: shardValidUntil,
-            shardCommandWindowLimit: shardCommandWindowLimit,
-            shardCommandWindowUsed: shardCommandWindowUsed,
-
-            actorRole: actorRole,
-            senderIsActive: senderIsActive,
-            muted: muted
-        )
-    }
-
     func directPolicySnapshot() throws -> DirectMessagePolicySnapshotRow {
         guard let recipientUserID, let senderProfileVisibleToRecipient,
               let recipientIsActive, let blocked, let isFriend,
@@ -553,35 +506,12 @@ struct MessageAcceptanceContextRow: Decodable {
     }
 
     func directPolicyCacheEntry() -> V2DirectSendPolicyCache.Entry? {
-        guard kind == "direct",
-              let recipientUserID, let directPolicyRevision,
-              let senderPolicyRevision, let recipientPolicyRevision,
-              let senderProfileVisibleToRecipient, let senderIsActive,
-              let recipientIsActive,
-              let blocked, let isFriend, let senderHasReplied, let recipientHasReplied,
-              let allowsStrangers
-        else { return nil }
-        return .init(
-            recipientID: recipientUserID,
-            directPairRevision: directPolicyRevision,
-            senderPolicyRevision: senderPolicyRevision,
-            recipientPolicyRevision: recipientPolicyRevision,
-            senderProfileVisibleToRecipient: senderProfileVisibleToRecipient,
-            senderCanSend: senderCanSend,
-            senderIsActive: senderIsActive,
-            recipientIsActive: recipientIsActive,
-            blocked: blocked,
-            isFriend: isFriend,
-            senderHasReplied: senderHasReplied,
-            recipientHasReplied: recipientHasReplied,
-            allowsStrangers: allowsStrangers,
-            senderAccountKind: senderAccountKind,
-            senderAccountStatus: senderAccountStatus,
-            senderAllowsServiceMessages: senderAllowsServiceMessages,
-            recipientAccountKind: recipientAccountKind,
-            recipientAccountStatus: recipientAccountStatus,
-            recipientAllowsCustomerMessages: recipientAllowsCustomerMessages
-        )
+        guard kind == "direct", let directPolicyRevision, let senderPolicyRevision,
+              let recipientPolicyRevision, let senderIsActive,
+              let policy = try? directPolicySnapshot() else { return nil }
+        return policy.cacheEntry(directPairRevision: directPolicyRevision,
+            senderPolicyRevision: senderPolicyRevision, recipientPolicyRevision: recipientPolicyRevision,
+            senderIsActive: senderIsActive)
     }
 
 }

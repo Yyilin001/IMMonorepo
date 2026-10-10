@@ -336,29 +336,6 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             "im_v2_direct_send_policy_cache_removals_total{reason=\"expired\"} \(policy.expirations)",
         ])
     }
-    if let fastAppend = snapshot.directRoomLogFastAppend {
-        lines.append(contentsOf: [
-            "# HELP im_v2_direct_room_log_fast_append_entries Bounded process-local snapshots eligible for a conditional direct append.",
-            "# TYPE im_v2_direct_room_log_fast_append_entries gauge",
-            "im_v2_direct_room_log_fast_append_entries \(fastAppend.entries)",
-            "# HELP im_v2_direct_room_log_fast_append_lookups_total Candidate cache lookup outcomes.",
-            "# TYPE im_v2_direct_room_log_fast_append_lookups_total counter",
-            "im_v2_direct_room_log_fast_append_lookups_total{outcome=\"hit\"} \(fastAppend.lookupHits)",
-            "im_v2_direct_room_log_fast_append_lookups_total{outcome=\"miss\"} \(fastAppend.lookupMisses)",
-            "# HELP im_v2_direct_room_log_fast_append_requests_total Conditional append request outcomes.",
-            "# TYPE im_v2_direct_room_log_fast_append_requests_total counter",
-            "im_v2_direct_room_log_fast_append_requests_total{outcome=\"attempted\"} \(fastAppend.attemptedAppends)",
-            "im_v2_direct_room_log_fast_append_requests_total{outcome=\"committed\"} \(fastAppend.committedAppends)",
-            "im_v2_direct_room_log_fast_append_requests_total{outcome=\"fallback\"} \(fastAppend.fallbackAppends)",
-            "# HELP im_v2_direct_room_log_fast_append_insertions_total New conditional append cache keys inserted.",
-            "# TYPE im_v2_direct_room_log_fast_append_insertions_total counter",
-            "im_v2_direct_room_log_fast_append_insertions_total \(fastAppend.insertions)",
-            "# HELP im_v2_direct_room_log_fast_append_removals_total Conditional append cache removals by bounded reason.",
-            "# TYPE im_v2_direct_room_log_fast_append_removals_total counter",
-            "im_v2_direct_room_log_fast_append_removals_total{reason=\"capacity\"} \(fastAppend.evictions)",
-            "im_v2_direct_room_log_fast_append_removals_total{reason=\"expired\"} \(fastAppend.expirations)",
-        ])
-    }
     if let eventCache = snapshot.directRoomLogEventCache {
         lines.append(contentsOf: [
             "# HELP im_v2_direct_room_log_event_cache_entries Bounded process-local plain direct event cache occupancy.",

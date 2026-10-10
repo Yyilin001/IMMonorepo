@@ -1,5 +1,5 @@
 {
-  "sourceCount": 605,
+  "sourceCount": 604,
   "fileTargets": {
     "IMV2Server/Composition/Room/V2GatewayDomainCommandHandler+RoomActors.swift": "IMV2Server",
     "IMV2Server/Composition/Room/V2GatewayRoomActorServices.swift": "IMV2Server",
@@ -530,7 +530,6 @@
     "IMV2ServerInfrastructure/V2DirectReadReceiptPolicy.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectRoomIdentityReader.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectRoomLogEventCache.swift": "IMV2ServerInfrastructure",
-    "IMV2ServerInfrastructure/V2DirectRoomLogFastAppendCache.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectSendControlPolicyFence.swift": "IMV2ServerInfrastructure",
     "IMV2ServerInfrastructure/V2DirectSendPolicyCache.swift": "IMV2ServerInfrastructure",
@@ -1562,18 +1561,6 @@
       ],
       "referenceLines": {
         "V2DirectRoomLogEventCache": 28
-      }
-    },
-    {
-      "from": "IMV2Server/Composition/V2GatewayRuntimePressureMetricsSource.swift",
-      "fromTarget": "IMV2Server",
-      "to": "IMV2ServerInfrastructure/V2DirectRoomLogFastAppendCache.swift",
-      "toTarget": "IMV2ServerInfrastructure",
-      "symbols": [
-        "V2DirectRoomLogFastAppendCache"
-      ],
-      "referenceLines": {
-        "V2DirectRoomLogFastAppendCache": 27
       }
     },
     {
@@ -15422,18 +15409,6 @@
       ],
       "referenceLines": {
         "V2DirectRoomLogEventCacheSnapshot": 410
-      }
-    },
-    {
-      "from": "IMV2ServerInfrastructure/V2DirectRoomLogFastAppendCache.swift",
-      "fromTarget": "IMV2ServerInfrastructure",
-      "to": "IMV2ServerContracts/V2RuntimeComponentSnapshots.swift",
-      "toTarget": "IMV2ServerContracts",
-      "symbols": [
-        "V2DirectRoomLogFastAppendCacheSnapshot"
-      ],
-      "referenceLines": {
-        "V2DirectRoomLogFastAppendCacheSnapshot": 236
       }
     },
     {

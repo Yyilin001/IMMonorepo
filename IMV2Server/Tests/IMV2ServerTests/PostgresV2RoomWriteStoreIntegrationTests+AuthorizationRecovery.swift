@@ -181,8 +181,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-
-
     #if os(macOS)
     @Test("authorization survives SIGKILL before and after both durable commits", .timeLimit(.minutes(3)),
           arguments: ["send", "forward"], ["before-reservation", "after-reservation", "after-owner", "after-ack"])
@@ -782,11 +780,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
             let room = try await direct.openedIdentity(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache)
+                contentReviewMode: .disabled)
                 .usingControlDatabase(control, authorizationResolutionDatabase: control)
             func command(_ id: ClientMessageID = .init(uuid: UUID()), text: String = "automatic grant") throws -> V2SendMessageCommand {
                 try .init(roomID: room.roomID, senderUserID: senderID, clientMessageID: id, text: text, limits: .init(maxUTF8Bytes: 64))
@@ -799,12 +795,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let used = try #require(try await ownerSQL.raw("SELECT command_window_used AS value FROM im_v2.shard_admission_pools WHERE room_shard_id = 'room-b'").first(decoding: CountRow.self)).value
                 return used
             }
-            let input = try command(), cacheBefore = await cache.snapshot()
+            let input = try command()
             let consumedBefore = try await consumed()
             try await sql.raw("ALTER TABLE im_v2.direct_authorization_intents ADD CONSTRAINT test_reject_ack CHECK (disposition IS NULL) NOT VALID").run()
             await #expect(throws: V2DirectAuthorizationCoordinationError.ownerUnavailable) { try await send(input) }
             #expect(try await consumed() == consumedBefore)
-            if warm { #expect(await cache.snapshot().committedAppends == cacheBefore.committedAppends) }
             #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.messages WHERE client_message_id = \(bind: input.clientMessageID.uuidValue!)").first(decoding: CountRow.self)?.value == 1)
             #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.direct_authorization_intents WHERE disposition IS NULL").first(decoding: CountRow.self)?.value == 1)
             try await sql.raw("ALTER TABLE im_v2.direct_authorization_intents DROP CONSTRAINT test_reject_ack").run()
@@ -826,11 +821,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
             let room = try await direct.openedIdentity(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let cache = V2DirectRoomLogFastAppendCache()
             let base = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache)
+                contentReviewMode: .disabled)
                 .usingControlDatabase(control)
             func command() throws -> V2SendMessageCommand {
                 try .init(roomID: room.roomID, senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
@@ -883,7 +876,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } else {
                 guard case .accepted = result else { throw CancellationError() }
                 #expect(try await count("im_v2.messages", on: ownerSQL) == before + 1)
-                if warm { #expect(await cache.snapshot().committedAppends == 0) }
             }
             let disposition = try await ownerSQL.raw("SELECT disposition AS value FROM im_v2.direct_authorization_receipts WHERE client_message_id = \(bind: input.clientMessageID.uuidValue!)")
                 .first(decoding: StringValueRow.self)?.value
@@ -903,10 +895,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await ownerSQL.raw("UPDATE im_v2.shard_admission_pools SET command_window_limit = 100").run()
             let recipients = [UserID(uuid: memberTwoUUID), UserID(uuid: memberThreeUUID)]
             let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: control), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-b", now: { now })
-            let cache = V2DirectRoomLogFastAppendCache()
             let base = PostgresV2RoomWriteStore(database: owner,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400), contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache).usingControlDatabase(control)
+                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400), contentReviewMode: .disabled).usingControlDatabase(control)
             var requests: [V2RoomWriteRequest] = [], grants: [V2DirectAuthorizationGrant] = []
             for recipient in recipients {
                 let room = try await direct.openedIdentity(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
@@ -934,7 +924,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(outcomes.count == 2 && outcomes.allSatisfy { if case .accepted = $0 { true } else { false } })
             #expect(try await count("im_v2.messages", on: ownerSQL) == before + 2)
             #expect(try await count("im_v2.direct_authorization_receipts", on: ownerSQL) == 5)
-            #expect(await cache.snapshot().committedAppends == 0)
         }
     }
 
@@ -1179,11 +1168,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 rooms.append(room.roomID)
             }
-            let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 20, window: 86_400),
-                contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache).usingControlDatabase(control)
+                contentReviewMode: .disabled).usingControlDatabase(control)
             let roomIDs = rooms
             @Sendable func requests(reversed: Bool = false) throws -> [V2OwnerValidatedRoomWriteRequest] {
                 let ordered = reversed ? Array(roomIDs.reversed()) : roomIDs
@@ -1204,7 +1191,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let first = try await writer.acceptAtomicallyOwnerValidated(requests: requests())
             #expect(first.count == 2)
             #expect(first.allSatisfy { if case .accepted = $0 { true } else { false } })
-            #expect(await cache.snapshot().committedAppends == 0)
             // Reverse arrival order across concurrent batches while sharing a sender.
             let forwardInputs = try requests(), reverseInputs = try requests(reversed: true)
             async let forward = writer.acceptAtomicallyOwnerValidated(requests: forwardInputs)
@@ -1271,11 +1257,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 capacityProfile: profile, roomShardID: "room-b", now: { now })
             let room = try await direct.openedIdentity(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let cache = V2DirectRoomLogFastAppendCache()
             let writer = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled,
-                directRoomLogFastAppendCache: cache).usingControlDatabase(control)
+                contentReviewMode: .disabled).usingControlDatabase(control)
             func request() throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: room.roomID, senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "control authority",
@@ -1293,8 +1277,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 for _ in 0..<2 {
                     guard case .accepted = try await send(request()) else { Issue.record("warm send rejected"); return }
                 }
-                #expect(await cache.snapshot().committedAppends == 0)
-                #expect(await cache.value(for: .init(roomID: room.roomID.uuidValue!, senderID: senderUUID)) == nil)
             }
             if kind == "concurrent-block" {
                 let gate = PostgreSQLTransactionGate()

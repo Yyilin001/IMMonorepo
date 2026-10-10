@@ -144,26 +144,12 @@ struct V2RoomWriteDirectBatchPath: Sendable {
                 senderCapabilityInserted: changes.senderCapabilityInserted,
                 recipientProfileInserted: changes.recipientProfileInserted
             )
-            let fastAppendCacheUpdate: V2DirectRoomLogFastAppendCache.Entry?
-            if V2RoomWriteFastDirectEligibility.isCacheCandidate(cacheEntry),
-               let shardState = append.fastAppendShardState {
-                fastAppendCacheUpdate = .init(
-                    policy: cacheEntry,
-                    roomShardID: append.fastAppendRoomShardID,
-                    capacityProfileID: append.fastAppendCapacityProfileID,
-                    membershipRevision: append.input.membershipRevision,
-                    shardState: shardState
-                )
-            } else {
-                fastAppendCacheUpdate = nil
-            }
             return .init(
                 originalIndex: append.originalIndex,
                 cacheKey: append.cacheKey,
                 commit: .init(
                     outcome: append.commit.outcome,
                     directPolicyCacheUpdate: append.publishesPolicyHints ? cacheEntry : nil,
-                    directRoomLogFastAppendCacheUpdate: append.publishesPolicyHints ? fastAppendCacheUpdate : nil,
                     reciprocalDirectReplyCacheUpdate: append.publishesPolicyHints ? reciprocalReplyCacheUpdate : nil
                 )
             )
@@ -282,8 +268,6 @@ private func directBatchUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID whe
     guard let value = value.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return value
 }
-
-
 
 private func directBatchSigned(_ value: UInt64) throws -> Int64 {
     guard value <= UInt64(Int64.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }

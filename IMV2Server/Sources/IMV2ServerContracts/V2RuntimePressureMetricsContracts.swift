@@ -195,8 +195,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     public let gatewayEventLoopLag: V2RuntimeLatencyHistogramSnapshot?
     /// 私聊发送策略提示缓存的占用、命中、淘汰与过期统计，不暴露缓存键。
     public let directSendPolicy: V2DirectSendPolicyCacheSnapshot?
-    /// 条件式单语句追加的候选缓存及提交、回退统计，不携带业务身份标签。
-    public let directRoomLogFastAppend: V2DirectRoomLogFastAppendCacheSnapshot?
     /// 尽力维护的本地私聊事件缓存统计，包含占用、查询和提交后写入状态。
     public let directRoomLogEventCache: V2DirectRoomLogEventCacheSnapshot?
     /// 共享群事件编码页缓存的条目数、字节数和查询结果，不导出缓存键。
@@ -223,7 +221,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     ///   - directRoomLogAppendStages: 私聊权威追加事务的固定阶段耗时分布，阶段名来自枚举而非动态 SQL。 默认 `nil`，表示未提供。
     ///   - gatewayEventLoopLag: TLS 子通道事件循环上低频探测任务观察到的调度延迟，不等同于请求耗时。 默认 `nil`，表示未提供。
     ///   - directSendPolicy: 私聊发送策略提示缓存的占用、命中、淘汰与过期统计，不暴露缓存键。 默认 `nil`，表示未提供。
-    ///   - directRoomLogFastAppend: 条件式单语句追加的候选缓存及提交、回退统计，不携带业务身份标签。 默认 `nil`，表示未提供。
     ///   - directRoomLogEventCache: 尽力维护的本地私聊事件缓存统计，包含占用、查询和提交后写入状态。 默认 `nil`，表示未提供。
     ///   - preparedGroupEventPageCache: 共享群事件编码页缓存的条目数、字节数和查询结果，不导出缓存键。 默认 `nil`，表示未提供。
     ///   - livePresenceRenewals: 心跳租约续期的合并与数据库批处理统计，不使用连接或用户标识作为标签。 默认 `nil`，表示未提供。
@@ -236,7 +233,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         directRoomLogAppendStages: V2DirectRoomLogAppendStageMetricsSnapshot? = nil,
         gatewayEventLoopLag: V2RuntimeLatencyHistogramSnapshot? = nil,
         directSendPolicy: V2DirectSendPolicyCacheSnapshot? = nil,
-        directRoomLogFastAppend: V2DirectRoomLogFastAppendCacheSnapshot? = nil,
         directRoomLogEventCache: V2DirectRoomLogEventCacheSnapshot? = nil,
         preparedGroupEventPageCache: V2PreparedGroupEventPageCacheSnapshot? = nil,
         livePresenceRenewals: V2LivePresenceRenewalBatcherSnapshot? = nil,
@@ -260,7 +256,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.directRoomLogAppendStages = directRoomLogAppendStages
         self.gatewayEventLoopLag = gatewayEventLoopLag
         self.directSendPolicy = directSendPolicy
-        self.directRoomLogFastAppend = directRoomLogFastAppend
         self.directRoomLogEventCache = directRoomLogEventCache
         self.preparedGroupEventPageCache = preparedGroupEventPageCache
         self.livePresenceRenewals = livePresenceRenewals
