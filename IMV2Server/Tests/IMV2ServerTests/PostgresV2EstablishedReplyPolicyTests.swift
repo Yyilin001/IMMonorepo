@@ -34,11 +34,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             try await controlSQL.raw("INSERT INTO im_v2.user_stranger_message_preferences VALUES (\(bind: memberTwoUUID),false,clock_timestamp())").run()
             let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
-            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control, roomDrainRequired: false),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy),
-                revoke: { _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget })
-            let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner, controlDatabase: control,
-                policyOwners: owners, endpoint: "room-b", maximumRooms: 1, usesCurrentState: true)
+            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control),
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+            let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
+                policyOwners: owners, endpoint: "room-b", maximumRooms: 1)
             let sendDatabase = try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 2, reservedRenewalConnections: 0,
                     maximumQueued: 32, maximumWait: .seconds(10)), sessionTimeouts: .default)
@@ -87,13 +86,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(await host.stop(deadline: .now + .seconds(10)).completed)
                 await resources.shutdownDurableSendOperations()
                 await leases.shutdownLifecycle(); await leases.shutdownRenewals()
-                try await policies.shutdown(); await owners.shutdown()
+                await policies.shutdown(); await owners.shutdown()
             } catch {
                 if hidden { try? await controlSQL.raw("ALTER TABLE im_v2.stranger_reply_hidden RENAME TO user_stranger_message_preferences").run() }
                 _ = await host.stop(deadline: .now + .seconds(10))
                 await resources.shutdownDurableSendOperations()
                 await leases.shutdownLifecycle(); await leases.shutdownRenewals()
-                try? await policies.shutdown(); await owners.shutdown()
+                await policies.shutdown(); await owners.shutdown()
                 throw error
             }
         }

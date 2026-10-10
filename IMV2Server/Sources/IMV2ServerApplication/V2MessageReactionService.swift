@@ -2,39 +2,6 @@ import IMV2ServerContracts
 import Foundation
 import IMV2Core
 
-/// 一次已认证的消息表态请求。
-///
-/// HTTP/领域适配器在完成身份与权限校验后构造该值；
-/// 服务层只负责补齐事件标识并转交存储边界。
-public struct V2AuthenticatedMessageReaction: Sendable {
-    /// 目标房间。
-    public let roomID: RoomID
-    /// 发起表态的已认证用户。
-    public let actorUserID: UserID
-    /// 该次表态操作的稳定标识，用于幂等重试。
-    public let operationID: MessageReactionOperationID
-    /// 被表态的消息。
-    public let messageID: MessageID
-    /// 表态内容（例如表情标识）。
-    public let reaction: String
-    /// 本次要执行的动作（添加或移除）。
-    public let action: V2MessageReactionAction
-
-    /// 创建表态请求。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - actorUserID: 发起表态的已认证用户。
-    ///   - operationID: 该次表态操作的稳定标识。
-    ///   - messageID: 被表态的消息。
-    ///   - reaction: 表态内容。
-    ///   - action: 要执行的动作。
-    public init(roomID: RoomID, actorUserID: UserID, operationID: MessageReactionOperationID, messageID: MessageID, reaction: String, action: V2MessageReactionAction) {
-        self.roomID = roomID; self.actorUserID = actorUserID; self.operationID = operationID
-        self.messageID = messageID; self.reaction = reaction; self.action = action
-    }
-}
-
 /// 消息表态的处理结果。
 public enum V2MessageReactionOutcome: Equatable, Sendable {
     /// 本次调用实际改变了表态状态。
@@ -63,22 +30,6 @@ public protocol V2MessageReactionStore: Sendable {
     /// - Returns: 表态处理结果。
     /// - Throws: 房间/消息不存在、非成员、消息已撤回或持久化失败时抛出。
     func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome
-}
-
-/// 为一次表态变更生成来源事件标识。
-public struct V2MessageReactionIDFactory: Sendable {
-    private let makeUUID: @Sendable () -> UUID
-    /// 创建标识工厂。
-    ///
-    /// - Parameter makeUUID: UUID 生成器，默认使用 `UUID.init`。
-    public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
-    /// 生成一对全新的来源事件标识。
-    ///
-    /// - Returns: 来源事件标识。
-    /// - Throws: UUID 生成失败时抛出。
-    public func make() throws -> EventID {
-        try .init(makeUUID().uuidString)
-    }
 }
 
 /// 消息表态存储的错误分类。

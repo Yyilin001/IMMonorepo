@@ -12,6 +12,41 @@ import Testing
 
 @Suite(.serialized)
 struct V2ResourceProfilePresentationTests {
+    @Test("relationship presentations require a current pair and reject either block direction",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
+    func relationshipAuthorityLifecycle() async throws {
+        let resources = makeV2DatabaseTestResources()
+        var service: V2ResourceProfilePresentationService?
+        do {
+            resources.databases.use(try .postgres(url: #require(ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"])), as: .psql, isDefault: true)
+            let database = resources.database(.psql), sql = try #require(database as? any SQLDatabase)
+            let actor = UserID(uuid: UUID()), target = UserID(uuid: UUID()), device = DeviceID(uuid: UUID())
+            for user in [actor, target] { try await seedProfile(user, sql: sql) }
+            try await sql.raw("INSERT INTO im_v2.auth_devices(user_id,device_id,created_at,last_active_at) VALUES(\(bind: actor.uuidValue!),\(bind: device.uuidValue!),clock_timestamp(),clock_timestamp())").run()
+            let reader = V2ResourceProfilePresentationService(controlDatabase: database,
+                authorization: .init(query: { _, _ in throw V2MediaStoreError.downloadNotAuthorized }),
+                avatars: .init(delivery: NoProfileAvatarDelivery()))
+            service = reader
+            let key = V2ProfileViewLookupKey(userID: target, context: .relationship)
+            let request = try V2ProfilePresentationBatchRequest(keys: [key])
+            #expect(try await reader.read(request, actorUserID: actor, deviceID: device).results == [.unavailable(key)])
+            try await sql.raw("INSERT INTO im_v2.user_relationships(lower_user_id,higher_user_id,state,requested_by_user_id,updated_at) VALUES(LEAST(\(bind: actor.uuidValue!),\(bind: target.uuidValue!)),GREATEST(\(bind: actor.uuidValue!),\(bind: target.uuidValue!)),'pending',\(bind: actor.uuidValue!),clock_timestamp())").run()
+            for state in ["pending", "accepted"] {
+                try await sql.raw("UPDATE im_v2.user_relationships SET state=\(bind: state),updated_at=clock_timestamp() WHERE lower_user_id=LEAST(\(bind: actor.uuidValue!),\(bind: target.uuidValue!)) AND higher_user_id=GREATEST(\(bind: actor.uuidValue!),\(bind: target.uuidValue!))").run()
+                let result = try await reader.read(request, actorUserID: actor, deviceID: device)
+                guard case .presentation = result.results.first else { throw V2MediaStoreError.downloadNotAuthorized }
+            }
+            for (blocker, blocked) in [(actor, target), (target, actor)] {
+                try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: blocker.uuidValue!),\(bind: blocked.uuidValue!),clock_timestamp())").run()
+                #expect(try await reader.read(request, actorUserID: actor, deviceID: device).results == [.unavailable(key)])
+                try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: blocker.uuidValue!) AND blocked_user_id=\(bind: blocked.uuidValue!)").run()
+            }
+            try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id=LEAST(\(bind: actor.uuidValue!),\(bind: target.uuidValue!)) AND higher_user_id=GREATEST(\(bind: actor.uuidValue!),\(bind: target.uuidValue!))").run()
+            #expect(try await reader.read(request, actorUserID: actor, deviceID: device).results == [.unavailable(key)])
+            await reader.close(); try await resources.shutdown()
+        } catch { await service?.close(); try? await resources.shutdown(); throw error }
+    }
+
     @Test("HTTP/author common authorization reads only the current recipient's private alias",
           .enabled(if:ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
     func recipientAliases() async throws {
@@ -163,13 +198,15 @@ struct V2ResourceProfilePresentationTests {
             // Generic membership does not relax commands which require a group.
             #expect(try await executor.execute(.profileVisibilityBatch(.init(roomID: room, actorUserID: actor,
                 roomKind: .group, targetUserIDs: [peer]))) == .notVisible)
-            try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: peer.uuidValue!),\(bind: actor.uuidValue!),clock_timestamp())").run()
-            let blocked = try await reader.read(.init(keys: [ownKey, peerKey]), actorUserID: actor, deviceID: device)
-            guard case .presentation = blocked.results.first else { throw V2MediaStoreError.downloadNotAuthorized }
-            #expect(blocked.results.last == .unavailable(peerKey))
-            let blockedRoom = try await reader.read(.init(keys: roomKeys), actorUserID: actor, deviceID: device)
-            #expect(blockedRoom.results[1] == .unavailable(roomKeys[1]))
-            try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: peer.uuidValue!) AND blocked_user_id=\(bind: actor.uuidValue!)").run()
+            for (blocker, blockedUser) in [(actor, peer), (peer, actor)] {
+                try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: blocker.uuidValue!),\(bind: blockedUser.uuidValue!),clock_timestamp())").run()
+                let blocked = try await reader.read(.init(keys: [ownKey, peerKey]), actorUserID: actor, deviceID: device)
+                guard case .presentation = blocked.results.first else { throw V2MediaStoreError.downloadNotAuthorized }
+                #expect(blocked.results.last == .unavailable(peerKey))
+                let blockedRoom = try await reader.read(.init(keys: roomKeys), actorUserID: actor, deviceID: device)
+                #expect(blockedRoom.results[1] == .unavailable(roomKeys[1]))
+                try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: blocker.uuidValue!) AND blocked_user_id=\(bind: blockedUser.uuidValue!)").run()
+            }
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=3 WHERE room_id=\(bind: room.uuidValue!) AND user_id=\(bind: peer.uuidValue!)").run()
             let departed = try await reader.read(.init(keys: [roomKeys[1]]), actorUserID: actor, deviceID: device)
             #expect(departed.results == [.unavailable(roomKeys[1])])

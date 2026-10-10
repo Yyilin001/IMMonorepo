@@ -72,7 +72,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let operation = UUID()
             let execute: @Sendable (V2RoomActivationWriteScope) async throws -> Void = { scope in
                 let executor = try V2RoomMessagingExecutor(token: scope.token(for: roomUUID),
-                    writes: .init(database: database),
                     capacityProfile: request.capacityProfile, limits: .init(maxUTF8Bytes: 64),
                     maximumEditBytes: 64, now: { now },
                     mutations:.init(database:database,contentReviewMode:.disabled,clock:{now}),reactionOperations:.init(database:database,clock:{now}))

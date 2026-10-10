@@ -31,16 +31,6 @@ public enum V2ReadReceiptOutcome: Equatable, Sendable {
     case idempotencyConflict
 }
 
-/// 已读回执偏好变更结果。
-public enum V2SetReadReceiptPreferencesOutcome: Equatable, Sendable {
-    /// 本次调用实际更新了偏好。
-    case updated(V2ReadReceiptPreferences)
-    /// 同一操作已提交过，返回其原有偏好。
-    case idempotent(V2ReadReceiptPreferences)
-    /// 同一操作标识已被不同载荷占用。
-    case idempotencyConflict
-}
-
 /// 已读回执的持久化能力。
 public protocol V2ReadReceiptStore: Sendable {
     /// 记录一条已读回执。
@@ -51,14 +41,6 @@ public protocol V2ReadReceiptStore: Sendable {
     /// - Returns: 记录结果。
     /// - Throws: 房间或消息不存在、非成员或持久化失败时抛出。
     func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome
-
-    /// 设置已读回执偏好。
-    ///
-    /// - Parameters:
-    ///   - command: 偏好变更命令。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 持久化失败时抛出。
 
     /// 分页读取读者列表。
     ///

@@ -8,65 +8,6 @@ import SQLKit
 import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("combined owner fence samples policy expiry after every policy lock", arguments: [false, true])
-    func combinedOwnerPolicyFenceRejectsExpiry(expireBlockedHolder: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            try await withRoomActivation(database: database, roomID: roomID, shardID: "room-a") { token in
-                let expiry = Date().addingTimeInterval(0.5)
-                let first = V2PolicyAuthorizationHolder(registrationID: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
-                    roomID: token.roomID.uuidValue!, activationID: UUID(), roomOwnerEpoch: token.owner.epoch,
-                    generation: 1, endpoint: "room-a", validUntil: expireBlockedHolder ? Date().addingTimeInterval(30) : expiry)
-                let last = V2PolicyAuthorizationHolder(registrationID: UUID(uuidString: "ffffffff-ffff-ffff-ffff-ffffffffffff")!,
-                    roomID: token.roomID.uuidValue!, activationID: UUID(), roomOwnerEpoch: token.owner.epoch,
-                    generation: 2, endpoint: "room-a", validUntil: expireBlockedHolder ? expiry : Date().addingTimeInterval(30))
-                let policyFence = PostgresV2RoomPolicyLeaseFence(database: database)
-                try await policyFence.install(first); try await policyFence.install(last)
-                let check = try policyFence.combinedCheck([last, first, first])
-                let gate = DurableWaveTupleQueueGate()
-                let deadline = ContinuousClock.now + .seconds(8)
-                let blocker = Task {
-                    do {
-                        try await v2WithRoomScopedTransaction(database: database) { transaction in
-                            let connection = try #require(transaction as? any SQLDatabase)
-                            _ = try await connection.raw("SELECT registration_id FROM im_v2.room_policy_authorization_leases WHERE registration_id=\(bind: last.registrationID) FOR UPDATE").all()
-                            await gate.holdUpdatedRow()
-                        }
-                    } catch { await gate.release(); throw error }
-                }
-                await gate.waitUntilHolderReady()
-                let waiter = Task {
-                    try await v2WithRoomActivationTransactionWithContext(database: database, deadline: deadline) { transaction, fence in
-                        let connection = try #require(transaction as? any SQLDatabase)
-                        let pid = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: DurableWaveCount.self)).value
-                        await gate.registerTail(pid)
-                        try await fence.requireDurableOwnersAndActivations(tokens: [token], operations: [
-                            .init(roomID: token.roomID.uuidValue!, senderID: senderUUID, clientMessageID: UUID())], policyCheck: check)
-                    }
-                }
-                do {
-                    var blocked = false
-                    while ContinuousClock.now < deadline {
-                        if let pid = await gate.tailPIDs.first,
-                           try await sql.raw("SELECT cardinality(pg_blocking_pids(\(bind: pid)::integer))::bigint AS value")
-                            .first(decoding: DurableWaveCount.self)?.value ?? 0 > 0 { blocked = true; break }
-                        try await Task.sleep(for: .milliseconds(10))
-                    }
-                    #expect(blocked)
-                    while try await sql.raw("SELECT CASE WHEN clock_timestamp()>=\(bind: expiry) THEN 1 ELSE 0 END::bigint AS value")
-                        .first(decoding: DurableWaveCount.self)?.value ?? 0 == 0 {
-                        guard ContinuousClock.now < deadline else { throw V2PolicyAuthorizationLifecycleError.corruptPersistence }
-                        try await Task.sleep(for: .milliseconds(10))
-                    }
-                    await gate.release(); try await blocker.value
-                    await #expect(throws: V2PolicyAuthorizationLifecycleError.staleVersion) { try await waiter.value }
-                } catch {
-                    await gate.release(); _ = await blocker.result; _ = await waiter.result
-                    throw error
-                }
-            }
-        }
-    }
-
     @Test("configured durable fence rejects expiry observed after the lock wait", arguments: [false, true])
     func durableConfiguredFenceRejectsExpiryAfterLockWait(expiresDuringWait: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in

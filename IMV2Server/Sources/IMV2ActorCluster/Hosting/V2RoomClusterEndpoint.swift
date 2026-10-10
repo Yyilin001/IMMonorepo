@@ -7,10 +7,6 @@ import IMV2Core
 
 /// Implementations return only after the room's actual revocation transaction
 /// commits. The Cluster layer authenticates callers and exact signed replies.
-public protocol V2RoomPolicyRevocationServing: Sendable {
-    func revokePolicyAuthorization(_ target: V2RoomPolicyRevocationWire, deadline: ContinuousClock.Instant) async throws -> V2RoomPolicyRevocationWire
-}
-
 public enum V2PolicyMutationServiceError: Error, Sendable { case identityConflict }
 
 public protocol V2PolicyMutationServing: Sendable {
@@ -20,8 +16,6 @@ public protocol V2PolicyMutationServing: Sendable {
 public protocol V2PolicyOwnershipServing: Sendable {
     func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire]
     func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, deadline: ContinuousClock.Instant) async throws
-    func claimPolicyOwnership(_ request: V2PolicyOwnershipClaimWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicyOwnerStateWire]
-    func invalidatePolicyCache(_ request: V2PolicyCacheInvalidationWire, deadline: ContinuousClock.Instant) async throws
 }
 extension V2PolicyOwnershipServing {
     public func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire] {
@@ -30,9 +24,7 @@ extension V2PolicyOwnershipServing {
     public func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, deadline: ContinuousClock.Instant) async throws {
         throw V2RoomCallFailure.notAccepted(.unavailable)
     }
-    public func invalidatePolicyCache(_ request: V2PolicyCacheInvalidationWire, deadline: ContinuousClock.Instant) async throws {
-        throw V2RoomCallFailure.notAccepted(.unavailable)
-    }
+
 }
 
 /// The host owns reservations and their physical SQL completion. Callers never
@@ -92,7 +84,6 @@ public actor V2RoomClusterInboundService {
     private let limits: V2ActorAuthenticationLimits
     private let allowedShards: Set<String>
     private let serviceShardAccess: [V2ActorServiceID: Set<String>]
-    private let policyRevocations: (any V2RoomPolicyRevocationServing)?
     private let policyMutations: (any V2PolicyMutationServing)?
     private let policyOwnership: (any V2PolicyOwnershipServing)?
     private let forwardPairs: (any V2RoomForwardPairServing)?
@@ -115,7 +106,6 @@ public actor V2RoomClusterInboundService {
                 maximumInboundRequests: Int,
                 localGeneration: UUID = UUID(),
                 actorSystem: ClusterSystem,
-                policyRevocations: (any V2RoomPolicyRevocationServing)? = nil,
                 policyOwnership: (any V2PolicyOwnershipServing)? = nil,
                 policyMutations: (any V2PolicyMutationServing)? = nil,
                 forwardPairs: (any V2RoomForwardPairServing)? = nil) throws {
@@ -130,7 +120,6 @@ public actor V2RoomClusterInboundService {
         self.limits = limits
         self.allowedShards = allowedShards
         self.serviceShardAccess = serviceShardAccess
-        self.policyRevocations = policyRevocations
         self.policyOwnership = policyOwnership
         self.policyMutations = policyMutations
         self.forwardPairs = forwardPairs
@@ -275,14 +264,6 @@ public actor V2RoomClusterInboundService {
         let shards: Set<String>
         if case .subscriptionRenewBatch(let items) = request { shards = Set(items.map { $0.token.owner.shardID }) }
         else if case .recoveryBatch(let items) = request { shards = Set(items.map { $0.token.owner.shardID }) }
-        else if case .revokePolicyAuthorization(let target) = request,
-                target.endpoint.hasPrefix(V2RoomPolicyEndpointLocator.prefix) {
-            guard let locator = try? V2RoomPolicyEndpointLocator(encoded: target.endpoint),
-                  identity.hostID == .init(uuid: locator.hostID) else {
-                throw V2ActorAuthenticationError.forbidden
-            }
-            shards = [locator.shardID]
-        }
         else { shards = [requestShard(request)] }
         guard shards.isSubset(of: allowedShards),
               shards.isSubset(of: serviceShardAccess[verified.call.serviceID] ?? []) else {
@@ -397,23 +378,6 @@ public actor V2RoomClusterInboundService {
             guard let policyOwnership else { throw V2RoomCallFailure.notAccepted(.unavailable) }
             try await policyOwnership.updatePolicySnapshot(request, deadline: deadline)
             return .acknowledged
-        case .invalidatePolicyCache(let request):
-            guard let policyOwnership else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-            try await policyOwnership.invalidatePolicyCache(request, deadline: deadline)
-            return .acknowledged
-        case .claimPolicyOwnership(let claim):
-            guard let policyOwnership else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-            let leases = try await policyOwnership.claimPolicyOwnership(claim, deadline: deadline)
-            if claim.cachedOnly && leases.isEmpty { return .policyOwnership([]) }
-            guard leases.count == claim.scopes.count, Set(leases.map { $0.owner.scope.key }) == Set(claim.scopes.map(\.key)) else {
-                throw V2RoomCallFailure.outcomeUnknown
-            }
-            return .policyOwnership(leases)
-        case .revokePolicyAuthorization(let target):
-            guard let policyRevocations else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-            let result = try await policyRevocations.revokePolicyAuthorization(target, deadline: deadline)
-            guard result == target else { throw V2RoomCallFailure.outcomeUnknown }
-            return .policyAuthorizationRevoked(result)
         case .activate(let roomID, let owner):
             let resolution = try await host.activate(roomID: roomID, owner: owner, deadline: deadline)
             switch resolution {
@@ -481,7 +445,7 @@ public actor V2RoomClusterInboundService {
 
     private func requestToken(_ request: V2ActorRPCRequest) -> V2RoomActivationToken? {
         switch request {
-        case .activate, .recoveryBatch, .subscriptionRenewBatch, .revokePolicyAuthorization, .claimPolicyOwnership, .mutatePolicy, .invalidatePolicyCache, .policySnapshots, .updatePolicySnapshot: nil
+        case .activate, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot: nil
         case .lookup(let token), .invoke(let token, _), .reserve(let token, _): token
         case .forwardPair(let token, _): token
         case .markDispatched(let grant), .abortReservation(let grant), .finishReservation(let grant, _): grant.token
@@ -492,11 +456,8 @@ public actor V2RoomClusterInboundService {
         switch request {
         case .policySnapshots(let request): request.endpoint
         case .updatePolicySnapshot(let request): request.endpoint
-        case .claimPolicyOwnership(let claim): claim.endpoint
-        case .invalidatePolicyCache(let request): request.endpoint
         case .forwardPair(let token, _): token.owner.shardID
         case .mutatePolicy(let mutation): mutation.endpoint
-        case .revokePolicyAuthorization(let target): target.endpoint
         case .activate(_, let owner): owner.shardID
         case .recoveryBatch, .subscriptionRenewBatch: "" // Handled as the complete shard set before dispatch.
         case .lookup(let token), .invoke(let token, _), .reserve(let token, _): token.owner.shardID
@@ -507,7 +468,7 @@ public actor V2RoomClusterInboundService {
 
     private func isHostOnly(_ request: V2ActorRPCRequest) -> Bool {
         switch request {
-        case .activate, .lookup, .recoveryBatch, .subscriptionRenewBatch, .revokePolicyAuthorization, .claimPolicyOwnership, .mutatePolicy, .invalidatePolicyCache, .policySnapshots, .updatePolicySnapshot, .forwardPair: true
+        case .activate, .lookup, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .forwardPair: true
         default: false
         }
     }

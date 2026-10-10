@@ -5,46 +5,6 @@ import IMV2Core
 import PostgresNIO
 import SQLKit
 
-/// 判断错误是否为发送完成记录的竞争冲突。
-///
-/// 条件追加可能在单条语句内等待操作栅栏，同时保留更早的语句快照。只有这几类精确的
-/// 操作键冲突才意味着「应改走已完成命令路径重试」；其他唯一约束或编程错误必须照常暴露。
-///
-/// - Parameter error: 待判断的错误。
-/// - Returns: 属于发送完成主键或消息唯一键冲突时为 `true`。
-func v2IsSendCompletionRace(_ error: any Error) -> Bool {
-    let state: String?
-    let constraint: String?
-    if let error = error as? PSQLError {
-        state = error.serverInfo?[.sqlState]
-        constraint = error.serverInfo?[.constraintName]
-    } else if let error = error as? PostgresError, case .server(let message) = error {
-        state = message.fields[.sqlState]
-        constraint = message.fields[.constraintName]
-    } else { return false }
-    return state == "23505" && [
-        "message_send_completions_pkey", "messages_room_sender_client_key"
-    ].contains(constraint ?? "")
-}
-
-/// 所有列式与 JSON 房间日志写入图共用的追加片段。
-///
-/// 输入携带已校验的命令指纹；序号与时间来自 `INSERT ... RETURNING`，成员修订来自已加锁的
-/// 输入或分配结果。锁查询跟随并发更新之后，不得再用语句的更旧 MVCC 快照重读房间。
-/// 该片段始终与消息写入处于同一语句和同一事务。
-var v2DirectRoomLogSendCompletionCTE: String { roomLogSendCompletionCTE(isGroup: false) }
-/// Runtime-accepted input already carries the immutable pair recipient.
-var v2RuntimeDirectRoomLogSendCompletionCTE: String { roomLogSendCompletionCTE(isGroup: false, recipientFromInput: true) }
-/// 混合大群房间日志写入使用的追加片段。
-var v2HybridGroupSendCompletionCTE: String { roomLogSendCompletionCTE(isGroup: true) }
-/// 私聊快速路径使用的追加片段，成员修订取自已分配结果。
-var v2FastDirectRoomLogSendCompletionCTE: String { roomLogSendCompletionCTE(
-    isGroup: false, acceptedSource: "eligible", membershipColumn: "expected_membership_revision"
-) }
-var v2ConditionalHybridGroupSendCompletionCTE: String { roomLogSendCompletionCTE(
-    isGroup: true, acceptedSource: "allocated"
-) }
-
 func roomLogSendCompletionCTE(
     isGroup: Bool, acceptedSource: String = "input", membershipColumn: String = "membership_revision",
     recipientFromInput: Bool = false, metadataFromInput: Bool = false

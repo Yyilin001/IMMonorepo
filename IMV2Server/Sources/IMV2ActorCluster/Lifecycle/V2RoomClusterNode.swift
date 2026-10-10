@@ -78,7 +78,6 @@ public actor V2RoomClusterNode {
     private var acceptingDiscoveries = true
     private var clients: [V2RoomClusterClient] = []
     private var localGeneration: UUID?
-    private let policyRevocations: (any V2RoomPolicyRevocationServing)?
     private let policyMutations: (any V2PolicyMutationServing)?
     private let policyOwnership: (any V2PolicyOwnershipServing)?
     private let forwardPairs: (any V2RoomForwardPairServing)?
@@ -88,7 +87,6 @@ public actor V2RoomClusterNode {
                 signer: V2ActorSigningIdentity, trust: V2ActorTrustStore,
                 authenticationLimits: V2ActorAuthenticationLimits,
                 runtimeConfiguration: V2RoomRuntimeConfiguration,
-                policyRevocations: (any V2RoomPolicyRevocationServing)? = nil,
                 policyOwnership: (any V2PolicyOwnershipServing)? = nil,
                 policyMutations: (any V2PolicyMutationServing)? = nil,
                 forwardPairs: (any V2RoomForwardPairServing)? = nil) {
@@ -99,7 +97,6 @@ public actor V2RoomClusterNode {
         self.trust = trust
         self.authenticationLimits = authenticationLimits
         self.runtimeConfiguration = runtimeConfiguration
-        self.policyRevocations = policyRevocations
         self.policyOwnership = policyOwnership
         self.policyMutations = policyMutations
         self.forwardPairs = forwardPairs
@@ -143,7 +140,7 @@ public actor V2RoomClusterNode {
             serviceShardAccess: configuration.serviceShardAccess,
             maximumInboundRequests: runtimeConfiguration.maximumActivationWaitersPerHost,
             localGeneration: generation,
-            actorSystem: system, policyRevocations: policyRevocations, policyOwnership: policyOwnership, policyMutations: policyMutations,
+            actorSystem: system, policyOwnership: policyOwnership, policyMutations: policyMutations,
             forwardPairs: forwardPairs
         )
         self.inbound = inbound

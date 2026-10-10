@@ -10,9 +10,9 @@ import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("accepted imports release policy before finalization and recover without owners or strategy tables",
-          arguments: ["legacy-direct", "legacy-group", "current-direct", "current-group"], [false, true])
+          arguments: ["direct", "group"], [false, true])
     func policyForwardAcceptedRecovery(kind: String, corrupt: Bool) async throws {
-        let group = kind.hasSuffix("group"), usesCurrentState = kind.hasPrefix("current")
+        let group = kind == "group"
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, controlSQL, ownerSQL, groupRoom in
             let now = Date(), profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             for sql in [controlSQL, ownerSQL] {
@@ -29,13 +29,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 room = opened.roomID
             }
             let exports = try await policyFactoryExports(database: control, target: room, profile: profile, now: now)
-            let router = PolicyRecoveryRouter(), legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
-            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control, roomDrainRequired: !usesCurrentState),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy),
-                revoke: { try await router.revoke($0) })
-            let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner, controlDatabase: control,
-                policyOwners: owners, endpoint: "room-b", maximumRooms: 1, usesCurrentState: usesCurrentState)
-            await router.install(policies)
+            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
+            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control),
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+            let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
+                policyOwners: owners, endpoint: "room-b", maximumRooms: 1)
             let write = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                 .usingControlDatabase(control).usingPolicyAuthorizations(policies)
@@ -45,8 +43,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         legacy: legacy, control: control, controlSQL: controlSQL, owner: owner, ownerSQL: ownerSQL,
                         profile: profile, limits: limits, corrupt: corrupt)
                 }
-                try await policies.shutdown(); await owners.shutdown(); await router.clear()
-            } catch { try? await policies.shutdown(); await owners.shutdown(); await router.clear(); throw error }
+                try await policies.shutdown(); await owners.shutdown()
+            } catch { try? await policies.shutdown(); await owners.shutdown(); throw error }
         }
     }
 
@@ -97,7 +95,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let result = try await disable.disable(.init(userID: senderID, operationID: UUID(), reason: .policyEnforcement))
                 await finished.mark(); return result
             }; mutation = changing
-            // The accepting permit must have settled even though finalization
+            // The accepting execution must have settled even though finalization
             // is provably blocked in an actual SQL transaction.
             try await policyRecoveryObserve { await finished.value }
             _ = try await changing.value
@@ -159,13 +157,4 @@ private actor PolicyRecoveryHold {
 private actor PolicyRecoveryFinished {
     private(set) var value = false
     func mark() { value = true }
-}
-private actor PolicyRecoveryRouter {
-    private var service: V2RoomPolicyAuthorizationService?
-    func install(_ service: V2RoomPolicyAuthorizationService) { self.service = service }
-    func clear() { service = nil }
-    func revoke(_ holder: V2PolicyAuthorizationHolder) async throws -> V2PolicyAuthorizationRevocationProof {
-        guard let service else { throw V2PolicyAuthorizationLifecycleError.closed }
-        return try await service.revoke(holder)
-    }
 }

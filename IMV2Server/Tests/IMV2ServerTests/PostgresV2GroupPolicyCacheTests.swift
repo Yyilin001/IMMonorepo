@@ -10,107 +10,45 @@ import Testing
 
 @Suite("bounded group policy cache", .serialized, .timeLimit(.minutes(2)))
 struct PostgresV2GroupPolicyCacheTests {
-    @Test("cancelled eviction retains capacity until durable SQL settles and stale preparation cannot execute")
-    func durableEviction() async throws {
+    @Test("idle current-policy eviction requires no lease SQL and rejects stale preparation")
+    func idleEviction() async throws {
         try await withUserEventDatabase { database, sql, schema in
-            let sender = UUID(), second = UUID(), token = try token()
-            try await seed([sender, second], sql: sql, schema: schema)
-            let recorder = GroupCacheSnapshots(), fence = PostgresV2RoomPolicyLeaseFence(database: database, schema: schema)
-            let registry = makeRegistry(database: database, schema: schema, token: token, recorder: recorder)
+            let sender = UUID(), token = try token()
+            let registry = makeRegistry(database: database, schema: schema, token: token)
             let old = try await registry.runtime(sender: sender, token: token)
-            let command = try command(sender: sender, token: token)
-            let queued = try await old.prepareBatch(commands: [command], callerDeadline: .now + .seconds(20))
-            let holder = try #require(await recorder.holders.first)
-            let held = GroupCacheHold()
-            let transaction = Task {
-                try await database.transaction { transaction in
-                    try await fence.requireActive(holder, transaction: transaction)
-                    let sql = try #require(transaction as? any SQLDatabase)
-                    let pid = try #require(try await sql.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: Count.self)).value
-                    await held.wait(pid: pid)
-                }
-            }
-            var evicting: Task<PostgresV2RoomPolicyAuthorization, any Error>?
+            let queued = try await old.prepareBatch(commands: [command(sender: sender, token: token)],
+                callerDeadline: .now + .seconds(20))
+            try await sql.raw("ALTER TABLE \(unsafeRaw: schema).room_policy_authorization_leases RENAME TO unavailable_group_leases").run()
             do {
-                try await observe { await held.pid != nil }
-                let pid = try #require(await held.pid)
-                let miss = Task { try await registry.runtime(sender: second, token: token) }; evicting = miss
-                try await observe {
-                    try await sql.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE \(bind: pid)::integer=ANY(pg_blocking_pids(pid))").first(decoding: Count.self)?.value ?? 0 > 0
-                }
-                miss.cancel()
+                _ = try await registry.runtime(sender: UUID(), token: token)
                 #expect(await registry.pressure().directions == 1)
-                #expect(await registry.isEvicting())
-                await #expect(throws: V2PolicyAuthorizationLifecycleError.busy) {
-                    try await registry.runtime(sender: UUID(), token: token)
-                }
                 await #expect(throws: V2PolicyAuthorizationLifecycleError.closed) {
                     try await old.executePreparedBatch(queued) { _ in Issue.record("evicted witness executed") }
                 }
-                await held.release(); try await transaction.value
-                await #expect(throws: CancellationError.self) { try await miss.value }
-                #expect(await registry.pressure().directions == 0)
-                #expect(await registry.isEvicting() == false)
-                await #expect(throws: V2PolicyAuthorizationLifecycleError.staleVersion) { try await fence.install(holder) }
-                let replacement = try await registry.runtime(sender: sender, token: token)
-                #expect(replacement !== old && replacement.activationID != old.activationID)
-                try await replacement.warm()
-                let current = try #require(await recorder.holders.last)
-                #expect(current.registrationID != holder.registrationID)
-                #expect(try await registry.revoke(holder).holder == holder)
-                #expect(await replacement.pressure().accepting)
-                // A bounded cache serves more distinct senders than its size.
-                // Unwarmed entries hold no durable permit and can retire cheaply.
-                for _ in 0..<130 { _ = try await registry.runtime(sender: UUID(), token: token) }
-                #expect(await registry.pressure().directions == 1)
-                try await registry.shutdown()
-            } catch {
-                await held.release(); _ = await transaction.result; _ = await evicting?.result
-                try? await registry.shutdown(); throw error
-            }
-        }
-    }
-
-    @Test("failed durable cleanup stays sealed and the same sender retries after database recovery")
-    func failedCleanup() async throws {
-        try await withUserEventDatabase { database, sql, schema in
-            let sender = UUID(), token = try token(), recorder = GroupCacheSnapshots()
-            try await seed([sender], sql: sql, schema: schema)
-            let registry = makeRegistry(database: database, schema: schema, token: token, recorder: recorder)
-            let old = try await registry.runtime(sender: sender, token: token)
-            try await old.warm()
-            try await sql.raw("ALTER TABLE \(unsafeRaw: schema).room_policy_authorization_leases RENAME TO unavailable_group_leases").run()
-            do {
-                await #expect(throws: (any Error).self) {
-                    try await registry.runtime(sender: UUID(), token: token)
-                }
-                #expect(await old.pressure().closed)
-                #expect(await registry.pressure().directions == 1)
-                #expect(await registry.isEvicting() == false)
-                await #expect(throws: V2PolicyAuthorizationLifecycleError.closed) { try await old.warm() }
-                try await sql.raw("ALTER TABLE \(unsafeRaw: schema).unavailable_group_leases RENAME TO room_policy_authorization_leases").run()
                 let replacement = try await registry.runtime(sender: sender, token: token)
                 #expect(replacement !== old)
                 try await replacement.warm()
+                #expect(await replacement.pressure().accepting)
+                for _ in 0..<130 { _ = try await registry.runtime(sender: UUID(), token: token) }
                 #expect(await registry.pressure().directions == 1)
-                #expect(await recorder.holders.count == 2)
-                try await registry.shutdown()
+                await registry.shutdown()
+                try await sql.raw("ALTER TABLE \(unsafeRaw: schema).unavailable_group_leases RENAME TO room_policy_authorization_leases").run()
             } catch {
                 try? await sql.raw("ALTER TABLE \(unsafeRaw: schema).unavailable_group_leases RENAME TO room_policy_authorization_leases").run()
-                try? await registry.shutdown(); throw error
+                await registry.shutdown()
+                throw error
             }
         }
     }
 
-    @Test("cold loads and actual message transactions cannot be evicted", arguments: ["cold", "execution"])
+    @Test("current snapshot loads and actual transactions retain capacity through cancellation and shutdown",
+          arguments: ["cold", "execution"])
     func activeRoots(phase: String) async throws {
-        try await withUserEventDatabase { database, sql, schema in
-            let sender = UUID(), token = try token(), held = GroupCacheHold(), recorder = GroupCacheSnapshots()
-            try await seed([sender], sql: sql, schema: schema)
-            let registry = makeRegistry(database: database, schema: schema, token: token, recorder: recorder,
-                beforeLoad: { if phase == "cold" { await held.wait(pid: 0) } })
+        try await withUserEventDatabase { database, _, schema in
+            let sender = UUID(), token = try token(), held = GroupCacheHold()
+            let registry = makeRegistry(database: database, schema: schema, token: token,
+                beforeLoad: { if phase == "cold" { await held.wait() } })
             let runtime = try await registry.runtime(sender: sender, token: token)
-            if phase == "execution" { try await runtime.warm() }
             let command = try command(sender: sender, token: token)
             let work = Task {
                 if phase == "cold" { try await runtime.warm() }
@@ -120,53 +58,51 @@ struct PostgresV2GroupPolicyCacheTests {
                             let sql = try #require(transaction as? any SQLDatabase)
                             try await execution.requireActive(roomID: token.roomID.uuidValue!, senderID: sender,
                                 clientMessageID: command.clientMessageID.uuidValue!, sql: sql)
-                            await held.wait(pid: 0)
+                            await held.wait()
                         }
                     }
                 }
             }
+            let stopped = GroupCacheShutdownProbe()
+            var stopping: Task<Void, Never>?
             do {
-                try await observe { await held.pid != nil }
+                try await observe { await held.entered }
                 await #expect(throws: V2PolicyAuthorizationLifecycleError.busy) {
                     try await registry.runtime(sender: UUID(), token: token)
                 }
                 #expect(await runtime.pressure().closed == false)
                 #expect(try await registry.runtime(sender: sender, token: token) === runtime)
-                await held.release(); try await work.value
-                _ = try await registry.runtime(sender: UUID(), token: token)
-                #expect(await runtime.pressure().closed)
+                work.cancel()
+                let shutdown = Task { await registry.shutdown(); await stopped.complete() }
+                stopping = shutdown
+                try await observe { await runtime.pressure().closed }
+                #expect(await stopped.done == false)
                 #expect(await registry.pressure().directions == 1)
-                try await registry.shutdown()
+                await #expect(throws: V2PolicyAuthorizationLifecycleError.closed) {
+                    try await registry.runtime(sender: sender, token: token)
+                }
+                await held.release()
+                _ = await work.result
+                await shutdown.value
+                #expect(await stopped.done)
             } catch {
-                await held.release(); _ = await work.result; try? await registry.shutdown(); throw error
+                await held.release(); _ = await work.result; _ = await stopping?.result
+                await registry.shutdown()
+                throw error
             }
         }
     }
 
     private func makeRegistry(database: any Database, schema: String, token: V2RoomActivationToken,
-        recorder: GroupCacheSnapshots, beforeLoad: @escaping @Sendable () async -> Void = {}) -> PostgresV2RoomPolicyAuthorizationRegistry {
-        let journal = PostgresV2PolicyAuthorizationJournal(database: database, schema: schema)
-        let store = PostgresV2AccountPolicySnapshotStore(database: database, schema: schema)
-        let ownerID = UUID()
-        return .init(activation: token, endpoint: "group-cache", fence: .init(database: database, schema: schema),
-            maximumDirections: 1, accountLoader: { sender, registration, activation in
+        beforeLoad: @escaping @Sendable () async -> Void = {}) -> PostgresV2RoomPolicyAuthorizationRegistry {
+        .init(activation: token, endpoint: "group-cache",
+            maximumDirections: 1, currentLoader: { sender, recipient in
+                #expect(recipient == nil)
                 await beforeLoad()
-                let owner = try await journal.acquireOwner(scope: .account(sender), ownerID: ownerID, durationSeconds: 30)
-                let state = try await journal.readOwnerState(owner: owner)
-                let snapshot = try await store.register(sender: sender, state: state, registrationID: registration,
-                    roomID: token.roomID.uuidValue!, activationID: activation, roomOwnerEpoch: token.owner.epoch,
-                    endpoint: "group-cache", durationSeconds: 20)
-                await recorder.record(snapshot.holder)
-                return snapshot
+                return try .account(sender: sender, snapshots: [.init(scope: .account(sender), version: 1,
+                    facts: .account(.init(userID: sender, isActive: true, specialKind: nil,
+                        specialStatus: nil, allowsServiceMessages: nil, allowsCustomerMessages: nil)))])
             })
-    }
-    private func seed(_ users: [UUID], sql: any SQLDatabase, schema: String) async throws {
-        for (index, user) in users.enumerated() {
-            try await sql.raw("""
-                INSERT INTO \(unsafeRaw: schema).public_user_profiles(user_id,public_handle,display_name,created_at,updated_at)
-                VALUES (\(bind: user),\(bind: "groupcache_\(index)"),'Sender',clock_timestamp(),clock_timestamp())
-                """).run()
-        }
     }
     private func token() throws -> V2RoomActivationToken {
         .init(roomID: .init(uuid: UUID()), owner: try .init(shardID: "room-b", epoch: 0),
@@ -181,20 +117,19 @@ struct PostgresV2GroupPolicyCacheTests {
         while .now < deadline { if try await check() { return }; await Task.yield() }
         throw V2PolicyAuthorizationLifecycleError.notDrained
     }
-    private struct Count: Decodable { let value: Int64 }
 }
 
-private actor GroupCacheSnapshots {
-    private(set) var holders: [V2PolicyAuthorizationHolder] = []
-    func record(_ holder: V2PolicyAuthorizationHolder) { holders.append(holder) }
-}
 private actor GroupCacheHold {
-    private(set) var pid: Int64?
+    private(set) var entered = false
     private var released = false
     private var waiter: CheckedContinuation<Void, Never>?
-    func wait(pid: Int64) async {
-        self.pid = pid
+    func wait() async {
+        entered = true
         if !released { await withCheckedContinuation { waiter = $0 } }
     }
     func release() { released = true; waiter?.resume(); waiter = nil }
+}
+private actor GroupCacheShutdownProbe {
+    private(set) var done = false
+    func complete() { done = true }
 }

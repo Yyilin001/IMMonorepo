@@ -3,36 +3,25 @@ import IMV2ActorCluster
 import IMV2ActorContracts
 import IMV2ServerApplication
 
-/// Versioned snapshots load once and receive active updates. Lease-based
-/// registration APIs below remain available only for legacy authorization.
+/// Versioned snapshots load once and receive committed updates from their owners.
 package struct PostgresV2RemotePolicyOwners: Sendable {
     package struct Route: Hashable, Sendable {
         package let host: V2ActorHostIdentity
         package let endpoint: String
-        package let ownerID: UUID
-        package init(host: V2ActorHostIdentity, endpoint: String, ownerID: UUID) {
+        package init(host: V2ActorHostIdentity, endpoint: String) {
             precondition(!endpoint.isEmpty && endpoint.utf8.count <= 512)
-            self.host = host; self.endpoint = endpoint; self.ownerID = ownerID
+            self.host = host; self.endpoint = endpoint
         }
     }
     private let clientProvider: @Sendable () async throws -> V2RoomClusterClient
     private let resolve: @Sendable (String) async throws -> Route
     private let resolveBatch: (@Sendable ([String]) async throws -> [Route])?
     private let timeout: Duration
-    private let probesRemoteMemory: Bool
     private let stateCache: V2NodePolicyStateCache?
     private let localOwners: PostgresV2PolicyOwnerDirectory?
     private let subscriber: V2PolicySnapshotSubscriberWire?
-    package init(client: V2RoomClusterClient, timeout: Duration = .seconds(5), probesRemoteMemory: Bool = false,
-        resolve: @escaping @Sendable (String) async throws -> Route) {
-        precondition(timeout > .zero && timeout <= .seconds(60))
-        self.clientProvider = { client }; self.timeout = timeout; self.resolve = resolve
-        self.resolveBatch = nil
-        self.stateCache = nil; self.localOwners = nil; self.subscriber = nil; self.probesRemoteMemory = probesRemoteMemory
-    }
-
     package init(clientProvider: @escaping @Sendable () async throws -> V2RoomClusterClient,
-        timeout: Duration = .seconds(5), probesRemoteMemory: Bool = false, localOwners: PostgresV2PolicyOwnerDirectory? = nil, stateCache: V2NodePolicyStateCache? = nil,
+        timeout: Duration = .seconds(5), localOwners: PostgresV2PolicyOwnerDirectory? = nil, stateCache: V2NodePolicyStateCache? = nil,
         subscriber: V2PolicySnapshotSubscriberWire? = nil,
         resolveBatch: (@Sendable ([String]) async throws -> [Route])? = nil,
         resolve: @escaping @Sendable (String) async throws -> Route) {
@@ -40,7 +29,7 @@ package struct PostgresV2RemotePolicyOwners: Sendable {
         self.resolveBatch = resolveBatch
         self.subscriber = subscriber
         self.clientProvider = clientProvider; self.timeout = timeout; self.resolve = resolve
-        self.stateCache = stateCache; self.localOwners = localOwners; self.probesRemoteMemory = probesRemoteMemory
+        self.stateCache = stateCache; self.localOwners = localOwners
     }
 
     package func cachedSnapshots(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot]? {
@@ -103,110 +92,4 @@ package struct PostgresV2RemotePolicyOwners: Sendable {
         }
     }
 
-    package func registrationOwners(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyOwnerLease] {
-        try await registrationStates(scopes: scopes).map(\.owner)
-    }
-
-    /// Locality is determined by the configured policy ownership mapping.
-    /// Foreign scopes use authenticated cache-only RPC, without SQL or renewal.
-    package func cachedRegistrationStates(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyOwnerState]? {
-        guard !scopes.isEmpty, scopes.count <= 4, scopes.allSatisfy(\.isValid),
-              Set(scopes.map(\.key)).count == scopes.count else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
-        if let stateCache { return try await stateCache.cached(scopes: scopes) }
-        if let localOwners, scopes.allSatisfy({ localOwners.acceptsScope($0.key) }) {
-            return try await localOwners.cachedRegistrationStates(scopes: scopes)
-        }
-        guard probesRemoteMemory else { return nil }
-        do { return try await fetchStates(scopes: scopes, cachedOnly: true) }
-        catch V2PolicyAuthorizationLifecycleError.staleVersion {
-            // Authority that expires in transit is a cache miss, not a grant.
-            // The ordinary bounded path may renew it under the scope lock.
-            return nil
-        }
-    }
-
-    package func registrationStates(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyOwnerState] {
-        if let stateCache {
-            return try await stateCache.load(scopes: scopes) { scopes, refresh in
-                try await self.loadUncached(scopes: scopes, refresh: refresh)
-            }
-        }
-        return try await loadUncached(scopes: scopes)
-    }
-
-    package func loadUncached(scopes: [V2PolicyAuthorizationScope], refresh: Bool = false) async throws -> [V2PolicyOwnerState] {
-        guard let states = try await fetchStates(scopes: scopes, cachedOnly: false, refresh: refresh) else {
-            throw V2PolicyAuthorizationLifecycleError.invalidTarget
-        }
-        return states
-    }
-
-    private func fetchStates(scopes: [V2PolicyAuthorizationScope], cachedOnly: Bool, refresh: Bool = false) async throws -> [V2PolicyOwnerState]? {
-        guard !scopes.isEmpty, scopes.count <= 4, scopes.allSatisfy(\.isValid),
-              Set(scopes.map(\.key)).count == scopes.count else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
-        // Same-host facts belong to the very same directory used by mutations.
-        // Do not serialize them through a self RPC or require a cluster client
-        // when every requested scope is local. Foreign scopes still use the
-        // authenticated route; locality never follows room placement.
-        let localScopes = scopes.filter { localOwners?.acceptsScope($0.key) == true }
-        let remoteScopes = scopes.filter { localOwners?.acceptsScope($0.key) != true }
-        if remoteScopes.isEmpty, let localOwners {
-            if cachedOnly { return try await localOwners.cachedRegistrationStates(scopes: localScopes) }
-            return try await localOwners.registrationStates(scopes: localScopes, minimumRemaining: refresh ? .seconds(10) : .zero)
-        }
-        let started = ContinuousClock.now
-        let deadline = min(started + timeout, V2RoomSQLDeadline.current ?? started + timeout)
-        guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        let client = try await clientProvider()
-        guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        var grouped: [Route: [V2PolicyScopeWire]] = [:]
-        for scope in remoteScopes {
-            guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-            let route = try await resolve(scope.key)
-            guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-            grouped[route, default: []].append(try scope.policyWire)
-        }
-        return try await withThrowingTaskGroup(of: [V2PolicyOwnerState]?.self) { group in
-            if !localScopes.isEmpty, let localOwners {
-                group.addTask {
-                    if cachedOnly { return try await localOwners.cachedRegistrationStates(scopes: localScopes) }
-                    return try await localOwners.registrationStates(scopes: localScopes, minimumRemaining: refresh ? .seconds(10) : .zero)
-                }
-            }
-            for (route, scopes) in grouped {
-                group.addTask {
-                    let claim = try V2PolicyOwnershipClaimWire(endpoint: route.endpoint, scopes: scopes, cachedOnly: cachedOnly, refresh: refresh)
-                    let states = try await client.claimPolicyStates(claim, on: route.host,
-                        expectedOwnerID: route.ownerID, deadline: deadline)
-                    if cachedOnly && states.isEmpty { return nil }
-                    return try states.map { wire in
-                        let lease = V2PolicyOwnerLease(scope: wire.owner.scope.policyScope, ownerID: wire.owner.ownerID,
-                            epoch: wire.owner.epoch, revision: wire.owner.revision, validUntil: wire.owner.validUntil)
-                        let facts = try JSONDecoder().decode(V2PolicyOwnerFacts.self, from: wire.facts)
-                        switch (lease.scope, facts) {
-                        case (.account(let user), .account(let account)) where user == account.userID: break
-                        case (.stranger(let user), .stranger(let settings)) where user == settings.userID: break
-                        case (.pair, .pair): break
-                        default: throw V2PolicyAuthorizationLifecycleError.invalidTarget
-                        }
-                        // Resolver, handshake, request and response time all consume
-                        // this deadline, including a reply from an owner's cache.
-                        let stateDeadline = started + .seconds(wire.remainingSeconds)
-                        guard stateDeadline > .now else { throw V2PolicyAuthorizationLifecycleError.staleVersion }
-                        return .init(owner: lease, facts: facts, deadline: stateDeadline)
-                    }
-                }
-            }
-            var leases: [V2PolicyOwnerState] = []
-            var missed = false
-            for try await batch in group {
-                if let batch { leases.append(contentsOf: batch) } else { missed = true }
-            }
-            if missed { return nil }
-            guard leases.count == scopes.count, Set(leases.map { $0.owner.scope.key }) == Set(scopes.map(\.key)) else {
-                throw V2PolicyAuthorizationLifecycleError.invalidTarget
-            }
-            return leases.sorted { $0.owner.scope.key < $1.owner.scope.key }
-        }
-    }
 }

@@ -93,12 +93,6 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         return try await peer.forwardPair(pair, token: token, deadline: deadline)
     }
 
-    package func invalidatePolicyCache(_ request: V2PolicyCacheInvalidationWire, on host: V2ActorHostIdentity,
-        deadline: ContinuousClock.Instant) async throws {
-        let peer = try directory.peer(for: host)
-        return try await peer.invalidatePolicyCache(request, on: host, deadline: deadline)
-    }
-
     package func mutatePolicy(_ mutation: V2PolicyMutationWire, on host: V2ActorHostIdentity,
         deadline: ContinuousClock.Instant) async throws -> V2PolicyMutationReceiptWire {
         let peer = try directory.peer(for: host)
@@ -115,24 +109,6 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         deadline: ContinuousClock.Instant) async throws {
         let peer = try directory.peer(for: host)
         return try await peer.updatePolicySnapshot(request, on: host, deadline: deadline)
-    }
-
-    package func claimPolicyOwnership(_ claim: V2PolicyOwnershipClaimWire, on host: V2ActorHostIdentity,
-        expectedOwnerID: UUID, deadline: ContinuousClock.Instant) async throws -> [V2PolicyOwnerLeaseWire] {
-        let peer = try directory.peer(for: host)
-        return try await peer.claimPolicyOwnership(claim, on: host, expectedOwnerID: expectedOwnerID, deadline: deadline)
-    }
-
-    package func claimPolicyStates(_ claim: V2PolicyOwnershipClaimWire, on host: V2ActorHostIdentity,
-        expectedOwnerID: UUID, deadline: ContinuousClock.Instant) async throws -> [V2PolicyOwnerStateWire] {
-        let peer = try directory.peer(for: host)
-        return try await peer.claimPolicyStates(claim, on: host, expectedOwnerID: expectedOwnerID, deadline: deadline)
-    }
-
-    package func revokePolicyAuthorization(_ target: V2RoomPolicyRevocationWire, on host: V2ActorHostIdentity,
-        deadline: ContinuousClock.Instant) async throws -> V2VerifiedRoomPolicyRevocation {
-        let peer = try directory.peer(for: host)
-        return try await peer.revokePolicyAuthorization(target, on: host, deadline: deadline)
     }
 
     public func activate(on host: V2ActorHostIdentity, roomID: RoomID, owner: V2RoomDataOwner,

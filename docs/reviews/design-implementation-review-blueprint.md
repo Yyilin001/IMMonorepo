@@ -131,7 +131,7 @@ flowchart LR
 
 ### R07 — 发送、准入与幂等
 
-- **入口：** `V2RoomRefMessagingClient`、`V2SendMessageService`、admission batcher、`PostgresV2RoomWriteStore`、`PostgresV2SendCompletion`、持久控制授权。
+- **入口：** `V2RoomRefMessagingClient`、`V2RoomMessagingExecutor`、durable operation owner batcher、`PostgresV2RoomWriteStore`、`PostgresV2SendCompletion`、持久控制授权。
 - **审核：** 普通发送、批量和特殊入口是否遵循相同政策；接受事实是否不可变；重放是否错误重复扣额或产生消息；撤权与提交的先后；回执及指纹保留策略。
 - **验证与交付：** 提交边界图和少量高价值故障用例：提交前中止、提交后丢响应、编辑/撤回后重放、并发相同 ID/不同内容、撤权先完成。通过标准是同一操作只有一个持久业务效果，重放保持原接受结果，清理不重新开放旧 ID。关联 B11、D07。
 

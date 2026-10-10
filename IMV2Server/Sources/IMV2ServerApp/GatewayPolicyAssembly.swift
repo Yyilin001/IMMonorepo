@@ -14,7 +14,6 @@ struct GatewayPolicyAssembly: Sendable {
     let physicalResources: [V2RoomServerOwnerResources]
     private let binding: V2PolicyClusterClientBinding
     private let cache: V2NodePolicyStateCache
-    private let remote: PostgresV2RemotePolicyOwners
     private let owners: PostgresV2PolicyOwnerDirectory
     private let worker: V2PolicyMaintenanceWorker
     private let pairService: V2RoomForwardPairService
@@ -33,8 +32,7 @@ struct GatewayPolicyAssembly: Sendable {
         let stateMetrics = prepared.roomOwners.physicalResources.sorted { $0.key < $1.key }
             .first?.value.sendOperationMetrics
         let journal = PostgresV2PolicyAuthorizationJournal(database: database,
-            stateReadAdmission: nil, stateMetrics: stateMetrics,
-            roomDrainRequired: false)
+            stateReadAdmission: nil, stateMetrics: stateMetrics)
         let dispatcher = PostgresV2PolicyMutationDispatcher(database: database,
             projectionDelivery: prepared.projection.userShardProjectionDelivery,
             legacyAuthorization: prepared.authorization)
@@ -48,11 +46,10 @@ struct GatewayPolicyAssembly: Sendable {
                     ?? peer.accessibleShardIDs.sorted()[0])
         }, localHostID: identity.hostID, cache: cache, client: { try binding.client() })
         let owners = PostgresV2PolicyOwnerDirectory(journal: journal, dispatcher: dispatcher,
-            ownerID: identity.incarnationID, maximumRetainedStates: 4_096, memoryMetrics: stateMetrics,
+            ownerID: identity.incarnationID,
             snapshotPublisher: snapshots,
-            ownsScope: { placement.owns($0, hostID: hostID) },
-            revoke: { _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget })
-        let remote = PostgresV2RemotePolicyOwners(clientProvider: { try binding.client() }, probesRemoteMemory: true, localOwners: owners, stateCache: cache, subscriber: subscriber, resolveBatch: { keys in
+            ownsScope: { placement.owns($0, hostID: hostID) })
+        let remote = PostgresV2RemotePolicyOwners(clientProvider: { try binding.client() }, localOwners: owners, stateCache: cache, subscriber: subscriber, resolveBatch: { keys in
             let client = try binding.client()
             return try PostgresV2PolicyDeploymentRoutes(placement: placement, client: client).resolveScopes(keys)
         }, resolve: { key in
@@ -61,7 +58,6 @@ struct GatewayPolicyAssembly: Sendable {
         })
         var resources: [String: V2RoomServerOwnerResources] = [:]
         var physical: [V2RoomServerOwnerResources] = []
-        var services: [String: V2RoomPolicyAuthorizationService] = [:]
         var forwardPairs: [String: V2ActorForwardPairDomainExecutor] = [:]
         let groups = Dictionary(grouping: prepared.roomOwners.physicalStoreKeyByShard.keys,
             by: { prepared.roomOwners.physicalStoreKeyByShard[$0]! })
@@ -72,12 +68,11 @@ struct GatewayPolicyAssembly: Sendable {
                   let original = prepared.roomOwners.ownerResources[alias] else { throw V2RoomActorApplicationError.invalidRole }
             let locator = try V2RoomPolicyEndpointLocator(hostID: hostID, shardID: alias)
             let service = V2RoomPolicyAuthorizationService(roomDatabase: database,
-                controlDatabase: prepared.topology.directSendControlPool.database, policyOwners: remote,
+                policyOwners: remote,
                 locator: locator, maximumRooms: configuration.runtime.maximumActiveRooms,
-                usesCurrentState: true,
                 sendOperationMetrics: original.sendOperationMetrics)
             let bound = try original.usingPolicyAuthorizations(service)
-            physical.append(bound); services[alias] = service
+            physical.append(bound)
             for alias in ordered {
                 guard let pair = prepared.roomOwners.forwardPairs[alias] else { throw V2RoomActorApplicationError.invalidRole }
                 resources[alias] = bound
@@ -87,8 +82,7 @@ struct GatewayPolicyAssembly: Sendable {
         let pairService = V2RoomForwardPairService(executors: forwardPairs)
         let hosted = V2PolicyHostedServices(placement: document,
             ownership: V2PolicyOwnershipService(owners: owners, endpoint: endpoint, cache: cache),
-            mutations: V2PolicyMutationService(owners: owners, endpoint: endpoint),
-            revocations: try V2RoomPolicyRevocationRouter(hostID: hostID, services: services))
+            mutations: V2PolicyMutationService(owners: owners, endpoint: endpoint))
             .bindingClient(binding).servingForwardPairs(pairService)
         let effects = PostgresV2PolicyCommittedEffectsPublisher(journal: journal,
             delivery: prepared.projection.maintenanceUserShardProjectionDelivery)
@@ -98,7 +92,7 @@ struct GatewayPolicyAssembly: Sendable {
                 try await effects.publish($0)
             })
         return .init(hosted: hosted, ownerResources: resources, physicalResources: physical,
-            binding: binding, cache: cache, remote: remote, owners: owners,
+            binding: binding, cache: cache, owners: owners,
             worker: .init(owners: owners, publisher: publisher, report: { value in
                 if value.failed {
                     logger.warning("IM V2 policy maintenance has unfinished work", metadata: [

@@ -12,9 +12,9 @@ import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("committed policy mutations refresh warm production rooms from memory and preserve unrelated rooms",
-          arguments: ["block", "remove", "stranger", "disable"], [false, true])
-    func warmRoomPolicyMutationIsolation(kind: String, usesCurrentState: Bool) async throws {
-        try await withForwardOwnerDatabases(mode: .standard, messageSessionDefaults: usesCurrentState) { control, owner, controlSQL, ownerSQL, _ in
+          arguments: ["block", "remove", "stranger", "disable"])
+    func warmRoomPolicyMutationIsolation(kind: String) async throws {
+        try await withForwardOwnerDatabases(mode: .standard, messageSessionDefaults: true) { control, owner, controlSQL, ownerSQL, _ in
             let now = Date(), profile = try forwardImportTestProfile()
             try await ownerSQL.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '10 minutes'").run()
             if kind == "remove" {
@@ -34,17 +34,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 rooms.append(opened.roomID)
             }
-            let router = WarmMutationRouter()
             let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
             let coldMetrics = V2SendOperationBatchMetrics()
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control,
-                stateMetrics: coldMetrics, roomDrainRequired: !usesCurrentState),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy),
-                revoke: { try await router.revoke($0) })
-            let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner, controlDatabase: control,
-                policyOwners: owners, endpoint: "room-b", maximumRooms: 2, usesCurrentState: usesCurrentState,
+                stateMetrics: coldMetrics),
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+            let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
+                policyOwners: owners, endpoint: "room-b", maximumRooms: 2,
                 sendOperationMetrics: coldMetrics)
-            await router.install(policies)
             let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
                 authorizationCoordinator: legacy).usingPolicyOwners(owners)
             let preferences = PostgresV2AccountPreferenceOperationStore(database: control,
@@ -59,13 +56,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writes = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                 .usingControlDatabase(control)
-            let sendDatabase = usesCurrentState ? try V2EventLoopBalancedDatabase(databases: [owner],
+            let sendDatabase = try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 2, reservedRenewalConnections: 0,
-                    maximumQueued: 32, maximumWait: .seconds(10)), sessionTimeouts: .default) : nil
-            let initializationReader = usesCurrentState ? try V2EventLoopBalancedDatabase(databases: [owner],
+                    maximumQueued: 32, maximumWait: .seconds(10)), sessionTimeouts: .default)
+            let initializationReader = try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 1, reservedRenewalConnections: 0,
-                    maximumQueued: 32, maximumWait: .seconds(10))) : nil
-            let resources = try V2RoomServerOwnerResources(database: initializationReader ?? owner, sendDatabase: sendDatabase, writes: writes,
+                    maximumQueued: 32, maximumWait: .seconds(10)))
+            let resources = try V2RoomServerOwnerResources(database: initializationReader, sendDatabase: sendDatabase, writes: writes,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: owner),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: owner),
                 invitationSecretIssuer: .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -95,47 +92,38 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         throw V2RoomCallFailure.notAccepted(.notReady)
                     }
                     tokens.append(token)
-                    if let initializationReader, let sendDatabase {
-                        let response = try await warmMutationColdSendWithHeldWrites(reader: initializationReader, writer: sendDatabase) {
-                            try await host.invoke(token: token,
-                                encodedRequest: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10))
-                        }
-                        try warmMutationAccepted(response)
-                    } else {
-                        try warmMutationAccepted(try await host.invoke(token: token,
-                            encodedRequest: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10)))
+                    let response = try await warmMutationColdSendWithHeldWrites(reader: initializationReader, writer: sendDatabase) {
+                        try await host.invoke(token: token,
+                            encodedRequest: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10))
                     }
+                    try warmMutationAccepted(response)
                 }
                 #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState]?.count == 2)
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == (usesCurrentState ? 0 : 2))
-                if usesCurrentState {
-                    try await V2PostgresSessionReadiness.verify(database: try #require(sendDatabase), timeouts: .default)
-                }
+                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
+                try await V2PostgresSessionReadiness.verify(database: sendDatabase, timeouts: .default)
                 let initialProfileEvents = try await ownerSQL.raw("""
                     SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
                     WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
                       AND projection_kind='direct_room_profile'
                     """).first(decoding: WarmMutationCount.self)?.value
                 #expect(initialProfileEvents == 1)
-                if usesCurrentState {
-                    // Hold the actual policy commit, not a room revocation
-                    // that this boundary intentionally never performs.
-                    try await controlSQL.raw("""
-                        CREATE FUNCTION im_v2.test_hold_warm_policy_commit() RETURNS trigger LANGUAGE plpgsql AS $$
-                        BEGIN PERFORM pg_advisory_xact_lock(966997); RETURN NEW; END $$
-                        """).run()
-                    try await controlSQL.raw("CREATE TRIGGER test_hold_warm_policy_commit BEFORE INSERT ON im_v2.policy_authorization_outbox FOR EACH ROW EXECUTE FUNCTION im_v2.test_hold_warm_policy_commit()").run()
-                    policyTriggerInstalled = true
-                    holdingPolicySQL = Task {
-                        try await control.transaction { transaction in
-                            let sql = try #require(transaction as? any SQLDatabase)
-                            try await sql.raw("SELECT pg_advisory_xact_lock(966997)").run()
-                            let pid = try #require(try await sql.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: WarmMutationCount.self)).value
-                            await policySQLGate.hold(pid)
-                        }
+                // Hold the actual policy commit, not a room revocation
+                // that this boundary intentionally never performs.
+                try await controlSQL.raw("""
+                    CREATE FUNCTION im_v2.test_hold_warm_policy_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+                    BEGIN PERFORM pg_advisory_xact_lock(966997); RETURN NEW; END $$
+                    """).run()
+                try await controlSQL.raw("CREATE TRIGGER test_hold_warm_policy_commit BEFORE INSERT ON im_v2.policy_authorization_outbox FOR EACH ROW EXECUTE FUNCTION im_v2.test_hold_warm_policy_commit()").run()
+                policyTriggerInstalled = true
+                holdingPolicySQL = Task {
+                    try await control.transaction { transaction in
+                        let sql = try #require(transaction as? any SQLDatabase)
+                        try await sql.raw("SELECT pg_advisory_xact_lock(966997)").run()
+                        let pid = try #require(try await sql.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: WarmMutationCount.self)).value
+                        await policySQLGate.hold(pid)
                     }
-                    try await warmMutationObserve { await policySQLGate.pid != nil }
-                } else { await router.holdNextRevocation() }
+                }
+                try await warmMutationObserve { await policySQLGate.pid != nil }
                 let changing = Task {
                     switch kind {
                     case "block", "remove":
@@ -151,41 +139,35 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                 }
                 mutationTask = changing
-                if usesCurrentState {
-                    let pid = try #require(await policySQLGate.pid)
-                    try await warmMutationObserve {
-                        try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE \(bind: pid)::integer=ANY(pg_blocking_pids(pid))").first(decoding: WarmMutationCount.self)?.value ?? 0 > 0
-                    }
-                    #expect(await owners.pressure().roots == 1)
-                    // The mutation has not committed. This same room still
-                    // authorizes against its last committed memory snapshot.
-                    let beforeSend = coldMetrics.sendOperationBatchMetricsSnapshot()
-                    let factsBefore = try #require(beforeSend.stages[.policyOwnerStateFacts]).count
-                    let transactionsBefore = try #require(beforeSend.stages[.policyOwnerStateTransaction]).count
-                    #expect(factsBefore > 0 && transactionsBefore > 0)
-                    let warmRequest = try warmMutationRequest(room: rooms[0], text: "before policy commit")
+                let pid = try #require(await policySQLGate.pid)
+                try await warmMutationObserve {
+                    try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE \(bind: pid)::integer=ANY(pg_blocking_pids(pid))").first(decoding: WarmMutationCount.self)?.value ?? 0 > 0
+                }
+                #expect(await owners.pressure().roots == 1)
+                // The mutation has not committed. This same room still
+                // authorizes against its last committed memory snapshot.
+                let beforeSend = coldMetrics.sendOperationBatchMetricsSnapshot()
+                let factsBefore = try #require(beforeSend.stages[.policyOwnerStateFacts]).count
+                let transactionsBefore = try #require(beforeSend.stages[.policyOwnerStateTransaction]).count
+                #expect(factsBefore > 0 && transactionsBefore > 0)
+                let warmRequest = try warmMutationRequest(room: rooms[0], text: "before policy commit")
+                try warmMutationAccepted(try await host.invoke(token: tokens[0],
+                    encodedRequest: warmRequest, deadline: .now + .seconds(10)))
+                if kind == "remove" {
+                    let implicitCount = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0
+                    #expect(implicitCount == 1)
+                    // The identical client operation replays without a second write.
                     try warmMutationAccepted(try await host.invoke(token: tokens[0],
                         encodedRequest: warmRequest, deadline: .now + .seconds(10)))
-                    if kind == "remove" {
-                        let implicitCount = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0
-                        #expect(implicitCount == 1)
-                        // The identical client operation replays without a second write.
-                        try warmMutationAccepted(try await host.invoke(token: tokens[0],
-                            encodedRequest: warmRequest, deadline: .now + .seconds(10)))
-                        #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0 == implicitCount)
-                    }
-                    #expect(await owners.pressure().roots == 1)
-                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateFacts]?.count ?? 0 == factsBefore)
-                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateTransaction]?.count ?? 0 == transactionsBefore)
-                } else {
-                    try await warmMutationObserve { await router.revocationHeld() }
+                    #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0 == implicitCount)
                 }
-                // An unrelated room must progress while the policy transaction
-                // (or the legacy revocation) is held.
+                #expect(await owners.pressure().roots == 1)
+                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateFacts]?.count ?? 0 == factsBefore)
+                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateTransaction]?.count ?? 0 == transactionsBefore)
+                // An unrelated room must progress while the policy transaction is held.
                 try warmMutationAccepted(try await host.invoke(token: tokens[1],
                     encodedRequest: warmMutationRequest(room: rooms[1], text: "during related change"),
                     deadline: .now + .seconds(10)))
-                await router.releaseRevocation()
                 await policySQLGate.release()
                 if let holdingPolicySQL { try await holdingPolicySQL.value }
                 holdingPolicySQL = nil
@@ -212,18 +194,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(receipt.outcome == .rejected(.directPolicyDenied))
                 try warmMutationAccepted(try await host.invoke(token: tokens[1],
                     encodedRequest: warmMutationRequest(room: rooms[1], text: "unrelated room"), deadline: .now + .seconds(10)))
-                // Only the invalidated room cold-loads again. Its peer's warm
-                // send does not fabricate owner/registration measurements.
+                // Warm sends sample current policy while reusing cached facts;
+                // room registration and owner SQL remain absent.
                 let policySample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
-                #expect(policySample.count == (usesCurrentState ? 6 : 3) && policySample.inFlight == 0)
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == (usesCurrentState ? 0 : 3))
+                #expect(policySample.count == 6 && policySample.inFlight == 0)
+                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
                 let reads = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.preparationOwnerRead]
-                #expect(reads?.count ?? 0 == (usesCurrentState ? 0 : 5))
+                #expect(reads?.count ?? 0 == 0)
                 #expect(reads?.inFlight ?? 0 == 0)
-                if usesCurrentState {
-                    #expect(sendDatabase?.loanMetricsSnapshot().classes[.ordinary]?.inFlight == 0)
-                }
-                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == (usesCurrentState ? 2 : 1))
+                #expect(sendDatabase.loanMetricsSnapshot().classes[.ordinary]?.inFlight == 0)
+                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 2)
                 #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[1].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 3)
                 for (isOwner, table) in renamed {
                     let sql = isOwner ? ownerSQL : controlSQL
@@ -269,22 +249,29 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         encodedRequest: warmMutationRequest(room: rooms[1], text: "unrelated after restoration"),
                         deadline: .now + .seconds(10)))
                     let sample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
-                    #expect(sample.count == (usesCurrentState ? 8 : 4) && sample.inFlight == 0)
-                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == (usesCurrentState ? 0 : 4))
-                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == (usesCurrentState ? 3 : 2))
+                    #expect(sample.count == 8 && sample.inFlight == 0)
+                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
+                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 3)
                     #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[1].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 4)
                     #expect(try await ownerSQL.raw("""
                         SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
                         WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
                           AND projection_kind='direct_room_profile'
                         """).first(decoding: WarmMutationCount.self)?.value == initialProfileEvents)
-                    #expect(try await ownerSQL.raw("""
+                    let restoredCapabilityEvents = try await ownerSQL.raw("""
                         SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
                         WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: senderUUID)
                           AND projection_kind='direct_sending_capability' AND payload->>'can_send'='true'
-                        """).first(decoding: WarmMutationCount.self)?.value == 1)
-                    // Rejected send operations no longer persist a capability
-                    // downgrade; restoration therefore needs no second upgrade.
+                        """).first(decoding: WarmMutationCount.self)?.value
+                    #expect(restoredCapabilityEvents == 2)
+                    let restrictedCapabilityEvents = try await ownerSQL.raw("""
+                        SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
+                        WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: senderUUID)
+                          AND projection_kind='direct_sending_capability' AND payload->>'can_send'='false'
+                        """).first(decoding: WarmMutationCount.self)?.value
+                    #expect(restrictedCapabilityEvents == 1)
+                    // Restriction hints downgrade the sender's presentation.
+                    // A later accepted send publishes the restored capability.
                     for (isOwner, table) in renamed {
                         let sql = isOwner ? ownerSQL : controlSQL
                         try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_warm_mutation_hidden") RENAME TO \(unsafeRaw: table)").run()
@@ -295,10 +282,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(await host.stop(deadline: .now + .seconds(10)).completed)
                 await resources.shutdownDurableSendOperations()
                 await leases.shutdownLifecycle(); await leases.shutdownRenewals()
-                try await policies.shutdown(); await owners.shutdown(); await router.clear()
+                try await policies.shutdown(); await owners.shutdown()
             } catch {
                 Issue.record("Warm policy scenario failed during \(stage)")
-                await router.releaseRevocation()
                 await policySQLGate.release()
                 if let holdingPolicySQL { _ = await holdingPolicySQL.result }
                 if let mutationTask { _ = await mutationTask.result }
@@ -313,33 +299,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 _ = await host.stop(deadline: .now + .seconds(10))
                 await resources.shutdownDurableSendOperations()
                 await leases.shutdownLifecycle(); await leases.shutdownRenewals()
-                try? await policies.shutdown(); await owners.shutdown(); await router.clear()
+                try? await policies.shutdown(); await owners.shutdown()
                 throw error
             }
         }
     }
 }
 
-private actor WarmMutationRouter {
-    private var service: V2RoomPolicyAuthorizationService?
-    private var holdRevocation = false
-    private var held = false
-    private var waiter: CheckedContinuation<Void, Never>?
-    func install(_ service: V2RoomPolicyAuthorizationService) { self.service = service }
-    func clear() { service = nil }
-    func holdNextRevocation() { holdRevocation = true; held = false }
-    func revocationHeld() -> Bool { held }
-    func releaseRevocation() { holdRevocation = false; waiter?.resume(); waiter = nil }
-    func revoke(_ holder: V2PolicyAuthorizationHolder) async throws -> V2PolicyAuthorizationRevocationProof {
-        guard let service else { throw V2PolicyAuthorizationLifecycleError.closed }
-        if holdRevocation {
-            holdRevocation = false
-            held = true
-            await withCheckedContinuation { waiter = $0 }
-        }
-        return try await service.revoke(holder)
-    }
-}
 private struct WarmMutationCount: Decodable { let value: Int64 }
 private func warmMutationColdSendWithHeldWrites(reader: V2EventLoopBalancedDatabase,
     writer: V2EventLoopBalancedDatabase,

@@ -203,9 +203,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             for database in [control, owner] {
-                let worker = V2RoomLogRetentionWorker(store: PostgresV2RoomLogRetentionStore(database: database),
-                    mode: .permanent, window: 3600)
-                _ = try await worker.runOnce(limit: 100)
+                let driver = V2RoomLogRetentionTestDriver(database: database)
+                _ = try await driver.trimRoomLogs(mode: .permanent, window: 3600, now: now, limit: 100)
             }
             for (sql, room, expected) in [(controlSQL, protectedRoom, 4), (ownerSQL, eligibleRoom, 2)] {
                 let count = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.room_events WHERE room_id = \(bind: room)")
@@ -243,7 +242,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         revision: 1, message: UUID(), createdAt: base)
                 }
             }
-            let store = PostgresV2RoomLogRetentionStore(database: resources.database(.psql))
+            let store = V2RoomLogRetentionTestDriver(database: resources.database(.psql))
             for expectedTrim in [0, 0, 1, 0] {
                 let report = try await store.trimRoomLogs(mode: mode, window: 3600, now: base, limit: 1)
                 #expect(report.scannedRooms == 1)
@@ -309,7 +308,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     """).run()
             }
 
-            let store = PostgresV2RoomLogRetentionStore(database: resources.database(.psql))
+            let store = V2RoomLogRetentionTestDriver(database: resources.database(.psql))
             // 永久模式：计入全部历史读者，最慢的那个把下界钉在 1，什么都不删。
             let permanent = try await store.trimRoomLogs(mode: .permanent, window: window, now: base.addingTimeInterval(120), limit: 8)
             #expect(permanent.trimmedRooms == 0)

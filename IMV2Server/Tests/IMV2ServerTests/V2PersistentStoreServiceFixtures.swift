@@ -154,26 +154,6 @@ public struct V2GroupCapabilitiesService: Sendable {
     public func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> { let eventID = try identifiers.make(); return try await store.changeMemberRole(actorUserID: actorUserID, command: command, capacityProfile: capacityProfile, eventID: eventID, now: now()) }
 }
 
-public struct V2ProfileViewService: Sendable {
-    private let store: any V2ProfileViewStore
-
-    /// 组合资料视图存储。
-    ///
-    /// - Parameter store: 实际执行查询的存储实现。
-    public init(store: any V2ProfileViewStore) {
-        self.store = store
-    }
-
-    /// 读取资料视图。
-    ///
-    /// - Parameter request: 已校验的查询请求。
-    /// - Returns: 与请求键一一对应的结果列表。
-    /// - Throws: 存储实现抛出的错误。
-    public func read(_ request: V2ProfileViewReadRequest) async throws -> [V2ProfileViewLookupResult] {
-        try await store.read(request)
-    }
-}
-
 public struct V2CrossOwnerForwardService: V2CrossOwnerForwarding {
     private let sources: [String: V2ForwardSourceEndpoint]
     private let now: @Sendable () -> Date

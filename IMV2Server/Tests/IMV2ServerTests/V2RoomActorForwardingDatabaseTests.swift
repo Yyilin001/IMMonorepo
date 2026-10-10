@@ -69,9 +69,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SET valid_until = CURRENT_TIMESTAMP + INTERVAL '1 hour'
                 WHERE room_shard_id = 'room-a'
                 """).run()
-            // Prepare source data before selecting either writer mode. Once
-            // policy mode precharges shared credits, legacy writes cannot
-            // participate in that runtime's budget.
+            // Prepare source data before selecting either writer mode.
             let targetSend = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
                 capacityProfile: profile, limits: limits, now: Date.init)
             guard case .accepted(let oppositeSource) = try await targetSend.send(.init(
@@ -98,9 +96,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let journal = PostgresV2PolicyAuthorizationJournal(database: database)
                 let legacy = V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: [:])
                 let owners = PostgresV2PolicyOwnerDirectory(journal: journal,
-                    dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy),
-                    revoke: { try await PostgresV2RoomPolicyLeaseFence(database: database).revoke($0) })
-                let service = V2RoomPolicyAuthorizationService(roomDatabase: database, controlDatabase: database,
+                    dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                let service = V2RoomPolicyAuthorizationService(roomDatabase: database,
                     policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
                 policyOwners = owners; policyService = service
                 configuredExecutor = configuredExecutor.usingPolicyAuthorizations(service)
@@ -190,12 +187,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
                 _ = try await executor.execute(pair, activationTokens: tokens)
             }
-            if let policyService { try await policyService.shutdown() }
+            if let policyService { await policyService.shutdown() }
             if let policyOwners { await policyOwners.shutdown() }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {
-            if let policyService { try? await policyService.shutdown() }
+            if let policyService { await policyService.shutdown() }
             if let policyOwners { await policyOwners.shutdown() }
             try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
             try? await resources.shutdown()

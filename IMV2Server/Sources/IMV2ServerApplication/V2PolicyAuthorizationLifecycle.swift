@@ -35,23 +35,6 @@ package struct V2PolicyOwnerLease: Sendable, Equatable {
     }
 }
 
-package struct V2PolicyAuthorizationHolder: Sendable, Equatable {
-    package let registrationID: UUID
-    package let roomID: UUID
-    package let activationID: UUID
-    package let roomOwnerEpoch: Int64
-    package let generation: Int64
-    /// Server-owned route locator. Never accept this from a client payload.
-    package let endpoint: String
-    package let validUntil: Date
-    package init(registrationID: UUID, roomID: UUID, activationID: UUID, roomOwnerEpoch: Int64,
-                 generation: Int64, endpoint: String, validUntil: Date) {
-        self.registrationID = registrationID; self.roomID = roomID; self.activationID = activationID
-        self.roomOwnerEpoch = roomOwnerEpoch; self.generation = generation
-        self.endpoint = endpoint; self.validUntil = validUntil
-    }
-}
-
 package struct V2PolicyAuthorizationChange: Sendable, Equatable {
     package let operationKey: String
     package let scopeKey: String

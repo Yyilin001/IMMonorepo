@@ -46,7 +46,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             let replay = try valid("original"), before = try valid("before"), after = try valid("after")
             try await withRoomActivation(database: database, roomID: operationRoom) { token in
-                let executor = try V2RoomMessagingExecutor(token: token, writes: writes,
+                let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                     now: { now }, sendOperations: store)
                 let original = try await store.send(replay, token: token, capacityProfile: profile,
@@ -172,7 +172,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "must reject third member",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             try await withRoomActivation(database: database, roomID: directRoom) { token in
-                let executor = try V2RoomMessagingExecutor(token: token, writes: writes,
+                let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                     now: { now }, sendOperations: store)
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
@@ -202,7 +202,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "valid",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             try await withRoomActivation(database: database, roomID: roomID) { token in
-                let executor = try V2RoomMessagingExecutor(token: token, writes: writes,
+                let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: .init(id: "wrong-deployment-profile", limits: profile.limits),
                     limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64, now: { now }, sendOperations: store)
                 await #expect(throws: V2RoomWriteStoreError.capacityProfileMismatch) {

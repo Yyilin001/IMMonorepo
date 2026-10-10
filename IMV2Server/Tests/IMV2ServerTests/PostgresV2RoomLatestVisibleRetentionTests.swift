@@ -63,7 +63,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(before.latest?.revision == (hiddenLatest ? 2 : 3))
             #expect(before.latest?.preview == (hiddenLatest ? "authorized revision two" : "authorized revision three"))
             try await insertSummaryFixtureReadReceipt(on: sql, room: room, user: user, readThrough: 4, at: now)
-            let retention = PostgresV2RoomLogRetentionStore(database: database)
+            let retention = V2RoomLogRetentionTestDriver(database: database)
             let report = try await retention.trimRoomLogs(mode: .permanent, window: 3600, now: now, limit: 100)
             #expect(report.trimmedRooms == 1 && report.deletedEvents == 2)
             #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.room_events WHERE room_id=\(bind: room)").first(decoding: CountRow.self)?.value == 0)

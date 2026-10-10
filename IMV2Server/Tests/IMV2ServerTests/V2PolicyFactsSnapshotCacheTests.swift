@@ -66,7 +66,7 @@ struct V2PolicyFactsSnapshotCacheTests {
     }
     @Test("different cold scopes have no logical concurrency quota")
     func independentScopes() async throws {
-        let cache = V2NodePolicyStateCache(maximumLoads: 1), source = SnapshotCacheSource()
+        let cache = V2NodePolicyStateCache(), source = SnapshotCacheSource()
         let first = V2PolicyAuthorizationScope.account(UUID()), second = V2PolicyAuthorizationScope.account(UUID())
         await source.block()
         let cold = Task { try await cache.loadSnapshots(scopes: [first], loader: source.read) }

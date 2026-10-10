@@ -60,7 +60,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                 }
             }
-            let store = PostgresV2RoomLogRetentionStore(database: database, eventLimit: 2)
+            let store = V2RoomLogRetentionTestDriver(database: database, eventLimit: 2)
             var deletedEvents = 0
             for _ in 0..<5 {
                 let report = try await store.trimRoomLogs(mode: .permanent,

@@ -73,7 +73,7 @@ struct V2RoomActorApplicationConfigurationTests {
         let hostID = try #require(peers.first?["hostID"] as? String)
         var services = try #require(object["services"] as? [[String: Any]])
         for i in services.indices {
-            services[i]["permissions"] = (services[i]["permissions"] as? [String] ?? []) + ["policyMutation", "policyRegistration", "policyRevocation"]
+            services[i]["permissions"] = (services[i]["permissions"] as? [String] ?? []) + ["policyMutation", "policyRegistration"]
         }
         object["services"] = services
         object["policyPlacement"] = ["revision": 1, "partitionCount": 16,

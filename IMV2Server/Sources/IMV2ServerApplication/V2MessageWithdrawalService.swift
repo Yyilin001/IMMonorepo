@@ -2,36 +2,6 @@ import IMV2ServerContracts
 import Foundation
 import IMV2Core
 
-/// 通过认证的消息撤回请求。
-public struct V2AuthenticatedMessageWithdrawal: Sendable {
-    /// 目标房间。
-    public let roomID: RoomID
-    /// 发起撤回的用户。
-    public let actorUserID: UserID
-    /// 本次撤回的幂等操作标识。
-    public let operationID: MessageWithdrawalOperationID
-    /// 需要撤回的消息。
-    public let messageID: MessageID
-    /// 客户端观察到的消息修订，用于防止撤回他人在此期间的编辑结果。
-    public let expectedMessageRevision: UInt64
-
-    /// 保存已认证的撤回请求。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - actorUserID: 发起撤回的用户。
-    ///   - operationID: 幂等操作标识。
-    ///   - messageID: 需要撤回的消息。
-    ///   - expectedMessageRevision: 期望的消息修订。
-    public init(roomID: RoomID, actorUserID: UserID, operationID: MessageWithdrawalOperationID, messageID: MessageID, expectedMessageRevision: UInt64) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.messageID = messageID
-        self.expectedMessageRevision = expectedMessageRevision
-    }
-}
-
 /// 消息撤回的执行结果。
 public enum V2MessageWithdrawalOutcome: Equatable, Sendable {
     /// 本次调用实际提交了撤回。
@@ -65,24 +35,6 @@ public protocol V2MessageWithdrawalStore: Sendable {
     /// - Returns: 撤回结果。
     /// - Throws: 房间或消息不存在、发起者非作者、持久化失败时抛出。
     func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome
-}
-
-/// 撤回命令的事件标识生成器。
-public struct V2MessageWithdrawalIDFactory: Sendable {
-    private let makeUUID: @Sendable () -> UUID
-
-    /// 注入 UUID 来源，默认使用系统实现。
-    ///
-    /// - Parameter makeUUID: 产生原始 UUID 的闭包，测试可注入确定性实现。
-    public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
-
-    /// 生成一个事件标识。
-    ///
-    /// - Returns: 本次命令使用的事件标识。
-    /// - Throws: 标识类型拒绝生成值时抛出。
-    public func make() throws -> EventID {
-        try .init(makeUUID().uuidString)
-    }
 }
 
 /// 消息撤回存储错误。

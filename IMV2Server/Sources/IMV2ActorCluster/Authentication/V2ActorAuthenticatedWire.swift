@@ -14,7 +14,6 @@ public enum V2ActorServicePermission: String, Codable, Hashable, Sendable {
     case roomCoordination
     case realtimePublish
     case realtimeReceive
-    case policyRevocation
     case policyMutation
     case policyRegistration
 }
@@ -70,10 +69,7 @@ public struct V2ActorSessionGrant: Codable, Equatable, Sendable {
 public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
     case activate(roomID: RoomID, owner: V2RoomDataOwner)
     case lookup(V2RoomActivationToken)
-    case revokePolicyAuthorization(V2RoomPolicyRevocationWire)
     case mutatePolicy(V2PolicyMutationWire)
-    case claimPolicyOwnership(V2PolicyOwnershipClaimWire)
-    case invalidatePolicyCache(V2PolicyCacheInvalidationWire)
     case policySnapshots(V2PolicySnapshotRequestWire)
     case updatePolicySnapshot(V2PolicySnapshotUpdateWire)
     case forwardPair(token: V2RoomActivationToken, pair: V2ActorForwardPairWire)
@@ -96,10 +92,8 @@ public enum V2ActorRPCResponse: Codable, Equatable, Sendable {
     case reserved(V2RoomReservation)
     case completed(Bool)
     case acknowledged
-    case policyAuthorizationRevoked(V2RoomPolicyRevocationWire)
     case policyMutationIdentityConflict(V2PolicyMutationWire)
     case policyMutationCommitted(V2PolicyMutationReceiptWire)
-    case policyOwnership([V2PolicyOwnerStateWire])
     case policySnapshots([V2PolicySnapshotWire])
     case forwardPair(V2ActorForwardMessageResultWire)
     case failure(V2RoomCallFailure)

@@ -371,23 +371,6 @@ public protocol V2SendMessageBatchMetricsReading: Sendable {
     func snapshot() async -> V2SendMessageBatchMetricsSnapshot
 }
 
-/// 消息持久化之前的进程内准入边界。
-///
-/// 实现可以使用单个批处理 actor 或按房间稳定分配的多个执行通道，必须保持同一房间的有序写入合同。
-public protocol V2SendMessageAdmission: V2SendMessageBatchMetricsReading {
-    /// 是否由准入实现围绕实际数据库工作管理前台写入许可，以避免等待批次的请求重复占用许可。
-    var managesForegroundWriteAdmission: Bool { get }
-
-    /// 提交不可变写入请求并等待该请求的独立结果。
-    ///
-    /// - Parameter request: 带固定标识与时间的接受输入。
-    /// - Returns: 对应此请求的业务接受结果。
-    /// - Throws: 准入、取消或存储执行错误，具体行为由实现定义。
-    func accept(
-        _ request: consuming V2RoomWriteRequest
-    ) async throws -> V2SendMessageOutcome
-}
-
 /// 生成消息接受标识时发现的输入错误。
 public enum V2AcceptanceIdentifierError: Error, Equatable, Sendable {
     /// 时间不能表示为非负、48 位 Unix 毫秒值，包括非有限值或越界时间。

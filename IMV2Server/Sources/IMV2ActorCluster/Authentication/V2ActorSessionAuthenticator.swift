@@ -187,23 +187,15 @@ public actor V2ActorSessionAuthenticator {
             guard pair.actorUserID.uuidValue != nil, pair.operationID.uuidValue != nil,
                   pair.source.roomID.uuidValue != nil, pair.source.messageID.uuidValue != nil,
                   pair.targetRoomID.uuidValue != nil else { throw V2ActorAuthenticationError.invalidRequest }
-        case .mutatePolicy, .invalidatePolicyCache, .updatePolicySnapshot:
+        case .mutatePolicy, .updatePolicySnapshot:
             guard call.principal == .service, peer.permissions.contains(.policyMutation) else {
                 throw V2ActorAuthenticationError.forbidden
             }
         case .policySnapshots(let request):
             guard call.principal == .service, peer.permissions.contains(.policyRegistration),
                   peer.hostedIDs.contains(request.subscriber.hostID) else { throw V2ActorAuthenticationError.forbidden }
-        case .claimPolicyOwnership:
-            guard call.principal == .service, peer.permissions.contains(.policyRegistration) else {
-                throw V2ActorAuthenticationError.forbidden
-            }
-        case .revokePolicyAuthorization:
-            guard call.principal == .service, peer.permissions.contains(.policyRevocation) else {
-                throw V2ActorAuthenticationError.forbidden
-            }
         case .activate, .lookup:
-            guard call.principal == .service, !peer.permissions.subtracting([.policyRevocation, .policyRegistration, .policyMutation]).isEmpty else {
+            guard call.principal == .service, !peer.permissions.subtracting([.policyRegistration, .policyMutation]).isEmpty else {
                 throw V2ActorAuthenticationError.forbidden
             }
         case .subscriptionRenewBatch(let items):

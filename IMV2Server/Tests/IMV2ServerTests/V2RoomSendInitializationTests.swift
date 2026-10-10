@@ -39,9 +39,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let directory = PostgresV2RoomPolicyAuthorizationDirectory(database: database,
                 endpoint: "initialization-test", maximumRooms: 4,
-                currentLoader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget },
-                loader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget },
-                accountLoader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget })
+                currentLoader: { _, _, _, _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget })
             try await directory.install(initialization)
             let memory = V2DirectRoomSendAcceptanceMemory()
             memory.install(initialization)
@@ -84,13 +82,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     policy: policy, ordinal: 0, now: Date()))
                 #expect(reloaded.room.roomSequence == 7 && reloaded.room.timelineSequence == 11)
             }
-            try await directory.retire(token: lease.token)
+            await directory.retire(token: lease.token)
             memory.invalidate(lease.token)
             #expect(try await leases.release(token: lease.token))
             await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
                 _ = try await v2RestoreRoomSendInitialization(database: database, token: lease.token)
             }
-            try await directory.shutdown()
+            await directory.shutdown()
         }
     }
 }

@@ -776,7 +776,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                   command.command.roomID == prepared.token.roomID,
                   case .prepared(let store) = prepared.preparations[plan.operationKeys[ordinal]],
                   let execution = store.policyExecution, execution.activation == prepared.token,
-                  case .current(_) = execution.snapshot, let policy = execution.snapshot.policy,
+                  let policy = execution.snapshot.policy,
                   store.authorizationGrants == nil,
                   let accepted = prepared.acceptedDirect[plan.operationKeys[ordinal]] else { return nil }
             try store.validateAuthorizationCommand(command.command)
@@ -799,7 +799,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 policy: .init(controlPolicyScope: [.init(roomID: key.room, senderID: key.actor): policy],
                     controlScopeRoomKinds: store.controlScopeRoomKinds), leasedPolicy: policy, accepted: accepted))
         }
-        if let _ = try await V2RoomPolicyExecution.combinedFenceCheck(policyInputs) { return nil }
+        try await V2RoomPolicyExecution.validateActive(policyInputs)
         let path = V2RoomWriteDurableOwnerBatchPath(strangerMessagePolicy: writes.strangerMessagePolicy)
         let appends = try path.reduce(items, rows: rows, usesPreloadedRows: true, metrics: sendOperationMetrics)
         guard V2RoomWriteDirectBatchPath.supportsSingleStatement(appends) else { return nil }
@@ -888,15 +888,13 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                             policyInputs.append((execution, operations[ordinal].command))
                         }
                     }
-                    let policyCheck = try await V2RoomPolicyExecution.combinedFenceCheck(policyInputs)
+                    try await V2RoomPolicyExecution.validateActive(policyInputs)
                     // Production room turns already retain their exact lifecycle
                     // until the physical transaction settles. Do not re-read and
                     // lock ownership/activation for each accepted message.
                     if !writes.usesMemorySendPreparation {
                         try await fence.requireDurableOwnersAndActivations(tokens: [prepared.token],
-                            operations: lockKeys, policyCheck: policyCheck)
-                    } else if policyCheck != nil {
-                        throw V2MessageOperationValidationError.invalidReceipt
+                            operations: lockKeys)
                     }
                 }
                 let receiptSets = PostgresV2DurableSendBatchReceipts()
@@ -907,7 +905,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 let combinesCurrentDirect = Set(try allInputs.map { try $0.key }).count == allInputs.count && ordered.allSatisfy { ordinal in
                     guard inputs[ordinal]?.attempt == nil,
                           let snapshot = scoped[ordinal]?.policyExecution?.snapshot,
-                          case .current = snapshot, snapshot.policy != nil else { return false }
+                          snapshot.policy != nil else { return false }
                     return true
                 }
                 var preparedRead: V2DurableOwnerPreparedRead?

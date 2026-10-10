@@ -19,21 +19,9 @@ struct V2ActorRoomDirectoryContractTests {
             #expect(try JSONDecoder().decode(V2RoomDirectoryQuery.self,
                 from: JSONEncoder().encode(query)) == query)
         }
-        let coordinator = try V2ActorUserRoomDirectoryQueryWire(actorUserID: user,
-            cursor: "topology-cursor", pageSize: 100)
-        #expect(coordinator.replayPolicy == .readOnly)
-        #expect(try JSONDecoder().decode(V2ActorUserRoomDirectoryQueryWire.self,
-            from: JSONEncoder().encode(coordinator)) == coordinator)
         #expect(throws: V2ActorRoomDirectoryWireError.invalidRequest) {
             try V2ActorMembershipDirectoryQueryWire(roomID: room,
                 actorUserID: user, cursor: "   ", pageSize: 1)
-        }
-        #expect(throws: V2ActorRoomDirectoryWireError.invalidRequest) {
-            try V2ActorUserRoomDirectoryQueryWire(actorUserID: user, cursor: nil, pageSize: 101)
-        }
-        #expect(throws: V2ActorRoomDirectoryWireError.invalidCursor) {
-            try V2ActorUserRoomDirectoryQueryWire(actorUserID: user,
-                cursor: String(repeating: "x", count: 2049), pageSize: 1)
         }
     }
 }

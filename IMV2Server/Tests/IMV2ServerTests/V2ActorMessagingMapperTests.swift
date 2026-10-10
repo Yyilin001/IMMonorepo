@@ -51,18 +51,19 @@ struct V2ActorMessagingMapperTests {
         #expect(wire.entities == [entity])
     }
 
-    @Test("all four authenticated inputs map without changing caller-owned intent")
+    @Test("durable operation inputs preserve caller-owned intent")
     func inputs() throws {
         let (room, user, message, client, _, _) = try ids()
         let limits = try V2MessageCommandLimits(maxUTF8Bytes: 100)
-        let send = V2AuthenticatedSendMessage(roomID: room, actorUserID: user,
-            clientMessageID: client, text: "hello", mentions: [.everyone, .user(user)],
+        let send = try V2MessageSendOperationCommand(command: .init(roomID: room, senderUserID: user,
+            clientMessageID: client, text: "hello", media: [], mentions: [.everyone, .user(user)],
             entities: [try V2MessageEntity(offsetUTF16: 0, lengthUTF16: 5, kind: .bold)],
-            replyTo: .init(messageID: message))
-        let returnedSend = try V2ActorSendMessageWire(send).toAuthenticated(limits: limits)
-        #expect(returnedSend.mentions == send.mentions)
-        #expect(returnedSend.entities == send.entities)
-        #expect(returnedSend.replyTo == send.replyTo)
+            replyTo: .init(messageID: message), limits: limits),
+            firstSubmissionDeadlineMilliseconds: 1_700_000_600_000)
+        let returnedSend = try JSONDecoder().decode(V2MessageSendOperationCommand.self,
+            from: JSONEncoder().encode(send))
+        #expect(returnedSend == send)
+        #expect(try returnedSend.fingerprint == send.fingerprint)
         let edit = try V2MessageEditOperationCommand(command: .init(roomID: room, actorUserID: user,
             operationID: .init("edit-1"), messageID: message, expectedMessageRevision: 2,
             text: "replacement", maximumUTF8Bytes: 100), firstSubmissionDeadlineMilliseconds: 1_700_000_600_000)

@@ -60,7 +60,6 @@ package protocol V2RoomMessagingPersisting: Sendable {
     func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult]
     func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
                                    deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch
-    func accept(_ request: V2RoomWriteRequest) async throws -> V2RoomMessagingResult
 }
 
 package extension V2RoomMessagingPersisting {

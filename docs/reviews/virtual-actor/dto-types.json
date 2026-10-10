@@ -641,6 +641,10 @@
         "public let messageID: MessageID",
         "public let expectedMessageRevision: UInt64",
         "public let text: String"
+      ],
+      "status": "retired",
+      "replacedBy": [
+        "V2EditMessageCommand"
       ]
     },
     {
@@ -658,6 +662,10 @@
         "public let messageID: MessageID",
         "public let reaction: String",
         "public let action: V2MessageReactionAction"
+      ],
+      "status": "retired",
+      "replacedBy": [
+        "V2ChangeMessageReactionCommand"
       ]
     },
     {
@@ -674,6 +682,10 @@
         "public let operationID: MessageWithdrawalOperationID",
         "public let messageID: MessageID",
         "public let expectedMessageRevision: UInt64"
+      ],
+      "status": "retired",
+      "replacedBy": [
+        "V2WithdrawMessageCommand"
       ]
     },
     {
@@ -2932,6 +2944,35 @@
       ]
     },
     {
+      "name": "V2RoomActivationSQLTimeouts",
+      "target": "IMV2ServerInfrastructure",
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomOwnerTransactionFence.swift",
+      "line": 13,
+      "kind": "struct",
+      "explicitCodable": false,
+      "declaration": "public struct V2RoomActivationSQLTimeouts: Sendable, Equatable",
+      "members": [
+        "public let lockMilliseconds: Int",
+        "public let statementMilliseconds: Int",
+        "public let idleTransactionMilliseconds: Int"
+      ]
+    },
+    {
+      "name": "V2RoomActivationToken",
+      "target": "IMV2ActorContracts",
+      "path": "IMV2Server/Sources/IMV2ActorContracts/V2RoomActivationIdentity.swift",
+      "line": 78,
+      "kind": "struct",
+      "explicitCodable": true,
+      "declaration": "public struct V2RoomActivationToken: Hashable, Codable, Sendable",
+      "members": [
+        "public let roomID: RoomID",
+        "public let owner: V2RoomDataOwner",
+        "public let activationEpoch: V2ActorEpoch",
+        "public let host: V2ActorHostIdentity"
+      ]
+    },
+    {
       "name": "V2RoomLatestVisible",
       "target": "IMV2Core",
       "path": "IMV2Core/Sources/IMV2Core/RoomLatestVisible.swift",
@@ -3238,6 +3279,10 @@
         "case updated(V2ReadReceiptPreferences)",
         "case idempotent(V2ReadReceiptPreferences)",
         "case idempotencyConflict"
+      ],
+      "status": "retired",
+      "replacedBy": [
+        "V2ReadReceiptPreferences"
       ]
     },
     {

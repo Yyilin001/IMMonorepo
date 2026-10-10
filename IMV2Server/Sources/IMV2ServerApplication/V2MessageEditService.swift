@@ -2,38 +2,6 @@ import IMV2ServerContracts
 import Foundation
 import IMV2Core
 
-/// 一次已认证的消息编辑请求。
-///
-/// 适配器在完成身份与权限校验后构造该值；服务层只负责补齐事件标识并转交存储边界。
-public struct V2AuthenticatedMessageEdit: Sendable {
-    /// 目标房间。
-    public let roomID: RoomID
-    /// 发起编辑的已认证用户，必须是消息作者。
-    public let actorUserID: UserID
-    /// 该次编辑操作的稳定标识，用于幂等重试。
-    public let operationID: MessageEditOperationID
-    /// 被编辑的消息。
-    public let messageID: MessageID
-    /// 期望的消息修订，用于乐观并发校验。
-    public let expectedMessageRevision: UInt64
-    /// 编辑后的新正文。
-    public let text: String
-
-    /// 创建编辑请求。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - actorUserID: 发起编辑的已认证用户。
-    ///   - operationID: 该次编辑操作的稳定标识。
-    ///   - messageID: 被编辑的消息。
-    ///   - expectedMessageRevision: 期望的消息修订。
-    ///   - text: 编辑后的新正文。
-    public init(roomID: RoomID, actorUserID: UserID, operationID: MessageEditOperationID, messageID: MessageID, expectedMessageRevision: UInt64, text: String) {
-        self.roomID = roomID; self.actorUserID = actorUserID; self.operationID = operationID
-        self.messageID = messageID; self.expectedMessageRevision = expectedMessageRevision; self.text = text
-    }
-}
-
 /// 消息编辑的处理结果。
 public enum V2MessageEditOutcome: Equatable, Sendable {
     /// 本次调用实际完成了编辑。
@@ -64,20 +32,6 @@ public protocol V2MessageEditStore: Sendable {
     /// - Returns: 编辑处理结果。
     /// - Throws: 房间/消息不存在、发起者非作者或持久化失败时抛出。
     func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome
-}
-
-/// 为一次消息编辑生成来源事件标识。
-public struct V2MessageEditIDFactory: Sendable {
-    private let makeUUID: @Sendable () -> UUID
-    /// 创建标识工厂。
-    ///
-    /// - Parameter makeUUID: UUID 生成器，默认使用 `UUID.init`。
-    public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
-    /// 生成一个全新的来源事件标识。
-    ///
-    /// - Returns: 来源事件标识。
-    /// - Throws: UUID 生成失败时抛出。
-    public func make() throws -> EventID { try .init(makeUUID().uuidString) }
 }
 
 /// 消息编辑存储的错误分类。

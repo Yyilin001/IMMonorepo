@@ -132,7 +132,7 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         if let context = durableOwner.current {
             await context.batcher.shutdown()
         }
-        try? await policyAuthorizations?.shutdown()
+        await policyAuthorizations?.shutdown()
     }
 }
 
@@ -392,7 +392,7 @@ private actor V2RoomServerActivation {
         let validation = self.validation
         let initialization: V2RoomSendInitialization? = try await V2RoomSQLDeadline.withDeadline(deadline) {
             if let validation { try await validation(token) }
-            if resources.policyAuthorizations?.usesMemorySendPreparation == true {
+            if resources.policyAuthorizations != nil {
                 return try await v2RestoreRoomSendInitialization(database: resources.activationValidationDatabase,
                     token: token, validateActivation: validation == nil)
             }
@@ -409,7 +409,7 @@ private actor V2RoomServerActivation {
             await resources.durableOwner.current?.store.installSendInitialization(initialization)
             guard !closed, ContinuousClock.now < deadline else {
                 await resources.durableOwner.current?.store.invalidateSendState(token: token)
-                try? await resources.policyAuthorizations?.retire(token: token)
+                await resources.policyAuthorizations?.retire(token: token)
                 throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
             }
         }
@@ -671,7 +671,7 @@ private actor V2RoomServerActivation {
         handlers = nil
         await resources?.durableOwner.current?.store.invalidateSendState(token: token)
         await resources?.writes.closeActorState(token: token)
-        try? await resources?.policyAuthorizations?.retire(token: token)
+        await resources?.policyAuthorizations?.retire(token: token)
     }
 
     private struct Handlers: Sendable {
@@ -696,7 +696,7 @@ private actor V2RoomServerActivation {
             guard let durable = resources.durableOwner.current else {
                 throw V2RoomCallFailure.notAccepted(.notReady)
             }
-            messages = try V2RoomMessagingExecutor(token: token, writes: resources.writes,
+            messages = try V2RoomMessagingExecutor(token: token,
                 capacityProfile: resources.capacity, limits: resources.messageLimits,
                 maximumEditBytes: resources.maximumEditBytes, now: now,
                 mutations: resources.mutations, sendOperations: durable.store,

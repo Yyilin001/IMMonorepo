@@ -165,21 +165,6 @@ public struct V2MediaProviderSessionService: Sendable {
     }
 }
 
-/// 提供方目标响应头的允许策略。
-enum V2MediaProviderTargetHeaderPolicy {
-    /// 判断单个响应头是否允许返回给客户端。
-    ///
-    /// 使用通用传输头约束；原始旧目标不能声明 Authorization 对象能力。
-    ///
-    /// - Parameters:
-    ///   - name: 响应头名称。
-    ///   - value: 响应头取值。
-    /// - Returns: 允许透传时为 `true`。
-    static func isAllowed(name: String, value: String) -> Bool {
-        (try? V2ResourceTransferHeader(name:name,value:value)) != nil
-    }
-}
-
 /// 媒体提供方会话错误。
 public enum V2MediaProviderSessionError: Error, Equatable, Sendable {
     /// 租约时长非正或非有限。

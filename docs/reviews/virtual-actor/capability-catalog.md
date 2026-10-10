@@ -15,7 +15,7 @@ The DTO register additionally includes the nine group-avatar intent, receipt, pr
 
 | Case | Existing method and input → result | Stable identity / payload identity | Retry; authorization and transaction boundary | Owner; mapper |
 | --- | --- | --- | --- | --- |
-| C1 send | `V2RoomWriteStore.accept(V2SendMessageCommand, V2CapacityProfile, V2AcceptanceIdentifiers, Date) → V2SendMessageOutcome`; façade `V2SendMessageService.send(V2AuthenticatedSendMessage)` | `ClientMessageID` scoped by sender+room; request fingerprint includes text/media/entities/reply/forward reference. Generated acceptance/event IDs are local execution data. | P; authenticated sender, current control policy, room membership and media checks; message/room/admission/outbox transaction plus activation fence. | D1; Core command and Server outcome/request to Contracts wire. |
+| C1 send | `V2RoomWriteStore.accept(V2SendMessageCommand, V2CapacityProfile, V2AcceptanceIdentifiers, Date) → V2SendMessageOutcome`; runtime uses `V2RoomRefMessagingClient` durable send operations | `ClientMessageID` scoped by sender+room; request fingerprint includes text/media/entities/reply/forward reference. Generated acceptance/event IDs are local execution data. | P; authenticated sender, current control policy, room membership and media checks; message/room/admission/outbox transaction plus activation fence. | D1; Core command and Server outcome/request to Contracts wire. |
 | C2 send batch | `V2AtomicRoomWriteBatchStore.acceptAtomically([V2RoomWriteRequest]) → [V2SendMessageOutcome]`; eligibility/partition/repeated-room methods are local batch planning | Per-item `ClientMessageID`, not one batch identity. | P per item; shared SQL must validate every participant token in stable lock order; unknown shared commit pauses every participating turn. | D1; array envelope with per-item result and partition metadata local. |
 | C3 edit | `V2MessageEditStore.edit(V2EditMessageCommand, V2CapacityProfile, EventID, Date) → V2MessageEditOutcome` | `MessageEditOperationID`; message ID, expected revision, replacement text/limit. | P; author and revision under room transaction, admission/event and content-review enqueue. | D1; Core command, Server outcome. |
 | C4 withdraw | `V2MessageWithdrawalStore.withdraw(V2WithdrawMessageCommand, V2CapacityProfile, EventID, Date) → V2MessageWithdrawalOutcome` | `MessageWithdrawalOperationID`; message ID + expected revision. | P; author/revision, message tombstone/event/admission atomically. | D1; Core command, Server outcome. |
@@ -46,7 +46,7 @@ The DTO register additionally includes the nine group-avatar intent, receipt, pr
 | C18 cross-owner forward/import | `V2CrossOwnerForwarding.forward(...) → V2CrossOwnerForwardOutcome`; `V2ForwardImportEndpoint.deliver` | `MessageForwardOperationID` and export/inbox/receipt identities; target acceptance uses original target client ID. | P; durable export/delivery/receipt workflow and target import under target room fence; source authorization remains anchored to source snapshot. | D5; Server export/import DTO mapper. |
 | Q9 media message visibility | `V2MediaDownloadTargetResolving.downloadTarget(UserID, DeviceID, MediaID, V2MediaMessageLocation?) → V2ResourceTransferPlan` | none for authorization query; grant/session has own ID. | R only before grant; control device/account then owner message/membership/content snapshot, lock/recheck before issue and exchange; `message=nil` is media domain path. | D5, I1 HTTP; wire result is authorization decision/locator, never provider target/secret. |
 | W1 forward delivery/media recovery | `V2ForwardDeliveryWorker.runOnce`, `V2ForwardMediaImportWorker.runOnce`, export/inbox/receipt stores and compactors | durable export/inbox/receipt/media import job IDs and leases. | P via workflow receipt; scanner/claim external, target import/accepted message uses room turn/fence. | D5; worker adapter and import wire mapper. |
-| W2 retention | `V2RoomLogRetentionStore.trimRoomLogs(V2RoomLogRetentionMode, TimeInterval, Date, Int) → V2RoomLogTrimReport` | no per-room operation ID; monotonic floor makes replay safe only after re-evaluating current readers. | N as current batch writer; scan externally, each floor update + event delete in room maintenance turn/fenced transaction. | D6; Server mode/report mapper only for local worker, no public client case. |
+| W2 retention | `PostgresV2RoomLogRetentionStore.trimRoomLog(token:mode:window:now:) → V2RoomLogTrimReport` | exact room activation token; monotonic floor requires re-evaluating current readers. | Candidate scan is read-only; floor update and event deletion commit in one activation-fenced room maintenance turn. | D6; local worker, no public client case. |
 | W3 content review | `V2ContentReviewStore.claimPending/validateAndRenew/resolve/stageViolation/scheduleRetry` | message version + durable review job lease; trusted moderation command identity. | claim/retry external; room fact apply P and fenced; never mark job complete before apply. | D6 adapter, D2 moderation. |
 | W4 housekeeping | `V2ControlPlaneHousekeepingStore.purgeTerminal(Date, TimeInterval, TimeInterval, Int) → V2ControlPlaneHousekeepingReport` | rotation cursor; per-row existing business operation identity. | N batch; split room-owned operation/content-review cleanup into fenced maintenance, keep user/control/outbox cleanup external with minimum idempotency retention. | D6 after C0 extraction. |
 
@@ -164,7 +164,6 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID, operationID: GroupNicknameOperationID, expectedRevision: V2ProfileRevision?, nickname: String?) async throws -> V2GroupMemberPresentation`
 ## V2ReadReceiptStore (V2ReadReceiptService.swift:45)
 - `func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome`
-- `func setPreferences(command: V2SetReadReceiptPreferencesCommand, now: Date) async throws -> V2SetReadReceiptPreferencesOutcome`
 - `func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage`
 ## V2ReadReceiptBatchStore (V2ReadReceiptService.swift:110)
 - `func recordBatch( _ requests: [V2ReadReceiptRecordRequest] ) async throws -> [V2ReadReceiptRecordResult]`
@@ -176,8 +175,8 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func readerCandidates( roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int ) async throws -> V2GroupReadReceiptReaderCandidatePage`
 ## V2ReadReceiptReaderVisibilityStore (V2ReadReceiptService.swift:274)
 - `func visibleReaderIdentities( actorUserID: UserID, candidateUserIDs: [UserID] ) async throws -> [UserID: V2PublicIdentity]`
-## V2RoomLogRetentionStore (V2RoomLogRetention.swift:40)
-- `func trimRoomLogs( mode: V2RoomLogRetentionMode, window: TimeInterval, now: Date, limit: Int ) async throws -> V2RoomLogTrimReport`
+## PostgresV2RoomLogRetentionStore
+- `func trimRoomLog(token: V2RoomActivationToken, mode: V2RoomLogRetentionMode, window: TimeInterval, now: Date, timeouts: V2RoomActivationSQLTimeouts) async throws -> V2RoomLogTrimReport`
 ## V2RoomMembershipDirectoryStore (V2RoomMembershipDirectoryService.swift:103)
 - `func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage`
 ## V2RoomMembershipStore (V2RoomMembershipService.swift:61)
@@ -192,9 +191,9 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func rooms(actorUserID: UserID, after: RoomID?, limit: Int) async throws -> V2UserRoomDirectorySlice`
 ## V2ControlValidatedRoomMembershipStore (V2MembershipIdentitySnapshotValidator.swift:56)
 - `func changeControlValidated( command: V2ChangeRoomMembershipCommand, ownerRoute: V2RoomShardRoute, identitySnapshot: V2MembershipIdentitySnapshot, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date ) async throws -> V2RoomMembershipChangeOutcome`
-## V2RoomWriteStore (V2SendMessageService.swift:147)
+## V2RoomWriteStore (IMV2ServerContracts/V2SendMessageContracts.swift)
 - `func accept( command: consuming V2SendMessageCommand, capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIdentifiers, now: Date ) async throws -> V2SendMessageOutcome`
-## V2AtomicRoomWriteBatchStore (V2SendMessageService.swift:202)
+## V2AtomicRoomWriteBatchStore (IMV2ServerContracts/V2SendMessageContracts.swift)
 - `func atomicBatchEligibility( requests: [V2RoomWriteRequest] ) async -> [Bool]`
 - `func atomicBatchPartitions( requests: [V2RoomWriteRequest] ) async -> [V2AtomicRoomWriteBatchPartition?]`
 - `func atomicBatchSupportsRepeatedRooms( in partition: V2AtomicRoomWriteBatchPartition ) async -> Bool`
@@ -210,10 +209,6 @@ All are in target `IMV2Server`; DTO target and Codable details are in the type r
 
 | Source | Exact existing method |
 | --- | --- |
-| `V2SendMessageService.swift:672` | `public func send(_ request: V2AuthenticatedSendMessage) async throws -> V2SendMessageOutcome` |
-| `V2MessageEditService.swift:111` | `public func edit(_ request: V2AuthenticatedMessageEdit) async throws -> V2MessageEditOutcome` |
-| `V2MessageWithdrawalService.swift:113` | `public func withdraw(_ request: V2AuthenticatedMessageWithdrawal) async throws -> V2MessageWithdrawalOutcome` |
-| `V2MessageReactionService.swift:108` | `public func change(_ request: V2AuthenticatedMessageReaction) async throws -> V2MessageReactionOutcome` |
 | `V2RoomMembershipService.swift:126` | `public func change(_ request: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome` |
 | `V2ModerationService.swift:297` | `public func apply(_ request: V2AuthenticatedModeration) async throws -> V2ModerationOutcome` |
 | `V2ModerationService.swift:345,361` | `public func apply(_ request: V2TrustedSafetyRoomControl) async throws -> V2ModerationOutcome`; `public func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome` |
@@ -228,5 +223,4 @@ All are in target `IMV2Server`; DTO target and Codable details are in the type r
 | `IMV2ServerApplication/V2GroupInviteCreationRecoveryWorker.swift:120` | `public func runOnce(limit: Int = 8) async throws -> V2GroupInviteCreationRecoveryReport` |
 | `IMV2ServerApplication/V2GroupJoinQuotaRecoveryWorker.swift:31` | `public func runOnce(limit: Int = 8) async throws -> V2GroupJoinQuotaRecoveryReport` |
 | `IMV2ServerApplication/V2ContentReviewWorker.swift:278` | `public func runOnce(limit: Int) async throws -> V2ContentReviewReport` |
-| `V2RoomLogRetention.swift:262` | `public func runOnce(limit: Int) async throws -> V2RoomLogTrimReport` |
 | `V2ControlPlaneHousekeepingWorker.swift:102` | `public func runOnce(limit: Int) async throws -> V2ControlPlaneHousekeepingReport` |

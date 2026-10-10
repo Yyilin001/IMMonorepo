@@ -16,7 +16,7 @@ public struct PostgresV2RoomWriteStore: V2OwnerValidatedRoomWriteStore, V2OwnerV
     private var database: any Database
     private var controlDatabase: (any Database)?
     private var policyAuthorizations: V2RoomPolicyAuthorizationService?
-    var usesMemorySendPreparation: Bool { policyAuthorizations?.usesMemorySendPreparation == true }
+    var usesMemorySendPreparation: Bool { policyAuthorizations != nil }
     private var controlResolution: V2RoomWriteControlResolution = .unresolved
     var authorizationGrants: [String: V2DirectAuthorizationGrant]? { controlResolution.authorization?.grants }
     private var authorizationResolutionDatabase: (any Database)?

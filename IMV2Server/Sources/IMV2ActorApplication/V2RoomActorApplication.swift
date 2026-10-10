@@ -22,10 +22,9 @@ public struct V2PolicyHostedServices: Sendable {
     public let placement: V2PolicyOwnerPlacementConfiguration
     public let ownership: any V2PolicyOwnershipServing
     public let mutations: any V2PolicyMutationServing
-    public let revocations: any V2RoomPolicyRevocationServing
     public init(placement: V2PolicyOwnerPlacementConfiguration, ownership: any V2PolicyOwnershipServing,
-        mutations: any V2PolicyMutationServing, revocations: any V2RoomPolicyRevocationServing) {
-        self.placement = placement; self.ownership = ownership; self.mutations = mutations; self.revocations = revocations
+        mutations: any V2PolicyMutationServing) {
+        self.placement = placement; self.ownership = ownership; self.mutations = mutations
     }
     package func bindingClient(_ binding: V2PolicyClusterClientBinding) -> Self {
         var copy = self; copy.clientBinding = binding; return copy
@@ -77,11 +76,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         self.metrics = metrics
     }
 
-    package func policyStatesProvider() throws -> PostgresV2RemotePolicyOwners {
-        guard let policyPlacement else { throw V2RoomActorApplicationError.invalidRole }
-        let routes = PostgresV2PolicyDeploymentRoutes(placement: policyPlacement, client: client)
-        return .init(client: client, resolve: { try await routes.resolveScope($0) })
-    }
     package func policyMutationExecutor() throws -> PostgresV2RemotePolicyMutations {
         guard let policyPlacement else { throw V2RoomActorApplicationError.invalidRole }
         let routes = PostgresV2PolicyDeploymentRoutes(placement: policyPlacement, client: client)
@@ -145,7 +139,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 serviceShardAccess: configuration.serviceShardAccess), identity: identity, host: host,
                 signer: configuration.signer, trust: configuration.trust,
                 authenticationLimits: configuration.authentication, runtimeConfiguration: runtime,
-                policyRevocations: policyServices?.revocations, policyOwnership: policyServices?.ownership, policyMutations: policyServices?.mutations,
+                policyOwnership: policyServices?.ownership, policyMutations: policyServices?.mutations,
                 forwardPairs: policyServices?.forwardPairs)
             do {
                 _ = try await hostNode.start()

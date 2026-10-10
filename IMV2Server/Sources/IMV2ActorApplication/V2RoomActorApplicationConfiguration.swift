@@ -153,7 +153,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
                 guard let peer = document.peers.first(where: { $0.hostID == owner.hostID }),
                       peer.shardIDs.contains(owner.endpoint),
                       let service = document.services.first(where: { $0.id == peer.serviceID }),
-                      Set([V2ActorServicePermission.policyMutation, .policyRegistration, .policyRevocation]).isSubset(of: Set(service.permissions)),
+                      Set([V2ActorServicePermission.policyMutation, .policyRegistration]).isSubset(of: Set(service.permissions)),
                       configuredShardIDs.isSubset(of: Set(service.shardIDs)) else {
                     throw V2RoomActorApplicationConfigurationError.invalidConfiguration
                 }

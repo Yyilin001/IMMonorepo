@@ -72,41 +72,6 @@ struct V2ActorAuthenticationTests {
         #expect(throws: (any Error).self) { try V2RoomPolicyEndpointLocator(hostID: host, shardID: String(repeating: "x", count: 129)) }
     }
 
-    @Test("policy revocation requires its own service permission and cannot use a user principal", arguments: [false, true])
-    func policyRevocationAuthority(allowed: Bool) async throws {
-        let fixture = try Fixture(clientPermissions: allowed ? [.policyRevocation] : [.userRoomCalls, .roomCoordination])
-        let grant = try await fixture.open()
-        // Expired targets remain valid obligations, not evidence of settlement.
-        let target = try V2RoomPolicyRevocationWire(registrationID: UUID(), roomID: fixture.token.roomID,
-            activationID: UUID(), roomOwnerEpoch: 0, generation: 1, endpoint: "owner",
-            validUntil: Date(timeIntervalSince1970: 1))
-        func call(_ principal: V2ActorCallPrincipal, sequence: UInt64) throws -> V2ActorAuthenticatedCall {
-            .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
-                sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
-                remainingBudget: try .init(5_000), principal: principal, request: .revokePolicyAuthorization(target))
-        }
-        await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000))
-        }
-        let packet = try fixture.client.sign(call(.service, sequence: 2), maximumBytes: 10_000)
-        if allowed {
-            #expect(try await fixture.auth.accept(packet).call.request == .revokePolicyAuthorization(target))
-            await failure(.replay) { _ = try await fixture.auth.accept(packet) }
-            let activation = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
-                recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 3, attemptID: UUID(), traceID: UUID(),
-                remainingBudget: try .init(5_000), principal: .service,
-                request: .activate(roomID: fixture.token.roomID, owner: fixture.token.owner))
-            await failure(.forbidden) {
-                _ = try await fixture.auth.accept(fixture.client.sign(activation, maximumBytes: 10_000))
-            }
-        } else { await failure(.forbidden) { _ = try await fixture.auth.accept(packet) } }
-        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(target)) as? [String: Any])
-        object["generation"] = 0
-        #expect(throws: (any Error).self) {
-            try JSONDecoder().decode(V2RoomPolicyRevocationWire.self, from: JSONSerialization.data(withJSONObject: object))
-        }
-    }
-
     @Test("versioned policy updates require mutation authority", arguments: [false, true])
     func versionedPolicyUpdateAuthority(allowed: Bool) async throws {
         let fixture = try Fixture(clientPermissions: allowed ? [.policyMutation] : [.policyRegistration])
@@ -136,21 +101,23 @@ struct V2ActorAuthenticationTests {
 
     @Test("policy registration requires independent service authority", arguments: [false, true])
     func policyRegistrationAuthority(allowed: Bool) async throws {
-        let fixture = try Fixture(clientPermissions: allowed ? [.policyRegistration] : [.policyRevocation, .roomCoordination])
+        let subscriberID = V2ActorHostID(uuid: UUID())
+        let fixture = try Fixture(clientHostedIDs: [subscriberID], clientPermissions: allowed ? [.policyRegistration] : [.policyMutation, .roomCoordination])
         let grant = try await fixture.open()
         let scope = V2PolicyScopeWire(account: UUID())
-        let claim = try V2PolicyOwnershipClaimWire(endpoint: "owner", scopes: [scope])
+        let claim = try V2PolicySnapshotRequestWire(endpoint: "owner", scopes: [scope],
+            subscriber: .init(hostID: subscriberID, endpoint: "gateway"))
         func call(_ principal: V2ActorCallPrincipal, sequence: UInt64) throws -> V2ActorAuthenticatedCall {
             .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
                 sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
-                remainingBudget: try .init(5_000), principal: principal, request: .claimPolicyOwnership(claim))
+                remainingBudget: try .init(5_000), principal: principal, request: .policySnapshots(claim))
         }
         await failure(.forbidden) {
             _ = try await fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000))
         }
         let packet = try fixture.client.sign(call(.service, sequence: 2), maximumBytes: 10_000)
         if allowed {
-            #expect(try await fixture.auth.accept(packet).call.request == .claimPolicyOwnership(claim))
+            #expect(try await fixture.auth.accept(packet).call.request == .policySnapshots(claim))
             await failure(.replay) { _ = try await fixture.auth.accept(packet) }
             let activation = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
                 recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 3, attemptID: UUID(), traceID: UUID(),
@@ -164,7 +131,7 @@ struct V2ActorAuthenticationTests {
 
     @Test("policy mutation requires independent service authority", arguments: [false, true])
     func policyMutationAuthority(allowed: Bool) async throws {
-        let fixture = try Fixture(clientPermissions: allowed ? [.policyMutation] : [.policyRegistration, .policyRevocation])
+        let fixture = try Fixture(clientPermissions: allowed ? [.policyMutation] : [.policyRegistration])
         let grant = try await fixture.open()
         let request = try V2PolicyMutationWire(endpoint: "owner", scope: .init(account: UUID()),
             operationKey: "operation", fingerprint: Data(repeating: 1, count: 32), command: Data("{}".utf8))
@@ -196,37 +163,39 @@ struct V2ActorAuthenticationTests {
         #expect(!receipt.matches(other))
     }
 
-    @Test("policy scope decoding canonicalizes pairs and rejects invalid claim metadata")
+    @Test("policy scope decoding canonicalizes pairs and rejects duplicate snapshot scopes")
     func policyOwnershipCodec() throws {
         let a = UUID(), b = UUID()
         let forward = try V2PolicyScopeWire(pair: a, b), reverse = try V2PolicyScopeWire(pair: b, a)
         #expect(forward == reverse)
         #expect(try JSONDecoder().decode(V2PolicyScopeWire.self, from: JSONEncoder().encode(reverse)) == forward)
         #expect(throws: (any Error).self) { try V2PolicyScopeWire(pair: a, a) }
-        #expect(throws: (any Error).self) { try V2PolicyOwnershipClaimWire(endpoint: "owner", scopes: [forward, reverse]) }
+        #expect(throws: (any Error).self) { try V2PolicySnapshotRequestWire(endpoint: "owner", scopes: [forward, reverse],
+            subscriber: .init(hostID: .init(uuid: UUID()), endpoint: "gateway")) }
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(V2PolicyScopeWire(account: a))) as? [String: Any])
         object["second"] = b.uuidString
         #expect(throws: (any Error).self) {
             try JSONDecoder().decode(V2PolicyScopeWire.self, from: JSONSerialization.data(withJSONObject: object))
         }
         #expect(throws: (any Error).self) {
-            try V2PolicyOwnerLeaseWire(scope: forward, ownerID: UUID(), epoch: 0, revision: 1, validUntil: Date())
+            try V2PolicySnapshotWire(scope: forward, version: 0, facts: Data([1]))
         }
     }
 
-    @Test("signed policy state bounds facts and remaining lifetime during decoding")
-    func policyStateWireBounds() throws {
-        let owner = try V2PolicyOwnerLeaseWire(scope: .init(account: UUID()), ownerID: UUID(), epoch: 1, revision: 1, validUntil: Date())
-        let wire = try V2PolicyOwnerStateWire(owner: owner, facts: Data([1]), remainingSeconds: 10)
-        #expect(try JSONDecoder().decode(V2PolicyOwnerStateWire.self, from: JSONEncoder().encode(wire)) == wire)
-        for duration in [0.0, -1.0, 301.0, Double.infinity] {
-            #expect(throws: (any Error).self) { try V2PolicyOwnerStateWire(owner: owner, facts: Data([1]), remainingSeconds: duration) }
+    @Test("policy snapshot decoding validates durable versions and fact size")
+    func policySnapshotWireBounds() throws {
+        let scope = V2PolicyScopeWire(account: UUID())
+        let wire = try V2PolicySnapshotWire(scope: scope, version: 1, facts: Data([1]))
+        #expect(try JSONDecoder().decode(V2PolicySnapshotWire.self, from: JSONEncoder().encode(wire)) == wire)
+        for version: Int64 in [0, -1] {
+            #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: version, facts: Data([1])) }
         }
-        #expect(throws: (any Error).self) { try V2PolicyOwnerStateWire(owner: owner, facts: Data(repeating: 1, count: 16_385), remainingSeconds: 10) }
+        #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: 1, facts: Data()) }
+        #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: 1, facts: Data(repeating: 1, count: 16_385)) }
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(wire)) as? [String: Any])
-        object["remainingSeconds"] = 0
+        object["version"] = 0
         #expect(throws: (any Error).self) {
-            try JSONDecoder().decode(V2PolicyOwnerStateWire.self, from: JSONSerialization.data(withJSONObject: object))
+            try JSONDecoder().decode(V2PolicySnapshotWire.self, from: JSONSerialization.data(withJSONObject: object))
         }
     }
 
@@ -771,6 +740,7 @@ struct V2ActorAuthenticationTests {
 
         init(limits: V2ActorAuthenticationLimits = try! .init(), clock: TestClock = .init(),
              workerPermissions: Set<V2ActorServicePermission> = [.trustedSafety],
+             clientHostedIDs: Set<V2ActorHostID> = [],
              clientPermissions: Set<V2ActorServicePermission> = [.userRoomCalls],
              gatewayNodeIDs: Set<String> = []) throws {
             self.limits = limits
@@ -784,7 +754,7 @@ struct V2ActorAuthenticationTests {
             worker = try .init(serviceID: V2ActorServiceID("reviewer"), privateKey: workerKey.rawRepresentation)
             hostSigner = try .init(serviceID: V2ActorServiceID("host"), privateKey: hostKey.rawRepresentation)
             trust = try .init(services: [
-                .init(serviceID: client.serviceID, publicKey: clientKey.publicKey.rawRepresentation, permissions: clientPermissions, gatewayNodeIDs: gatewayNodeIDs),
+                .init(serviceID: client.serviceID, publicKey: clientKey.publicKey.rawRepresentation, permissions: clientPermissions, hostedIDs: clientHostedIDs, gatewayNodeIDs: gatewayNodeIDs),
                 .init(serviceID: worker.serviceID, publicKey: workerKey.publicKey.rawRepresentation, permissions: workerPermissions),
                 .init(serviceID: hostSigner.serviceID, publicKey: hostKey.publicKey.rawRepresentation, permissions: [], hostedIDs: [host.hostID]),
             ])

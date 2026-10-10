@@ -97,20 +97,4 @@ public enum V2GroupCapabilitiesStoreError: Error, Equatable, Sendable {
     case corruptPersistenceState
 }
 
-/// 群能力命令的事件标识生成器。
-public struct V2GroupCapabilitiesIDFactory: Sendable {
-    private let makeUUID: @Sendable () -> UUID
-
-    /// 注入 UUID 来源，默认使用系统实现。
-    ///
-    /// - Parameter makeUUID: 产生原始 UUID 的闭包，测试可注入确定性实现。
-    public init(makeUUID: @escaping @Sendable () -> UUID = UUID.init) { self.makeUUID = makeUUID }
-
-    /// 生成本次命令的事件标识。
-    ///
-    /// - Returns: 本次命令使用的事件标识。
-    /// - Throws: 标识类型拒绝生成值时抛出。
-    public func make() throws -> EventID { try .init(makeUUID().uuidString) }
-}
-
 /// 群能力命令的对外服务，负责补齐标识与授时后转交存储。

@@ -176,8 +176,7 @@ func v2RoomSnapshotReadActivationFences(
 /// Every lock stage depends on completion of the preceding materialized stage.
 /// Receipt reads remain a separate statement after this fence settles.
 func v2RequireDurableOperationAndActivationLocks(
-    keys: [V2DurableOwnerBatchOperationKey], tokens: [V2RoomActivationToken], sql: any SQLDatabase,
-    policyCheck: PostgresV2RoomPolicyLeaseFence.CombinedCheck? = nil
+    keys: [V2DurableOwnerBatchOperationKey], tokens: [V2RoomActivationToken], sql: any SQLDatabase
 ) async throws {
     guard !keys.isEmpty, keys.count <= 256, !tokens.isEmpty, tokens.count <= 256 else {
         throw V2MessageOperationValidationError.invalidReceipt
@@ -193,15 +192,6 @@ func v2RequireDurableOperationAndActivationLocks(
         throw V2RoomActivationLeaseError.activationChanged
     }
     let roomsInput = String(decoding: try JSONEncoder().encode(expected.keys.sorted { $0.uuidString < $1.uuidString }.map(\.uuidString)), as: UTF8.self)
-    let policyStages: SQLQueryString = policyCheck?.stages ?? ""
-    let clockDependency: SQLQueryString = policyCheck == nil ? "leases_done" : "policies_done"
-    let policyRows: SQLQueryString = policyCheck == nil ? "NULL::text" : """
-        CASE WHEN requested.room_id=(SELECT room_id FROM requested ORDER BY room_id LIMIT 1)
-        THEN (SELECT coalesce(jsonb_agg(to_jsonb(policy) || jsonb_build_object(
-            'valid_until_microseconds',((extract(epoch FROM policy.valid_until)-946684800)*1000000)::bigint,
-            'observed_at_microseconds',((extract(epoch FROM observed.observed_at)-946684800)*1000000)::bigint)), '[]'::jsonb)::text
-         FROM locked_policies policy) ELSE NULL::text END
-        """
     let rows = try await v2RoomSQLObservedAll(sql.raw("""
         \(locks.statement), operation_locks_done AS MATERIALIZED (
             SELECT count(*) AS acquired_count FROM locked
@@ -220,13 +210,12 @@ func v2RequireDurableOperationAndActivationLocks(
             ORDER BY lease.room_id FOR UPDATE OF lease
         ), leases_done AS MATERIALIZED (
             SELECT count(*) AS locked_count FROM locked_leases
-        )\(policyStages), observed AS MATERIALIZED (
-            SELECT clock_timestamp() AS observed_at FROM \(clockDependency) WHERE locked_count>=0
+        ), observed AS MATERIALIZED (
+            SELECT clock_timestamp() AS observed_at FROM leases_done WHERE locked_count>=0
         )
         SELECT requested.room_id, room.room_shard_id, room.owner_epoch AS room_owner_epoch,
                lease.activation_epoch, lease.owner_shard_id, lease.owner_epoch,
-               lease.host_id, lease.host_incarnation_id, lease.expires_at, observed.observed_at,
-               \(policyRows) AS policy_leases
+               lease.host_id, lease.host_incarnation_id, lease.expires_at, observed.observed_at
         FROM requested CROSS JOIN observed
         LEFT JOIN locked_rooms room USING(room_id) LEFT JOIN locked_leases lease USING(room_id)
         ORDER BY requested.room_id
@@ -248,23 +237,18 @@ func v2RequireDurableOperationAndActivationLocks(
             throw V2RoomActivationLeaseError.leaseExpired
         }
     }
-    if let policyCheck {
-        guard let json = rows.first?.policyLeases else { throw V2PolicyAuthorizationLifecycleError.corruptPersistence }
-        try policyCheck.validate(json: json)
-    }
+
 }
 
 private struct DurableCombinedFenceRow: Decodable {
     let shardID: String?
     let epoch: Int64?
     let lease: V2LockedRoomActivationLeaseRow
-    let policyLeases: String?
-    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id", epoch = "room_owner_epoch", policyLeases = "policy_leases" }
+    enum CodingKeys: String, CodingKey { case shardID = "room_shard_id", epoch = "room_owner_epoch" }
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         shardID = try container.decodeIfPresent(String.self, forKey: .shardID)
         epoch = try container.decodeIfPresent(Int64.self, forKey: .epoch)
-        policyLeases = try container.decodeIfPresent(String.self, forKey: .policyLeases)
         lease = try V2LockedRoomActivationLeaseRow(from: decoder)
     }
 }

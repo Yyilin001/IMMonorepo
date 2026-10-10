@@ -53,8 +53,7 @@ for database ownership, shutdown order, dependency boundaries and validation.
    DNS-valid mutual TLS certificate using the [Room Virtual Actor contract](../docs/reviews/room-virtual-actor-contract.md).
    The local stack script creates isolated test identities automatically.
 6. Set every required variable in [`.env.example`](.env.example), then run the
-   V2 app. The `IM_V2_NATS_*` and `IM_V2_GROUP_WAKE_NATS_*` variables are
-   all-or-nothing optional hint layers, not required broker dependencies.
+   V2 app.
 
 Before packaging a deployment, verify that the three checked-in examples still
 match their strict runtime constructors:

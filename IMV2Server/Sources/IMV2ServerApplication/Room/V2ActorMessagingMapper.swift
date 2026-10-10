@@ -64,25 +64,6 @@ public extension V2ActorMentionTargetWire {
     }
 }
 
-public extension V2ActorSendMessageWire {
-    init(_ value: V2AuthenticatedSendMessage) {
-        self.init(roomID: value.roomID, actorUserID: value.actorUserID,
-                  clientMessageID: value.clientMessageID, text: value.text, media: value.media,
-                  mentions: value.mentions.map(V2ActorMentionTargetWire.init),
-                  entities: value.entities, replyTo: value.replyTo)
-    }
-
-    /// 本地执行器自行提供文本预算；调用方仍须认证 actorUserID。
-    func toAuthenticated(limits: V2MessageCommandLimits) throws -> V2AuthenticatedSendMessage {
-        let targets = mentions.map { $0.toDomain() }
-        _ = try V2SendMessageCommand(roomID: roomID, senderUserID: actorUserID,
-                                     clientMessageID: clientMessageID, text: text, media: media,
-                                     mentions: targets, entities: entities, replyTo: replyTo, limits: limits)
-        return .init(roomID: roomID, actorUserID: actorUserID, clientMessageID: clientMessageID,
-                     text: text, media: media, mentions: targets, entities: entities, replyTo: replyTo)
-    }
-}
-
 
 
 

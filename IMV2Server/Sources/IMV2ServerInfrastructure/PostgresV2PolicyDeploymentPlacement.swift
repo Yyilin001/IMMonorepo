@@ -89,12 +89,12 @@ package struct PostgresV2PolicyDeploymentRoutes: Sendable {
         return try keys.map { key in
             let target = try placement.assignment(for: key)
             let host = try snapshot.resolvePolicyHost(hostID: .init(uuid: target.hostID), endpoint: target.endpoint)
-            return .init(host: host, endpoint: target.endpoint, ownerID: host.incarnationID)
+            return .init(host: host, endpoint: target.endpoint)
         }
     }
     package func resolveScope(_ key: String) throws -> PostgresV2RemotePolicyOwners.Route {
         let target = try placement.assignment(for: key)
         let host = try client.resolvePolicyHost(hostID: .init(uuid: target.hostID), endpoint: target.endpoint)
-        return .init(host: host, endpoint: target.endpoint, ownerID: host.incarnationID)
+        return .init(host: host, endpoint: target.endpoint)
     }
 }

@@ -519,8 +519,7 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
     /// Uses this transaction's owned connection and already installed LOCAL
     /// timeouts. No caller-provided connection can bypass timeout setup.
     func requireDurableOwnersAndActivations(tokens: [V2RoomActivationToken],
-        operations: [V2DurableOwnerBatchOperationKey]? = nil,
-        policyCheck: PostgresV2RoomPolicyLeaseFence.CombinedCheck? = nil) async throws {
+        operations: [V2DurableOwnerBatchOperationKey]? = nil) async throws {
         try lifecycle.withLock { lifecycle in
             guard lifecycle.active, !lifecycle.inUse, !lifecycle.used else {
                 throw V2RoomActivationLeaseError.activationChanged
@@ -533,10 +532,8 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         }
         do {
             if let operations {
-                try await v2RequireDurableOperationAndActivationLocks(keys: operations, tokens: tokens, sql: sql,
-                    policyCheck: policyCheck)
+                try await v2RequireDurableOperationAndActivationLocks(keys: operations, tokens: tokens, sql: sql)
             } else {
-                guard policyCheck == nil else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
                 try await v2RequireDurableOwnerBatchActivations(tokens: tokens, sql: sql,
                     timeouts: configuredTimeouts, configureTimeouts: false)
             }

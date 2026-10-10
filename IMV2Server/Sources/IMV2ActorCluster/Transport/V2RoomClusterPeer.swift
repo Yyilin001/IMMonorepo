@@ -6,12 +6,6 @@ import IMV2ActorRuntime
 import IMV2Core
 import Synchronization
 
-/// Only the authenticated client mints this after checking the exact reply.
-package struct V2VerifiedRoomPolicyRevocation: Sendable {
-    package let target: V2RoomPolicyRevocationWire
-    fileprivate init(target: V2RoomPolicyRevocationWire) { self.target = target }
-}
-
 actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     package func forwardPair(_ pair: V2ActorForwardPairWire, token: V2RoomActivationToken,
         deadline: ContinuousClock.Instant) async throws -> V2ActorForwardMessageResultWire {
@@ -23,13 +17,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             throw V2RoomCallFailure.outcomeUnknown
         }
         return result
-    }
-    package func invalidatePolicyCache(_ request: V2PolicyCacheInvalidationWire, on host: V2ActorHostIdentity,
-        deadline: ContinuousClock.Instant) async throws {
-        let response = try await exchange(.invalidatePolicyCache(request), on: host,
-            principal: .service, deadline: deadline, roomToken: nil)
-        if case .failure(let failure) = response { throw failure }
-        guard case .acknowledged = response else { throw V2RoomCallFailure.outcomeUnknown }
     }
     package func mutatePolicy(_ mutation: V2PolicyMutationWire, on host: V2ActorHostIdentity,
         deadline: ContinuousClock.Instant) async throws -> V2PolicyMutationReceiptWire {
@@ -60,33 +47,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let response = try await exchange(.updatePolicySnapshot(request), on: host, principal: .service, deadline: deadline, roomToken: nil)
         if case .failure(let failure) = response { throw failure }
         guard case .acknowledged = response else { throw V2RoomCallFailure.outcomeUnknown }
-    }
-    package func claimPolicyOwnership(_ claim: V2PolicyOwnershipClaimWire, on host: V2ActorHostIdentity,
-        expectedOwnerID: UUID, deadline: ContinuousClock.Instant) async throws -> [V2PolicyOwnerLeaseWire] {
-        try await claimPolicyStates(claim, on: host, expectedOwnerID: expectedOwnerID, deadline: deadline).map(\.owner)
-    }
-    package func claimPolicyStates(_ claim: V2PolicyOwnershipClaimWire, on host: V2ActorHostIdentity,
-        expectedOwnerID: UUID, deadline: ContinuousClock.Instant) async throws -> [V2PolicyOwnerStateWire] {
-        let response = try await exchange(.claimPolicyOwnership(claim), on: host,
-            principal: .service, deadline: deadline, roomToken: nil)
-        if case .failure(let failure) = response { throw failure }
-        if claim.cachedOnly, case .policyOwnership(let states) = response, states.isEmpty { return [] }
-        guard case .policyOwnership(let leases) = response, leases.count == claim.scopes.count,
-              Set(leases.map { $0.owner.scope.key }) == Set(claim.scopes.map(\.key)),
-              leases.allSatisfy({ $0.owner.ownerID == expectedOwnerID }) else {
-            throw V2RoomCallFailure.outcomeUnknown
-        }
-        return leases
-    }
-    package func revokePolicyAuthorization(_ target: V2RoomPolicyRevocationWire, on host: V2ActorHostIdentity,
-        deadline: ContinuousClock.Instant) async throws -> V2VerifiedRoomPolicyRevocation {
-        let response = try await exchange(.revokePolicyAuthorization(target), on: host,
-            principal: .service, deadline: deadline, roomToken: nil)
-        if case .failure(let failure) = response { throw failure }
-        guard case .policyAuthorizationRevoked(let revoked) = response, revoked == target else {
-            throw V2RoomCallFailure.outcomeUnknown
-        }
-        return .init(target: revoked)
     }
     private let system: ClusterSystem
     private let signer: V2ActorSigningIdentity

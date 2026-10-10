@@ -209,7 +209,7 @@
     {
       "id": "W26",
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomLogRetention.swift",
-      "symbol": "func trimRoomLogs",
+      "symbol": "func trimRoomLog(",
       "table_or_marker": "im_v2.room_events"
     },
     {

@@ -153,28 +153,6 @@ public struct V2ActorUserRoomDirectoryEntryWire: Codable, Equatable, Sendable {
     }
 }
 
-/// 用户／控制域协调者查询；有意不归入 V2RoomDirectoryQuery。
-public struct V2ActorUserRoomDirectoryQueryWire: Codable, Equatable, Sendable {
-    public let actorUserID: UserID
-    public let cursor: String?
-    public let pageSize: Int
-    public init(actorUserID: UserID, cursor: String?, pageSize: Int) throws {
-        guard (1...100).contains(pageSize) else { throw V2ActorRoomDirectoryWireError.invalidRequest }
-        guard cursor.map({ !$0.isEmpty && $0.utf8.count <= 2048 }) ?? true else {
-            throw V2ActorRoomDirectoryWireError.invalidCursor
-        }
-        self.actorUserID = actorUserID; self.cursor = cursor; self.pageSize = pageSize
-    }
-    public init(from decoder: any Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(actorUserID: values.decode(UserID.self, forKey: .actorUserID),
-                      cursor: values.decodeIfPresent(String.self, forKey: .cursor),
-                      pageSize: values.decode(Int.self, forKey: .pageSize))
-    }
-    private enum CodingKeys: String, CodingKey { case actorUserID, cursor, pageSize }
-    public var replayPolicy: V2RoomReplayPolicy { .readOnly }
-}
-
 public struct V2ActorUserRoomDirectoryPageWire: Codable, Equatable, Sendable {
     public let rooms: [V2ActorUserRoomDirectoryEntryWire]
     public let nextCursor: String?
@@ -194,10 +172,4 @@ public struct V2ActorUserRoomDirectorySliceWire: Codable, Equatable, Sendable {
     public init(entries: [V2ActorUserRoomDirectoryEntryWire], scannedThrough: RoomID?, hasMore: Bool) {
         self.entries = entries; self.scannedThrough = scannedThrough; self.hasMore = hasMore
     }
-}
-
-/// 用户／控制域枚举错误归属于协调操作。
-public enum V2ActorUserRoomDirectoryResultWire: Codable, Equatable, Sendable {
-    case page(V2ActorUserRoomDirectoryPageWire)
-    case failure(V2ActorRoomRecoveryReadErrorWire)
 }

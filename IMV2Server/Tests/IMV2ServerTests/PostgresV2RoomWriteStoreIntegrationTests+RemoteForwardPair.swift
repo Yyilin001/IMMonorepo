@@ -14,8 +14,8 @@ import SQLKit
 import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("caller-only TCP forward delegates reservations and policy writes to the host", arguments: [false, true], [false, true])
-    func policyRemoteForwardPair(splitHosts: Bool, usesCurrentState: Bool) async throws {
+    @Test("caller-only TCP forward delegates reservations and policy writes to the host", arguments: [false, true])
+    func policyRemoteForwardPair(splitHosts: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 128)
             let now = Date(), sourceRoom = RoomID(uuid: roomUUID)
@@ -46,25 +46,22 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let leases = try V2RoomServerLeaseStore(databases: ["room-a": database])
             let legacy = V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: [:])
-            let revocations = RemotePairPolicyRouter()
-            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database, roomDrainRequired: !usesCurrentState),
-                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy),
-                revoke: { try await revocations.revoke($0) })
-            let policies = V2RoomPolicyAuthorizationService(roomDatabase: database, controlDatabase: database,
-                policyOwners: owners, endpoint: "room-a", maximumRooms: 2, usesCurrentState: usesCurrentState)
-            await revocations.install(policies)
+            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+            let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
+                policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity, leaseStore: leases,
                 configuration: runtime, budget: .init(configuration: runtime), classify: { $0.turnSchedulingClass },
                 factory: .init { token in .init(restore: { _ in }, execute: { _ in .rolledBack(.invalidRequest) },
                     invalidateReservation: { _ in }, close: {
-                        do { try await policies.retire(token: token) }
+                        do { await policies.retire(token: token) }
                         catch { Issue.record("Policy registration retirement failed") }
                     }) })
             let sourceHost = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: sourceIdentity, leaseStore: leases,
                 configuration: runtime, budget: .init(configuration: runtime), classify: { $0.turnSchedulingClass },
                 factory: .init { token in .init(restore: { _ in }, execute: { _ in .rolledBack(.invalidRequest) },
                     invalidateReservation: { _ in }, close: {
-                        do { try await policies.retire(token: token) }
+                        do { await policies.retire(token: token) }
                         catch { Issue.record("Policy registration retirement failed") }
                     }) })
             let executor = V2ActorForwardPairDomainExecutor(database: database,
@@ -154,7 +151,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(limitedResult.messageID == nil && limitedResult.errorCode == "RATE_LIMITED")
                 let localSocial = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                 let mutations = PostgresV2RemotePolicyMutations(client: client, resolve: { _ in
-                    .init(host: identity, endpoint: "room-a", ownerID: identity.incarnationID)
+                    .init(host: identity, endpoint: "room-a")
                 })
                 phase = "remote friendship enables further sends"
                 let requested = try await localSocial.freezeSocialFixture(actorUserID: senderID,
@@ -208,8 +205,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 await sourceInbound.stop(); _ = await sourceHost.stop(deadline: .now + .seconds(10))
                 #expect(await directory.quiesce(deadline: .now + .seconds(10)))
                 #expect(await hostClient.quiesce(deadline: .now + .seconds(10)))
-                try await policies.shutdown(); await owners.shutdown(); await leases.shutdownLifecycle()
-                await revocations.clear()
+                await policies.shutdown(); await owners.shutdown(); await leases.shutdownLifecycle()
                 await routes.shutdown()
                 try await callerSystem.shutdown().wait(); try await sourceSystem.shutdown().wait(); try await system.shutdown().wait()
             } catch {
@@ -219,8 +215,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 await sourceInbound.stop(); _ = await sourceHost.stop(deadline: .now + .seconds(10))
                 _ = await directory.quiesce(deadline: .now + .seconds(10))
                 _ = await hostClient.quiesce(deadline: .now + .seconds(10))
-                try? await policies.shutdown(); await owners.shutdown(); await leases.shutdownLifecycle()
-                await revocations.clear()
+                await policies.shutdown(); await owners.shutdown(); await leases.shutdownLifecycle()
                 await routes.shutdown()
                 try? await callerSystem.shutdown().wait(); try? await sourceSystem.shutdown().wait(); try? await system.shutdown().wait(); throw error
             }
@@ -376,13 +371,3 @@ private func remotePairSettings(_ name: String, port: Int) -> ClusterSystemSetti
 }
 private struct RemotePairCount: Decodable { let value: Int64 }
 private struct RemotePairReceiptRow: Decodable { let value: UUID? }
-
-private actor RemotePairPolicyRouter {
-    private var service: V2RoomPolicyAuthorizationService?
-    func install(_ service: V2RoomPolicyAuthorizationService) { self.service = service }
-    func clear() { service = nil }
-    func revoke(_ holder: V2PolicyAuthorizationHolder) async throws -> V2PolicyAuthorizationRevocationProof {
-        guard let service else { throw V2PolicyAuthorizationLifecycleError.closed }
-        return try await service.revoke(holder)
-    }
-}

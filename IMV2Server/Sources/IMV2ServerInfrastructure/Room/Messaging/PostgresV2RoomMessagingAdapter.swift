@@ -8,7 +8,6 @@ import IMV2Core
 /// token on the owner connection. This adapter never opens an outer transaction.
 struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     private let token: V2RoomActivationToken
-    private let writes: PostgresV2RoomWriteStore
     private let sendOperations: PostgresV2MessageSendOperationStore?
     private let sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?
     private let directSendPreparation: V2RoomSendPreparation?
@@ -19,7 +18,7 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     private let maximumEditBytes: Int
     private let now: @Sendable () -> Date
 
-    init(token: V2RoomActivationToken, writes: PostgresV2RoomWriteStore,
+    init(token: V2RoomActivationToken,
          capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIDFactory,
          maximumEditBytes: Int, now: @escaping @Sendable () -> Date,
          mutations: PostgresV2MessageMutationOperationStore?,
@@ -27,9 +26,8 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
          reactionOperations: PostgresV2MessageReactionOperationStore?,
          sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?,
          directSendPreparation: V2RoomSendPreparation?) throws {
-        let scope = try V2RoomActivationWriteScope(tokens: [token])
+        _ = try V2RoomActivationWriteScope(tokens: [token])
         self.token = token
-        self.writes = writes.usingActivationScope(scope)
         self.sendOperations = sendOperations
         self.sendOperationOwnerBatcher = sendOperationOwnerBatcher
         self.directSendPreparation = directSendPreparation
@@ -116,19 +114,10 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
             }
         } catch { throw v2NormalizeMessageOperationClosed(error) }
     }
-
-    func accept(_ request: V2RoomWriteRequest) async throws -> V2RoomMessagingResult {
-        do {
-            return .send(.init(try await writes.accept(command: request.command,
-                capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now)))
-        } catch {
-            throw v2NormalizeMessageOperationClosed(error)
-        }
-    }
 }
 
 public extension V2RoomMessagingExecutor {
-    init(token: V2RoomActivationToken, writes: PostgresV2RoomWriteStore,
+    init(token: V2RoomActivationToken,
          capacityProfile: V2CapacityProfile,
          limits: V2MessageCommandLimits, maximumEditBytes: Int,
          identifiers: V2AcceptanceIDFactory = .init(),
@@ -138,14 +127,13 @@ public extension V2RoomMessagingExecutor {
          sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher? = nil,
          directSendPreparation: V2RoomSendPreparation? = nil,
          reactionOperations: PostgresV2MessageReactionOperationStore? = nil) throws {
-        let adapter = try PostgresV2RoomMessagingAdapter(token: token, writes: writes,
+        let adapter = try PostgresV2RoomMessagingAdapter(token: token,
             capacityProfile: capacityProfile, identifiers: identifiers,
             maximumEditBytes: maximumEditBytes, now: now, mutations: mutations,
             sendOperations: sendOperations, reactionOperations: reactionOperations,
             sendOperationOwnerBatcher: sendOperationOwnerBatcher,
             directSendPreparation: directSendPreparation)
-        try self.init(token: token, persistence: adapter, capacityProfile: capacityProfile,
-            limits: limits, maximumEditBytes: maximumEditBytes,
-            identifiers: identifiers, now: now)
+        try self.init(token: token, persistence: adapter,
+            limits: limits, maximumEditBytes: maximumEditBytes)
     }
 }

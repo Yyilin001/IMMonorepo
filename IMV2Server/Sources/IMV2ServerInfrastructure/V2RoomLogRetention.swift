@@ -28,25 +28,6 @@ public struct V2RoomLogTrimReport: Equatable, Sendable {
     }
 }
 
-/// 房间日志保留裁剪的持久化能力。
-public protocol V2RoomLogRetentionStore: Sendable {
-    /// 按保留模式推进一批房间的裁剪下界并删除其下的历史事件。
-    ///
-    /// - Parameters:
-    ///   - mode: 保留模式。
-    ///   - window: 窗口模式下读者不再钉住下界的宽限秒数；永久模式忽略该值。
-    ///   - now: 服务端统一授时时刻。
-    ///   - limit: 本轮最多检查的房间数。
-    /// - Returns: 本轮裁剪结论。
-    /// - Throws: 参数非法或持久化失败时抛出。
-    func trimRoomLogs(
-        mode: V2RoomLogRetentionMode,
-        window: TimeInterval,
-        now: Date,
-        limit: Int
-    ) async throws -> V2RoomLogTrimReport
-}
-
 /// 房间日志保留裁剪的 PostgreSQL 实现。
 ///
 /// 下界取"仍然钉住历史的读者的已读线最小值"：窗口模式只看窗口内更新过已读线的读者，
@@ -55,9 +36,9 @@ public protocol V2RoomLogRetentionStore: Sendable {
 ///
 /// 删除是本项目里**唯一**允许移除房间事件的路径，由触发器双重约束：语句必须显式声明
 /// 这是保留裁剪，且被删事件序号必须已经低于房间的裁剪下界。
-public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
+public actor PostgresV2RoomLogRetentionStore {
     private let database: any Database
-    /// 每个事务最多删除的事件数；多房间入口共享这个预算。
+    /// 每个获准房间事务最多删除的事件数。
     private let eventLimit: Int
     // 稳定主键轮转；事务成功后才推进。重启从头开始，不影响裁剪安全性。
     private var lastScannedRoomID: UUID?
@@ -141,92 +122,6 @@ public actor PostgresV2RoomLogRetentionStore: V2RoomLogRetentionStore {
                 }
             }
         } catch { throw error }
-    }
-
-    /// 按保留模式推进一批房间的裁剪下界并删除其下的历史事件。
-    ///
-    /// - Parameters:
-    ///   - mode: 保留模式。
-    ///   - window: 窗口模式下读者不再钉住下界的宽限秒数，需大于零。
-    ///   - now: 服务端统一授时时刻。
-    ///   - limit: 本轮最多检查的房间数，需大于零。
-    /// - Returns: 本轮裁剪结论。
-    /// - Throws: 参数非法、时刻不可编码或持久化失败时抛出。
-    public func trimRoomLogs(
-        mode: V2RoomLogRetentionMode,
-        window: TimeInterval,
-        now: Date,
-        limit: Int
-    ) async throws -> V2RoomLogTrimReport {
-        guard (1...1_000).contains(limit), (1...10_000).contains(eventLimit),
-              window > 0, v2PostgresTimestampCanEncode(now) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        guard let activeSince = v2PostgresPastTimestamp(now: now, interval: window) else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        // actor 在等待数据库时可重入；同一实例只允许一轮更新游标。
-        guard !isTrimming else { return .init(scannedRooms: 0, trimmedRooms: 0, deletedEvents: 0) }
-        isTrimming = true
-        defer { isTrimming = false }
-        let eventLimit = self.eventLimit
-        let afterRoomID = lastScannedRoomID
-        let result = try await database.transaction { transaction in
-            guard let sql = transaction as? any SQLDatabase else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            let cursorPredicate: SQLQueryString = if let afterRoomID {
-                "room_id > \(bind: afterRoomID)"
-            } else { "TRUE" }
-            // 与房间写入争用同一房间锁；忙碌房间跳过，下轮继续。
-            // 先锁定有界房间集，再在新语句快照中计算已读下界，避免并发入群被漏算。
-            var locked = try await sql.raw("""
-                SELECT room_id FROM im_v2.rooms
-                WHERE \(cursorPredicate)
-                  AND (room_sequence > log_trimmed_through_room_sequence OR EXISTS (
-                      SELECT 1 FROM im_v2.room_events AS event
-                      WHERE event.room_id = rooms.room_id
-                        AND event.room_sequence < rooms.log_trimmed_through_room_sequence))
-
-                ORDER BY room_id
-                LIMIT \(bind: limit)
-                FOR UPDATE SKIP LOCKED
-                """).all(decoding: RoomLogLockedRow.self)
-            if locked.isEmpty, afterRoomID != nil {
-                locked = try await sql.raw("""
-                    SELECT room_id FROM im_v2.rooms
-                    WHERE room_sequence > log_trimmed_through_room_sequence OR EXISTS (
-                        SELECT 1 FROM im_v2.room_events AS event
-                        WHERE event.room_id = rooms.room_id
-                          AND event.room_sequence < rooms.log_trimmed_through_room_sequence)
-
-                    ORDER BY room_id LIMIT \(bind: limit) FOR UPDATE SKIP LOCKED
-                    """).all(decoding: RoomLogLockedRow.self)
-            }
-            let roomIDs = locked.map(\.roomID)
-            guard !roomIDs.isEmpty else {
-                return (V2RoomLogTrimReport(scannedRooms: 0, trimmedRooms: 0, deletedEvents: 0), UUID?.none)
-            }
-            let candidates = try await roomLogRetentionCandidates(
-                roomIDs: roomIDs, mode: mode, activeSince: activeSince, sql: sql)
-            var trimmedRooms = 0
-            var deletedEvents = 0
-            var scannedRooms = 0
-            var lastProcessedRoomID: UUID?
-            for candidate in candidates {
-                guard deletedEvents < eventLimit else { break }
-                let outcome = try await trimRoomLogCandidate(candidate,
-                    eventLimit: eventLimit - deletedEvents, sql: sql)
-                scannedRooms += 1
-                lastProcessedRoomID = candidate.roomID
-                if outcome.trimmed { trimmedRooms += 1 }
-                deletedEvents += outcome.deletedEvents
-            }
-            return (V2RoomLogTrimReport(scannedRooms: scannedRooms, trimmedRooms: trimmedRooms,
-                deletedEvents: deletedEvents), lastProcessedRoomID)
-        }
-        lastScannedRoomID = result.1
-        return result.0
     }
 }
 
@@ -358,43 +253,4 @@ private func trimRoomLogCandidate(
         """).first(decoding: RoomLogTrimmedRow.self)
     try await sql.raw("SET LOCAL im_v2.retention_trim = 'off'").run()
     return (advanced, Int(removed?.count ?? 0))
-}
-
-/// 周期运行房间日志保留裁剪的工作器。
-///
-/// 永久模式下全部已知读者钉住下界；窗口模式下仅窗口内的回执钉住下界。
-/// 当前成员缺少回执时，两种模式都保守地保留历史。两种模式共用同一条路径，避免"配置切换后跑的是另一段代码"。
-public struct V2RoomLogRetentionWorker: Sendable {
-    private let store: any V2RoomLogRetentionStore
-    private let mode: V2RoomLogRetentionMode
-    private let window: TimeInterval
-    private let now: @Sendable () -> Date
-
-    /// 组合保留存储与判定参数。
-    ///
-    /// - Parameters:
-    ///   - store: 执行裁剪的存储。
-    ///   - mode: 保留模式。
-    ///   - window: 窗口模式的宽限秒数，需大于零。
-    ///   - now: 可注入的当前时刻读取函数。
-    public init(
-        store: any V2RoomLogRetentionStore,
-        mode: V2RoomLogRetentionMode,
-        window: TimeInterval,
-        now: @escaping @Sendable () -> Date = Date.init
-    ) {
-        self.store = store
-        self.mode = mode
-        self.window = window
-        self.now = now
-    }
-
-    /// 运行一轮有界裁剪。
-    ///
-    /// - Parameter limit: 本轮最多检查的房间数，需大于零。
-    /// - Returns: 本轮裁剪结论。
-    /// - Throws: 存储实现抛出的错误。
-    public func runOnce(limit: Int) async throws -> V2RoomLogTrimReport {
-        try await store.trimRoomLogs(mode: mode, window: window, now: now(), limit: limit)
-    }
 }

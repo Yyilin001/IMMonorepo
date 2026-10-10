@@ -73,7 +73,7 @@ struct V2ActorRoomDirectoryMapperTests {
             try baseline.domainValue()
         }
         let invalidEntry = V2ActorUserRoomDirectoryEntryWire(roomID: room, roomKind: .direct,
-            viewerMembershipRevision: 0, ownerEpoch: 0)
+            viewerMembershipRevision: UInt64(Int64.max) + 1, ownerEpoch: 0)
         #expect(throws: V2RoomRecoveryReadError.corruptPersistence) {
             try invalidEntry.domainValue()
         }
@@ -100,8 +100,5 @@ struct V2ActorRoomDirectoryErrorMapperTests {
         #expect(try JSONDecoder().decode(V2RoomDirectoryResult.self,
             from: JSONEncoder().encode(V2RoomDirectoryResult.roleBaselineFailure(baseline)))
             == .roleBaselineFailure(baseline))
-        let userResult = V2ActorUserRoomDirectoryResultWire.failure(.topologyChanged)
-        #expect(try JSONDecoder().decode(V2ActorUserRoomDirectoryResultWire.self,
-            from: JSONEncoder().encode(userResult)) == userResult)
     }
 }

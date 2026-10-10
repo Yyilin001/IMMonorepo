@@ -15,28 +15,6 @@ public enum V2ActorMessagingOperationID: Codable, Equatable, Sendable {
     case mutation(V2OperationReference)
 }
 
-public struct V2ActorSendMessageWire: Codable, Equatable, Sendable {
-    public let roomID: RoomID
-    public let actorUserID: UserID
-    public let clientMessageID: ClientMessageID
-    public let text: String
-    public let media: [V2MediaReference]
-    public let mentions: [V2ActorMentionTargetWire]
-    public let entities: [V2MessageEntity]
-    public let replyTo: V2MessageReplyReference?
-
-    public init(roomID: RoomID, actorUserID: UserID, clientMessageID: ClientMessageID, text: String, media: [V2MediaReference], mentions: [V2ActorMentionTargetWire], entities: [V2MessageEntity], replyTo: V2MessageReplyReference?) {
-        self.roomID = roomID
-        self.actorUserID = actorUserID
-        self.clientMessageID = clientMessageID
-        self.text = text
-        self.media = media
-        self.mentions = mentions
-        self.entities = entities
-        self.replyTo = replyTo
-    }
-}
-
 
 
 

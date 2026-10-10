@@ -1,16 +1,6 @@
 import Foundation
 import IMV2Core
 
-/// 设置实时状态偏好后的结果。
-public enum V2SetLiveActivityPreferencesOutcome: Equatable, Sendable {
-    /// 本次调用实际更新了偏好。
-    case updated(V2LiveActivityPreferences)
-    /// 同一操作已提交过，返回其原有偏好。
-    case idempotent(V2LiveActivityPreferences)
-    /// 同一操作标识已被不同载荷占用。
-    case idempotencyConflict
-}
-
 /// 实时状态存储错误。
 public enum V2LiveActivityStoreError: Error, Equatable, Sendable {
     /// 房间不存在。
@@ -52,14 +42,6 @@ public enum V2PresenceObservationOutcome: Equatable, Sendable {
 ///
 /// 它授权的实时状态保存在网关注册表中，刻意不进入任何持久化的聊天或事件投影。
 public protocol V2LiveActivityStore: Sendable {
-    /// 设置当前用户的实时状态偏好。
-    ///
-    /// - Parameters:
-    ///   - command: 偏好变更命令。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 持久化失败时抛出。
-
     /// 读取当前用户的实时状态偏好。
     ///
     /// - Parameters:

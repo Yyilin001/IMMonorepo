@@ -28,24 +28,15 @@ package enum V2PolicyOwnerFacts: Codable, Equatable, Sendable {
     case stranger(V2PolicyStrangerFacts)
     case pair(V2PolicyPairFacts)
 }
-package struct V2PolicyOwnerState: Sendable {
-    package let owner: V2PolicyOwnerLease
-    package let facts: V2PolicyOwnerFacts
-    package let deadline: ContinuousClock.Instant
-}
-
-/// Legacy registration uses the established fact locks. Versioned snapshot
-/// initialization reads under one MVCC snapshot with lockFacts=false. Policy
-/// writers must advance their scope version atomically with the facts.
+/// Mutation facts are read while holding the scope and domain locks.
 struct PostgresV2PolicyOwnerStateReader: Sendable {
     let schema: String
-    func read(scope: V2PolicyAuthorizationScope, transaction: any Database, lockFacts: Bool = true) async throws -> V2PolicyOwnerFacts {
+    func read(scope: V2PolicyAuthorizationScope, transaction: any Database) async throws -> V2PolicyOwnerFacts {
         guard transaction.inTransaction, let sql = transaction as? any SQLDatabase else {
             throw V2PolicyAuthorizationLifecycleError.corruptPersistence
         }
         switch scope {
         case .account(let user):
-            if lockFacts {
             try await v2AcquireOrderedDirectAuthorizationLocks(["account-state:" + user.uuidString], shared: true, sql: sql)
             // One round trip acquires both row-lock sets in the established
             // profile -> special-account order. Consume both CTEs, including
@@ -64,7 +55,6 @@ struct PostgresV2PolicyOwnerStateReader: Sendable {
                 SELECT (SELECT count(*) FROM profiles)::bigint AS profiles,
                        (SELECT count(*) FROM specials)::bigint AS specials
                 """).all()
-            }
             guard let row = try await sql.raw("""
                 SELECT COALESCE(profile.state='active',false)
                     AND NOT EXISTS(SELECT 1 FROM \(unsafeRaw: schema).account_disables WHERE user_id=\(bind: user)) AS active,
@@ -77,14 +67,14 @@ struct PostgresV2PolicyOwnerStateReader: Sendable {
             return .account(.init(userID: user, isActive: row.active, specialKind: row.kind, specialStatus: row.status,
                 allowsServiceMessages: row.service, allowsCustomerMessages: row.customer))
         case .stranger(let user):
-            if lockFacts { try await v2AcquireOrderedDirectAuthorizationLocks(["v2-stranger-message-preference:" + user.uuidString.lowercased()], shared: true, sql: sql) }
+            try await v2AcquireOrderedDirectAuthorizationLocks(["v2-stranger-message-preference:" + user.uuidString.lowercased()], shared: true, sql: sql)
             guard let row = try await sql.raw("SELECT COALESCE((SELECT allows_stranger_messages FROM \(unsafeRaw: schema).user_stranger_message_preferences WHERE user_id=\(bind: user)),true) AS strangers").first(decoding: StrangerRow.self) else {
                 throw V2PolicyAuthorizationLifecycleError.corruptPersistence
             }
             return .stranger(.init(userID: user, allowsStrangers: row.strangers))
         case .pair(let first, let second):
             let key = [first, second].map { $0.uuidString.lowercased() }.sorted().joined(separator: "|")
-            if lockFacts { try await v2AcquireOrderedDirectAuthorizationLocks([key], shared: true, sql: sql) }
+            try await v2AcquireOrderedDirectAuthorizationLocks([key], shared: true, sql: sql)
             guard let row = try await sql.raw("""
                 SELECT EXISTS(SELECT 1 FROM \(unsafeRaw: schema).user_blocks
                     WHERE (blocker_user_id=\(bind: first) AND blocked_user_id=\(bind: second))

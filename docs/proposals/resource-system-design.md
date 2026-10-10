@@ -61,7 +61,7 @@
 8. **聊天展示尚未接入作者资料。** [消息 UI 转换](../../IMApp/IMApp/V2/V2ConversationDataSource.swift)只用 sender ID 判断是否自己发送；消息气泡、会话列表头像仍需实现。群名册每页最多 100 人，只包含公开名称等基础身份。
 9. **草案基线中的资料变化仅覆盖部分私聊受众。** [公开资料 worker](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift)枚举已有消息的私聊对端，不做全群分发；草案基线的群昵称写入没有对应群日志变更事件。当前工作区已补充仅含主体与版本的失效事件及客户端持久版本下界，验证与剩余边界见[实施记录](resource-system-implementation.md)。
 10. **客户端资料缓存缺少上下文。** [资料仓储](../../IMV2ClientKit/Sources/IMV2ClientKit/V2ProfileRepository.swift)尚无跨调用合并、TTL 或 in-flight 共享；本地资料按 user ID 存储，不能作为所有上下文的访问资格。
-11. **资料查询的跨库授权要补齐。** [profile batch](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfileViewStore.swift)在 control 库查询本地房间成员关系；真实 room owner 分库后需要明确路由。当前 100-key batch 是同一 actor 查多个目标，不是 100 个不同接收者合批授权。
+11. **草案基线中的资料查询缺少跨库授权。** 旧查询曾在 control 库读取本地房间成员关系，现已退役；当前 [资料展示接线](../../IMV2Server/Sources/IMV2ServerInfrastructure/Resources/Infrastructure/V2ResourceProfilePresentationWiring.swift)组合控制域合批读取与房间 Actor 授权，当前边界及验收见[实施记录](resource-system-implementation.md)。
 12. **已有 provider 接口尚不足以隔离运营商。** [下载 provider](../../IMV2Server/Sources/IMV2ServerApplication/V2MediaProviderSessionService.swift)按 MediaID 签目标，通用头策略包含厂商前缀；[客户端传输](../../IMV2ClientKit/Sources/IMV2ClientKit/V2MediaTransfer.swift)固定 PUT/GET。需要补精确 blob placement、后端绑定及声明式传输计划，保证切换默认后端不影响旧对象与进行中的会话。
 
 这些发现指导工作优先级。当前纯消息发送/恢复容量证据不能证明头像、资料查询和 CDN 的组合容量。

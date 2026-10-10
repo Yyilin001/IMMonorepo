@@ -1,4 +1,5 @@
-import IMV2ServerContracts
+@testable import IMV2ServerContracts
+@testable import IMV2ServerApplication
 import Foundation
 import IMV2Core
 

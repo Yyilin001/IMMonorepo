@@ -18,7 +18,7 @@ struct PostgresV2PolicyFactsSnapshotTests {
     @Test("single statement preserves defaults, request order, and committed version/facts consistency")
     func singleStatementConsistency() async throws {
         try await PostgresV2RoomWriteStoreIntegrationTests().withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let journal = PostgresV2PolicyAuthorizationJournal(database: database, roomDrainRequired: false)
+            let journal = PostgresV2PolicyAuthorizationJournal(database: database)
             let missing = UUID()
             let scopes: [V2PolicyAuthorizationScope] = [.stranger(missing), .pair(missing, senderUUID), .account(missing), .account(senderUUID)]
             let defaults = try await journal.readSnapshots(scopes: scopes)
@@ -68,7 +68,7 @@ struct PostgresV2PolicyFactsSnapshotTests {
             }
             while !(await gate.entered) { await Task.yield() }
             do {
-                let journal = PostgresV2PolicyAuthorizationJournal(database: database, roomDrainRequired: false)
+                let journal = PostgresV2PolicyAuthorizationJournal(database: database)
                 let value = try await V2RoomSQLDeadline.withDeadline(.now + .seconds(2)) {
                     try await journal.readSnapshot(scope: .account(senderUUID))
                 }
@@ -101,13 +101,13 @@ struct PostgresV2PolicyFactsSnapshotTests {
             let subscriber = try V2PolicySnapshotSubscriberWire(hostID: identities[1].hostID, endpoint: names[1])
             let publisher = V2PolicySnapshotPublisher(targets: [subscriber], localHostID: identities[0].hostID,
                 cache: caches[0], client: { clients[0] })
-            let journal = PostgresV2PolicyAuthorizationJournal(database: database, roomDrainRequired: false)
+            let journal = PostgresV2PolicyAuthorizationJournal(database: database)
             let dispatcher = PostgresV2PolicyMutationDispatcher(database: database, projectionDelivery: SuccessfulProjectionDelivery(),
                 legacyAuthorization: .init(controlDatabase: database, ownerDatabases: [:]))
             let directories = (0..<2).map { index in
                 PostgresV2PolicyOwnerDirectory(journal: journal, dispatcher: dispatcher, ownerID: identities[index].incarnationID,
                     snapshotPublisher: index == 0 ? publisher : nil, leaseSeconds: 0.05,
-                    ownsScope: { _ in index == 0 }, revoke: { _ in throw V2PolicyAuthorizationLifecycleError.invalidTarget })
+                    ownsScope: { _ in index == 0 })
             }
             var stores: [V2RoomServerLeaseStore] = []
             var hosts: [V2RoomActivationHost<V2RoomRequest, V2RoomResponse>] = []
@@ -142,7 +142,7 @@ struct PostgresV2PolicyFactsSnapshotTests {
                         address: "127.0.0.1", port: ports[index], accessibleShardIDs: [names[index]], availableRooms: 0, isHealthy: true))
                 }
                 let remote = PostgresV2RemotePolicyOwners(clientProvider: { clients[1] }, stateCache: caches[1], subscriber: subscriber,
-                    resolve: { _ in .init(host: identities[0], endpoint: names[0], ownerID: identities[0].incarnationID) })
+                    resolve: { _ in .init(host: identities[0], endpoint: names[0]) })
                 let scopes: [V2PolicyAuthorizationScope] = [.account(senderUUID), .account(memberTwoUUID), .pair(senderUUID, memberTwoUUID), .stranger(memberTwoUUID)]
                 let first = try await remote.registrationSnapshots(scopes: scopes)
                 #expect(first.count == 4 && first.allSatisfy { $0.version == 1 })
@@ -206,7 +206,5 @@ private actor SnapshotCountingService: V2PolicyOwnershipServing {
     func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, deadline: ContinuousClock.Instant) async throws {
         updates += 1; try await service.updatePolicySnapshot(request, deadline: deadline)
     }
-    func claimPolicyOwnership(_ request: V2PolicyOwnershipClaimWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicyOwnerStateWire] {
-        try await service.claimPolicyOwnership(request, deadline: deadline)
-    }
+
 }

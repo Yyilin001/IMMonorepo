@@ -3,25 +3,9 @@ import IMV2ActorContracts
 import IMV2ServerApplication
 
 /// Shared versioned facts for every room on this node. Snapshot reads never
-/// expire or renew ownership. The older lease APIs below serve only legacy
-/// registered authorization; the Gateway uses loadSnapshots/install exclusively.
+/// expire or renew ownership; committed updates advance their versions.
 package actor V2NodePolicyStateCache {
-    package typealias Loader = @Sendable ([V2PolicyAuthorizationScope], Bool) async throws -> [V2PolicyOwnerState]
-    private struct Entry {
-        let state: V2PolicyOwnerState
-        var usedAt: ContinuousClock.Instant
-    }
-    private struct Flight {
-        let id: UUID
-        let task: Task<[V2PolicyOwnerState], any Error>
-    }
     private let maximumEntries: Int
-    private let maximumLoads: Int
-    private var entries: [String: Entry] = [:]
-    private var order = V2IndexedFIFO<String, String>()
-    private var flights: [String: Flight] = [:]
-    private var invalidated: Set<String> = []
-    private var loop: Task<Void, Never>?
     private var closed = false
     package typealias SnapshotLoader = @Sendable ([V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot]
     private struct SnapshotFlight {
@@ -132,133 +116,16 @@ package actor V2NodePolicyStateCache {
     }
 
 
-    package init(maximumEntries: Int = 32_768, maximumLoads: Int = 128) {
-        precondition(maximumEntries > 0 && maximumLoads > 0)
-        self.maximumEntries = maximumEntries; self.maximumLoads = maximumLoads
-    }
-
-    package func cached(scopes: [V2PolicyAuthorizationScope], touch: Bool = true) throws -> [V2PolicyOwnerState]? {
-        try validate(scopes)
-        let now = ContinuousClock.now
-        guard scopes.allSatisfy({ entries[$0.key].map { $0.state.deadline > now } == true }) else { return nil }
-        return scopes.map {
-            if touch {
-                entries[$0.key]!.usedAt = now
-                order.remove($0.key); order.append($0.key, key: $0.key)
-            }
-            return entries[$0.key]!.state
-        }
-    }
-
-    package func load(scopes: [V2PolicyAuthorizationScope], refresh: Bool = false,
-                      loader: @escaping Loader) async throws -> [V2PolicyOwnerState] {
-        try validate(scopes)
-        if !refresh, let cached = try cached(scopes: scopes) { return cached }
-        let now = ContinuousClock.now
-        let missing = scopes.filter { refresh || entries[$0.key].map { $0.state.deadline > now } != true }
-        let newScopes = missing.filter { flights[$0.key] == nil }
-        if !newScopes.isEmpty {
-            guard Set(flights.values.map(\.id)).count < maximumLoads else { throw V2PolicyAuthorizationLifecycleError.busy }
-            let id = UUID(), deadline = V2RoomSQLDeadline.current
-            let task = Task.detached {
-                let result: Result<[V2PolicyOwnerState], any Error>
-                do { result = .success(try await V2RoomSQLDeadline.withSelectedDeadline(deadline) {
-                    try await loader(newScopes, refresh)
-                }) } catch { result = .failure(error) }
-                return try await self.finished(id: id, scopes: newScopes, result: result).get()
-            }
-            for scope in newScopes { flights[scope.key] = .init(id: id, task: task) }
-        }
-        // Capture actual tasks before suspending. Cancellation of a caller
-        // does not abandon the shared load or free its capacity prematurely.
-        var tasks: [UUID: Task<[V2PolicyOwnerState], any Error>] = [:]
-        for scope in missing {
-            if let flight = flights[scope.key] { tasks[flight.id] = flight.task }
-        }
-        for task in tasks.values { _ = try await task.value }
-        try Task.checkCancellation()
-        guard let result = try cached(scopes: scopes, touch: !refresh) else { throw V2PolicyAuthorizationLifecycleError.busy }
-        return result
-    }
-
-    package func invalidate(_ key: String) {
-        entries[key] = nil; order.remove(key)
-        if flights[key] != nil { invalidated.insert(key) }
-    }
-
-    private func finished(id: UUID, scopes: [V2PolicyAuthorizationScope],
-        result: Result<[V2PolicyOwnerState], any Error>) -> Result<[V2PolicyOwnerState], any Error> {
-        var stale: Set<String> = []
-        for scope in scopes where flights[scope.key]?.id == id {
-            flights[scope.key] = nil
-            if invalidated.remove(scope.key) != nil { stale.insert(scope.key) }
-        }
-        guard !closed else { return .failure(V2PolicyAuthorizationLifecycleError.closed) }
-        guard case .success(let states) = result else { return result }
-        guard states.count == scopes.count, Set(states.map { $0.owner.scope.key }) == Set(scopes.map(\.key)),
-              states.allSatisfy({ $0.deadline > .now }) else {
-            return .failure(V2PolicyAuthorizationLifecycleError.invalidTarget)
-        }
-        // One changed scope cannot discard independent facts in the same RPC
-        // batch. Only callers depending on that scope observe a cache miss.
-        let usable = states.filter { !stale.contains($0.owner.scope.key) }
-        for state in usable {
-            let key = state.owner.scope.key
-            let usedAt = entries[key]?.usedAt ?? .now
-            if entries[key] == nil, entries.count == maximumEntries, let victim = order.removeFirst() {
-                entries[victim] = nil
-            }
-            entries[key] = .init(state: state, usedAt: usedAt)
-            order.remove(key); order.append(key, key: key)
-        }
-        return .success(usable)
-    }
-
-    package func start(loader: @escaping Loader) throws {
-        guard !closed else { throw V2PolicyAuthorizationLifecycleError.closed }
-        guard loop == nil else { return }
-        loop = Task.detached {
-            while !Task.isCancelled {
-                await self.refreshOnce(loader: loader)
-                do { try await Task.sleep(for: .seconds(1)) } catch { return }
-            }
-        }
-    }
-
-    /// Bound background work separately from message-triggered cold loads.
-    /// Recently used entries renew before expiry; idle entries cease renewing.
-    package func refreshOnce(loader: @escaping Loader) async {
-        guard !closed else { return }
-        let now = ContinuousClock.now
-        let due = entries.values.filter {
-            $0.usedAt > now - .seconds(60) && $0.state.deadline <= now + .seconds(10)
-                && flights[$0.state.owner.scope.key] == nil
-        }.sorted { $0.state.deadline < $1.state.deadline }.prefix(512).map { $0.state.owner.scope }
-        let batches = stride(from: 0, to: due.count, by: 4).map { Array(due[$0..<min($0 + 4, due.count)]) }
-        await withTaskGroup(of: Void.self) { group in
-            var next = 0
-            while next < min(4, batches.count) {
-                let scopes = batches[next]; next += 1
-                group.addTask { _ = try? await self.load(scopes: scopes, refresh: true, loader: loader) }
-            }
-            while await group.next() != nil {
-                if next < batches.count {
-                    let scopes = batches[next]; next += 1
-                    group.addTask { _ = try? await self.load(scopes: scopes, refresh: true, loader: loader) }
-                }
-            }
-        }
+    package init(maximumEntries: Int = 32_768) {
+        precondition(maximumEntries > 0)
+        self.maximumEntries = maximumEntries
     }
 
     package func shutdown() async {
-        closed = true; loop?.cancel()
-        let snapshotTasks = Array(snapshotFlights.values.map(\.task))
-        for task in snapshotTasks { _ = await task.result }
-        snapshots.removeAll(); snapshotOrder.removeAll()
-        if let loop { await loop.value }
-        let tasks = flights.values.map(\.task)
+        closed = true
+        let tasks = Array(snapshotFlights.values.map(\.task))
         for task in tasks { _ = await task.result }
-        entries.removeAll(); order = .init(); loop = nil
+        snapshots.removeAll(); snapshotOrder.removeAll(); pendingSnapshots.removeAll()
     }
 
     private func validate(_ scopes: [V2PolicyAuthorizationScope]) throws {
