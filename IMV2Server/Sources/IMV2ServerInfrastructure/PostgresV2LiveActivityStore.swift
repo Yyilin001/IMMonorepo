@@ -50,7 +50,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     /// - Throws: 时间戳非法或持久化失败时抛出。
     func applyAccountLiveActivityPreferences(command:V2SetLiveActivityPreferencesCommand,transaction:any Database,now:Date) async throws -> V2LiveActivityPreferences {
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            let actor = try liveActivityUUID(command.actorUserID), operation = try liveActivityUUID(command.operationID)
+            let actor = try v2PersistenceUUID(command.actorUserID, invalid: V2LiveActivityStoreError.corruptPersistenceState), operation = try v2PersistenceUUID(command.operationID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: actor.uuidString + ":" + operation.uuidString), 0))").run()
             guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
             try await sql.raw("INSERT INTO im_v2.user_live_activity_preferences (user_id, allows_online_presence, allows_typing_indicators, updated_at) VALUES (\(bind: actor), \(bind: command.allowsOnlinePresence), \(bind: command.allowsTypingIndicators), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_online_presence = EXCLUDED.allows_online_presence, allows_typing_indicators = EXCLUDED.allows_typing_indicators, updated_at = EXCLUDED.updated_at").run()
@@ -68,7 +68,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     /// - Throws: 时间戳无法编码或持久化状态损坏时抛出。
     public func preferences(userID: UserID, now: Date) async throws -> V2LiveActivityPreferences {
         guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-        let user = try liveActivityUUID(userID)
+        let user = try v2PersistenceUUID(userID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
         let preference = try await sql.raw("SELECT allows_online_presence, allows_typing_indicators, updated_at FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: user)").first(decoding: LiveActivityPreferenceRow.self)
         if let preference { return try preference.validatedPreferences() }
         guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
@@ -90,7 +90,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            let room = try liveActivityUUID(roomID), viewer = try liveActivityUUID(viewerUserID)
+            let room = try v2PersistenceUUID(roomID, invalid: V2LiveActivityStoreError.corruptPersistenceState), viewer = try v2PersistenceUUID(viewerUserID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             guard let peer = try await sql.raw("SELECT CASE WHEN lower_user_id = \(bind: viewer) THEN higher_user_id ELSE lower_user_id END AS user_id FROM im_v2.direct_room_pairs WHERE room_id = \(bind: room) AND (lower_user_id = \(bind: viewer) OR higher_user_id = \(bind: viewer))").first(decoding: LiveActivityUserRow.self) else { throw V2LiveActivityStoreError.notDirectRoom }
             guard try await activeMember(room: room, user: viewer, sql: sql) else { throw V2LiveActivityStoreError.actorNotMember }
             guard !(try await usersAreBlocked(viewer, peer.userID, sql: sql)) else { throw V2LiveActivityStoreError.interactionBlocked }
@@ -111,8 +111,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         guard !unique.isEmpty else { return [:] }
         struct Input: Encodable { let ordinal: Int; let room: UUID; let viewer: UUID; let target: UUID }
         let inputs = try unique.enumerated().map { index, request in
-            Input(ordinal: index, room: try liveActivityUUID(request.roomID),
-                  viewer: try liveActivityUUID(request.viewerUserID), target: try liveActivityUUID(request.targetUserID))
+            Input(ordinal: index, room: try v2PersistenceUUID(request.roomID, invalid: V2LiveActivityStoreError.corruptPersistenceState),
+                  viewer: try v2PersistenceUUID(request.viewerUserID, invalid: V2LiveActivityStoreError.corruptPersistenceState), target: try v2PersistenceUUID(request.targetUserID, invalid: V2LiveActivityStoreError.corruptPersistenceState))
         }
         let json = String(decoding: try JSONEncoder().encode(inputs), as: UTF8.self)
         guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
@@ -184,7 +184,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     public func authorizeTyping(roomID: RoomID, actorUserID: UserID, now _: Date) async throws {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            let room = try liveActivityUUID(roomID), actor = try liveActivityUUID(actorUserID)
+            let room = try v2PersistenceUUID(roomID, invalid: V2LiveActivityStoreError.corruptPersistenceState), actor = try v2PersistenceUUID(actorUserID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             guard try await activeMember(room: room, user: actor, sql: sql) else { throw V2LiveActivityStoreError.actorNotMember }
             if let peer = try await directPeer(room: room, user: actor, sql: sql) {
                 guard !(try await usersAreBlocked(actor, peer, sql: sql)) else { throw V2LiveActivityStoreError.interactionBlocked }
@@ -207,9 +207,9 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     public func authorizeObservation(roomID: RoomID, viewerUserID: UserID, subjectUserID: UserID, now _: Date) async throws {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            let room = try liveActivityUUID(roomID)
-            let viewer = try liveActivityUUID(viewerUserID)
-            let subject = try liveActivityUUID(subjectUserID)
+            let room = try v2PersistenceUUID(roomID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
+            let viewer = try v2PersistenceUUID(viewerUserID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
+            let subject = try v2PersistenceUUID(subjectUserID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             guard try await activeMember(room: room, user: viewer, sql: sql) else { throw V2LiveActivityStoreError.actorNotMember }
             guard let peer = try await directPeer(room: room, user: viewer, sql: sql) else { return }
             guard peer == subject else { throw V2LiveActivityStoreError.actorNotMember }
@@ -224,7 +224,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     /// - Throws: 持久化状态损坏时抛出。
     public func allowsOnlinePresence(userID: UserID) async throws -> Bool {
         guard let sql = database as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-        let user = try liveActivityUUID(userID)
+        let user = try v2PersistenceUUID(userID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
         return try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id = \(bind: user)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
     }
 
@@ -272,8 +272,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2LiveActivityStoreError.corruptPersistenceState
             }
-            let user = try liveActivityUUID(identity.userID)
-            let device = try liveActivityUUID(identity.deviceID)
+            let user = try v2PersistenceUUID(identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
+            let device = try v2PersistenceUUID(identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             // 同一用户的所有竞争者都先取得同一把锁；
             // 设备锁再串行化更窄的限制，避免用户锁与设备锁形成顺序循环。
             try await lockConnectionIdentity(user: user, device: device, sql: sql)
@@ -363,8 +363,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         }
         guard !unique.isEmpty else { return rejected }
         let ordered = unique.values.sorted { $0.connectionID.uuidString < $1.connectionID.uuidString }
-        let users = try ordered.map { try liveActivityUUID($0.identity.userID) }
-        let devices = try ordered.map { try liveActivityUUID($0.identity.deviceID) }
+        let users = try ordered.map { try v2PersistenceUUID($0.identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState) }
+        let devices = try ordered.map { try v2PersistenceUUID($0.identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState) }
         let ids = ordered.map(\.connectionID)
         let refreshed = try await renewalDatabase.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
@@ -423,7 +423,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         suppressed: Bool, now: Date) async throws -> V2PresencePublicationLeaseObservation {
         try await database.transaction { tx in
             guard let sql=tx as? any SQLDatabase,v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            let user=try liveActivityUUID(identity.userID);let device=try liveActivityUUID(identity.deviceID)
+            let user=try v2PersistenceUUID(identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState);let device=try v2PersistenceUUID(identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             try await lockConnectionIdentity(user:user,device:device,sql:sql)
             guard try await sql.raw("UPDATE im_v2.user_live_presence_leases SET publication_suppressed=\(bind:suppressed) WHERE connection_id=\(bind:connectionID) AND user_id=\(bind:user) AND device_id=\(bind:device) AND expires_at>\(bind:now) RETURNING expires_at").first(decoding:LiveActivityExpiryRow.self) != nil else { throw V2LiveActivityStoreError.corruptPersistenceState }
             let allowed=try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id=\(bind:user)").first(decoding:LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
@@ -440,8 +440,8 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         guard v2PostgresTimestampCanEncode(now) else { throw V2LiveActivityStoreError.corruptPersistenceState }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            let user = try liveActivityUUID(identity.userID)
-            let device = try liveActivityUUID(identity.deviceID)
+            let user = try v2PersistenceUUID(identity.userID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
+            let device = try v2PersistenceUUID(identity.deviceID, invalid: V2LiveActivityStoreError.corruptPersistenceState)
             try await lockConnectionIdentity(user: user, device: device, sql: sql)
             // 即使租约已过期且被其他副本删除，调用方经认证的身份仍是权威。
             // 同时匹配两个所有者字段，还可防止旧生命周期删除
@@ -521,7 +521,6 @@ private struct LiveActivityConnectionIDRow: Decodable {
     let connectionID: UUID
     enum CodingKeys: String, CodingKey { case connectionID = "connection_id" }
 }
-private func liveActivityUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: id.rawValue) else { throw V2LiveActivityStoreError.corruptPersistenceState }; return value }
 
 private struct LiveActivityPresenceBatchRow: Decodable {
     let ordinal: Int

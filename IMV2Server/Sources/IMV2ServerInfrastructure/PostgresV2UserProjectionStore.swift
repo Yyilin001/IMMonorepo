@@ -68,7 +68,7 @@ public struct PostgresV2UserProjectionStore: Sendable {
                 guard existing.userSyncSequence == sequence, existing.payloadJSON == record.payloadJSON else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
-                return try crossStoreUnsigned(existing.userSyncSequence)
+                return try v2PersistenceUnsigned(existing.userSyncSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState)
             }
             let createdAt = try persistedCreatedAt ?? V2PersistenceTimestamp(date: record.createdAt)
             if let occupying = try await sql.raw("""
@@ -102,7 +102,7 @@ public struct PostgresV2UserProjectionStore: Sendable {
                 """).first(decoding: CrossStoreMirroredRecordRow.self),
                   mirrored.userSyncSequence == sequence, mirrored.payloadJSON == record.payloadJSON
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            return try crossStoreUnsigned(mirrored.userSyncSequence)
+            return try v2PersistenceUnsigned(mirrored.userSyncSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState)
         }
     }
 
@@ -150,7 +150,7 @@ public struct PostgresV2UserProjectionStore: Sendable {
                   AND projection_kind = \(bind: projectionKind)
                 """).first(decoding: CrossStoreMirroredRecordRow.self) {
                 guard existing.payloadJSON == payloadJSON else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                return try crossStoreUnsigned(existing.userSyncSequence)
+                return try v2PersistenceUnsigned(existing.userSyncSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState)
             }
             let timestamp = try persistedCreatedAt ?? V2PersistenceTimestamp(date: createdAt)
             guard let sequence = try await sql.raw("""
@@ -168,7 +168,7 @@ public struct PostgresV2UserProjectionStore: Sendable {
                 VALUES (\(bind: userUUID), \(bind: sequence.userSyncSequence), \(bind: eventUUID), \(bind: projectionKind),
                         \(bind: payloadJSON)::jsonb, \(bind: timestamp))
                 """).run()
-            return try crossStoreUnsigned(sequence.userSyncSequence)
+            return try v2PersistenceUnsigned(sequence.userSyncSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState)
         }
     }
 
@@ -178,7 +178,3 @@ public struct PostgresV2UserProjectionStore: Sendable {
 private struct CrossStoreSequenceRow: Decodable { let userSyncSequence: Int64; enum CodingKeys: String, CodingKey { case userSyncSequence = "user_sync_sequence" } }
 private struct CrossStoreMirroredRecordRow: Decodable { let userSyncSequence: Int64; let payloadJSON: String; enum CodingKeys: String, CodingKey { case userSyncSequence = "user_sync_sequence", payloadJSON = "payload_json" } }
 private struct CrossStoreSequenceOccupantRow: Decodable { let sourceEventID: UUID; let projectionKind: String; enum CodingKeys: String, CodingKey { case sourceEventID = "source_event_id", projectionKind = "projection_kind" } }
-private func crossStoreUnsigned(_ value: Int64) throws -> UInt64 {
-    guard value >= 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return UInt64(value)
-}

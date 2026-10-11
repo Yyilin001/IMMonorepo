@@ -22,8 +22,8 @@ enum V2RoomWriteScalarPersistencePath {
         let eventID = try scalarRoomWriteUUID(writeSet.eventID)
         let senderID = try scalarRoomWriteUUID(message.senderUserID)
         let clientMessageID = try scalarRoomWriteUUID(message.clientMessageID)
-        let roomSequence = try scalarRoomWriteSigned(message.roomSequence)
-        let timelineSequence = try scalarRoomWriteSigned(message.timelineSequence)
+        let roomSequence = try v2PersistenceSigned(message.roomSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState)
+        let timelineSequence = try v2PersistenceSigned(message.timelineSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState)
 
         guard let mediaJSON = String(data: try JSONEncoder().encode(message.media.map { $0.mediaID.rawValue }), encoding: .utf8) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -417,11 +417,6 @@ enum V2RoomWriteScalarPersistencePath {
 private func scalarRoomWriteUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let value = value.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return value
-}
-
-private func scalarRoomWriteSigned(_ value: UInt64) throws -> Int64 {
-    guard value <= UInt64(Int64.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return Int64(value)
 }
 
 private func hybridMentionTargetIDs(_ mentions: [V2MentionTarget], excluding senderID: UUID) -> [UUID] {

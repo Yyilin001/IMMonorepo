@@ -35,8 +35,8 @@ public struct PostgresV2RoomMembershipDirectoryStore: V2RoomMembershipDirectoryS
     ///   角色或账号类型无法解码时抛出
     ///   ``V2RoomMembershipDirectoryError/corruptPersistenceState``。
     public func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage {
-        let roomID = try directoryUUID(request.roomID)
-        let actorID = try directoryUUID(request.actorUserID)
+        let roomID = try v2PersistenceUUID(request.roomID, invalid: V2RoomMembershipDirectoryError.corruptPersistenceState)
+        let actorID = try v2PersistenceUUID(request.actorUserID, invalid: V2RoomMembershipDirectoryError.corruptPersistenceState)
         let cursor = try request.cursor.map(directoryCursor)
         guard cursor?.roomID == nil || cursor?.roomID == roomID else {
             throw V2RoomMembershipDirectoryError.invalidCursor
@@ -188,15 +188,4 @@ private func directoryCursor(_ value: String) throws -> DirectoryCursor {
 private func directoryCursorString(roomID: UUID, membershipRevision: Int64, afterUserID: UUID) throws -> String {
     let cursor = DirectoryCursor(version: 1, roomID: roomID, membershipRevision: membershipRevision, afterUserID: afterUserID)
     return try JSONEncoder().encode(cursor).base64EncodedString()
-}
-
-/// 把标识原始值解析为 UUID。
-///
-/// - Parameter identifier: 已校验的标识类型。
-/// - Returns: 对应的 UUID。
-/// - Throws: 原始值不是合法 UUID 时抛出
-///   ``V2RoomMembershipDirectoryError/corruptPersistenceState``。
-private func directoryUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let value = UUID(uuidString: identifier.rawValue) else { throw V2RoomMembershipDirectoryError.corruptPersistenceState }
-    return value
 }

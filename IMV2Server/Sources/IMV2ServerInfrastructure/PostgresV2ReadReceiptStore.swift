@@ -66,7 +66,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
                 timeouts: timeouts, useRoomDeadline: activationScope != nil) { transaction in
                 try await attempt.body {
                     guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-                    let roomID = try receiptUUID(command.roomID), userID = try receiptUUID(command.actorUserID), operationID = try receiptUUID(command.operationID)
+                    let roomID = try v2PersistenceUUID(command.roomID, invalid: V2ReadReceiptStoreError.corruptPersistenceState), userID = try v2PersistenceUUID(command.actorUserID, invalid: V2ReadReceiptStoreError.corruptPersistenceState), operationID = try v2PersistenceUUID(command.operationID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
                     if let activationScope {
                         try await v2RequireRoomActivations(tokens: [try activationScope.token(for: roomID)],
                             sql: sql, timeouts: timeouts)
@@ -74,7 +74,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
                         try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
                     }
                     try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-read-receipt-operation:" + userID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()), 0))").run()
-                    let requested = try receiptSigned(command.readThroughRoomSequence)
+                    let requested = try v2PersistenceSigned(command.readThroughRoomSequence, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
                     // 即使已读游标未推进，也要匹配操作写入的时间戳精度。
                     guard let room = try await sql.raw("SELECT room_sequence, membership_revision, \(bind: now)::timestamptz AS recorded_at FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptRoomRow.self) else { throw V2ReadReceiptStoreError.roomNotFound }
                     guard room.roomSequence >= 0, Int64(command.readThroughRoomSequence) <= room.roomSequence else { throw V2ReadReceiptStoreError.roomSequenceNotFound }
@@ -215,8 +215,8 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
             // 移除无效时钟样本前，先保持批次的重复操作契约。
             // 只有有效日期才能进入 SQL 或 JSON 编码。
             let keys = try requests.map { request in
-                GroupReceiptOperationKey(userID: try receiptUUID(request.command.actorUserID),
-                                         operationID: try receiptUUID(request.command.operationID))
+                GroupReceiptOperationKey(userID: try v2PersistenceUUID(request.command.actorUserID, invalid: V2ReadReceiptStoreError.corruptPersistenceState),
+                                         operationID: try v2PersistenceUUID(request.command.operationID, invalid: V2ReadReceiptStoreError.corruptPersistenceState))
             }
             guard Set(keys).count == requests.count else { throw V2ReadReceiptStoreError.invalidRequest }
             var results = [V2GroupReadReceiptBatchResult](repeating: .failure(.corruptPersistenceState), count: requests.count)
@@ -350,8 +350,8 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
 
     func applyAccountReadReceiptPreferences(command:V2SetReadReceiptPreferencesCommand,transaction:any Database,now:Date) async throws -> V2ReadReceiptPreferences {
             guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-            let actorID = try receiptUUID(command.actorUserID)
-            let operationID = try receiptUUID(command.operationID)
+            let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+            let operationID = try v2PersistenceUUID(command.operationID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
             let lockKey = "v2-read-receipt-preference:" + actorID.uuidString
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             guard v2PostgresTimestampCanEncode(now) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
@@ -395,9 +395,9 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2ReadReceiptStoreError.corruptPersistenceState
             }
-            let room = try receiptUUID(roomID)
-            let message = try receiptUUID(messageID)
-            let actor = try receiptUUID(actorUserID)
+            let room = try v2PersistenceUUID(roomID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+            let message = try v2PersistenceUUID(messageID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+            let actor = try v2PersistenceUUID(actorUserID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
             let context = try await receiptReaderContext(
                 roomID: room, messageID: message, sql: sql
             )
@@ -453,7 +453,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
         guard let sql = database as? any SQLDatabase else {
             throw V2ReadReceiptStoreError.corruptPersistenceState
         }
-        let actor = try receiptUUID(actorUserID)
+        let actor = try v2PersistenceUUID(actorUserID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
         guard try await sql.raw("""
             SELECT 1 AS exists
             FROM im_v2.public_user_profiles AS profile
@@ -466,7 +466,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
             """).first(decoding: ReceiptExistsRow.self) != nil
         else { throw V2ReadReceiptStoreError.actorNotMember }
         guard !candidateUserIDs.isEmpty else { return [:] }
-        let values = try candidateUserIDs.map(receiptUUID)
+        let values = try candidateUserIDs.map { try v2PersistenceUUID($0, invalid: V2ReadReceiptStoreError.corruptPersistenceState) }
         let encoded = try receiptUUIDJSON(values)
         let rows = try await sql.raw("""
             WITH requested AS (
@@ -505,9 +505,9 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
         guard (1 ... 100).contains(pageSize) else { throw V2ReadReceiptStoreError.invalidRequest }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-            let room = try receiptUUID(roomID)
-            let message = try receiptUUID(messageID)
-            let actor = try receiptUUID(actorUserID)
+            let room = try v2PersistenceUUID(roomID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+            let message = try v2PersistenceUUID(messageID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+            let actor = try v2PersistenceUUID(actorUserID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
             guard let context = try await sql.raw("""
                 SELECT message.room_sequence,
                        event.committed_membership_revision,
@@ -816,7 +816,7 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
             VALUES (\(bind: peer.userID), \(bind: sourceEventID), 'direct_read_receipt',
                 jsonb_build_object('room_id', \(bind: roomID.uuidString),
                     'reader_user_id', \(bind: readerID.uuidString),
-                    'read_through_room_sequence', \(bind: try receiptSigned(receipt.readThroughRoomSequence)),
+                    'read_through_room_sequence', \(bind: try v2PersistenceSigned(receipt.readThroughRoomSequence, invalid: V2ReadReceiptStoreError.corruptPersistenceState)),
                     'recorded_at_ms', \(bind: try v2GatewayMilliseconds(receipt.recordedAt))),
                 \(bind: now), \(bind: now), \(bind: roomID))
             """).run()
@@ -931,12 +931,12 @@ private struct GroupReceiptBatchInput: Sendable {
             throw V2ReadReceiptStoreError.invalidRequest
         }
         self.ordinal = ordinal
-        roomID = try receiptUUID(request.command.roomID)
-        userID = try receiptUUID(request.command.actorUserID)
-        operationID = try receiptUUID(request.command.operationID)
-        requestedSequence = try receiptSigned(
+        roomID = try v2PersistenceUUID(request.command.roomID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+        userID = try v2PersistenceUUID(request.command.actorUserID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+        operationID = try v2PersistenceUUID(request.command.operationID, invalid: V2ReadReceiptStoreError.corruptPersistenceState)
+        requestedSequence = try v2PersistenceSigned(
             request.command.readThroughRoomSequence
-        )
+        , invalid: V2ReadReceiptStoreError.corruptPersistenceState)
         recordedAt = request.now
         guard v2PostgresTimestampCanEncode(recordedAt) else {
             throw V2ReadReceiptStoreError.invalidRequest
@@ -1356,8 +1356,7 @@ private func receiptCursorString(
     ))
     return encoded.base64EncodedString()
 }
-private func receiptUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: id.rawValue) else { throw V2ReadReceiptStoreError.corruptPersistenceState }; return value }
-private func receiptSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2ReadReceiptStoreError.corruptPersistenceState }; return Int64(value) }
+
 private func receiptUnsigned(_ value: Int64) throws -> UInt64 { guard value > 0 else { throw V2ReadReceiptStoreError.corruptPersistenceState }; return UInt64(value) }
 private func receiptUUIDJSON(_ values: [UUID]) throws -> String {
     let data = try JSONEncoder().encode(values.map(\.uuidString))

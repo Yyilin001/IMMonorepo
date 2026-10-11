@@ -6,7 +6,6 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-
 /// 有界重放结果使用的信封密钥。
 ///
 /// 数据库只会收到经过认证的密文；该密钥属于部署机密材料，
@@ -122,8 +121,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         guard !accessToken.isEmpty, !refreshCredential.isEmpty else { throw V2DeviceCredentialServiceError.unavailable }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceCredentialServiceError.unavailable }
-            let userUUID = try credentialUUID(request.userID)
-            let deviceUUID = try credentialUUID(request.deviceID)
+            let userUUID = try v2PersistenceUUID(request.userID, invalid: V2DeviceCredentialServiceError.malformedPersistence)
+            let deviceUUID = try v2PersistenceUUID(request.deviceID, invalid: V2DeviceCredentialServiceError.malformedPersistence)
             let metadata = try normalizedMetadata(request.metadata)
             if let cancellation { try await V2PostgresDeviceRegistrationCancellationService.lock(sql, request: cancellation) }
             try await lockAccountState(sql, userID: userUUID)
@@ -208,8 +207,8 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
         guard !accessToken.isEmpty, !refreshCredential.isEmpty else { throw V2DeviceCredentialServiceError.unavailable }
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceCredentialServiceError.unavailable }
-            let userUUID = try credentialUUID(request.userID)
-            let deviceUUID = try credentialUUID(request.deviceID)
+            let userUUID = try v2PersistenceUUID(request.userID, invalid: V2DeviceCredentialServiceError.malformedPersistence)
+            let deviceUUID = try v2PersistenceUUID(request.deviceID, invalid: V2DeviceCredentialServiceError.malformedPersistence)
             let incomingRefreshHMAC = tokenHMACKey.digest(request.refreshCredential)
             try await lockAccountState(sql, userID: userUUID)
             var issuedAt = now()
@@ -310,18 +309,18 @@ public struct V2PostgresDeviceCredentialService: V2DeviceCredentialIssuing, Send
     }
 
     private func insertNewSession(_ sql: any SQLDatabase, credentials: V2IssuedDeviceCredentials, issuedAt: Date, refreshExpiresAt: Date) async throws {
-        let userID = try credentialUUID(credentials.userID), deviceID = try credentialUUID(credentials.deviceID)
+        let userID = try v2PersistenceUUID(credentials.userID, invalid: V2DeviceCredentialServiceError.malformedPersistence), deviceID = try v2PersistenceUUID(credentials.deviceID, invalid: V2DeviceCredentialServiceError.malformedPersistence)
         try await sql.raw("INSERT INTO im_v2.device_refresh_sessions (user_id, device_id, refresh_hmac, issued_at, expires_at) VALUES (\(bind: userID), \(bind: deviceID), \(bind: tokenHMACKey.digest(credentials.refreshCredential)), \(bind: issuedAt), \(bind: refreshExpiresAt))").run()
         try await insertAccessToken(sql, credentials: credentials, issuedAt: issuedAt)
     }
 
     private func insertAccessToken(_ sql: any SQLDatabase, credentials: V2IssuedDeviceCredentials, issuedAt: Date) async throws {
-        try await sql.raw("INSERT INTO im_v2.device_access_tokens (token_hmac, user_id, device_id, issued_at, expires_at) VALUES (\(bind: tokenHMACKey.digest(credentials.accessToken)), \(bind: credentialUUID(credentials.userID)), \(bind: credentialUUID(credentials.deviceID)), \(bind: issuedAt), \(bind: credentials.accessTokenExpiresAt))").run()
+        try await sql.raw("INSERT INTO im_v2.device_access_tokens (token_hmac, user_id, device_id, issued_at, expires_at) VALUES (\(bind: tokenHMACKey.digest(credentials.accessToken)), \(bind: v2PersistenceUUID(credentials.userID, invalid: V2DeviceCredentialServiceError.malformedPersistence)), \(bind: v2PersistenceUUID(credentials.deviceID, invalid: V2DeviceCredentialServiceError.malformedPersistence)), \(bind: issuedAt), \(bind: credentials.accessTokenExpiresAt))").run()
     }
 
     private func insertOperation(_ sql: any SQLDatabase, kind: String, requestRefreshHMAC: String?, operationID: UUID, credentials: V2IssuedDeviceCredentials, issuedAt: Date, replayExpiresAt: Date) async throws {
         let context = replayContext(userID: credentials.userID, deviceID: credentials.deviceID, operationID: operationID)
-        try await sql.raw("INSERT INTO im_v2.device_credential_operations (device_id, operation_id, operation_kind, user_id, request_refresh_hmac, resulting_access_token_hmac, encrypted_access_token, encrypted_refresh_credential, encrypted_revocation_credential, revocation_credential_expires_at, access_token_expires_at, replay_expires_at, created_at) VALUES (\(bind: credentialUUID(credentials.deviceID)), \(bind: operationID), \(bind: kind), \(bind: credentialUUID(credentials.userID)), \(bind: requestRefreshHMAC), \(bind: tokenHMACKey.digest(credentials.accessToken)), \(bind: try replayEnvelopeKey.seal(credentials.accessToken, authenticating: context)), \(bind: try replayEnvelopeKey.seal(credentials.refreshCredential, authenticating: context)), \(bind: try replayEnvelopeKey.seal(credentials.revocationCredential.rawValue, authenticating: context)), \(bind: credentials.revocationCredentialExpiresAt), \(bind: credentials.accessTokenExpiresAt), \(bind: replayExpiresAt), \(bind: issuedAt))").run()
+        try await sql.raw("INSERT INTO im_v2.device_credential_operations (device_id, operation_id, operation_kind, user_id, request_refresh_hmac, resulting_access_token_hmac, encrypted_access_token, encrypted_refresh_credential, encrypted_revocation_credential, revocation_credential_expires_at, access_token_expires_at, replay_expires_at, created_at) VALUES (\(bind: v2PersistenceUUID(credentials.deviceID, invalid: V2DeviceCredentialServiceError.malformedPersistence)), \(bind: operationID), \(bind: kind), \(bind: v2PersistenceUUID(credentials.userID, invalid: V2DeviceCredentialServiceError.malformedPersistence)), \(bind: requestRefreshHMAC), \(bind: tokenHMACKey.digest(credentials.accessToken)), \(bind: try replayEnvelopeKey.seal(credentials.accessToken, authenticating: context)), \(bind: try replayEnvelopeKey.seal(credentials.refreshCredential, authenticating: context)), \(bind: try replayEnvelopeKey.seal(credentials.revocationCredential.rawValue, authenticating: context)), \(bind: credentials.revocationCredentialExpiresAt), \(bind: credentials.accessTokenExpiresAt), \(bind: replayExpiresAt), \(bind: issuedAt))").run()
     }
 
     private func credentials(from operation: CredentialOperationRow, request: V2TrustedDeviceRegistration) throws -> V2IssuedDeviceCredentials {
@@ -475,9 +474,4 @@ private struct CredentialOperationRow: Decodable {
         case encryptedRevocationCredential = "encrypted_revocation_credential"; case revocationCredentialExpiresAt = "revocation_credential_expires_at"
         case accessTokenExpiresAt = "access_token_expires_at"; case replayExpiresAt = "replay_expires_at"
     }
-}
-
-private func credentialUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let value = UUID(uuidString: identifier.rawValue) else { throw V2DeviceCredentialServiceError.malformedPersistence }
-    return value
 }

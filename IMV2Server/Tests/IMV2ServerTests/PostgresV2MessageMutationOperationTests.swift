@@ -12,6 +12,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("permanent message mutations preserve receipts across conflicts and close races")
     func permanentMessageMutationReceipts() async throws {
         try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in
+            #expect(throws: V2MessageEditStoreError.corruptPersistenceState) {
+                _ = try V2PostgresMessageEditPersistence(transaction: database, contentReviewMode: .disabled)
+            }
+            #expect(throws: V2MessageWithdrawalStoreError.corruptPersistenceState) {
+                _ = try V2PostgresMessageWithdrawalPersistence(transaction: database)
+            }
+            #expect(throws: V2MessageReactionStoreError.corruptPersistenceState) {
+                _ = try V2PostgresMessageReactionPersistence(transaction: database)
+            }
             let now=Date(timeIntervalSince1970:1_750_000_000)
             let profile=try forwardImportTestProfile()
             let sends=try V2SendMessageService(store:V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,

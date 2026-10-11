@@ -37,9 +37,9 @@ public struct PostgresV2MediaStore: V2MediaStore {
     ///   到期时刻不晚于当前时刻或持久化异常时抛出
     ///   ``V2RoomWriteStoreError/corruptPersistenceState``。
     public func requestDownload(requesterUserID: UserID, deviceID: DeviceID, mediaID: MediaID, expiresAt: Date, now: Date) async throws -> V2MediaDownloadGrant {
-        let requester = try mediaUUID(requesterUserID)
-        let device = try mediaUUID(deviceID)
-        let media = try mediaUUID(mediaID)
+        let requester = try v2PersistenceUUID(requesterUserID, invalid: V2MediaStoreError.mediaUnavailable)
+        let device = try v2PersistenceUUID(deviceID, invalid: V2MediaStoreError.mediaUnavailable)
+        let media = try v2PersistenceUUID(mediaID, invalid: V2MediaStoreError.mediaUnavailable)
         let session = makeUUID()
         return try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
@@ -67,4 +67,3 @@ public struct PostgresV2MediaStore: V2MediaStore {
 }
 
 private struct MediaGrantExpiryRow: Decodable { let expiresAt: Date; enum CodingKeys: String, CodingKey { case expiresAt = "expires_at" } }
-private func mediaUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let uuid = UUID(uuidString: value.rawValue) else { throw V2MediaStoreError.mediaUnavailable }; return uuid }

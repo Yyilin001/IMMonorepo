@@ -36,7 +36,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
                 roomID: command.roomID, isPinned: command.isPinned, isArchived: command.isArchived,
                 muteUntil: command.muteUntil, updatedAt: time, revision: .init(rawValue: UInt64(revision))!)
             try await appendStateProjection(
-                actor: actor, source: capabilityUUID(command.operationID), value: value, now: time, sql: sql)
+                actor: actor, source: v2PersistenceUUID(command.operationID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState), value: value, now: time, sql: sql)
             return .conversationState(value)
         }
         return receipt
@@ -51,7 +51,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
             expected: command.expectedRevision, now: now
         ) { sql, actor, room, current, time in
             guard current < Int64.max else { throw V2ConversationCapabilitiesStoreError.corruptPersistenceState }
-            let message = try capabilityUUID(command.messageID)
+            let message = try v2PersistenceUUID(command.messageID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState)
             let revision = current + 1
             try await sql.raw(
                 "INSERT INTO im_v2.user_message_favorites(user_id,message_id,room_id,is_favorited,created_at,revision) VALUES(\(bind:actor),\(bind:message),\(bind:room),\(bind:command.isFavorited),\(bind:time),\(bind:revision)) ON CONFLICT(user_id,message_id) DO UPDATE SET is_favorited=EXCLUDED.is_favorited,created_at=EXCLUDED.created_at,revision=EXCLUDED.revision"
@@ -60,7 +60,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
                 roomID: command.roomID, messageID: command.messageID, isFavorited: command.isFavorited, updatedAt: time,
                 revision: .init(rawValue: UInt64(revision))!)
             try await appendFavoriteProjection(
-                actor: actor, source: capabilityUUID(command.operationID), value: value, now: time, sql: sql)
+                actor: actor, source: v2PersistenceUUID(command.operationID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState), value: value, now: time, sql: sql)
             return .messageFavorite(value)
         }
         return receipt
@@ -77,7 +77,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
             guard let sql = tx as? any SQLDatabase else {
                 throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
             }
-            let actor = try capabilityUUID(identity.accountID)
+            let actor = try v2PersistenceUUID(identity.accountID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState)
             let room = try roomUUID(identity)
             try await prepare(identity: identity, room: room, sql: sql)
             if let old = try await read(identity: identity, sql: sql) {
@@ -96,7 +96,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
             if rejection == nil, case .message(_, let messageID) = identity.scope {
                 let exists =
                     try await sql.raw(
-                        "SELECT EXISTS(SELECT 1 FROM im_v2.messages WHERE room_id=\(bind:room) AND message_id=\(bind:capabilityUUID(messageID))) AS value"
+                        "SELECT EXISTS(SELECT 1 FROM im_v2.messages WHERE room_id=\(bind:room) AND message_id=\(bind:v2PersistenceUUID(messageID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState))) AS value"
                     ).first(decoding: CapabilityBooleanRow.self)?.value ?? false
                 if !exists { rejection = .notFound }
             }
@@ -117,7 +117,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
                 case .message(_, let message):
                     current =
                         try await sql.raw(
-                            "SELECT revision AS value FROM im_v2.user_message_favorites WHERE user_id=\(bind:actor) AND message_id=\(bind:capabilityUUID(message)) FOR UPDATE"
+                            "SELECT revision AS value FROM im_v2.user_message_favorites WHERE user_id=\(bind:actor) AND message_id=\(bind:v2PersistenceUUID(message, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState)) FOR UPDATE"
                         ).first(decoding: PreferenceRevisionRow.self)?.value ?? 0
                 default: throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
                 }
@@ -148,7 +148,7 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
             guard let sql = tx as? any SQLDatabase else {
                 throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
             }
-            try await prepare(identity: request.identity, room: capabilityUUID(request.roomID), sql: sql)
+            try await prepare(identity: request.identity, room: v2PersistenceUUID(request.roomID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState), sql: sql)
             if let receipt = try await read(identity: request.identity, sql: sql) {
                 return receipt.fingerprint == request.fingerprint ? .receipt(receipt) : .fingerprintConflict
             }
@@ -208,13 +208,13 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
         case .closed: outcomeKind = "closed"
         }
         try await sql.raw(
-            "INSERT INTO im_v2.personal_preference_operation_receipts(identity_key,actor_user_id,operation_id,room_id,kind,fingerprint_version,request_fingerprint,outcome_kind,receipt,created_at) VALUES(\(bind:identity.storageKey),\(bind:capabilityUUID(identity.accountID)),\(bind:operationUUID),\(bind:roomUUID(identity)),\(bind:identity.kind.rawValue),\(bind:Int16(fingerprint.version)),\(bind:fingerprint.digest),\(bind:outcomeKind),\(bind:json)::jsonb,\(bind:time))"
+            "INSERT INTO im_v2.personal_preference_operation_receipts(identity_key,actor_user_id,operation_id,room_id,kind,fingerprint_version,request_fingerprint,outcome_kind,receipt,created_at) VALUES(\(bind:identity.storageKey),\(bind:v2PersistenceUUID(identity.accountID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState)),\(bind:operationUUID),\(bind:roomUUID(identity)),\(bind:identity.kind.rawValue),\(bind:Int16(fingerprint.version)),\(bind:fingerprint.digest),\(bind:outcomeKind),\(bind:json)::jsonb,\(bind:time))"
         ).run()
         return receipt
     }
     private func roomUUID(_ identity: V2OperationIdentity) throws -> UUID {
         switch identity.scope {
-        case .room(let room), .message(let room, _): return try capabilityUUID(room)
+        case .room(let room), .message(let room, _): return try v2PersistenceUUID(room, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState)
         default: throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
         }
     }
@@ -236,14 +236,14 @@ public struct PostgresV2ConversationCapabilitiesStore: V2ConversationCapabilitie
         actor: UUID, source: UUID, value: V2ConversationState, now: Date, sql: any SQLDatabase
     ) async throws {
         try await sql.raw(
-            "INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: actor), \(bind: source), 'conversation_state', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'is_pinned', \(bind: value.isPinned), 'is_archived', \(bind: value.isArchived), 'mute_until_ms', \(bind: value.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0), 'revision', \(bind: value.revision.signedValue), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now), \(bind: now), \(bind: capabilityUUID(value.roomID)))"
+            "INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: actor), \(bind: source), 'conversation_state', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'is_pinned', \(bind: value.isPinned), 'is_archived', \(bind: value.isArchived), 'mute_until_ms', \(bind: value.muteUntil.map { Int64($0.timeIntervalSince1970 * 1_000) } ?? 0), 'revision', \(bind: value.revision.signedValue), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now), \(bind: now), \(bind: v2PersistenceUUID(value.roomID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState)))"
         ).run()
     }
     private func appendFavoriteProjection(
         actor: UUID, source: UUID, value: V2MessageFavorite, now: Date, sql: any SQLDatabase
     ) async throws {
         try await sql.raw(
-            "INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: actor), \(bind: source), 'message_favorite', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'message_id', \(bind: value.messageID.rawValue), 'is_favorited', \(bind: value.isFavorited), 'revision', \(bind: value.revision.signedValue), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now), \(bind: now), \(bind: capabilityUUID(value.roomID)))"
+            "INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: actor), \(bind: source), 'message_favorite', jsonb_build_object('room_id', \(bind: value.roomID.rawValue), 'message_id', \(bind: value.messageID.rawValue), 'is_favorited', \(bind: value.isFavorited), 'revision', \(bind: value.revision.signedValue), 'updated_at_ms', \(bind: Int64(value.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: now), \(bind: now), \(bind: v2PersistenceUUID(value.roomID, invalid: V2ConversationCapabilitiesStoreError.corruptPersistenceState)))"
         ).run()
     }
 
@@ -274,9 +274,3 @@ private struct CapabilityRoomRow: Decodable {
     enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" }
 }
 private struct CapabilityBooleanRow: Decodable { let value: Bool }
-private func capabilityUUID<Tag>(_ id: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let uuid = UUID(uuidString: id.rawValue) else {
-        throw V2ConversationCapabilitiesStoreError.corruptPersistenceState
-    }
-    return uuid
-}

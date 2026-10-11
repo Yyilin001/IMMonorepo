@@ -78,11 +78,6 @@ struct ShardRow: Decodable {
         case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used"
     }
     func admissionState() throws -> ShardAdmissionState {
-        try .init(lease: .init(id: ShardAdmissionLeaseID(uuid: leaseID), generation: try admissionRowUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)))
+        try .init(lease: .init(id: ShardAdmissionLeaseID(uuid: leaseID), generation: try v2PersistenceUnsigned(generation, invalid: V2RoomWriteStoreError.corruptPersistenceState), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)))
     }
-}
-
-private func admissionRowUnsigned(_ value: Int64) throws -> UInt64 {
-    guard value >= 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return UInt64(value)
 }

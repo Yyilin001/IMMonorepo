@@ -18,8 +18,8 @@ public struct PostgresV2MessageMutationOperationStore:Sendable {
     public func edit(_ command:V2MessageEditOperationCommand,token:V2RoomActivationToken,capacityProfile:V2CapacityProfile,eventID:EventID,now:Date,maximumUTF8Bytes:Int) async throws -> V2MessageMutationRecoveryResult {
         let identity=try command.identity, fingerprint=try command.fingerprint
         return try await execute(identity:identity,fingerprint:fingerprint,deadline:command.firstSubmissionDeadlineMilliseconds,token:token,now:now) { transaction in
-            let outcome=try await PostgresV2MessageEditStore(database:transaction,contentReviewMode:contentReviewMode,identities:identities)
-                .usingOperationTransaction().usingActivationScope(.init(tokens:[token])).edit(command:command.domainCommand(maximumUTF8Bytes:maximumUTF8Bytes),capacityProfile:capacityProfile,eventID:eventID,now:now)
+            let outcome=try await V2PostgresMessageEditPersistence(transaction:transaction,contentReviewMode:contentReviewMode,identities:identities)
+                .edit(command:command.domainCommand(maximumUTF8Bytes:maximumUTF8Bytes),capacityProfile:capacityProfile,eventID:eventID,now:now)
             switch outcome {
             case .edited(let value): return .terminal(.committed(try .init(messageID:value.messageID,messageRevision:value.messageRevision,roomSequence:value.roomSequence,eventID:value.eventID)), isNewEvent: true)
             case .idempotent(let value): return .terminal(.committed(try .init(messageID:value.messageID,messageRevision:value.messageRevision,roomSequence:value.roomSequence,eventID:value.eventID)))
@@ -34,8 +34,8 @@ public struct PostgresV2MessageMutationOperationStore:Sendable {
     public func withdraw(_ command:V2MessageWithdrawalOperationCommand,token:V2RoomActivationToken,capacityProfile:V2CapacityProfile,eventID:EventID,now:Date) async throws -> V2MessageMutationRecoveryResult {
         let identity=try command.identity, fingerprint=try command.fingerprint
         return try await execute(identity:identity,fingerprint:fingerprint,deadline:command.firstSubmissionDeadlineMilliseconds,token:token,now:now) { transaction in
-            let outcome=try await PostgresV2MessageWithdrawalStore(database:transaction)
-                .usingOperationTransaction().usingActivationScope(.init(tokens:[token])).withdraw(command:command.domainCommand(),capacityProfile:capacityProfile,eventID:eventID,now:now)
+            let outcome=try await V2PostgresMessageWithdrawalPersistence(transaction:transaction)
+                .withdraw(command:command.domainCommand(),capacityProfile:capacityProfile,eventID:eventID,now:now)
             switch outcome {
             case .withdrawn(let value): return .terminal(.committed(try .init(messageID:value.messageID,messageRevision:value.messageRevision,roomSequence:value.roomSequence,eventID:value.eventID)), isNewEvent: true)
             case .idempotent(let value): return .terminal(.committed(try .init(messageID:value.messageID,messageRevision:value.messageRevision,roomSequence:value.roomSequence,eventID:value.eventID)))

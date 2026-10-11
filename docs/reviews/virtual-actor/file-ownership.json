@@ -680,15 +680,15 @@
       "owner": "D5"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditOutcomes.swift",
       "owner": "D1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageReactionService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageReactionOutcomes.swift",
       "owner": "D1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageWithdrawalService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageWithdrawalOutcomes.swift",
       "owner": "D1"
     },
     {
@@ -699,9 +699,9 @@
       "retiredPath": "IMV2Server/Sources/IMV2ServerApplication/V2OwnerValidatedMessageMutationStores.swift",
       "owner": "I1",
       "replacedBy": [
-        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageEditStore.swift",
-        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageWithdrawalStore.swift",
-        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageReactionStore.swift"
+        "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresMessageEditPersistence.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresMessageWithdrawalPersistence.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresMessageReactionPersistence.swift"
       ]
     },
     {
@@ -969,7 +969,7 @@
       "owner": "D5"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageEditStore.swift",
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresMessageEditPersistence.swift",
       "owner": "D1"
     },
     {
@@ -993,11 +993,11 @@
       "owner": "D1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageReactionStore.swift",
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresMessageReactionPersistence.swift",
       "owner": "D1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageWithdrawalStore.swift",
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2PostgresMessageWithdrawalPersistence.swift",
       "owner": "D1"
     },
     {

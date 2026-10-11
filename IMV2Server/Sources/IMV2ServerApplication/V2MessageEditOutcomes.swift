@@ -20,19 +20,6 @@ public enum V2MessageEditOutcome: Equatable, Sendable {
     case unavailable(V2CommandAdmissionUnavailableReason)
 }
 
-/// 消息编辑的持久化边界。
-public protocol V2MessageEditStore: Sendable {
-    /// 在权威存储中执行一次消息编辑。
-    ///
-    /// - Parameters:
-    ///   - command: 待执行的编辑命令。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 本次编辑的来源事件标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 编辑处理结果。
-    /// - Throws: 房间/消息不存在、发起者非作者或持久化失败时抛出。
-    func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome
-}
 
 /// 消息编辑存储的错误分类。
 public enum V2MessageEditStoreError: Error, Equatable, Sendable {

@@ -50,9 +50,9 @@ public struct PostgresV2MediaDownloadSessionStore: V2MediaDownloadSessionStore {
         guard let leaseExpiresAt = v2PostgresFutureTimestamp(now: now, interval: leaseDuration) else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
-        let requester = try mediaDownloadUUID(requesterUserID)
-        let device = try mediaDownloadUUID(deviceID)
-        let session = try mediaDownloadUUID(downloadSessionID)
+        let requester = try v2PersistenceUUID(requesterUserID, invalid: V2MediaDownloadSessionStoreError.sessionUnavailable)
+        let device = try v2PersistenceUUID(deviceID, invalid: V2MediaDownloadSessionStoreError.sessionUnavailable)
+        let session = try v2PersistenceUUID(downloadSessionID, invalid: V2MediaDownloadSessionStoreError.sessionUnavailable)
         let token = makeUUID()
         guard let sql = database as? any SQLDatabase else {
             throw V2RoomWriteStoreError.corruptPersistenceState
@@ -103,8 +103,8 @@ public struct PostgresV2MediaDownloadSessionStore: V2MediaDownloadSessionStore {
     ///   ``V2MediaDownloadSessionStoreError/sessionUnavailable``。
     public func completeDownload(_ claim: V2ClaimedMediaDownload, now: Date) async throws {
         guard let sql = database as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        let session = try mediaDownloadUUID(claim.downloadSessionID)
-        let media = try mediaDownloadUUID(claim.mediaID)
+        let session = try v2PersistenceUUID(claim.downloadSessionID, invalid: V2MediaDownloadSessionStoreError.sessionUnavailable)
+        let media = try v2PersistenceUUID(claim.mediaID, invalid: V2MediaDownloadSessionStoreError.sessionUnavailable)
         guard let identity = try await sql.raw("""
             SELECT user_id, device_id FROM im_v2.media_download_grants
             WHERE download_session_id = \(bind: session)
@@ -146,7 +146,7 @@ public struct PostgresV2MediaDownloadSessionStore: V2MediaDownloadSessionStore {
         try await sql.raw("""
             UPDATE im_v2.media_download_grants
             SET state = 'pending', claim_token = NULL, lease_expires_at = NULL
-            WHERE download_session_id = \(bind: try mediaDownloadUUID(claim.downloadSessionID))
+            WHERE download_session_id = \(bind: try v2PersistenceUUID(claim.downloadSessionID, invalid: V2MediaDownloadSessionStoreError.sessionUnavailable))
               AND state = 'claimed'
               AND claim_token = \(bind: claim.claimToken)
             """).run()
@@ -158,19 +158,6 @@ private struct MediaDownloadGrantRow: Decodable {
     let mediaID: UUID
     let expiresAt: Date
     enum CodingKeys: String, CodingKey { case mediaID = "media_id"; case expiresAt = "expires_at" }
-}
-
-/// 把标识原始值解析为 UUID。
-///
-/// - Parameter value: 已校验的标识类型。
-/// - Returns: 对应的 UUID。
-/// - Throws: 原始值不是合法 UUID 时抛出
-///   ``V2MediaDownloadSessionStoreError/sessionUnavailable``。
-private func mediaDownloadUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let uuid = UUID(uuidString: value.rawValue) else {
-        throw V2MediaDownloadSessionStoreError.sessionUnavailable
-    }
-    return uuid
 }
 
 private struct MediaDownloadGrantIdentityRow: Decodable {

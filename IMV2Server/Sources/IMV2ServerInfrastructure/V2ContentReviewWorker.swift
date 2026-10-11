@@ -92,7 +92,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
         }
         let messageID = try contentReviewUUID(lease.input.messageID)
         let roomID = try contentReviewRoomUUID(lease.input.roomID)
-        let expected = try contentReviewSigned(lease.input.contentRevision)
+        let expected = try v2PersistenceSigned(lease.input.contentRevision, invalid: V2RoomWriteStoreError.corruptPersistenceState)
         guard expected < Int64.max else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let enforcedRevision = expected + 1
         return try await database.transaction { transaction in
@@ -193,7 +193,7 @@ public struct PostgresV2ContentReviewStore: V2ContentReviewStore {
                 finding_severity = \(bind: finding.severity), finding_confidence = \(bind: finding.confidence)
             WHERE message_id = \(bind: try contentReviewUUID(lease.input.messageID))
               AND room_id = \(bind: try contentReviewRoomUUID(lease.input.roomID))
-              AND expected_content_revision = \(bind: try contentReviewSigned(lease.input.contentRevision))
+              AND expected_content_revision = \(bind: try v2PersistenceSigned(lease.input.contentRevision, invalid: V2RoomWriteStoreError.corruptPersistenceState))
               AND state = 'claimed' AND claim_token = \(bind: lease.claimToken)
             RETURNING message_id
             """).first(decoding: ContentReviewMessageRow.self) != nil
@@ -254,7 +254,7 @@ private struct ContentReviewClaimRow: Decodable {
 private struct ContentReviewMessageRow: Decodable { let messageID: UUID; enum CodingKeys: String, CodingKey { case messageID = "message_id" } }
 private func contentReviewUUID(_ id: MessageID) throws -> UUID { guard let value = UUID(uuidString: id.rawValue) else { throw V2RoomWriteStoreError.corruptPersistenceState }; return value }
 private func contentReviewRoomUUID(_ id: RoomID) throws -> UUID { guard let value = UUID(uuidString: id.rawValue) else { throw V2RoomWriteStoreError.corruptPersistenceState }; return value }
-private func contentReviewSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }; return Int64(value) }
+
 private func contentReviewUnsigned(_ value: Int64) -> UInt64 { UInt64(value) }
 private func contentReviewData(_ verdict: V2ContentReviewVerdict) -> (state: String, decision: String, category: String?, severity: Int?, confidence: Double?) {
     switch verdict {

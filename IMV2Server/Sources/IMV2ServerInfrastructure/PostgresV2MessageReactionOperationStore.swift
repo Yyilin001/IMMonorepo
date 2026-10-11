@@ -36,8 +36,7 @@ public struct PostgresV2MessageReactionOperationStore: Sendable {
                     return (.receipt(try await persist(identity: identity, fingerprint: fingerprint,
                         outcome: .rejected(.revisionConflict(current: current.revision)), now: authoritativeNow, sql: sql)), false)
                 }
-                let result = try await PostgresV2MessageReactionStore(database: transaction).usingOperationTransaction()
-                    .usingActivationScope(.init(tokens: [token])).change(command: command.domainCommand(),
+                let result = try await V2PostgresMessageReactionPersistence(transaction: transaction).change(command: command.domainCommand(),
                         capacityProfile: capacityProfile, eventID: eventID, now: now)
                 let proof: V2MessageReactionEventProof?
                 switch result {

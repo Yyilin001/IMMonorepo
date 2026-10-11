@@ -519,16 +519,11 @@ struct MessageOperationReplayRow: Decodable {
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         return .accepted(try .init(
             messageID: .init(uuid: messageID), roomID: .init(uuid: roomID),
-            roomSequence: scalarPreflightUnsigned(roomSequence), timelineSequence: scalarPreflightUnsigned(timelineSequence),
+            roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState), timelineSequence: v2PersistenceUnsigned(timelineSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState),
             senderUserID: .init(uuid: senderUserID), clientMessageID: .init(uuid: clientMessageID),
             groupCapacityClass: groupCapacityClass,
-            sourceEventID: .init(uuid: sourceEventID), acceptedMembershipRevision: scalarPreflightUnsigned(acceptedMembershipRevision),
+            sourceEventID: .init(uuid: sourceEventID), acceptedMembershipRevision: v2PersistenceUnsigned(acceptedMembershipRevision, invalid: V2RoomWriteStoreError.corruptPersistenceState),
             directRecipientUserID: directRecipientUserID.map { .init(uuid: $0) }, createdAt: createdAt
         ), fingerprint)
     }
-}
-
-private func scalarPreflightUnsigned(_ value: Int64) throws -> UInt64 {
-    guard value >= 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return UInt64(value)
 }

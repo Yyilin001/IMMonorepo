@@ -166,7 +166,7 @@ struct V2RoomWriteScalarAcceptancePath {
                 groupCapacityClass: room.kind == "group" ? room.capacityClass : nil,
 
                 sourceEventID: timelineWriteSet.eventID,
-                acceptedMembershipRevision: try scalarAcceptanceUnsigned(room.membershipRevision),
+                acceptedMembershipRevision: try v2PersistenceUnsigned(room.membershipRevision, invalid: V2RoomWriteStoreError.corruptPersistenceState),
                 directRecipientUserID: directContext.map { .init(uuid: $0.recipientID) },
                 projectionCreatedAtUnixMilliseconds: try roomWriteProjectionMilliseconds(timelineWriteSet.acceptedMessage.createdAt)
             )
@@ -322,7 +322,7 @@ extension V2RoomWriteScalarAcceptancePath {
         if try await sql.raw("SELECT source_event_id FROM im_v2.room_timeline_activities WHERE source_event_id = \(bind: sourceEventID) AND room_id = \(bind: roomUUID) AND recipient_user_id = \(bind: senderID) LIMIT 1").first() != nil {
             return
         }
-        let timelineSequence = try scalarAcceptanceSigned(nextTimelineSequence)
+        let timelineSequence = try v2PersistenceSigned(nextTimelineSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState)
         let milliseconds = try v2GatewayMilliseconds(roomWritePersistedDate(createdAt))
         try await sql.raw("UPDATE im_v2.rooms SET timeline_sequence = \(bind: timelineSequence) WHERE room_id = \(bind: roomUUID)").run()
         try await sql.raw("INSERT INTO im_v2.room_timeline_activities (source_event_id, room_id, timeline_sequence, activity_type, recipient_user_id, created_at) VALUES (\(bind: sourceEventID), \(bind: roomUUID), \(bind: timelineSequence), \(bind: activityType), \(bind: senderID), \(bind: createdAt))").run()
@@ -576,17 +576,7 @@ struct V2RoomWriteSelectedOwnerGuard {
 
 }
 
-private func scalarAcceptanceSigned(_ value: UInt64) throws -> Int64 {
-    guard value <= UInt64(Int64.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return Int64(value)
-}
-
 private func scalarAcceptanceUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let value = value.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return value
-}
-
-private func scalarAcceptanceUnsigned(_ value: Int64) throws -> UInt64 {
-    guard value >= 0 else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return UInt64(value)
 }

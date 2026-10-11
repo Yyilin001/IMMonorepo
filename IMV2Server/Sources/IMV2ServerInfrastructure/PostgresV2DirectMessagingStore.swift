@@ -41,9 +41,9 @@ public struct PostgresV2DirectMessagingStore: Sendable {
     func applyOpen(command: V2OpenDirectRoomCommand, capacityProfile: V2CapacityProfile,
                    roomShardID: String, roomID: RoomID, identitySnapshot: V2DirectRoomIdentitySnapshot, transaction: any Database, now: Date) async throws -> V2OpenDirectRoomOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-            let actorID = try directUUID(command.actorUserID)
-            let targetID = try directUUID(command.targetUserID)
-            let operationID = try directUUID(command.operationID)
+            let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2DirectMessagingStoreError.corruptPersistenceState)
+            let targetID = try v2PersistenceUUID(command.targetUserID, invalid: V2DirectMessagingStoreError.corruptPersistenceState)
+            let operationID = try v2PersistenceUUID(command.operationID, invalid: V2DirectMessagingStoreError.corruptPersistenceState)
             // 操作只限定于操作者，与目标关系无关。取得关系锁前先串行化查询，
             // 使并发重试能够看到已提交的房间和时间戳。
             let operationLockKey = "v2-direct-room-operation:" + actorID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()
@@ -67,7 +67,7 @@ public struct PostgresV2DirectMessagingStore: Sendable {
                 return .opened(try existingPair.directRoom(actor: command.actorUserID, target: command.targetUserID))
             }
 
-            let createdRoomID = try directUUID(roomID)
+            let createdRoomID = try v2PersistenceUUID(roomID, invalid: V2DirectMessagingStoreError.corruptPersistenceState)
             guard let profile = identitySnapshot.targetProfile, profile.userID == command.targetUserID,
                   let revision = identitySnapshot.targetRevision, let storedRevision = Int64(exactly: revision),
                   let updatedAt = identitySnapshot.targetUpdatedAt, v2PostgresTimestampCanEncode(updatedAt) else {
@@ -120,8 +120,8 @@ public struct PostgresV2DirectMessagingStore: Sendable {
     /// - Throws: 持久化失败时抛出。
     func applyUserAddPermission(command:V2SetUserAddPermissionCommand,transaction:any Database,now:Date) async throws -> V2SetUserAddPermissionOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-            let actorID = try directUUID(command.actorUserID)
-            let operationID = try directUUID(command.operationID)
+            let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2DirectMessagingStoreError.corruptPersistenceState)
+            let operationID = try v2PersistenceUUID(command.operationID, invalid: V2DirectMessagingStoreError.corruptPersistenceState)
             let requested = command.permission == .allow
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: userAddPreferenceLockKey(actorID)), 0))").run()
             guard v2PostgresTimestampCanEncode(now) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
@@ -143,7 +143,6 @@ public struct PostgresV2DirectMessagingStore: Sendable {
         try await sql.raw("INSERT INTO im_v2.user_state_event_outbox (user_id, source_event_id, projection_kind, payload, created_at, next_attempt_at, source_room_id) VALUES (\(bind: recipientID), \(bind: sourceEventID), 'direct_room_profile', jsonb_build_object('room_id', \(bind: wireRoomID), 'target_user_id', \(bind: wireTargetUserID), 'public_handle', \(bind: profile.publicHandle), 'display_name', \(bind: profile.displayName), 'account_kind', \(bind: profile.accountKind), 'revision', \(bind: profile.revision), 'room_created_at_ms', (SELECT floor(extract(epoch FROM created_at) * 1000)::bigint FROM im_v2.rooms WHERE room_id = \(bind: roomID)), 'updated_at_ms', \(bind: Int64(profile.updatedAt.timeIntervalSince1970 * 1_000))), \(bind: createdAt), \(bind: createdAt), \(bind: roomID))").run()
     }
 }
-
 
 private struct DirectPairRow: Decodable {
     let roomID: UUID; let createdAt: Date; let capacityProfileID: String
@@ -173,7 +172,7 @@ private struct DirectPublicProfileRow: Decodable {
     }
 }
 private struct DirectSyncSequenceRow: Decodable { let nextSequence: Int64; enum CodingKeys: String, CodingKey { case nextSequence = "next_sequence" } }
-private func directUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let result = UUID(uuidString: identifier.rawValue) else { throw V2DirectMessagingStoreError.corruptPersistenceState }; return result }
+
 private func directPair(_ lhs: UUID, _ rhs: UUID) -> (lower: UUID, higher: UUID, lockKey: String) { let left = lhs.uuidString.lowercased(); let right = rhs.uuidString.lowercased(); return left < right ? (lhs, rhs, "\(left)|\(right)") : (rhs, lhs, "\(right)|\(left)") }
 
 extension PostgresV2DirectMessagingStore {

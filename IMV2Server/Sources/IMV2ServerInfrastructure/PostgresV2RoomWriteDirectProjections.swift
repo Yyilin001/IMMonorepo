@@ -289,7 +289,7 @@ extension V2RoomWriteDirectProjectionPath {
                        jsonb_build_object(
                            'room_id', \(bind: roomID.uuidString),
                            'can_send', TRUE,
-                           'state_version', \(bind: try directProjectionSigned(stateVersion)),
+                           'state_version', \(bind: try v2PersistenceSigned(stateVersion, invalid: V2RoomWriteStoreError.corruptPersistenceState)),
                            'updated_at_ms', \(bind: try v2GatewayMilliseconds(roomWritePersistedDate(createdAt)))
                        ) AS payload
                 WHERE \(bind: senderCanSend != true)
@@ -431,9 +431,4 @@ private struct DirectRoomProfileMutationRow: Decodable {
         case insertedCount = "inserted_count"
         case pairCount = "pair_count"
     }
-}
-
-private func directProjectionSigned(_ value: UInt64) throws -> Int64 {
-    guard value <= UInt64(Int64.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return Int64(value)
 }

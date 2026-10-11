@@ -1,4 +1,5 @@
 import Foundation
+import IMV2Core
 import IMV2ServerContracts
 
 /// Operation receipts require a positive, PostgreSQL-representable timestamp.
@@ -26,4 +27,14 @@ func v2EncodePersistenceJSON<Value: Encodable>(_ value: Value) throws -> String 
 
 func v2DecodePersistenceJSON<Value: Decodable>(_ type: Value.Type, from value: String) throws -> Value {
     try JSONDecoder().decode(type, from: Data(value.utf8))
+}
+
+func v2PersistenceUUID<Tag>(_ identifier: V2Identifier<Tag>, invalid: any Error) throws -> UUID where Tag: V2IdentifierTag {
+    guard let value = UUID(uuidString: identifier.rawValue) else { throw invalid }
+    return value
+}
+
+func v2PersistenceSigned(_ value: UInt64, invalid: any Error) throws -> Int64 {
+    guard let value = Int64(exactly: value) else { throw invalid }
+    return value
 }

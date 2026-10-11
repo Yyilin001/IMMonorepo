@@ -175,8 +175,8 @@ struct V2RoomWriteDirectBatchPath: Sendable {
             senderID: senderID,
             clientMessageID: clientMessageID,
             persistsRoomAdmission: persistsRoomAdmission,
-            roomSequence: try directBatchSigned(acceptedMessage.roomSequence),
-            timelineSequence: try directBatchSigned(acceptedMessage.timelineSequence),
+            roomSequence: try v2PersistenceSigned(acceptedMessage.roomSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState),
+            timelineSequence: try v2PersistenceSigned(acceptedMessage.timelineSequence, invalid: V2RoomWriteStoreError.corruptPersistenceState),
             commandWindowUsed: commandWindowUsed,
             text: acceptedMessage.text,
             entities: acceptedMessage.entities,
@@ -267,9 +267,4 @@ struct V2RoomWriteDirectBatchPath: Sendable {
 private func directBatchUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
     guard let value = value.uuidValue else { throw V2RoomWriteStoreError.corruptPersistenceState }
     return value
-}
-
-private func directBatchSigned(_ value: UInt64) throws -> Int64 {
-    guard value <= UInt64(Int64.max) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-    return Int64(value)
 }

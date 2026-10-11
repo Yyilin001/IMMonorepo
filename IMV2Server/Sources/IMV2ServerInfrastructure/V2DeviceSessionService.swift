@@ -8,7 +8,6 @@ import NIOCore
 import PostgresNIO
 import SQLKit
 
-
 /// 已签发但尚未持久化的设备吊销凭据。
 struct V2IssuedDeviceRevocationCapability: Sendable {
     /// 吊销凭据。
@@ -16,7 +15,6 @@ struct V2IssuedDeviceRevocationCapability: Sendable {
     /// 凭据到期时刻。
     let expiresAt: Date
 }
-
 
 /// 基于 PostgreSQL 的账号会话服务。
 public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceRevocationCapabilityRedeeming, Sendable {
@@ -49,7 +47,7 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     static func issueRevocationCapability(
         on sql: any SQLDatabase, userID: UserID, deviceID: DeviceID, at now: Date
     ) async throws -> V2IssuedDeviceRevocationCapability {
-        let userUUID = try deviceSessionUUID(userID), deviceUUID = try deviceSessionUUID(deviceID)
+        let userUUID = try v2PersistenceUUID(userID, invalid: V2DeviceSessionServiceError.malformedPersistence), deviceUUID = try v2PersistenceUUID(deviceID, invalid: V2DeviceSessionServiceError.malformedPersistence)
         guard v2PostgresTimestampCanEncode(now) else { throw V2DeviceSessionServiceError.unavailable }
         try await Self.lockAccountState(sql, userID: userUUID)
         guard let device = try await sql.raw("SELECT created_at AS session_created_at, session_expires_at FROM im_v2.auth_devices WHERE user_id = \(bind: userUUID) AND device_id = \(bind: deviceUUID) AND revoked_at IS NULL AND session_expires_at > \(bind: now) FOR UPDATE").first(decoding: CapabilitySessionRow.self)
@@ -89,8 +87,8 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
             SELECT capability.expires_at
             FROM im_v2.device_revocation_capabilities AS capability
             JOIN im_v2.auth_devices AS device USING (user_id, device_id)
-            WHERE capability.user_id = \(bind: deviceSessionUUID(userID))
-              AND capability.device_id = \(bind: deviceSessionUUID(deviceID))
+            WHERE capability.user_id = \(bind: v2PersistenceUUID(userID, invalid: V2DeviceSessionServiceError.malformedPersistence))
+              AND capability.device_id = \(bind: v2PersistenceUUID(deviceID, invalid: V2DeviceSessionServiceError.malformedPersistence))
               AND capability.credential_digest = \(bind: revocationDigest(credential))
               AND capability.session_created_at = device.created_at
               AND capability.session_expires_at = device.session_expires_at
@@ -168,7 +166,7 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     public func sessions(for userID: UserID, cursor: String?, pageSize: Int) async throws -> V2DeviceSessionPage {
         guard (1 ... 100).contains(pageSize) else { throw V2DeviceSessionServiceError.invalidRequest }
         guard let sql = database as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
-        let userUUID = try deviceSessionUUID(userID)
+        let userUUID = try v2PersistenceUUID(userID, invalid: V2DeviceSessionServiceError.malformedPersistence)
         let cursorValue = try cursor.map(deviceSessionCursor)
         let observedAt = now()
         guard v2PostgresTimestampCanEncode(observedAt) else { throw V2DeviceSessionServiceError.unavailable }
@@ -207,7 +205,6 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     /// - Returns: 变更结果。
     /// - Throws: 目标不可用或持久化失败时抛出。
 
-
     /// 吊销当前设备。
     ///
     /// 当前设备登出与凭据签发/刷新共用同一账号锁。设备 ID 绝不会被复活：
@@ -227,8 +224,8 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     public func revokeCurrentDevice(actorUserID: UserID, currentDeviceID: DeviceID, operationID: UUID) async throws -> V2DeviceSessionMutationOutcome {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSessionServiceError.unavailable }
-            let userUUID = try deviceSessionUUID(actorUserID)
-            let deviceUUID = try deviceSessionUUID(currentDeviceID)
+            let userUUID = try v2PersistenceUUID(actorUserID, invalid: V2DeviceSessionServiceError.malformedPersistence)
+            let deviceUUID = try v2PersistenceUUID(currentDeviceID, invalid: V2DeviceSessionServiceError.malformedPersistence)
             try await Self.lockAccountState(sql, userID: userUUID)
             if let prior = try await operation(sql, actorUserID: userUUID, operationID: operationID) {
                 guard prior.kind == SessionOperationKind.revokeDevice.rawValue, prior.targetDeviceID == deviceUUID else { return .targetUnavailable }
@@ -250,7 +247,6 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
     ///   - operationID: 幂等操作标识。
     /// - Returns: 变更结果。
     /// - Throws: 持久化失败时抛出。
-
 
     private func isCurrentDeviceActive(_ sql: any SQLDatabase, userID: UUID, deviceID: UUID) async throws -> Bool {
         try await isTargetActive(sql, userID: userID, deviceID: deviceID)
@@ -323,7 +319,6 @@ public struct V2PostgresDeviceSessionService: V2DeviceSessionManaging, V2DeviceR
             """).run()
     }
 
-
     /// 取得账号级咨询锁。
     ///
     /// - Parameters:
@@ -393,17 +388,11 @@ private struct DeviceSessionCursorTimestamp: Codable, PostgresNonThrowingEncodab
     }
 }
 
-private func deviceSessionUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let value = UUID(uuidString: identifier.rawValue) else { throw V2DeviceSessionServiceError.malformedPersistence }
-    return value
-}
-
-
 extension V2PostgresDeviceSessionService: V2RemoteDeviceRevocationManaging {
     public func remoteRevocationBaseline(actorUserID:UserID,currentDeviceID:DeviceID) async throws -> V2RemoteDeviceRevocationBaseline {
         try await database.transaction { tx in
             guard let sql=tx as? any SQLDatabase else {throw V2DeviceSessionServiceError.unavailable}
-            let actor=try deviceSessionUUID(actorUserID),current=try deviceSessionUUID(currentDeviceID)
+            let actor=try v2PersistenceUUID(actorUserID, invalid: V2DeviceSessionServiceError.malformedPersistence),current=try v2PersistenceUUID(currentDeviceID, invalid: V2DeviceSessionServiceError.malformedPersistence)
             try await Self.lockAccountState(sql,userID:actor)
             guard try await isCurrentDeviceActive(sql,userID:actor,deviceID:current) else {throw V2DeviceSessionServiceError.authorizationDenied}
             let issued=now()

@@ -68,9 +68,9 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
                access.trimmedThroughRoomSequence == 0 {
                 if let cached = await directRoomLogEventCache.page(
                     candidate: candidate,
-                    actorJoinedRevision: try groupEventUnsigned(access.actorJoinedRevision),
-                    actorLeftRevision: try access.actorLeftRevision.map(groupEventUnsigned),
-                    currentHighWatermark: try groupEventUnsigned(access.roomSequence)
+                    actorJoinedRevision: try v2PersistenceUnsigned(access.actorJoinedRevision, invalid: V2GroupEventLogError.corruptPersistenceState),
+                    actorLeftRevision: try access.actorLeftRevision.map { try v2PersistenceUnsigned($0, invalid: V2GroupEventLogError.corruptPersistenceState) },
+                    currentHighWatermark: try v2PersistenceUnsigned(access.roomSequence, invalid: V2GroupEventLogError.corruptPersistenceState)
                 ) {
                     return cached
                 }
@@ -132,9 +132,9 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
 
         switch try await directRoomLogEventCache.preparedPage(
             roomID: roomID,
-            actorJoinedRevision: try groupEventUnsigned(access.actorJoinedRevision),
-            actorLeftRevision: try access.actorLeftRevision.map(groupEventUnsigned),
-            currentHighWatermark: try groupEventUnsigned(access.roomSequence),
+            actorJoinedRevision: try v2PersistenceUnsigned(access.actorJoinedRevision, invalid: V2GroupEventLogError.corruptPersistenceState),
+            actorLeftRevision: try access.actorLeftRevision.map { try v2PersistenceUnsigned($0, invalid: V2GroupEventLogError.corruptPersistenceState) },
+            currentHighWatermark: try v2PersistenceUnsigned(access.roomSequence, invalid: V2GroupEventLogError.corruptPersistenceState),
             afterRoomSequence: afterRoomSequence,
             pageSize: pageSize,
             context: context
@@ -171,8 +171,8 @@ public struct PostgresV2GroupEventLogStore: V2PreparedGroupEventLogStore {
         let room = try await authorizedRoom(roomID: roomID, actorUserID: actorUserID, sql: sql)
         return try .init(
             roomID: roomID,
-            highWatermark: try groupEventUnsigned(room.roomSequence),
-            membershipRevision: try groupEventUnsigned(room.membershipRevision)
+            highWatermark: try v2PersistenceUnsigned(room.roomSequence, invalid: V2GroupEventLogError.corruptPersistenceState),
+            membershipRevision: try v2PersistenceUnsigned(room.membershipRevision, invalid: V2GroupEventLogError.corruptPersistenceState)
         )
     }
 
@@ -301,11 +301,6 @@ struct GroupEventLogRow: Decodable {
     }
 }
 
-private func groupEventUnsigned(_ value: Int64) throws -> UInt64 {
-    guard value >= 0 else { throw V2GroupEventLogError.corruptPersistenceState }
-    return UInt64(value)
-}
-
 func groupEventProjectionKind(for eventType: String) -> String {
     switch eventType {
     case "room.created": "room"
@@ -338,15 +333,15 @@ func v2DecodeGroupEventPull(_ rows: [GroupEventLogRow], roomID: RoomID,
             else { throw V2GroupEventLogError.corruptPersistenceState }
             return try V2GroupEventLogEntry(
                 sourceEventID: try EventID(eventID.uuidString),
-                roomSequence: try groupEventUnsigned(roomSequence),
+                roomSequence: try v2PersistenceUnsigned(roomSequence, invalid: V2GroupEventLogError.corruptPersistenceState),
                 projectionKind: groupEventProjectionKind(for: eventType),
                 payload: payload
             )
         }
         // Advance through the inspected candidate window, including invisible
         // events. Only an exhausted pair of sources may advance to the room head.
-        let trimmedThrough = try groupEventUnsigned(room.trimmedThroughRoomSequence)
-        let next = max(afterRoomSequence, try groupEventUnsigned(room.scannedThroughRoomSequence))
+        let trimmedThrough = try v2PersistenceUnsigned(room.trimmedThroughRoomSequence, invalid: V2GroupEventLogError.corruptPersistenceState)
+        let next = max(afterRoomSequence, try v2PersistenceUnsigned(room.scannedThroughRoomSequence, invalid: V2GroupEventLogError.corruptPersistenceState))
         return try V2GroupEventLogPage(
             roomID: roomID,
             events: entries,

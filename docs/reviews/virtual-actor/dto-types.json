@@ -600,7 +600,7 @@
     {
       "name": "V2AuthenticatedMessageEdit",
       "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditOutcomes.swift",
       "line": 8,
       "kind": "struct",
       "explicitCodable": false,
@@ -621,7 +621,7 @@
     {
       "name": "V2AuthenticatedMessageReaction",
       "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageReactionService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageReactionOutcomes.swift",
       "line": 9,
       "kind": "struct",
       "explicitCodable": false,
@@ -642,7 +642,7 @@
     {
       "name": "V2AuthenticatedMessageWithdrawal",
       "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageWithdrawalService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageWithdrawalOutcomes.swift",
       "line": 6,
       "kind": "struct",
       "explicitCodable": false,
@@ -2402,7 +2402,7 @@
     {
       "name": "V2MessageEditOutcome",
       "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditOutcomes.swift",
       "line": 38,
       "kind": "enum",
       "explicitCodable": false,
@@ -2467,7 +2467,7 @@
     {
       "name": "V2MessageReactionOutcome",
       "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageReactionService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageReactionOutcomes.swift",
       "line": 39,
       "kind": "enum",
       "explicitCodable": false,
@@ -2526,7 +2526,7 @@
     {
       "name": "V2MessageWithdrawalOutcome",
       "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageWithdrawalService.swift",
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageWithdrawalOutcomes.swift",
       "line": 36,
       "kind": "enum",
       "explicitCodable": false,

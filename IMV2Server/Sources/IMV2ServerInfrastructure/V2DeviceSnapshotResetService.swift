@@ -5,7 +5,6 @@ import Foundation
 import IMV2Core
 import SQLKit
 
-
 /// 基于 PostgreSQL 的设备可用性检查实现。
 public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking {
     private let database: any Database
@@ -29,8 +28,8 @@ public struct V2PostgresDeviceAvailabilityChecker: V2DeviceAvailabilityChecking 
         return try await sql.raw("""
             SELECT 1
             FROM im_v2.auth_devices
-            WHERE user_id = \(bind: snapshotResetUUID(userID))
-              AND device_id = \(bind: snapshotResetUUID(deviceID))
+            WHERE user_id = \(bind: v2PersistenceUUID(userID, invalid: V2DeviceSnapshotResetError.malformedPersistence))
+              AND device_id = \(bind: v2PersistenceUUID(deviceID, invalid: V2DeviceSnapshotResetError.malformedPersistence))
               AND revoked_at IS NULL AND session_expires_at > clock_timestamp()
             """).first() != nil
     }
@@ -95,8 +94,8 @@ public struct V2PostgresDeviceSnapshotResetService: V2DeviceSnapshotResetting, S
     }
 
     private func stage(_ command: V2DeviceSnapshotResetCommand, at location: V2UserShardStorageLocation) async throws -> V2DeviceSnapshotResetResult {
-        let userUUID = try snapshotResetUUID(command.userID)
-        let deviceUUID = try snapshotResetUUID(command.deviceID)
+        let userUUID = try v2PersistenceUUID(command.userID, invalid: V2DeviceSnapshotResetError.malformedPersistence)
+        let deviceUUID = try v2PersistenceUUID(command.deviceID, invalid: V2DeviceSnapshotResetError.malformedPersistence)
         let currentTime = now()
         return try await location.database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2DeviceSnapshotResetError.unavailable }
@@ -250,10 +249,7 @@ private struct ResetCursorRow: Decodable {
     enum CodingKeys: String, CodingKey { case state, generation = "reset_generation" }
 }
 private struct ResetWatermarkRow: Decodable { let value: Int64 }
-private func snapshotResetUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let value = UUID(uuidString: identifier.rawValue) else { throw V2DeviceSnapshotResetError.malformedPersistence }
-    return value
-}
+
 private func unsigned(_ value: Int64) throws -> UInt64 {
     guard value >= 0 else { throw V2DeviceSnapshotResetError.malformedPersistence }
     return UInt64(value)

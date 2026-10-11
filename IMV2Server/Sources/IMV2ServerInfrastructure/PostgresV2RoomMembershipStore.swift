@@ -35,10 +35,10 @@ enum PostgresV2RoomMembershipStore {
         now: Date,
         writeOperationLedger: Bool = true
     ) async throws -> V2RoomMembershipChangeOutcome {
-        let roomID = try membershipUUID(command.roomID)
-        let actorID = try membershipUUID(command.actorUserID)
-        let targetID = try membershipUUID(command.targetUserID)
-        let operationID = try membershipUUID(command.operationID)
+        let roomID = try v2PersistenceUUID(command.roomID, invalid: V2RoomMembershipStoreError.corruptPersistenceState)
+        let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2RoomMembershipStoreError.corruptPersistenceState)
+        let targetID = try v2PersistenceUUID(command.targetUserID, invalid: V2RoomMembershipStoreError.corruptPersistenceState)
+        let operationID = try v2PersistenceUUID(command.operationID, invalid: V2RoomMembershipStoreError.corruptPersistenceState)
         let operationLockKey = actorID.uuidString + ":" + operationID.uuidString
 
         if activationScope != nil {
@@ -97,8 +97,8 @@ enum PostgresV2RoomMembershipStore {
             FROM im_v2.group_rooms WHERE room_id = \(bind: roomID)
             """).first(decoding: MembershipGroupRow.self) else { throw V2RoomMembershipStoreError.roomNotFound }
         guard room.capacityProfileID == capacityProfile.id else { throw V2RoomMembershipStoreError.corruptPersistenceState }
-        guard try membershipUnsigned(room.membershipRevision) == command.expectedMembershipRevision else {
-            return .revisionConflict(current: try membershipUnsigned(room.membershipRevision))
+        guard try v2PersistenceUnsigned(room.membershipRevision, invalid: V2RoomMembershipStoreError.corruptPersistenceState) == command.expectedMembershipRevision else {
+            return .revisionConflict(current: try v2PersistenceUnsigned(room.membershipRevision, invalid: V2RoomMembershipStoreError.corruptPersistenceState))
         }
         guard let actor = try await sql.raw("""
             SELECT user_id, role FROM im_v2.room_memberships
@@ -187,7 +187,7 @@ enum PostgresV2RoomMembershipStore {
         }
         let nextRevision = room.membershipRevision + 1
         let nextSequence = room.roomSequence + 1
-        let eventUUID = try membershipUUID(eventID)
+        let eventUUID = try v2PersistenceUUID(eventID, invalid: V2RoomMembershipStoreError.corruptPersistenceState)
 
         // 以与操作和事件写入相同的精度解码；保持原始 Date 绑定。
         guard let timestamp = try await sql.raw("""
@@ -200,15 +200,15 @@ enum PostgresV2RoomMembershipStore {
         let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
         try await sql.raw("""
             UPDATE im_v2.room_admission
-            SET eligible_member_count = \(bind: nextEligibleCount), command_window_used = \(bind: reservedRoom.commandWindow.used), shard_lease_id = \(bind: try membershipUUID(lease.id)),
-                shard_lease_generation = \(bind: try membershipSigned(lease.generation))
+            SET eligible_member_count = \(bind: nextEligibleCount), command_window_used = \(bind: reservedRoom.commandWindow.used), shard_lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2RoomMembershipStoreError.corruptPersistenceState)),
+                shard_lease_generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2RoomMembershipStoreError.corruptPersistenceState))
             WHERE room_id = \(bind: roomID)
             """).run()
         try await sql.raw("""
             UPDATE im_v2.shard_admission_pools
             SET command_window_used = \(bind: lease.commandWindow.used)
             WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID)
-              AND lease_id = \(bind: try membershipUUID(lease.id)) AND generation = \(bind: try membershipSigned(lease.generation))
+              AND lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2RoomMembershipStoreError.corruptPersistenceState)) AND generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2RoomMembershipStoreError.corruptPersistenceState))
             """).run()
         switch command.action {
         case .add:
@@ -256,11 +256,11 @@ enum PostgresV2RoomMembershipStore {
                 (actor_user_id, operation_id, room_id, target_user_id, action, expected_membership_revision,
                  resulting_membership_revision, room_sequence, event_id, created_at)
             VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: targetID), \(bind: command.action.rawValue),
-                    \(bind: try membershipSigned(command.expectedMembershipRevision)), \(bind: nextRevision), \(bind: nextSequence), \(bind: eventUUID), \(bind: now))
+                    \(bind: try v2PersistenceSigned(command.expectedMembershipRevision, invalid: V2RoomMembershipStoreError.corruptPersistenceState)), \(bind: nextRevision), \(bind: nextSequence), \(bind: eventUUID), \(bind: now))
             """).run()
         }
         return .changed(try .init(roomID: command.roomID, targetUserID: command.targetUserID, action: command.action,
-                                  membershipRevision: membershipUnsigned(nextRevision), roomSequence: membershipUnsigned(nextSequence),
+                                  membershipRevision: v2PersistenceUnsigned(nextRevision, invalid: V2RoomMembershipStoreError.corruptPersistenceState), roomSequence: v2PersistenceUnsigned(nextSequence, invalid: V2RoomMembershipStoreError.corruptPersistenceState),
                                   eventID: eventID, createdAt: timestamp.createdAt))
     }
 }
@@ -278,15 +278,13 @@ private struct MembershipOperationRow: Decodable {
     let roomID: UUID; let targetUserID: UUID; let action: String; let expectedMembershipRevision: Int64; let resultingMembershipRevision: Int64; let roomSequence: Int64; let eventID: UUID; let createdAt: Date
     enum CodingKeys: String, CodingKey { case roomID = "room_id", targetUserID = "target_user_id", action, expectedMembershipRevision = "expected_membership_revision", resultingMembershipRevision = "resulting_membership_revision", roomSequence = "room_sequence", eventID = "event_id", createdAt = "created_at" }
     func matches(command: V2ChangeRoomMembershipCommand, roomID: UUID, targetID: UUID) -> Bool { self.roomID == roomID && targetUserID == targetID && action == command.action.rawValue && expectedMembershipRevision == command.expectedRevision.signedValue }
-    func change() throws -> V2RoomMembershipChange { try .init(roomID: .init(roomID.uuidString), targetUserID: .init(targetUserID.uuidString), action: try .init(rawValue: action).unwrapMembership(), membershipRevision: membershipUnsigned(resultingMembershipRevision), roomSequence: membershipUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt) }
+    func change() throws -> V2RoomMembershipChange { try .init(roomID: .init(roomID.uuidString), targetUserID: .init(targetUserID.uuidString), action: try .init(rawValue: action).unwrapMembership(), membershipRevision: v2PersistenceUnsigned(resultingMembershipRevision, invalid: V2RoomMembershipStoreError.corruptPersistenceState), roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2RoomMembershipStoreError.corruptPersistenceState), eventID: .init(eventID.uuidString), createdAt: createdAt) }
 }
 private struct MembershipAdmissionRow {
     let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64
 }
 extension MembershipAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)) } }
 private struct MembershipShardRow { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; }
-extension MembershipShardRow: Decodable { enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: membershipUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed))) } }
-private func membershipUUID<Tag>(_ value: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: value.rawValue) else { throw V2RoomMembershipStoreError.corruptPersistenceState }; return value }
-private func membershipUnsigned(_ value: Int64) throws -> UInt64 { guard value >= 0 else { throw V2RoomMembershipStoreError.corruptPersistenceState }; return UInt64(value) }
-private func membershipSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2RoomMembershipStoreError.corruptPersistenceState }; return Int64(value) }
+extension MembershipShardRow: Decodable { enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: v2PersistenceUnsigned(generation, invalid: V2RoomMembershipStoreError.corruptPersistenceState), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed))) } }
+
 private extension Optional where Wrapped == V2RoomMembershipAction { func unwrapMembership() throws -> Wrapped { guard let self else { throw V2RoomMembershipStoreError.corruptPersistenceState }; return self } }

@@ -3496,3 +3496,14 @@ r9 最新工作区完整 PostgresV2RoomWriteStoreIntegrationTests：409 项测�
 客户端当前受影响的消息编码、发送流程、查询恢复、路由发送、资源 journal/recovery 与 protobuf 帧七类套件 r10：39 项测试、7 个 suite 全部通过，1.938 秒，进程退出0。日志 `/tmp/imv2-compat-current72-client-r10.log`。这是本轮当前代码证据，不使用早于修改的旧客户端回归代替。
 
 上表待定的广范围数据库及客户端验证现已完成。清单、服务端边界、环境样例及 git diff --check 通过。历史升级链、旧协议分支、Owner 后置绑定和无调用辅助入口已清理；保留当前资源存储迁移、日志重复安装、当前结构校验与批次隔离。未压测、APNs、提交推送，不改开发数据库与验收服务。
+
+
+### 2026-10-11 第二轮服务端冗余清理
+
+三个消息修改 Store 协议、旧受信审核 Service 及 IDFactory 移入 Tests。消息编辑/撤回/表态结果文件改为 Outcomes；SQL 正文组件改为包级 V2PostgresMessage*Persistence，构造时要求 Database.inTransaction。外层 Operation Store 继续负责操作锁、activation、事务期限、提交及永久回执；删除内层可选 activationScope、existingOperationTransaction 和两次后置配置。独立事务调用仅由测试适配器提供；真实 SQL、权限校验、幂等结果保留。永久消息修改回执测试新增三种组件拒绝非事务句柄的断言。
+
+删除无设备断言校验接口与旧基协议，Claims 校验必须提供 DeviceID。合并27个文件中42个 UUID/非负整数/有符号整数转换函数，保留各业务错误及正数检查；两个 map 函数引用也迁移为明确闭包。未改动资源存储迁移、目录归属过滤及实际转发计划。更新当前能力清单、源码归属和 DTO 路径。
+
+最终新构建（41.37秒）的独立 PostgreSQL 回归：28项测试、2个suite通过，66.753秒；`/tmp/imv2-server-cleanup-r3-native.log`，runner tests=0、cleanup=0，临时集群目录已删除。涵盖永久编辑/撤回/表态回执、缺少接受事实拒绝、成员授权、并发编辑与撤回、审核归属围栏、已读回执及时间边界。不是全套服务端回归。使用同一最终二进制复核8类相关单元套件：39项测试、8个suite通过，0.026秒，日志 `/tmp/imv2-server-cleanup-r3-unit.log`。
+
+清单、分层、环境样例及 git diff --check 通过。Sources代码物理行数（包含空行注释）从152362变为152005，净减少357行；其中部分代码仅移入测试，不等于整个仓库均减少相同数量。无压测或APNs验证；不修改清空后的验收库或服务，未提交推送。

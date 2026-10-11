@@ -73,9 +73,9 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
-            let roomID = try moderationUUID(command.roomID)
-            let actorID = try moderationUUID(command.actorUserID)
-            let operationID = try moderationUUID(command.operationID)
+            let roomID = try v2PersistenceUUID(command.roomID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let operationID = try v2PersistenceUUID(command.operationID, invalid: V2ModerationStoreError.corruptPersistenceState)
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
@@ -124,7 +124,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             }
             guard let lease = nextShard.lease, room.roomSequence < Int64.max else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomSequence = room.roomSequence + 1
-            let eventUUID = try moderationUUID(eventID)
+            let eventUUID = try v2PersistenceUUID(eventID, invalid: V2ModerationStoreError.corruptPersistenceState)
             let eventType = command.action == .freezeRoom ? "room.frozen" : "room.unfrozen"
             let frozenAt = command.action == .freezeRoom ? now : nil
             let frozenBy = command.action == .freezeRoom ? actorID : nil
@@ -138,10 +138,10 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
             try await sql.raw("""
-                UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try moderationUUID(lease.id)), shard_lease_generation = \(bind: try moderationSigned(lease.generation)) WHERE room_id = \(bind: roomID)
+                UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)), shard_lease_generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState)) WHERE room_id = \(bind: roomID)
                 """).run()
             try await sql.raw("""
-                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try moderationUUID(lease.id)) AND generation = \(bind: try moderationSigned(lease.generation))
+                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)) AND generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState))
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
@@ -154,7 +154,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_audit_entries (actor_user_id, operation_id, room_id, action, target_user_id, message_id, reason_code, occurred_at, retain_until) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), \(bind: command.action == .freezeRoom ? "freeze_room" : "unfreeze_room"), NULL, NULL, \(bind: command.reasonCode.rawValue), \(bind: now), \(bind: retainUntil))
                 """).run()
-            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: nil, messageID: nil, muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: eventID, createdAt: timestamp.createdAt))
+            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: command.action, targetUserID: nil, messageID: nil, muteUntil: nil, roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2ModerationStoreError.corruptPersistenceState), eventID: eventID, createdAt: timestamp.createdAt))
         }
     }
 
@@ -164,11 +164,11 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingMessageModerationTransaction
         ) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
-            let roomID = try moderationUUID(command.roomID)
-            let actorID = try moderationUUID(command.actorUserID)
-            let operationID = try moderationUUID(command.operationID)
+            let roomID = try v2PersistenceUUID(command.roomID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let operationID = try v2PersistenceUUID(command.operationID, invalid: V2ModerationStoreError.corruptPersistenceState)
             guard let commandMessageID = command.messageID else { throw V2ModerationStoreError.corruptPersistenceState }
-            let messageID = try moderationUUID(commandMessageID)
+            let messageID = try v2PersistenceUUID(commandMessageID, invalid: V2ModerationStoreError.corruptPersistenceState)
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
@@ -207,7 +207,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             else { throw V2ModerationStoreError.messageNotFound }
             guard message.withdrawnAt == nil else { return .messageAlreadyRedacted }
             if let expectedRevision = command.expectedMessageRevision {
-                let expectedRevisionValue = try moderationSigned(expectedRevision)
+                let expectedRevisionValue = try v2PersistenceSigned(expectedRevision, invalid: V2ModerationStoreError.corruptPersistenceState)
                 guard message.contentRevision == expectedRevisionValue else {
                 // 此结果在特权边界有意保持不透明。审核工作器复查租约，
                 // 并将过期发现标记为已被取代；绝不处理较新的编辑。
@@ -235,7 +235,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             }
             guard let lease = nextShard.lease, room.roomSequence < Int64.max, message.contentRevision < Int64.max else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomSequence = room.roomSequence + 1; let messageRevision = message.contentRevision + 1
-            let eventUUID = try moderationUUID(eventID)
+            let eventUUID = try v2PersistenceUUID(eventID, invalid: V2ModerationStoreError.corruptPersistenceState)
             let previousProjectionState = try await PostgresV2MessageProjectionStateRepository()
                 .loadCurrentOrMaterialize(
                     messageID: messageID,
@@ -243,7 +243,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
                     sql: sql
                 )
             let redactedProjectionState = try previousProjectionState.state.applyingRemoval(
-                revision: moderationUnsigned(messageRevision)
+                revision: v2PersistenceUnsigned(messageRevision, invalid: V2ModerationStoreError.corruptPersistenceState)
             )
             // 只有响应使用解码后的时间戳；持久化仍保留原始 Date。
             guard let timestamp = try await sql.raw("""
@@ -258,10 +258,10 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             // 并为保留期清理提供确定性的处置标记。
             try await sql.raw("UPDATE im_v2.message_media_references SET revoked_at = \(bind: now) WHERE message_id = \(bind: messageID) AND revoked_at IS NULL").run()
             try await sql.raw("""
-                UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try moderationUUID(lease.id)), shard_lease_generation = \(bind: try moderationSigned(lease.generation)) WHERE room_id = \(bind: roomID)
+                UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)), shard_lease_generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState)) WHERE room_id = \(bind: roomID)
                 """).run()
             try await sql.raw("""
-                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try moderationUUID(lease.id)) AND generation = \(bind: try moderationSigned(lease.generation))
+                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)) AND generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState))
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
@@ -284,7 +284,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_audit_entries (actor_user_id, operation_id, room_id, action, target_user_id, message_id, reason_code, occurred_at, retain_until) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'redact_message', NULL, \(bind: messageID), \(bind: command.reasonCode.rawValue), \(bind: now), \(bind: retainUntil))
                 """).run()
-            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: .redactMessage, targetUserID: nil, messageID: commandMessageID, messageRevision: moderationUnsigned(messageRevision), muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: eventID, createdAt: timestamp.createdAt))
+            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: .redactMessage, targetUserID: nil, messageID: commandMessageID, messageRevision: v2PersistenceUnsigned(messageRevision, invalid: V2ModerationStoreError.corruptPersistenceState), muteUntil: nil, roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2ModerationStoreError.corruptPersistenceState), eventID: eventID, createdAt: timestamp.createdAt))
         }
     }
 
@@ -296,10 +296,10 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             guard let sql = transaction as? any SQLDatabase,
                   let commandTargetID = command.targetUserID
             else { throw V2ModerationStoreError.corruptPersistenceState }
-            let roomID = try moderationUUID(command.roomID)
-            let actorID = try moderationUUID(command.actorUserID)
-            let targetID = try moderationUUID(commandTargetID)
-            let operationID = try moderationUUID(command.operationID)
+            let roomID = try v2PersistenceUUID(command.roomID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let targetID = try v2PersistenceUUID(commandTargetID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let operationID = try v2PersistenceUUID(command.operationID, invalid: V2ModerationStoreError.corruptPersistenceState)
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
@@ -364,7 +364,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             guard let lease = reservedShard.lease, room.membershipRevision < Int64.max, room.roomSequence < Int64.max else { throw V2ModerationStoreError.corruptPersistenceState }
             let membershipRevision = room.membershipRevision + 1
             let roomSequence = room.roomSequence + 1
-            let eventUUID = try moderationUUID(eventID)
+            let eventUUID = try v2PersistenceUUID(eventID, invalid: V2ModerationStoreError.corruptPersistenceState)
             guard let timestamp = try await sql.raw("""
                 UPDATE im_v2.rooms SET membership_revision = \(bind: membershipRevision), room_sequence = \(bind: roomSequence)
                 WHERE room_id = \(bind: roomID)
@@ -374,10 +374,10 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             }
             let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
             try await sql.raw("""
-                UPDATE im_v2.room_admission SET eligible_member_count = \(bind: admission.eligibleMemberCount - 1), command_window_used = \(bind: reservedRoom.commandWindow.used), shard_lease_id = \(bind: try moderationUUID(lease.id)), shard_lease_generation = \(bind: try moderationSigned(lease.generation)) WHERE room_id = \(bind: roomID)
+                UPDATE im_v2.room_admission SET eligible_member_count = \(bind: admission.eligibleMemberCount - 1), command_window_used = \(bind: reservedRoom.commandWindow.used), shard_lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)), shard_lease_generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState)) WHERE room_id = \(bind: roomID)
                 """).run()
             try await sql.raw("""
-                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try moderationUUID(lease.id)) AND generation = \(bind: try moderationSigned(lease.generation))
+                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)) AND generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState))
                 """).run()
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = \(bind: membershipRevision) WHERE room_id = \(bind: roomID) AND user_id = \(bind: targetID) AND left_revision IS NULL").run()
             try await sql.raw("""
@@ -394,7 +394,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
                 """).run()
 
             try await sql.raw("INSERT INTO im_v2.moderation_audit_entries (actor_user_id, operation_id, room_id, action, target_user_id, message_id, reason_code, occurred_at, retain_until) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'remove_member', \(bind: targetID), NULL, \(bind: command.reasonCode.rawValue), \(bind: now), \(bind: retainUntil))").run()
-            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: .removeMember, targetUserID: commandTargetID, messageID: nil, membershipRevision: moderationUnsigned(membershipRevision), muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: eventID, createdAt: timestamp.createdAt))
+            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: .removeMember, targetUserID: commandTargetID, messageID: nil, membershipRevision: v2PersistenceUnsigned(membershipRevision, invalid: V2ModerationStoreError.corruptPersistenceState), muteUntil: nil, roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2ModerationStoreError.corruptPersistenceState), eventID: eventID, createdAt: timestamp.createdAt))
         }
     }
 
@@ -410,10 +410,10 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
                   let commandTargetID = command.targetUserID,
                   let commandMuteUntil = command.muteUntil
             else { throw V2ModerationStoreError.corruptPersistenceState }
-            let roomID = try moderationUUID(command.roomID)
-            let actorID = try moderationUUID(command.actorUserID)
-            let operationID = try moderationUUID(command.operationID)
-            let targetID = try moderationUUID(commandTargetID)
+            let roomID = try v2PersistenceUUID(command.roomID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let operationID = try v2PersistenceUUID(command.operationID, invalid: V2ModerationStoreError.corruptPersistenceState)
+            let targetID = try v2PersistenceUUID(commandTargetID, invalid: V2ModerationStoreError.corruptPersistenceState)
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
@@ -469,7 +469,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             }
             guard let lease = nextShard.lease, room.roomSequence < Int64.max else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomSequence = room.roomSequence + 1
-            let eventUUID = try moderationUUID(eventID)
+            let eventUUID = try v2PersistenceUUID(eventID, invalid: V2ModerationStoreError.corruptPersistenceState)
             guard let timestamp = try await sql.raw("""
                 UPDATE im_v2.rooms SET room_sequence = \(bind: roomSequence) WHERE room_id = \(bind: roomID)
                 RETURNING \(bind: now)::timestamptz AS created_at, \(bind: commandMuteUntil)::timestamptz AS mute_until
@@ -486,10 +486,10 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
                     operation_id = EXCLUDED.operation_id, created_at = EXCLUDED.created_at
                 """).run()
             try await sql.raw("""
-                UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try moderationUUID(lease.id)), shard_lease_generation = \(bind: try moderationSigned(lease.generation)) WHERE room_id = \(bind: roomID)
+                UPDATE im_v2.room_admission SET command_window_used = \(bind: nextRoom.commandWindow.used), shard_lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)), shard_lease_generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState)) WHERE room_id = \(bind: roomID)
                 """).run()
             try await sql.raw("""
-                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try moderationUUID(lease.id)) AND generation = \(bind: try moderationSigned(lease.generation))
+                UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: room.roomShardID) AND capacity_profile_id = \(bind: room.capacityProfileID) AND lease_id = \(bind: try v2PersistenceUUID(lease.id, invalid: V2ModerationStoreError.corruptPersistenceState)) AND generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2ModerationStoreError.corruptPersistenceState))
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at)
@@ -500,7 +500,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
             try await sql.raw("""
                 INSERT INTO im_v2.moderation_audit_entries (actor_user_id, operation_id, room_id, action, target_user_id, message_id, reason_code, occurred_at, retain_until) VALUES (\(bind: actorID), \(bind: operationID), \(bind: roomID), 'mute_member', \(bind: targetID), NULL, \(bind: command.reasonCode.rawValue), \(bind: now), \(bind: retainUntil))
                 """).run()
-            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: .muteMember, targetUserID: commandTargetID, messageID: nil, muteUntil: timestamp.muteUntil, roomSequence: moderationUnsigned(roomSequence), eventID: eventID, createdAt: timestamp.createdAt))
+            return .applied(try .init(roomID: command.roomID, operationID: command.operationID, action: .muteMember, targetUserID: commandTargetID, messageID: nil, muteUntil: timestamp.muteUntil, roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2ModerationStoreError.corruptPersistenceState), eventID: eventID, createdAt: timestamp.createdAt))
         }
     }
 }
@@ -539,10 +539,10 @@ private struct ModerationOperationRow: Decodable {
         switch action {
         case "redact_message":
             guard targetUserID == nil, let messageID, let resultingMessageRevision, muteUntil == nil else { throw V2ModerationStoreError.corruptPersistenceState }
-            return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: .redactMessage, targetUserID: nil, messageID: .init(messageID.uuidString), messageRevision: moderationUnsigned(resultingMessageRevision), muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt)
+            return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: .redactMessage, targetUserID: nil, messageID: .init(messageID.uuidString), messageRevision: v2PersistenceUnsigned(resultingMessageRevision, invalid: V2ModerationStoreError.corruptPersistenceState), muteUntil: nil, roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2ModerationStoreError.corruptPersistenceState), eventID: .init(eventID.uuidString), createdAt: createdAt)
         case "freeze_room", "unfreeze_room":
             guard targetUserID == nil, messageID == nil, resultingMessageRevision == nil, muteUntil == nil else { throw V2ModerationStoreError.corruptPersistenceState }
-            return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: action == "freeze_room" ? .freezeRoom : .unfreezeRoom, targetUserID: nil, messageID: nil, muteUntil: nil, roomSequence: moderationUnsigned(roomSequence), eventID: .init(eventID.uuidString), createdAt: createdAt)
+            return try .init(roomID: .init(roomID.uuidString), operationID: operationID, action: action == "freeze_room" ? .freezeRoom : .unfreezeRoom, targetUserID: nil, messageID: nil, muteUntil: nil, roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2ModerationStoreError.corruptPersistenceState), eventID: .init(eventID.uuidString), createdAt: createdAt)
         default:
             throw V2ModerationStoreError.corruptPersistenceState
         }
@@ -551,10 +551,7 @@ private struct ModerationOperationRow: Decodable {
 private struct ModerationAdmissionRow { let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64 }
 extension ModerationAdmissionRow: Decodable { enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)) } }
 private struct ModerationShardRow { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; }
-extension ModerationShardRow: Decodable { enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: moderationUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed))) } }
-private func moderationUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag { guard let value = UUID(uuidString: identifier.rawValue) else { throw V2ModerationStoreError.corruptPersistenceState }; return value }
-private func moderationUnsigned(_ value: Int64) throws -> UInt64 { guard value >= 0 else { throw V2ModerationStoreError.corruptPersistenceState }; return UInt64(value) }
-private func moderationSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2ModerationStoreError.corruptPersistenceState }; return Int64(value) }
+extension ModerationShardRow: Decodable { enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: v2PersistenceUnsigned(generation, invalid: V2ModerationStoreError.corruptPersistenceState), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed))) } }
 
 private struct ModerationGroupProfileRow: Decodable {
     let ownerUserID: UUID

@@ -127,14 +127,14 @@ public struct PostgresV2GroupMessagingStore: Sendable {
             throw V2GroupMessagingStoreError.corruptPersistenceState
         }
         let result = try await createGroup(input: .init(actorUserID: placement.actorUserID,
-            actorID: try groupUUID(placement.actorUserID), operationID: try groupUUID(placement.operationID),
+            actorID: try v2PersistenceUUID(placement.actorUserID, invalid: V2GroupMessagingStoreError.corruptPersistenceState), operationID: try v2PersistenceUUID(placement.operationID, invalid: V2GroupMessagingStoreError.corruptPersistenceState),
             title: intent.title, capacityClass: intent.capacityClass, memberCount: placement.audienceMemberCount),
             capacityProfile: capacityProfile, roomShardID: placement.roomShardID,
             roomID: placement.roomID, eventID: placement.eventID, now: now, creationIntent: intent)
         switch result {
         case .created, .idempotent:
             guard let sql = database as? any SQLDatabase,
-                  let row = try await sql.raw("SELECT receipt::text AS receipt FROM im_v2.group_creation_owner_receipts WHERE actor_user_id = \(bind: try groupUUID(placement.actorUserID)) AND operation_id = \(bind: try groupUUID(placement.operationID))").first(decoding: ProvenGroupReceiptRow.self) else { throw V2GroupMessagingStoreError.corruptPersistenceState }
+                  let row = try await sql.raw("SELECT receipt::text AS receipt FROM im_v2.group_creation_owner_receipts WHERE actor_user_id = \(bind: try v2PersistenceUUID(placement.actorUserID, invalid: V2GroupMessagingStoreError.corruptPersistenceState)) AND operation_id = \(bind: try v2PersistenceUUID(placement.operationID, invalid: V2GroupMessagingStoreError.corruptPersistenceState))").first(decoding: ProvenGroupReceiptRow.self) else { throw V2GroupMessagingStoreError.corruptPersistenceState }
             let receipt = try JSONDecoder().decode(V2GroupCreationReceipt.self, from: Data(row.receipt.utf8))
             guard receipt.validates(intent: intent) else { throw V2GroupMessagingStoreError.corruptPersistenceState }
             return .receipt(receipt)
@@ -204,8 +204,8 @@ public struct PostgresV2GroupMessagingStore: Sendable {
                       summary.materializedMembers == Int64(input.memberCount)
                 else { return .unavailable }
 
-            let createdRoomID = try groupUUID(roomID)
-            let createdEventID = try groupUUID(eventID)
+            let createdRoomID = try v2PersistenceUUID(roomID, invalid: V2GroupMessagingStoreError.corruptPersistenceState)
+            let createdEventID = try v2PersistenceUUID(eventID, invalid: V2GroupMessagingStoreError.corruptPersistenceState)
             // 响应和投影使用持久化后的时间精度；其他写入保留原始 Date。
             guard let timestamp = try await sql.raw("""
                 INSERT INTO im_v2.rooms
@@ -307,7 +307,7 @@ public struct PostgresV2GroupMessagingStore: Sendable {
             try await sql.raw("""
                 INSERT INTO im_v2.room_admission
                     (room_id, eligible_member_count, command_window_limit, shard_lease_id, shard_lease_generation)
-                VALUES (\(bind: createdRoomID), \(bind: input.memberCount), \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: try groupUUID(reservedLease.id)), \(bind: try groupSigned(reservedLease.generation)))
+                VALUES (\(bind: createdRoomID), \(bind: input.memberCount), \(bind: capacityProfile.limits.maxCommandsPerWindow), \(bind: try v2PersistenceUUID(reservedLease.id, invalid: V2GroupMessagingStoreError.corruptPersistenceState)), \(bind: try v2PersistenceSigned(reservedLease.generation, invalid: V2GroupMessagingStoreError.corruptPersistenceState)))
                 """).run()
             try await sql.raw("""
                 UPDATE im_v2.room_admission
@@ -319,8 +319,8 @@ public struct PostgresV2GroupMessagingStore: Sendable {
                 SET command_window_used = \(bind: reservedLease.commandWindow.used)
                 WHERE room_shard_id = \(bind: roomShardID)
                   AND capacity_profile_id = \(bind: capacityProfile.id)
-                  AND lease_id = \(bind: try groupUUID(reservedLease.id))
-                  AND generation = \(bind: try groupSigned(reservedLease.generation))
+                  AND lease_id = \(bind: try v2PersistenceUUID(reservedLease.id, invalid: V2GroupMessagingStoreError.corruptPersistenceState))
+                  AND generation = \(bind: try v2PersistenceSigned(reservedLease.generation, invalid: V2GroupMessagingStoreError.corruptPersistenceState))
                 """).run()
 
                 guard let resolvedMilliseconds=UInt64(exactly:createdAtMilliseconds) else { throw V2GroupMessagingStoreError.corruptPersistenceState }
@@ -351,7 +351,6 @@ public struct PostgresV2GroupMessagingStore: Sendable {
 private enum ProvenGroupDeferred: Error { case rateLimited(Int), unavailable }
 private struct ProvenGroupReceiptRow: Decodable { let receipt: String }
 private struct ProvenGroupMemberRow: Decodable { let userID: UUID; enum CodingKeys: String, CodingKey { case userID = "user_id" } }
-
 
 private struct GroupCommittedTimestampRow: Decodable {
     let createdAt: Date
@@ -399,12 +398,11 @@ private struct GroupShardLeaseRow: Decodable {
         try .init(
             lease: .init(
                 id: .init(leaseID.uuidString),
-                generation: try groupUnsigned(generation),
+                generation: try v2PersistenceUnsigned(generation, invalid: V2GroupMessagingStoreError.corruptPersistenceState),
                 validUntil: validUntil,
                 commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)))
     }
 }
-
 
 private struct GroupOwnerIntentValues {
     let actorUserID: UUID
@@ -482,27 +480,10 @@ private struct GroupOwnerManifestSummaryRow: Decodable {
     }
 }
 
-private func groupUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID where Tag: V2IdentifierTag {
-    guard let value = UUID(uuidString: identifier.rawValue) else {
-        throw V2GroupMessagingStoreError.corruptPersistenceState
-    }
-    return value
-}
-
 private func groupUUIDJSON(_ values: [UUID]) throws -> String {
     guard let encoded = String(
         data: try JSONEncoder().encode(values.map(\.uuidString)),
         encoding: .utf8
     ) else { throw V2GroupMessagingStoreError.corruptPersistenceState }
     return encoded
-}
-
-private func groupUnsigned(_ value: Int64) throws -> UInt64 {
-    guard value >= 0 else { throw V2GroupMessagingStoreError.corruptPersistenceState }
-    return UInt64(value)
-}
-
-private func groupSigned(_ value: UInt64) throws -> Int64 {
-    guard value <= UInt64(Int64.max) else { throw V2GroupMessagingStoreError.corruptPersistenceState }
-    return Int64(value)
 }

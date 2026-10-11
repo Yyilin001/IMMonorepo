@@ -55,7 +55,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
                 FROM im_v2.resource_group_avatar_operations WHERE actor_user_id=\(bind:ids.actor) AND operation_id=\(bind:ids.operation)
                 """).first(decoding: GroupAvatarOperationRow.self) {
                 guard prior.roomID == ids.room, prior.mediaID == requested,
-                      try groupUnsigned(prior.expectedRevision) == command.expectedRevision else { return .idempotencyConflict }
+                      try v2PersistenceUnsigned(prior.expectedRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState) == command.expectedRevision else { return .idempotencyConflict }
                 return .idempotent(try prior.value())
             }
             if let closed = try await sql.raw("""
@@ -75,7 +75,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             let current = try await sql.raw("SELECT media_id,revision FROM im_v2.resource_group_avatars WHERE room_id=\(bind:ids.room) FOR UPDATE")
                 .first(decoding: GroupAvatarBindingRow.self)
             let revision = current?.revision ?? 0
-            guard try groupUnsigned(revision) == command.expectedRevision else { return .revisionConflict }
+            guard try v2PersistenceUnsigned(revision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState) == command.expectedRevision else { return .revisionConflict }
             guard revision < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             // Binding and GC share exact media locks, always in canonical order.
             for id in Set([current?.mediaID, requested].compactMap { $0 }).sorted(by: { $0.uuidString < $1.uuidString }) {
@@ -124,7 +124,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
                     \(bind:committed.sequence),\(bind:committed.eventID),\(bind:now))
                 """).run()
             return .applied(try .init(state: .init(roomID: command.roomID, mediaID: command.mutation.mediaID,
-                revision: groupUnsigned(next)), roomSequence: groupUnsigned(committed.sequence), updatedAt: committed.createdAt))
+                revision: v2PersistenceUnsigned(next, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState)), roomSequence: v2PersistenceUnsigned(committed.sequence, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), updatedAt: committed.createdAt))
         }
     }
 
@@ -142,7 +142,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
                 FROM im_v2.resource_group_avatar_operations WHERE actor_user_id=\(bind:ids.actor) AND operation_id=\(bind:ids.operation)
                 """).first(decoding: GroupAvatarOperationRow.self) {
                 guard prior.roomID == ids.room, prior.mediaID == command.mutation.mediaID?.uuidValue,
-                      try groupUnsigned(prior.expectedRevision) == command.expectedRevision else { return .idempotencyConflict }
+                      try v2PersistenceUnsigned(prior.expectedRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState) == command.expectedRevision else { return .idempotencyConflict }
                 return .committed(try prior.value())
             }
             if let closed = try await sql.raw("""
@@ -155,7 +155,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             try await sql.raw("""
                 INSERT INTO im_v2.resource_group_avatar_closures(actor_user_id,operation_id,room_id,requested_media_id,expected_revision,closed_at)
                 VALUES(\(bind:ids.actor),\(bind:ids.operation),\(bind:ids.room),\(bind:command.mutation.mediaID?.uuidValue),
-                    \(bind:try groupSigned(command.expectedRevision)),clock_timestamp())
+                    \(bind:try v2PersistenceSigned(command.expectedRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState)),clock_timestamp())
                 """).run()
             return .closed
         }
@@ -197,7 +197,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, eventType: "message.pinned_changed", payload: try groupPayload(["event_type": "message.pinned_changed", "room_id": ids.room.uuidString, "message_id": messageID.uuidString, "is_pinned": command.isPinned, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
             if command.isPinned { try await sql.raw("INSERT INTO im_v2.room_pinned_messages (room_id, message_id, pinned_by_user_id, pinned_at) VALUES (\(bind: ids.room), \(bind: messageID), \(bind: ids.actor), \(bind: now))").run() }
             else { try await sql.raw("DELETE FROM im_v2.room_pinned_messages WHERE room_id = \(bind: ids.room) AND message_id = \(bind: messageID)").run() }
-            return .applied(try .init(roomID: command.roomID, messageID: command.messageID, isPinned: command.isPinned, roomSequence: groupUnsigned(committed.sequence), updatedAt: committed.createdAt))
+            return .applied(try .init(roomID: command.roomID, messageID: command.messageID, isPinned: command.isPinned, roomSequence: v2PersistenceUnsigned(committed.sequence, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), updatedAt: committed.createdAt))
         }
     }
 
@@ -221,13 +221,13 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .permission(.manageAnnouncements), capacityProfile: capacityProfile, now: now, sql: sql)
             let current = try await sql.raw("SELECT revision FROM im_v2.group_announcements WHERE room_id = \(bind: ids.room) FOR UPDATE").first(decoding: GroupRevisionRow.self)?.revision ?? 0
-            guard try groupUnsigned(current) == command.expectedRevision else { return .revisionConflict }
+            guard try v2PersistenceUnsigned(current, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState) == command.expectedRevision else { return .revisionConflict }
             guard current < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let revision = current + 1
             try requireCapabilityDeadline()
             let committed = try await commit(room: ids.room, context: context, actor: ids.actor, eventID: eventID, eventType: "group.announcement_changed", payload: try groupPayload(["event_type": "group.announcement_changed", "room_id": ids.room.uuidString, "body": command.body, "revision": revision, "actor_user_id": ids.actor.uuidString]), now: now, sql: sql)
             try await sql.raw("INSERT INTO im_v2.group_announcements (room_id, body, revision, updated_by_user_id, updated_at) VALUES (\(bind: ids.room), \(bind: command.body), \(bind: revision), \(bind: ids.actor), \(bind: now)) ON CONFLICT (room_id) DO UPDATE SET body = EXCLUDED.body, revision = EXCLUDED.revision, updated_by_user_id = EXCLUDED.updated_by_user_id, updated_at = EXCLUDED.updated_at").run()
-            return .applied(try .init(roomID: command.roomID, body: command.body, revision: groupUnsigned(revision), roomSequence: groupUnsigned(committed.sequence), updatedAt: committed.createdAt))
+            return .applied(try .init(roomID: command.roomID, body: command.body, revision: v2PersistenceUnsigned(revision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), roomSequence: v2PersistenceUnsigned(committed.sequence, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), updatedAt: committed.createdAt))
         }
     }
 
@@ -250,7 +250,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             if let activationScope { try await activationScope.require([ids.room], sql: sql) }
             guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .permission(.changeMemberRoles), capacityProfile: capacityProfile, now: now, sql: sql)
-            guard try groupUnsigned(context.room.groupPermissionRevision) == command.expectedRevision else { return .revisionConflict }
+            guard try v2PersistenceUnsigned(context.room.groupPermissionRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState) == command.expectedRevision else { return .revisionConflict }
             guard context.room.groupPermissionRevision < Int64.max else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let revision = context.room.groupPermissionRevision + 1
             try requireCapabilityDeadline()
@@ -261,7 +261,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             try await sql.raw("DELETE FROM im_v2.group_role_permissions WHERE room_id = \(bind: ids.room) AND role = \(bind: command.role.rawValue)").run()
             for permission in command.permissions { try await sql.raw("INSERT INTO im_v2.group_role_permissions (room_id, role, permission) VALUES (\(bind: ids.room), \(bind: command.role.rawValue), \(bind: permission.rawValue))").run() }
             try await sql.raw("UPDATE im_v2.rooms SET group_permission_revision = \(bind: revision) WHERE room_id = \(bind: ids.room)").run()
-            return .applied(try .init(roomID: command.roomID, role: command.role, permissions: command.permissions, revision: groupUnsigned(revision), roomSequence: groupUnsigned(committed.sequence)))
+            return .applied(try .init(roomID: command.roomID, role: command.role, permissions: command.permissions, revision: v2PersistenceUnsigned(revision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), roomSequence: v2PersistenceUnsigned(committed.sequence, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState)))
         }
     }
 
@@ -286,7 +286,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             guard ids.actor != targetID else { return .alreadyInDesiredState }
             guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .permission(.changeMemberRoles), capacityProfile: capacityProfile, now: now, sql: sql)
-            guard try groupUnsigned(context.room.membershipRevision) == command.expectedMembershipRevision else { return .revisionConflict }
+            guard try v2PersistenceUnsigned(context.room.membershipRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState) == command.expectedMembershipRevision else { return .revisionConflict }
             guard let target = try await sql.raw("SELECT role, joined_revision FROM im_v2.room_memberships WHERE room_id = \(bind: ids.room) AND user_id = \(bind: targetID) AND joined_revision <= \(bind: context.room.membershipRevision) AND (left_revision IS NULL OR left_revision > \(bind: context.room.membershipRevision)) ORDER BY joined_revision DESC LIMIT 1 FOR UPDATE").first(decoding: GroupMemberRow.self) else { throw V2GroupCapabilitiesStoreError.targetNotMember }
             guard target.role != .owner else { throw V2GroupCapabilitiesStoreError.actorNotAuthorized }
             guard target.role != command.role else { return .alreadyInDesiredState }
@@ -299,7 +299,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = \(bind: membershipRevision) WHERE room_id = \(bind: ids.room) AND user_id = \(bind: targetID) AND joined_revision = \(bind: target.joinedRevision)").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships (room_id, user_id, role, joined_revision, left_revision) VALUES (\(bind: ids.room), \(bind: targetID), \(bind: command.role.rawValue), \(bind: membershipRevision), NULL)").run()
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = \(bind: membershipRevision) WHERE room_id = \(bind: ids.room)").run()
-            return .applied(try .init(roomID: command.roomID, targetUserID: command.targetUserID, role: command.role, membershipRevision: groupUnsigned(membershipRevision), roomSequence: groupUnsigned(committed.sequence)))
+            return .applied(try .init(roomID: command.roomID, targetUserID: command.targetUserID, role: command.role, membershipRevision: v2PersistenceUnsigned(membershipRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), roomSequence: v2PersistenceUnsigned(committed.sequence, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState)))
         }
     }
 }
@@ -320,8 +320,7 @@ private func groupLock(actor: UUID, operation: UUID, sql: any SQLDatabase) async
     let key = actor.uuidString + ":" + operation.uuidString
     try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: key), 0))").run()
 }
-private func groupUnsigned(_ value: Int64) throws -> UInt64 { guard value >= 0 else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }; return UInt64(value) }
-private func groupSigned(_ value: UInt64) throws -> Int64 { guard value <= UInt64(Int64.max) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }; return Int64(value) }
+
 private func groupPayload(_ object: [String: Any]) throws -> String {
     String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
 }
@@ -348,7 +347,7 @@ private struct GroupMessageRow: Decodable { let roomID: UUID; let withdrawnAt: D
 private struct GroupBoolRow: Decodable { let value: Bool }
 private struct GroupRevisionRow: Decodable { let revision: Int64 }
 private struct GroupAdmissionRow: Decodable { let eligibleMemberCount: Int; let commandWindowLimit: Int; let commandWindowUsed: Int; let shardLeaseID: UUID; let shardLeaseGeneration: Int64; enum CodingKeys: String, CodingKey { case eligibleMemberCount = "eligible_member_count", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used", shardLeaseID = "shard_lease_id", shardLeaseGeneration = "shard_lease_generation" }; func state() throws -> RoomAdmissionState { try .init(eligibleMemberCount: eligibleMemberCount, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed)) } }
-private struct GroupShardRow: Decodable { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: try groupUnsigned(generation), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed))) } }
+private struct GroupShardRow: Decodable { let leaseID: UUID; let generation: Int64; let validUntil: Date; let commandWindowLimit: Int; let commandWindowUsed: Int; enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until", commandWindowLimit = "command_window_limit", commandWindowUsed = "command_window_used" }; func state() throws -> ShardAdmissionState { try .init(lease: .init(id: .init(leaseID.uuidString), generation: try v2PersistenceUnsigned(generation, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), validUntil: validUntil, commandWindow: .init(limit: commandWindowLimit, used: commandWindowUsed))) } }
 private struct GroupContext { let room: GroupRoomRow; let admission: GroupAdmissionRow; let nextRoom: RoomAdmissionState; let nextShard: ShardAdmissionState }
 private struct GroupCommitted { let sequence: Int64; let eventID: UUID; let createdAt: Date }
 private struct GroupCommittedTimestampRow: Decodable {
@@ -402,8 +401,8 @@ private func commit(room: UUID, context: GroupContext, actor: UUID, eventID: Eve
     // 避免再次编码损失额外一微秒。
     guard let timestamp = try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: sequence) WHERE room_id = \(bind: room) RETURNING \(bind: now)::timestamptz AS created_at").first(decoding: GroupCommittedTimestampRow.self) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
     let createdAtMilliseconds = try v2GatewayMilliseconds(timestamp.createdAt)
-    try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: context.nextRoom.commandWindow.used), shard_lease_id = \(bind: leaseID), shard_lease_generation = \(bind: try groupSigned(lease.generation)) WHERE room_id = \(bind: room)").run()
-    try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: context.room.roomShardID) AND capacity_profile_id = \(bind: context.room.capacityProfileID) AND lease_id = \(bind: leaseID) AND generation = \(bind: try groupSigned(lease.generation))").run()
+    try await sql.raw("UPDATE im_v2.room_admission SET command_window_used = \(bind: context.nextRoom.commandWindow.used), shard_lease_id = \(bind: leaseID), shard_lease_generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState)) WHERE room_id = \(bind: room)").run()
+    try await sql.raw("UPDATE im_v2.shard_admission_pools SET command_window_used = \(bind: lease.commandWindow.used) WHERE room_shard_id = \(bind: context.room.roomShardID) AND capacity_profile_id = \(bind: context.room.capacityProfileID) AND lease_id = \(bind: leaseID) AND generation = \(bind: try v2PersistenceSigned(lease.generation, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState))").run()
     // 在追加操作使用的同一房间锁下分配源版本。
     // 个人状态投影保留此载荷，但自行分配游标。
     try await sql.raw("INSERT INTO im_v2.room_events (event_id, room_id, room_sequence, event_type, actor_user_id, payload, committed_membership_revision, created_at) VALUES (\(bind: event), \(bind: room), \(bind: sequence), \(bind: eventType), \(bind: actor), \(bind: payload)::jsonb || jsonb_build_object('room_sequence', \(bind: sequence), 'server_created_at_ms', \(bind: createdAtMilliseconds)), \(bind: context.room.membershipRevision), \(bind: now))").run()
@@ -422,8 +421,8 @@ private struct GroupAvatarOperationRow: Decodable {
         case resultingRevision = "resulting_revision", roomSequence = "room_sequence", createdAt = "created_at"
     }
     func value() throws -> V2GroupAvatarChange {
-        try .init(state: .init(roomID: .init(uuid: roomID), mediaID: mediaID.map { .init(uuid: $0) }, revision: groupUnsigned(resultingRevision)),
-                  roomSequence: groupUnsigned(roomSequence), updatedAt: createdAt)
+        try .init(state: .init(roomID: .init(uuid: roomID), mediaID: mediaID.map { .init(uuid: $0) }, revision: v2PersistenceUnsigned(resultingRevision, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState)),
+                  roomSequence: v2PersistenceUnsigned(roomSequence, invalid: V2GroupCapabilitiesStoreError.corruptPersistenceState), updatedAt: createdAt)
     }
 }
 private struct GroupAvatarClosureRow: Decodable {

@@ -221,22 +221,15 @@ struct V2VaporDeviceCredentialRoutesTests {
 private struct RouteAssertionVerifier: V2DeviceBoundAccountAssertionVerifier {
     let userID: UserID
     var accepts = true
-    func verifiedUserID(for accountAssertion: String) throws -> UserID {
+    func verifiedUserID(for accountAssertion: String, deviceID _: DeviceID) throws -> UserID {
         guard accepts, accountAssertion == "opaque-assertion" else { throw RouteAssertionFailure.denied }
         return userID
-    }
-    func verifiedUserID(for accountAssertion: String, deviceID _: DeviceID) throws -> UserID {
-        try verifiedUserID(for: accountAssertion)
     }
 }
 
 private struct DeviceBoundRouteAssertionVerifier: V2DeviceBoundAccountAssertionVerifier {
     let userID: UserID
     let deviceID: DeviceID
-    func verifiedUserID(for accountAssertion: String) throws -> UserID {
-        guard accountAssertion == "bound-assertion" else { throw RouteAssertionFailure.denied }
-        return userID
-    }
     func verifiedUserID(for accountAssertion: String, deviceID: DeviceID) throws -> UserID {
         guard accountAssertion == "bound-assertion", deviceID == self.deviceID else { throw RouteAssertionFailure.denied }
         return userID
@@ -249,7 +242,6 @@ private actor RecordingRouteAssertionVerifier: V2DeviceBoundAccountAssertionVeri
     let userID: UserID
     private var calls = 0
     init(userID: UserID) { self.userID = userID }
-    func verifiedUserID(for _: String) -> UserID { calls += 1; return userID }
     func verifiedUserID(for _: String, deviceID _: DeviceID) -> UserID { calls += 1; return userID }
     func callCount() -> Int { calls }
 }

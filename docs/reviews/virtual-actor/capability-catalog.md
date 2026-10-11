@@ -136,12 +136,6 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func releaseDownload(_ claim: V2ClaimedMediaDownload) async throws`
 ## V2MediaStore (V2MediaService.swift:6)
 - `func requestDownload(requesterUserID: UserID, deviceID: DeviceID, mediaID: MediaID, expiresAt: Date, now: Date) async throws -> V2MediaDownloadGrant`
-## V2MessageEditStore (V2MessageEditService.swift:55)
-- `func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome`
-## V2MessageReactionStore (V2MessageReactionService.swift:54)
-- `func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome`
-## V2MessageWithdrawalStore (V2MessageWithdrawalService.swift:56)
-- `func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome`
 ## V2ModerationStore (V2ModerationService.swift:141)
 - `func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome`
 ## V2TrustedSafetyModerationStore (V2ModerationService.swift:241)

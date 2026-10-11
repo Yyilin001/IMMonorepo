@@ -101,15 +101,6 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
         return "v2a1.\(encodedPayload).\(base64URL(Data(signature)))"
     }
 
-    /// 校验断言并返回其声明的用户，不校验绑定设备。
-    ///
-    /// - Parameter accountAssertion: 待校验的断言。
-    /// - Returns: 断言确认的用户标识。
-    /// - Throws: 断言非法、过期或时钟不可用时抛出。
-    public func verifiedUserID(for accountAssertion: String) throws -> UserID {
-        try verifiedClaims(for: accountAssertion, expectedDeviceID: nil).userID
-    }
-
     /// 校验断言并确认其绑定到指定设备。
     ///
     /// - Parameters:
@@ -125,17 +116,17 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
         try verifiedClaims(for: accountAssertion, expectedDeviceID: deviceID).revision
     }
 
-    /// 校验断言结构、签名、时效与可选设备绑定。
+    /// 校验断言结构、签名、时效与设备绑定。
     ///
     /// - Parameters:
     ///   - assertion: 待校验的断言。
-    ///   - expectedDeviceID: 期望绑定的设备；为 `nil` 时跳过设备校验。
+    ///   - expectedDeviceID: 期望绑定的设备。
     /// - Returns: 断言确认的用户标识。
     /// - Throws: 断言超长、段数或版本前缀不符、Base64 解码失败、签名无效、
     ///   载荷无法解码、标识非法、已过期、设备不匹配时抛出
     ///   ``V2AccountAssertionError/invalidAssertion``；
     ///   当前时钟无法表示时抛出 ``V2AccountAssertionError/invalidClock``。
-    private func verifiedClaims(for assertion: String, expectedDeviceID: DeviceID?) throws -> (userID: UserID, revision: Int64) {
+    private func verifiedClaims(for assertion: String, expectedDeviceID: DeviceID) throws -> (userID: UserID, revision: Int64) {
         guard assertion.utf8.count <= 4_096 else { throw V2AccountAssertionError.invalidAssertion }
         let parts = assertion.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3, parts[0] == "v2a1",
@@ -150,7 +141,7 @@ public struct V2HMACAccountAssertionIssuer: V2DeviceBoundAccountAssertionVerifie
         let nowMilliseconds = now().timeIntervalSince1970 * 1_000
         guard Int64(exactly: nowMilliseconds.rounded(.towardZero)) != nil else { throw V2AccountAssertionError.invalidClock }
         guard Double(claims.expiresAtMilliseconds) > nowMilliseconds,
-              expectedDeviceID.map({ $0 == assertionDeviceID }) ?? true
+              expectedDeviceID == assertionDeviceID
         else { throw V2AccountAssertionError.invalidAssertion }
         return (userID, claims.credentialRevision)
     }

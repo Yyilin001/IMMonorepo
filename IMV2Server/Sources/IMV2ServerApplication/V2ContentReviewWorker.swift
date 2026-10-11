@@ -225,7 +225,6 @@ public protocol V2ContentReviewSafetyApplying: Sendable {
     func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome
 }
 
-extension V2TrustedSafetyModerationService: V2ContentReviewSafetyApplying {}
 
 /// 已定义类型的 D2 可信安全命令的生产适配器。
 /// 入站服务角色检查与房间轮次负责授权和完整激活围栏；
