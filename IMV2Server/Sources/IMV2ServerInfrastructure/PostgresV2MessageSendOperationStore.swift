@@ -1228,16 +1228,14 @@ fileprivate struct DurableSendPreparationRow: Sendable {
 /// Only confirmed permanent outcomes enter this bounded cache. A miss follows
 /// the durable execution path; absence in memory never authorizes a new insert.
 private actor V2SendPreparationResultMemory {
-    private var rows: [String: DurableSendPreparationRow] = [:]
-    private var order: [String] = []
-    private let limit = 8192
+    private var rows = V2BoundedInsertionCache<String, DurableSendPreparationRow>(capacity: 8192)
     private func key(_ command: V2MessageSendOperationCommand) -> String {
         "\(command.command.roomID.rawValue):\(command.command.senderUserID.rawValue):\(command.command.clientMessageID.rawValue)"
     }
     func snapshot(_ commands: [V2MessageSendOperationCommand]) -> [String: [DurableSendPreparationRow]] {
         var result: [String: [DurableSendPreparationRow]] = [:]
         for command in commands {
-            guard let row = rows[key(command)] else { continue }
+            guard let row = rows.value(for: key(command)) else { continue }
             let operation = [row.roomID, row.senderID, UUID(uuidString: command.command.clientMessageID.rawValue)!].map { $0.uuidString.lowercased() }.joined(separator: ":")
             result[operation] = [row]
         }
@@ -1254,15 +1252,9 @@ private actor V2SendPreparationResultMemory {
                   let fingerprint = try? command.fingerprint,
                   let resolved = Int64(exactly: receipt.resolvedAtMilliseconds) else { continue }
             let k = key(command)
-            if rows[k] == nil { order.append(k) }
-            rows[k] = .init(roomID: room, senderID: sender, receipt: .init(messageID: message, roomSequence: Int64(accepted.roomSequence),
+            rows.insert(.init(roomID: room, senderID: sender, receipt: .init(messageID: message, roomSequence: Int64(accepted.roomSequence),
                     domainFingerprint: command.command.fingerprint.digest, fingerprintVersion: 3,
-                    operationFingerprint: fingerprint.digest, resolvedAt: resolved))
-        }
-        if order.count > limit {
-            let count = order.count - limit
-            for k in order.prefix(count) { rows.removeValue(forKey: k) }
-            order.removeFirst(count)
+                    operationFingerprint: fingerprint.digest, resolvedAt: resolved)), for: k)
         }
     }
 }

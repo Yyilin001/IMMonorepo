@@ -126,10 +126,8 @@ extension ActorID: _ProtobufRepresentable {
             }
 
             // Handle well known metadata types
-            if let value = shouldPropagate(keys.path, metadata: self.metadata) {
-                let serialized = try context.serialization.serialize(value)
-                proto.metadata[keys.path.id] = serialized.buffer.readData()
-            }
+            // Path is already encoded in proto.path and restored by fromProto.
+            // Duplicating it in metadata invokes the generic JSON serializer.
             if let value = shouldPropagate(keys.type, metadata: self.metadata) {
                 let serialized = try context.serialization.serialize(value.mangledName)
                 proto.metadata[keys.type.id] = serialized.buffer.readData()
