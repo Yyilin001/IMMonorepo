@@ -17,7 +17,7 @@ public struct V2RoomActivationDrainResult: Sendable {
 
 /// 负责一个进程实例的有界激活、租约续期和退役。
 /// 每个回调在修改房间条目前，都要与本地代次和完整数据库令牌核对。
-public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Sendable> {
+public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     private nonisolated let hostAdmission = V2RoomHostAdmission()
     private nonisolated let executionHandles = Mutex<[RoomID: V2RoomExecutionHandle<Request, Response>]>([:])
     private let identity: V2ActorHostIdentity
@@ -250,41 +250,31 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         return handle
     }
 
-    public nonisolated func invoke(token: V2RoomActivationToken, encodedRequest: Data,
-                                  deadline: ContinuousClock.Instant) async throws -> Response {
-        if factory.pureRoomLogPull != nil || factory.pureSubscriptionRenew != nil {
-            guard !encodedRequest.isEmpty, encodedRequest.count <= configuration.maximumRequestBytes else {
-                throw V2RoomCallFailure.notAccepted(.invalidRequest)
-            }
-            if let decoded = try? V2DecodedRoomInvocation<Request>(decoding: encodedRequest) {
-                if factory.pureRoomLogPull != nil,
-                   let request = decoded.request as? V2RoomRequest, case .roomLog(.pull) = request {
-                    return try await invokePureRead(token: token, encodedRequest: encodedRequest,
-                        request: decoded.request, deadline: deadline)
-                }
-                if factory.pureSubscriptionRenew != nil,
-                   let request = decoded.request as? V2RoomRequest, case .roomSubscription(.renew) = request {
-                    return try await invokePureRenew(token: token, encodedRequest: encodedRequest,
-                                                     request: decoded.request, deadline: deadline)
-                }
-                return try await executionHandle(token: token).invoke(decodedInvocation: decoded, deadline: deadline)
-            }
+    public nonisolated func invoke(token: V2RoomActivationToken, request: Request,
+                                   deadline: ContinuousClock.Instant) async throws -> Response {
+        if factory.pureRoomLogPull != nil,
+           let concrete = request as? V2RoomRequest, case .roomLog(.pull) = concrete {
+            return try await invokePureRead(token: token, request: request, deadline: deadline)
         }
-        return try await executionHandle(token: token).invoke(encodedRequest: encodedRequest, deadline: deadline)
+        if factory.pureSubscriptionRenew != nil,
+           let concrete = request as? V2RoomRequest, case .roomSubscription(.renew) = concrete {
+            return try await invokePureRenew(token: token, request: request, deadline: deadline)
+        }
+        return try await executionHandle(token: token).invoke(decodedInvocation: V2RoomInvocation(request), deadline: deadline)
     }
 
-    private func invokePureRead(token: V2RoomActivationToken, encodedRequest: Data,
+    private func invokePureRead(token: V2RoomActivationToken,
                                request: Request, deadline: ContinuousClock.Instant) async throws -> Response {
         let entry = try readyEntry(token)
         guard let execute = factory.pureRoomLogPull else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         if let request = request as? V2RoomRequest, request.roomID != token.roomID {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
-        return try await invokePinnedRead(entry: entry, token: token, encodedRequest: encodedRequest,
+        return try await invokePinnedRead(entry: entry, token: token,
             request: request, deadline: deadline, execute: execute)
     }
 
-    private func invokePureRenew(token: V2RoomActivationToken, encodedRequest: Data,
+    private func invokePureRenew(token: V2RoomActivationToken,
                                  request: Request, deadline: ContinuousClock.Instant) async throws -> Response {
         guard let concrete = request as? V2RoomRequest, concrete.roomID == token.roomID,
               case .roomSubscription(.renew) = concrete,
@@ -295,14 +285,14 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         guard let validUntil = entry.executionAuthority?.deadline() else {
             throw V2RoomCallFailure.notAccepted(.leaseLost)
         }
-        return try await invokePinnedRead(entry: entry, token: token, encodedRequest: encodedRequest,
+        return try await invokePinnedRead(entry: entry, token: token,
             request: request, deadline: deadline, execute: { token, request, deadline in
                 await execute(token, request, deadline, validUntil)
             })
     }
 
     private func invokePinnedRead(
-        entry: Entry, token: V2RoomActivationToken, encodedRequest: Data,
+        entry: Entry, token: V2RoomActivationToken,
         request: Request, deadline: ContinuousClock.Instant,
         execute: @Sendable (V2RoomActivationToken, Request, ContinuousClock.Instant) async -> V2RoomTransactionCompletion<Response>
     ) async throws -> Response {
@@ -313,7 +303,7 @@ public actor V2RoomActivationHost<Request: Decodable & Sendable, Response: Senda
         // count/bytes limits apply to reads and queued write-lane submissions.
         entry.inFlightCalls += 1
         defer { entry.inFlightCalls -= 1 }
-        let permit = try budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
+        let permit = try budget.acquire(roomID: token.roomID, byteCount: V2ActorPayloadBudget.retainedBytes(of: request))
         do {
             guard entries[token.roomID] === entry, try readyEntry(token) === entry else {
                 throw V2RoomCallFailure.notAccepted(.staleActivation)
@@ -937,10 +927,10 @@ public extension V2RoomActivationHost where Request == V2RoomRequest, Response =
               Set(items.map { $0.token.owner }).count == 1 else {
             return items.map { rejected($0, .notAccepted(.invalidRequest)) }
         }
-        let requestBytes = try? JSONEncoder().encode(items.map {
+        let requestBytes = V2ActorPayloadBudget.retainedBytes(of: items.map {
             V2RoomRecoveryBatchWireItem(token: $0.token, query: $0.query)
-        }).count
-        guard let requestBytes, requestBytes <= 64 * 1_024 else {
+        })
+        guard requestBytes <= 64 * 1_024 else {
             return items.map { rejected($0, .notAccepted(.invalidRequest)) }
         }
         let end = min(deadline, items.map(\.deadline).min()!)
@@ -986,8 +976,7 @@ public extension V2RoomActivationHost where Request == V2RoomRequest, Response =
             switch completion {
             case .committed(let values):
                 if values.count == selected.count,
-                   let responseBytes = try? JSONEncoder().encode(values).count,
-                   responseBytes <= 256 * 1_024, zip(selectedItems, values).allSatisfy({
+                   V2ActorPayloadBudget.retainedBytes(of: values) <= 256 * 1_024, zip(selectedItems, values).allSatisfy({
                     $0.0.token == $0.1.token && $0.0.query == $0.1.query
                 }) {
                     for (index, value) in zip(selected, values) { answers[index] = value }

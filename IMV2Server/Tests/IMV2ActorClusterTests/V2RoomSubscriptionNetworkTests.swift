@@ -89,7 +89,7 @@ struct V2RoomSubscriptionNetworkTests {
                 offerEvent: { _, permits in offered.withLock { $0.append(contentsOf: permits) } }, offerHead: { _, _ in })
             #expect(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "publisher", deadline: .now + .seconds(60)))
             try await first.configureRoomSubscription(ingress)
-            let targetID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: first.descriptor.endpointReference)
+            let targetID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: first.descriptor.endpointReference)
             let remote = try V2GatewayRealtimeEndpoint.resolve(id: targetID, using: callerSystem)
             #expect(__isRemoteActor(remote))
             #expect(targetID.node != callerSystem.cluster.node)
@@ -195,7 +195,7 @@ struct V2RoomSubscriptionNetworkTests {
             peerSystem = await makeSystem(name: "room-subscription-peer", port: peerPort)
             let replacement = try makePeer(system: peerSystem, port: peerPort, keys: keys)
             peerHandle = replacement
-            let newID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: replacement.descriptor.endpointReference)
+            let newID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: replacement.descriptor.endpointReference)
             #expect(newID.node != targetID.node)
             #expect(replacement.descriptor.identity.incarnationID != oldDescriptor.identity.incarnationID)
             let replacementAuthority = V2GatewayRoomSubscriptionAuthority()
@@ -248,7 +248,7 @@ struct V2RoomSubscriptionNetworkTests {
         var failure: (any Error)?
         do {
             try await peer.configureRoomSubscription(ingress)
-            let endpointID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: peer.descriptor.endpointReference)
+            let endpointID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: peer.descriptor.endpointReference)
             let remote = try V2GatewayRealtimeEndpoint.resolve(id: endpointID, using: callerSystem)
             #expect(__isRemoteActor(remote))
             #expect(endpointID.node != callerSystem.cluster.node)

@@ -237,7 +237,9 @@ def gateway_env(args, kind, database, index, actors, manifest):
         IM_V2_IDLE_TIMEOUT_MS='600000', IM_V2_LOG_LEVEL='notice' if app_canary_enabled(args) else 'warning')
     if kind == 'candidate':
         values['IM_V2_SEND_PATH_TRACE_MODE'] = getattr(args, 'candidate_send_path_trace_mode', 'sampled')
-        values['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'] = 'true' if getattr(args, 'candidate_actor_binary_invocations', 'disabled') == 'enabled' else 'false'
+        if getattr(args, 'candidate_actor_binary_invocations', 'enabled') != 'enabled':
+            raise ValueError('candidate Actor transport requires binary invocations')
+        values['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'] = 'true'
         values['IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED'] = 'true' if getattr(args, 'candidate_message_write_prepared_queries', 'enabled') == 'enabled' else 'false'
         # Keep non-message workload roles fixed; the dedicated policy pool can vary independently.
         node_message_connections = getattr(args, 'candidate_message_write_connections', 4)
@@ -2491,8 +2493,8 @@ def main():
     parser.add_argument('--kind',choices=('baseline','candidate','both'),default='both')
     parser.add_argument('--candidate-event-loop-threads', type=int, choices=(1, 2), default=1,
                         help='candidate infrastructure/message EventLoops; non-message pools keep one loop')
-    parser.add_argument('--candidate-actor-binary-invocations', choices=('enabled', 'disabled'), default='disabled',
-                        help='Opt into binary distributed invocation framing on all candidate nodes')
+    parser.add_argument('--candidate-actor-binary-invocations', choices=('enabled',), default='enabled',
+                        help='Actor Protobuf transport requires binary distributed invocation framing')
     parser.add_argument('--candidate-message-write-prepared-queries', choices=('enabled', 'disabled'), default='enabled',
                         help='candidate bounded per-connection message SQL shape cache')
     parser.add_argument('--candidate-send-path-trace-mode', choices=('sampled', 'all'), default='sampled',

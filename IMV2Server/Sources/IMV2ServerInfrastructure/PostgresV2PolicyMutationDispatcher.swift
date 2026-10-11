@@ -1,3 +1,4 @@
+import IMV2ActorContracts
 import Crypto
 import Foundation
 import FluentKit
@@ -76,21 +77,12 @@ package struct V2DurableAccountDisableCommand: Codable, Sendable {
     }
 }
 
-package enum V2PolicyMutationResult: Codable, Sendable {
-    case social(V2SocialOperationRecoveryResult)
-    case preference(V2AccountPreferenceRecoveryResult)
-    case disable(V2PolicyAccountDisableReceipt)
-}
-
-package struct V2PolicyAccountDisableReceipt: Codable, Sendable {
-    package enum Kind: String, Codable, Sendable { case disabled, idempotent, alreadyDisabled }
-    package let kind: Kind
-    package let disabledAt: Date
+extension V2PolicyAccountDisableReceipt {
     package init(_ outcome: V2AccountDisableOutcome) {
         switch outcome {
-        case .disabled(let date): kind = .disabled; disabledAt = date
-        case .idempotent(let date): kind = .idempotent; disabledAt = date
-        case .alreadyDisabled(let date): kind = .alreadyDisabled; disabledAt = date
+        case .disabled(let date): self.init(kind: .disabled, disabledAt: date)
+        case .idempotent(let date): self.init(kind: .idempotent, disabledAt: date)
+        case .alreadyDisabled(let date): self.init(kind: .alreadyDisabled, disabledAt: date)
         }
     }
     package var outcome: V2AccountDisableOutcome {
@@ -98,6 +90,30 @@ package struct V2PolicyAccountDisableReceipt: Codable, Sendable {
         case .disabled: .disabled(disabledAt: disabledAt)
         case .idempotent: .idempotent(disabledAt: disabledAt)
         case .alreadyDisabled: .alreadyDisabled(disabledAt: disabledAt)
+        }
+    }
+}
+
+extension V2DurablePolicyMutation {
+    init(wire: V2PolicyMutationCommand) throws {
+        switch wire {
+        case .social(let command): self = .social(command)
+        case .strangerPreference(let command): self = .strangerPreference(command)
+        case .disable(let wire):
+            guard let reason = V2AccountDisableReason(rawValue: wire.reason) else {
+                throw V2PolicyAuthorizationLifecycleError.invalidTarget
+            }
+            let command = try V2AccountDisableCommand(userID: .init(uuid: wire.userID), operationID: wire.operationID, reason: reason)
+            self = .disable(.init(command: command, operatorPrincipal: wire.operatorPrincipal))
+        }
+        try validate()
+    }
+    var wire: V2PolicyMutationCommand {
+        switch self {
+        case .social(let command): .social(command)
+        case .strangerPreference(let command): .strangerPreference(command)
+        case .disable(let command): .disable(.init(userID: command.userID, operationID: command.operationID,
+            reason: command.reason.rawValue, operatorPrincipal: command.operatorPrincipal))
         }
     }
 }

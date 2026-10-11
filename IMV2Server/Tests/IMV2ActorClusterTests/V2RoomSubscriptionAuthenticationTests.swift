@@ -8,6 +8,34 @@ import Testing
 
 @Suite("Room subscription signed transport")
 struct V2RoomSubscriptionAuthenticationTests {
+    @Test("PB batch bytes preserve all signed envelope fields and exact packet limits")
+    func protobufBatchEnvelope() throws {
+        let fixture = try Fixture()
+        var builder = V2RoomSubscriptionDeliveryBatch.Builder()
+        #expect(try builder.append(fixture.delivery, maximumBytes: 262_144))
+        let call = RoomSubscriptionBatchCall(serviceID: fixture.publisher.serviceID, version: 1,
+            callerIncarnation: fixture.incarnation, recipient: fixture.identity,
+            sessionID: UUID(), sequence: 17, attemptID: UUID(), sourceShardID: "room-a",
+            batch: builder.finish())
+        let bytes = try V2ActorProtobuf.encode(call)
+        let packet = try fixture.publisher.sign(call, maximumBytes: bytes.count)
+        let decoded = try fixture.trust.verify(packet, as: RoomSubscriptionBatchCall.self,
+            maximumBytes: bytes.count).0
+        #expect(decoded.serviceID == call.serviceID && decoded.version == call.version)
+        #expect(decoded.callerIncarnation == call.callerIncarnation && decoded.recipient == call.recipient)
+        #expect(decoded.sessionID == call.sessionID && decoded.sequence == call.sequence)
+        #expect(decoded.attemptID == call.attemptID && decoded.sourceShardID == call.sourceShardID)
+        #expect(decoded.batch == call.batch)
+        #expect(throws: V2ActorAuthenticationError.oversized) {
+            try fixture.publisher.sign(call, maximumBytes: bytes.count - 1)
+        }
+        var altered = packet.body
+        altered[altered.startIndex] ^= 1
+        #expect(throws: V2ActorAuthenticationError.invalidSignature) {
+            try fixture.trust.verify(.init(signerID: packet.signerID, body: altered,
+                signature: packet.signature), as: RoomSubscriptionBatchCall.self, maximumBytes: bytes.count)
+        }
+    }
     @Test("room delivery authenticates shard, recipient and session before synchronous authority")
     func signedRoomAuthority() async throws {
         let fixture = try Fixture()

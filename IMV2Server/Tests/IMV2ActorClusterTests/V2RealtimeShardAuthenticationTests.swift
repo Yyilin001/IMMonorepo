@@ -15,10 +15,10 @@ struct V2RealtimeShardAuthenticationTests {
         let other = V2RealtimeTopicKey(kind: .userSync, id: lower)
         #expect(direct == other && direct.id == lower && direct.partitionID() == other.partitionID())
         let json = Data("{\"kind\":\"userSync\",\"id\":\"\(upper)\"}".utf8)
-        let decoded = try JSONDecoder().decode(V2RealtimeTopicKey.self, from: json)
+        let decoded = try V2ActorProtobuf.decode(V2RealtimeTopicKey.self, from: json)
         #expect(decoded == direct)
-        let encoded = try JSONEncoder().encode(decoded)
-        #expect(try JSONDecoder().decode(V2RealtimeTopicKey.self, from: encoded) == other)
+        let encoded = try V2ActorProtobuf.encode(decoded)
+        #expect(try V2ActorProtobuf.decode(V2RealtimeTopicKey.self, from: encoded) == other)
         let topic = V2RealtimeTopic(kind: .userSync, id: upper, owner: try .init(shardID: "users", epoch: 0))
         #expect(V2RealtimeTopicKey(topic) == direct)
         #expect(Set([direct, other, decoded]).count == 1)
@@ -150,7 +150,7 @@ struct V2RealtimeShardAuthenticationTests {
         let inbound = V2RealtimeShardInbound(identity: f.token.host, signer: f.receiver, trust: f.trust,
             serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], limits: .init())
         let endpoint = V2RealtimeShardEndpoint(actorSystem: system, service: inbound)
-        let bytes = try JSONEncoder().encode(endpoint.id); inbound.bindEndpointReference(bytes)
+        let bytes = try V2ActorProtobuf.encode(endpoint.id); inbound.bindEndpointReference(bytes)
         let target = V2GatewayRealtimeDescriptor(identity: f.token.host, endpointReference: bytes, address: "127.0.0.1", port: port)
         let sender = try V2RealtimeShardSender(system: system, signer: f.caller, trust: f.trust, limits: .init(), incarnation: f.gateway.incarnationID)
         do { _ = try await sender.exchange(.control(f.control()), to: target); Issue.record("first-use reference was automatically admitted") }
@@ -198,11 +198,11 @@ struct V2RealtimeShardAuthenticationTests {
             .init(nodeID: f.token.host.nodeID, serviceID: f.token.host.serviceID, address: "127.0.0.1", port: peerPort)
         ]
         let roster = Dictionary(uniqueKeysWithValues: peers.map { ($0.nodeID, $0.serviceID) })
-        let digest = Data(SHA256.hash(data: try JSONEncoder().encode(roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })))
+        let digest = Data(SHA256.hash(data: try V2ActorProtobuf.encode(roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })))
         let inbound = V2RealtimeShardInbound(identity: f.token.host, signer: f.receiver, trust: f.trust,
             serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], limits: .init())
         let endpoint = V2RealtimeShardEndpoint(actorSystem: peerSystem, service: inbound)
-        let reference = try JSONEncoder().encode(endpoint.id); inbound.bindEndpointReference(reference)
+        let reference = try V2ActorProtobuf.encode(endpoint.id); inbound.bindEndpointReference(reference)
         let publisher = V2RealtimeShardPublisher(identity: f.token.host, signer: f.receiver, endpointID: endpoint.id,
             endpointReference: reference, trust: f.trust, roster: roster, rosterDigest: digest)
         try await publisher.install([.init(token: f.token, remainingLeaseMilliseconds: 30_000)])

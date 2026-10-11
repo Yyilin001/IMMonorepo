@@ -43,14 +43,14 @@ struct PostgresV2RoomSubscriptionOwnerLifecycleTests {
                 guard case .ready(let first) = try await host.activate(roomID: room, owner: dataOwner, deadline: .now + .seconds(5)) else {
                     throw V2RoomSubscriptionOwnerError.stale
                 }
-                let encoder = JSONEncoder()
+
                 guard case .granted(let grant) = try await host.invoke(token: first,
-                    encodedRequest: encoder.encode(SubscriptionLifecycleRequest.subscribe), deadline: .now + .seconds(5)) else {
+                    request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5)) else {
                     throw V2RoomSubscriptionOwnerError.stale
                 }
                 #expect(grant.fence.activation == first)
                 let transient = try await host.invoke(token: first,
-                    encodedRequest: encoder.encode(SubscriptionLifecycleRequest.transient), deadline: .now + .seconds(5))
+                    request: SubscriptionLifecycleRequest.transient, deadline: .now + .seconds(5))
                 #expect(transient == .failure(.unavailable))
                 #expect(try await leases.locate(roomID: room, owner: dataOwner)?.token == first)
                 #expect(instances.withLock { $0.count } == 1)
@@ -60,7 +60,7 @@ struct PostgresV2RoomSubscriptionOwnerLifecycleTests {
                 let original = instances.withLock { $0[0] }
                 await #expect(throws: V2RoomSubscriptionSourceError.snapshotRequired) { try await original.backgroundDrain() }
                 await #expect(throws: V2RoomCallFailure.rolledBack(.staleActivation)) {
-                    try await host.invoke(token: first, encodedRequest: encoder.encode(SubscriptionLifecycleRequest.subscribe), deadline: .now + .seconds(5))
+                    try await host.invoke(token: first, request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5))
                 }
                 let stopWaiting = ContinuousClock.now + .seconds(5)
                 while try await leases.locate(roomID: room, owner: dataOwner) != nil {
@@ -78,7 +78,7 @@ struct PostgresV2RoomSubscriptionOwnerLifecycleTests {
                 #expect(second.activationEpoch.rawValue == first.activationEpoch.rawValue + 1)
                 #expect(instances.withLock { $0.count } == 2)
                 guard case .granted(let restored) = try await host.invoke(token: second,
-                    encodedRequest: encoder.encode(SubscriptionLifecycleRequest.subscribe), deadline: .now + .seconds(5)) else {
+                    request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5)) else {
                     throw V2RoomSubscriptionOwnerError.stale
                 }
                 #expect(restored.fence.activation == second && restored.userBaselineSequence == 1)

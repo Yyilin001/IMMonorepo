@@ -75,7 +75,7 @@ struct V2RoomTurnLaneTests {
         }
     }
 
-    @Test("profile cohorts bound encoded bytes and treat invalid costs as barriers")
+    @Test("profile cohorts bound retained bytes and treat invalid costs as barriers")
     func profileCohortByteAndCostLimits() async throws {
         let fixture = try Fixture()
         let oversized = fixture.submit(.init(id: -1, send: false, profileTargets: 1,
@@ -88,8 +88,8 @@ struct V2RoomTurnLaneTests {
         var tasks: [Task<Int, any Error>] = []
         do {
             let commands: [Command] = [
-                .init(id: 1, send: false, profileTargets: 1, padding: String(repeating: "x", count: 33_000)),
-                .init(id: 2, send: false, profileTargets: 1, padding: String(repeating: "x", count: 33_000)),
+                .init(id: 1, send: false, profileTargets: 1, padding: String(repeating: "x", count: 17_000)),
+                .init(id: 2, send: false, profileTargets: 1, padding: String(repeating: "x", count: 17_000)),
                 .init(id: 3, send: false, profileTargets: Int.max),
                 .init(id: 4, send: false, profileTargets: Int.min),
                 .init(id: 5, send: false, profileTargets: 0),
@@ -424,11 +424,11 @@ struct V2RoomTurnLaneTests {
         try await fixture.waitForBudget(0)
     }
 
-    @Test("invalid encoded request is rejected without consuming capacity")
+    @Test("oversized retained request is rejected without consuming capacity")
     func invalidWire() async throws {
         let fixture = try Fixture()
         do {
-            _ = try await fixture.lane.submit(encodedRequest: Data("{}".utf8), deadline: .now + .seconds(1))
+            _ = try await fixture.lane.submit(request: Command(id: 1, send: false, padding: String(repeating: "x", count: 2_000_000)), deadline: .now + .seconds(1))
             Issue.record("invalid request unexpectedly succeeded")
         } catch {
             #expect(error as? V2RoomCallFailure == .notAccepted(.invalidRequest))
@@ -578,7 +578,7 @@ struct V2RoomTurnLaneTests {
         }
 
         func submit(_ command: Command, deadline: ContinuousClock.Instant = .now + .seconds(5)) -> Task<Int, any Error> {
-            Task { try await lane.submit(encodedRequest: JSONEncoder().encode(command), deadline: deadline) }
+            Task { try await lane.submit(request: command, deadline: deadline) }
         }
 
         func waitForQueue(_ count: Int) async throws {

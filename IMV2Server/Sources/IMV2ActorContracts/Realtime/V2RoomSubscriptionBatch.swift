@@ -5,6 +5,18 @@ import Foundation
 public struct V2RoomSubscriptionDeliveryBatch: Equatable, Codable, Sendable {
     public let deliveries: [V2RoomSubscriptionDelivery]
     public init(deliveries: [V2RoomSubscriptionDelivery]) { self.deliveries = deliveries }
+    package struct Builder {
+        private var bytes = 64
+        package private(set) var deliveries: [V2RoomSubscriptionDelivery] = []
+        package init() {}
+        package var count: Int { deliveries.count }
+        package mutating func append(_ delivery: V2RoomSubscriptionDelivery, maximumBytes: Int) throws -> Bool {
+            let cost = V2ActorPayloadBudget.retainedBytes(of: delivery)
+            guard bytes <= maximumBytes, cost <= maximumBytes - bytes else { return false }
+            bytes += cost; deliveries.append(delivery); return true
+        }
+        package consuming func finish() -> V2RoomSubscriptionDeliveryBatch { .init(deliveries: deliveries) }
+    }
 
     public func validate(maximumItems: Int = 64, maximumBytes: Int = 262_144) throws {
         guard !deliveries.isEmpty, deliveries.count <= maximumItems else {
@@ -25,7 +37,7 @@ public struct V2RoomSubscriptionDeliveryBatch: Equatable, Codable, Sendable {
             roomFences[delivery.fence.roomID.rawValue] = delivery.fence
             previous[delivery.fence] = delivery.deliverySequence
         }
-        guard try JSONEncoder().encode(self).count <= maximumBytes else {
+        guard V2ActorPayloadBudget.retainedBytes(of: self) <= maximumBytes else {
             throw V2ActorContractError.invalidConfiguration("room subscription batch bytes")
         }
     }

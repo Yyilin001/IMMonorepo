@@ -124,8 +124,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     clientMessageID: .init(uuid: UUID()), text: "factory send", limits: .init(maxUTF8Bytes: 64)),
                     firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 600_000)
                 let request = V2RoomRequest.messaging(.sendOperation(command))
-                let bytes = try JSONEncoder().encode(request)
-                let response = try await first.invoke(token: token, encodedRequest: bytes,
+                let bytes = try request
+                let response = try await first.invoke(token: token, request: bytes,
                     deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let originalProof))) = response,
                       case .accepted(let receipt) = originalProof.outcome else {
@@ -146,14 +146,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let read = try V2ActorRecordReadReceiptWire(roomID: roomID, actorUserID: senderID,
                     operationID: .init(uuid: UUID()), readThroughRoomSequence: receipt.roomSequence)
                 let recorded = try await first.invoke(token: token,
-                    encodedRequest: JSONEncoder().encode(V2RoomRequest.receipt(.record(read))),
+                    request: V2RoomRequest.receipt(.record(read)),
                     deadline: .now + .seconds(10))
                 guard case .receipt(.record(.recorded(let readReceipt))) = recorded else {
                     throw V2ReadReceiptStoreError.corruptPersistenceState
                 }
                 #expect(readReceipt.readThroughRoomSequence == receipt.roomSequence)
                 let query = V2RoomRequest.recovery(.init(roomID: roomID, actorUserID: senderID, kind: .state))
-                let state = try await first.invoke(token: token, encodedRequest: JSONEncoder().encode(query),
+                let state = try await first.invoke(token: token, request: query,
                     deadline: .now + .seconds(10))
                 guard case .recovery(.state(.state(let value))) = state else {
                     throw V2RoomRecoveryReadError.corruptPersistence
@@ -161,7 +161,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(value.roomID == roomID)
 
                 let denied = V2RoomRequest.roomLog(.subscribe(.init(roomID: roomID, actorUserID: .init(uuid: UUID()))))
-                let denial = try await first.invoke(token: token, encodedRequest: JSONEncoder().encode(denied),
+                let denial = try await first.invoke(token: token, request: denied,
                     deadline: .now + .seconds(10))
                 #expect(denial == .roomLog(.failure(.actorNotMember)))
                 // An Account-style direct invoke has no Gateway permit. The
@@ -175,7 +175,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 guard case .ready(let replacement) = try await next.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }
                 #expect(replacement.activationEpoch.rawValue > token.activationEpoch.rawValue)
-                let repeated = try await next.invoke(token: replacement, encodedRequest: bytes,
+                let repeated = try await next.invoke(token: replacement, request: bytes,
                     deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let replay))) = repeated,
                       case .accepted(let recovered) = replay.outcome else {
@@ -283,7 +283,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 600_000)
                 let request = V2RoomRequest.messaging(.sendOperation(command))
                 let response = try await host.invoke(
-                    token: token, encodedRequest: JSONEncoder().encode(request),
+                    token: token, request: request,
                     deadline: .now + .seconds(10)
                 )
                 guard case .messaging(.sendOperation(.receipt(let proof))) = response,

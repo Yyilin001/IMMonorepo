@@ -23,8 +23,7 @@ public enum V2RealtimeShardFingerprint {
         try hash(interests.sorted { key($0.key) < key($1.key) })
     }
     private static func hash<T: Encodable>(_ value: T) throws -> Data {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return Data(SHA256.hash(data: try encoder.encode(value)))
+        return Data(SHA256.hash(data: try V2ActorProtobuf.encode(value)))
     }
     static func key(_ key: V2RealtimeTopicKey) -> String { key.kind.rawValue + "\u{0}" + key.id }
 }

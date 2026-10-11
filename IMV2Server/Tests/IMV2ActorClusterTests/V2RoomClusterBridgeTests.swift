@@ -288,14 +288,14 @@ struct V2RoomClusterBridgeTests {
             Issue.record("expected ready"); return
         }
         let original = try await fixture.inbound.physicalReference(for: token)
-        let originalID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: original)
+        let originalID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: original)
         #expect(await fixture.inbound.removePhysicalReference(for: token, actorID: originalID))
         let replacement = try await fixture.inbound.physicalReference(for: token)
-        let replacementID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: replacement)
+        let replacementID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: replacement)
         #expect(originalID != replacementID)
         #expect(!(await fixture.inbound.removePhysicalReference(for: token, actorID: originalID)))
         let retained = try await fixture.inbound.physicalReference(for: token)
-        let retainedID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: retained)
+        let retainedID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: retained)
         #expect(retainedID == replacementID)
         #expect(await fixture.inbound.actorCount() == 1)
         #expect(await fixture.host.isReady(token: token))
@@ -369,7 +369,7 @@ struct V2RoomClusterBridgeTests {
         #expect(token.roomID == fixture.room)
         #expect(!idBytes.isEmpty)
         let actor = try V2RoomClusterActor.resolve(
-            id: JSONDecoder().decode(ClusterSystem.ActorID.self, from: idBytes), using: fixture.system
+            id: V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: idBytes), using: fixture.system
         )
         let wrongShard = try V2RoomDataOwner(shardID: "forbidden", epoch: 0)
         let denied = fixture.call(grant: grant, sequence: 2,
@@ -502,7 +502,7 @@ struct V2RoomClusterBridgeTests {
             clientMessageID: ClientMessageID(uuid: UUID()), text: "hold",
             media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
         let executing = Task {
-            try await fixture.host.invoke(token: token, encodedRequest: JSONEncoder().encode(request),
+            try await fixture.host.invoke(token: token, request: request,
                                           deadline: .now + .seconds(3))
         }
         try await gate.waitForEntry()

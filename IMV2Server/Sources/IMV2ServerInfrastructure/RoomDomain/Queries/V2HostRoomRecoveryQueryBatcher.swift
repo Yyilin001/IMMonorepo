@@ -301,9 +301,9 @@ public actor V2HostRoomRecoveryQueryBatcher {
         return value
     }
 
-    // Encodes the retained immutable authority and query rather than a guessed
-    // token/user overhead. Actual selected arrays are encoded again for 64KiB.
-    private struct ReadInput: Encodable {
+    // Encode each immutable input array once. Combining nonempty JSON arrays
+    // shares one array allocation charge; item costs are additive.
+    private struct ReadInput {
         let token: V2RoomActivationToken
         let query: Query
         enum Query: Encodable {
@@ -318,11 +318,8 @@ public actor V2HostRoomRecoveryQueryBatcher {
             return [.init(token: turn.token, query: kind == .state ? .state(turn.actorUserID) : .latestVisible(turn.actorUserID))]
         }
     }
-    private func encodedBytes(_ requests: [Request]) throws -> Int {
-        try JSONEncoder().encode(requests.flatMap { inputs($0) }).count
-    }
     private func accept(_ request: Request, origin: Origin, id: UUID = UUID()) async throws -> Value {
-        let bytes = try encodedBytes([request]), enqueued = ContinuousClock.now
+        let bytes = V2ActorPayloadBudget.retainedBytes(of: inputs(request)), enqueued = ContinuousClock.now
         let due = request.due
         let deadline = V2RoomSQLDeadline.current.map { min($0, request.deadline) } ?? request.deadline
         let admissionDeadline = databaseWorkAdmission.map { min(deadline, enqueued + $0.maximumQueueWait) } ?? deadline
@@ -398,12 +395,14 @@ public actor V2HostRoomRecoveryQueryBatcher {
         let indices = pending.indices.filter { pending[$0].origin == origin }
         guard let head = indices.first else { return [] }
         var selected = [head], requests = [pending[head].request], count = pending[head].request.items
+        var bytes = pending[head].byteCount
         for index in indices.dropFirst() {
             let next = pending[index]
             guard requests.allSatisfy({ compatible($0, next.request) }),
                   count + next.request.items <= configuration.maximumItems,
-                  ((try? encodedBytes(requests + [next.request])) ?? Int.max) <= configuration.maximumBytes else { break }
+                  next.byteCount - 32 <= configuration.maximumBytes - bytes else { break }
             selected.append(index); requests.append(next.request); count += next.request.items
+            bytes += next.byteCount - 32
         }
         return selected
     }
@@ -543,7 +542,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
                 case .failure: return .init(key: key, outcome: .failure(largestFailure))
                 }
             }
-            guard try JSONEncoder().encode(replies).count <= configuration.maximumResponseBytes else { throw V2HostRoomRecoveryBatchError.oversized }
+            guard V2ActorPayloadBudget.retainedBytes(of: replies) <= configuration.maximumResponseBytes else { throw V2HostRoomRecoveryBatchError.oversized }
             for item in items {
                 if case .states(let original) = item.request {
                     var outcomes = values
@@ -562,7 +561,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
             let tokens = rooms.map { room in turns.first { $0.token.roomID == room }!.token }
             let query = try V2ActorRoomRecoveryBatchQueryWire(roomIDs: rooms, actorUserID: turns[0].actorUserID)
             let result = try await execute(.latestVisible(query), tokens)
-            guard try JSONEncoder().encode(result).count <= configuration.maximumResponseBytes else { throw V2HostRoomRecoveryBatchError.oversized }
+            guard V2ActorPayloadBudget.retainedBytes(of: result) <= configuration.maximumResponseBytes else { throw V2HostRoomRecoveryBatchError.oversized }
             switch result {
             case .latestVisible(let batch):
                 let values = try batch.domainValue(expectedRoomIDs: rooms)
@@ -611,7 +610,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
         var largest = V2RoomCallFailure.outcomeUnknown
         var maximum = 0
         for failure in failures {
-            let bytes = try JSONEncoder().encode(StateReplyBudgetEnvelope.Outcome.failure(failure)).count
+            let bytes = V2ActorPayloadBudget.retainedBytes(of: StateReplyBudgetEnvelope.Outcome.failure(failure))
             if bytes > maximum { maximum = bytes; largest = failure }
         }
         return largest

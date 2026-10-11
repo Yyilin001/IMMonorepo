@@ -21,9 +21,9 @@ package struct V2PolicyFactsSnapshot: Equatable, Sendable {
     }
     package init(wire: V2PolicySnapshotWire) throws {
         try self.init(scope: wire.scope.policyScope, version: wire.version,
-            facts: JSONDecoder().decode(V2PolicyOwnerFacts.self, from: wire.facts))
+            facts: wire.facts)
     }
     package var wire: V2PolicySnapshotWire {
-        get throws { try .init(scope: scope.policyWire, version: version, facts: JSONEncoder().encode(facts)) }
+        get throws { try .init(scope: scope.policyWire, version: version, facts: facts) }
     }
 }

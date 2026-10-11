@@ -159,11 +159,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // Hold dispatch only while queuing a read followed by a send. Timing
             // starts inside the real read turn and excludes this synchronization.
             let reservation = try await lane.reserve(requestID: UUID(), deadline: .now + .seconds(10))
-            let read = Task { try await lane.submit(encodedRequest: JSONEncoder().encode(BoundedLogTurn.read), deadline: .now + .seconds(10)) }
+            let read = Task { try await lane.submit(request: BoundedLogTurn.read, deadline: .now + .seconds(10)) }
             let queueDeadline = ContinuousClock.now + .seconds(5)
             while await lane.snapshot().queuedCount < 1, ContinuousClock.now < queueDeadline { await Task.yield() }
             #expect(await lane.snapshot().queuedCount == 1)
-            let send = Task { try await lane.submit(encodedRequest: JSONEncoder().encode(BoundedLogTurn.send), deadline: .now + .seconds(10)) }
+            let send = Task { try await lane.submit(request: BoundedLogTurn.send, deadline: .now + .seconds(10)) }
             while await lane.snapshot().queuedCount < 2, ContinuousClock.now < queueDeadline { await Task.yield() }
             #expect(await lane.snapshot().queuedCount == 2)
             #expect(await lane.abortReservation(reservation))

@@ -12,6 +12,11 @@ package struct V2IndexedFIFO<Key: Hashable & Sendable, Value: Sendable>: Sendabl
     package var count: Int { nodes.count }
     package var isEmpty: Bool { nodes.isEmpty }
     package var first: Value? { head.flatMap { nodes[$0]?.value } }
+    /// Project a small head field without returning an owned Value to callers.
+    package borrowing func firstMap<Result>(_ transform: (borrowing Value) throws -> Result) rethrows -> Result? {
+        guard let head, let node = nodes[head] else { return nil }
+        return try transform(node.value)
+    }
     /// Visits in FIFO order without materializing a snapshot. The callback
     /// cannot mutate this queue while its read access is active.
     package borrowing func forEach(_ visit: (borrowing Value) throws -> Void) rethrows {

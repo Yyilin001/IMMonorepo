@@ -25,7 +25,7 @@ struct V2RoomActorMetricsTests {
     func releasedPermits() async throws {
         let budget = V2RoomCommandBudget(configuration: try .init())
         let permit = try await budget.acquire(roomID: RoomID("private-room"),
-            encodedRequest: Data(repeating: 1, count: 32))
+            byteCount: 32)
         #expect(await budget.release(permit))
         let state = await budget.snapshot()
         let value = V2RoomRuntimeMetricsSnapshot(host: .init(accepting: true,

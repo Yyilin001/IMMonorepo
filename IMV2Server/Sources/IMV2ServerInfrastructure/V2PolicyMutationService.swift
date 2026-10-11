@@ -25,7 +25,7 @@ package struct V2PolicyMutationService: V2PolicyMutationServing {
     package func mutatePolicy(_ request: V2PolicyMutationWire, deadline: ContinuousClock.Instant) async throws -> V2PolicyMutationReceiptWire {
         guard request.endpoint == endpoint else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
         guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        let mutation = try JSONDecoder().decode(V2DurablePolicyMutation.self, from: request.command)
+        let mutation = try V2DurablePolicyMutation(wire: request.command)
         try mutation.validate()
         guard mutation.scope.key == request.scope.key, mutation.operationKey == request.operationKey,
               try mutation.fingerprint == request.fingerprint else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
@@ -36,7 +36,7 @@ package struct V2PolicyMutationService: V2PolicyMutationServing {
         // durable operation remains replayable with its original identity.
         guard deadline > .now else { throw V2RoomCallFailure.outcomeUnknown }
         return try .init(scope: request.scope, operationKey: request.operationKey, fingerprint: request.fingerprint,
-            receipt: JSONEncoder().encode(execution.result), replayed: execution.replayed)
+            receipt: execution.result, replayed: execution.replayed)
     }
 }
 
@@ -54,11 +54,11 @@ package struct PostgresV2RemotePolicyMutations: V2PolicyMutationExecuting {
         let deadline = ContinuousClock.now + timeout
         let route = try await resolve(mutation.scope.key)
         let request = try V2PolicyMutationWire(endpoint: route.endpoint, scope: mutation.scope.policyWire,
-            operationKey: mutation.operationKey, fingerprint: mutation.fingerprint, command: Data(mutation.json.utf8))
+            operationKey: mutation.operationKey, fingerprint: mutation.fingerprint, command: mutation.wire)
         let receipt: V2PolicyMutationReceiptWire
         do { receipt = try await client.mutatePolicy(request, on: route.host, deadline: deadline) }
         catch V2PolicyMutationServiceError.identityConflict { throw V2PolicyAuthorizationLifecycleError.identityConflict }
-        let result = try JSONDecoder().decode(V2PolicyMutationResult.self, from: receipt.receipt)
+        let result = receipt.receipt
         switch (mutation, result) {
         case (.social, .social), (.strangerPreference, .preference), (.disable, .disable): break
         default: throw V2PolicyAuthorizationLifecycleError.corruptPersistence

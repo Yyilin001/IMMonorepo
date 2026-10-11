@@ -237,7 +237,7 @@ private func g2AssertConcreteRecovery(host: V2RoomActivationHost<V2RoomRequest, 
     token: V2RoomActivationToken, room: RoomID) async throws {
     let request = V2RoomRequest.recovery(.init(roomID: room, actorUserID: senderID, kind: .state))
     let response = try await host.invoke(token: token,
-        encodedRequest: JSONEncoder().encode(request), deadline: .now + .seconds(5))
+        request: request, deadline: .now + .seconds(5))
     guard case .recovery(.state(.state(let state))) = response,
           state.roomID == room else { throw G2TestFailure.recoveryQueryFailed }
 }

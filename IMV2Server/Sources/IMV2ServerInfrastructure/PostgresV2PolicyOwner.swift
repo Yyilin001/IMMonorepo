@@ -1,3 +1,4 @@
+import IMV2ActorContracts
 import Foundation
 import FluentKit
 import IMV2ServerApplication

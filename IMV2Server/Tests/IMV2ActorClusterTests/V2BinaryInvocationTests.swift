@@ -1,3 +1,4 @@
+import IMV2ActorContracts
 import Foundation
 import NIO
 import Testing
@@ -16,7 +17,7 @@ struct V2BinaryInvocationTests {
         #expect(result.targetIdentifier == original.targetIdentifier)
         #expect(result.genericSubstitutions == original.genericSubstitutions)
         #expect(result.arguments == original.arguments)
-        let legacy = try JSONEncoder().encode(original)
+        let legacy = try V2ActorProtobuf.encode(original)
         #expect(encoded.count < legacy.count)
     }
 

@@ -327,7 +327,7 @@ actor V2RealtimeShardSender {
         let limits = self.limits; let incarnation = self.incarnation
         let started = ContinuousClock.now
         let task = Task<Session, Error> {
-            let id = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: target.endpointReference)
+            let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: target.endpointReference)
             guard id.node.endpoint.host == target.address, id.node.endpoint.port == target.port else { throw V2ActorAuthenticationError.wrongRecipient }
             let endpoint = try V2RealtimeShardEndpoint.resolve(id: id, using: system)
             let hello = RealtimeHello(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation, recipient: target.identity, handshakeID: UUID(),

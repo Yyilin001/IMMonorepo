@@ -47,7 +47,7 @@ struct V2RoomHostPostgresReservationTests {
                 try await rowLock.waitUntilHeld()
                 let bQuery = Task {
                     try await host.invoke(token: tokenB,
-                        encodedRequest: try recoveryBytes(seed.b), deadline: .now + .seconds(8))
+                        request: try recoveryBytes(seed.b), deadline: .now + .seconds(8))
                 }
                 try await pairWaitUntil {
                     await hosted.admission.snapshot().interactiveRead.inFlight == 1
@@ -64,7 +64,7 @@ struct V2RoomHostPostgresReservationTests {
                 try await trace.waitForAttempt(seed.b)
                 let aQuery = Task {
                     try await host.invoke(token: tokenA,
-                        encodedRequest: try recoveryBytes(seed.a), deadline: .now + .seconds(8))
+                        request: try recoveryBytes(seed.a), deadline: .now + .seconds(8))
                 }
                 try await pairWaitUntil { await hosted.budget.snapshot().commandCount >= 4 }
                 #expect(await hosted.admission.snapshot().interactiveRead.inFlight == 1)
@@ -323,9 +323,9 @@ private func pairExecution(executor: V2ActorForwardPairDomainExecutor,
     catch { return v2RoomDomainCompletion(error) }
 }
 
-private func recoveryBytes(_ room: RoomID) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.recovery(.init(roomID: room,
-        actorUserID: senderID, kind: .state)))
+private func recoveryBytes(_ room: RoomID) throws -> V2RoomRequest {
+    try V2RoomRequest.recovery(.init(roomID: room,
+        actorUserID: senderID, kind: .state))
 }
 
 private func recoveryHead(_ response: V2RoomResponse, room: RoomID) throws -> UInt64 {

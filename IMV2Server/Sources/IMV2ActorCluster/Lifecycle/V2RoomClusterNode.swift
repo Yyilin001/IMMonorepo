@@ -109,8 +109,7 @@ public actor V2RoomClusterNode {
         var settings = ClusterSystemSettings(name: configuration.name, host: configuration.host,
                                              port: configuration.port, tls: configuration.tls)
         settings.threadPoolSize = configuration.threadPoolSize
-        settings.serialization.binaryDistributedInvocations =
-            ProcessInfo.processInfo.environment["IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED"] == "true"
+        settings.serialization.binaryDistributedInvocations = true
         // 集群成员关系只用于发现。对等节点超时不能让本进程
         // 放弃或认领受数据库围栏保护的房间激活。
         settings.downingStrategy = .none

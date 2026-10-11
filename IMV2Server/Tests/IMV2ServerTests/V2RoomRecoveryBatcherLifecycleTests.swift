@@ -115,7 +115,7 @@ struct V2RoomRecoveryBatcherLifecycleTests {
             viewerMembershipRevision: 1, head: 0, trimmedThrough: 0, readThrough: 0, latestOwnMessageSequence: 0))
         let count = perPairFailure ? 2 : 5
         let batcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(maximumItems: count,
-            maximumResponseBytes: 1024), executeStates: { turns in
+            maximumResponseBytes: perPairFailure ? 4096 : 1024), executeStates: { turns in
                 #expect(turns.count == count)
                 let key = V2RoomStateReadKey(roomID: token.roomID, viewerUserID: viewer)
                 if perPairFailure {

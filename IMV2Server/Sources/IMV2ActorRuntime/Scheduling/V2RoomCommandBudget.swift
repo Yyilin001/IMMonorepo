@@ -7,10 +7,7 @@ import Synchronization
 /// 只有签发该许可的预算才能归还容量。
 public struct V2RoomCommandPermit: Equatable, Sendable {
     public let roomID: RoomID
-    /// 分发使用这些精确的不可变字节，不接受调用方另行提供且自行报告大小的载荷。
-    /// Data 副本共享不可变存储。
-    public let encodedRequest: Data
-    public var byteCount: Int { encodedRequest.count }
+    public let byteCount: Int
     public let isReservation: Bool
     fileprivate let budgetID: UUID
     fileprivate let permitID: UUID
@@ -40,23 +37,22 @@ public final class V2RoomCommandBudget: Sendable {
         self.configuration = configuration
     }
 
-    public func acquire(roomID: RoomID, encodedRequest: Data) throws -> V2RoomCommandPermit {
-        try acquire(roomID: roomID, encodedRequest: encodedRequest, isReservation: false)
+    public func acquire<Request>(roomID: RoomID, request: Request) throws -> V2RoomCommandPermit {
+        try acquire(roomID: roomID, byteCount: V2ActorPayloadBudget.retainedBytes(of: request), isReservation: false)
     }
 
     /// 预留屏障共用普通请求的数量与字节上限，
     /// 并有独立的宿主级并发上限；没有额外的无界等待队列。
-    func acquireReservation(roomID: RoomID, encodedRequest: Data) throws -> V2RoomCommandPermit {
-        try acquire(roomID: roomID, encodedRequest: encodedRequest, isReservation: true)
+    func acquireReservation(roomID: RoomID, byteCount: Int) throws -> V2RoomCommandPermit {
+        try acquire(roomID: roomID, byteCount: byteCount, isReservation: true)
     }
 
-    private func acquire(roomID: RoomID, encodedRequest: Data, isReservation: Bool) throws -> V2RoomCommandPermit {
-        let byteCount = encodedRequest.count
+    func acquire(roomID: RoomID, byteCount: Int, isReservation: Bool = false) throws -> V2RoomCommandPermit {
         guard byteCount > 0, byteCount <= configuration.maximumRequestBytes else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
         let permit = V2RoomCommandPermit(
-            roomID: roomID, encodedRequest: encodedRequest, isReservation: isReservation,
+            roomID: roomID, byteCount: byteCount, isReservation: isReservation,
             budgetID: identity, permitID: UUID()
         )
         return try state.withLock { state in

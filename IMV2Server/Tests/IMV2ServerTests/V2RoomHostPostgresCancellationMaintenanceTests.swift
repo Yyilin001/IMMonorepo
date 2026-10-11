@@ -50,7 +50,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let firstRequest = try cancelMaintenanceSendBytes(operation: firstID, text: "first")
                 let queuedRequest = try cancelMaintenanceSendBytes(operation: queuedID, text: "queued")
                 let first = Task { try await host.invoke(token: token,
-                    encodedRequest: firstRequest,
+                    request: firstRequest,
                     deadline: .now + .seconds(15)) }
                 try await cancelMaintenanceWaitUntil {
                     let waiting = try await cancelMaintenanceAdvisoryWait(sql: sql)
@@ -58,7 +58,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     return waiting && snapshot.inFlightBatches == 1
                 }
                 let queued = Task { try await host.invoke(token: token,
-                    encodedRequest: queuedRequest,
+                    request: queuedRequest,
                     deadline: .now + .seconds(15)) }
                 try await cancelMaintenanceWaitUntil { await hosted.budget.snapshot().commandCount == 2 }
                 queued.cancel()
@@ -98,7 +98,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let fresh = try await cancelMaintenanceActivate(host: successor.host)
                 #expect(fresh.activationEpoch.rawValue == token.activationEpoch.rawValue + 1)
                 let replay = try await successor.host.invoke(token: fresh,
-                    encodedRequest: firstRequest,
+                    request: firstRequest,
                     deadline: .now + .seconds(5))
                 guard case .messaging(.sendOperation(.receipt(let proof))) = replay,
                       case .accepted(let accepted) = proof.outcome else {
@@ -178,9 +178,9 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let old = try await cancelMaintenanceActivate(host: first.host)
                 let command = V2RoomRequest.maintenance(.trimLog(.init(roomID: roomID,
                     mode: .permanent, windowSeconds: 3_600)))
-                let request = try JSONEncoder().encode(command)
+                let request = try command
                 let trim = Task { try await first.host.invoke(token: old,
-                    encodedRequest: request, deadline: .now + .seconds(15)) }
+                    request: request, deadline: .now + .seconds(15)) }
                 try await cancelMaintenanceWaitUntil {
                     try await cancelMaintenanceAdvisoryWait(sql: sql)
                 }
@@ -210,7 +210,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let fresh = try await cancelMaintenanceActivate(host: next.host)
                 #expect(fresh.activationEpoch.rawValue == old.activationEpoch.rawValue + 1)
                 await cancelMaintenanceExpectFailure(.notAccepted(.staleActivation), Task {
-                    try await first.host.invoke(token: old, encodedRequest: request,
+                    try await first.host.invoke(token: old, request: request,
                         deadline: .now + .seconds(5))
                 })
                 #expect(try await leases.release(token: old) == false)
@@ -220,7 +220,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                             mode: .permanent, windowSeconds: 3_600)), token: old)
                 }
                 let freshResponse = try await next.host.invoke(token: fresh,
-                    encodedRequest: request, deadline: .now + .seconds(5))
+                    request: request, deadline: .now + .seconds(5))
                 guard case .maintenance(.logTrimmed(let noOp)) = freshResponse else {
                     throw CancelMaintenanceFailure.unexpectedResult
                 }
@@ -283,7 +283,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let applicator = V2RoomContentReviewSafetyApplicator(callTimeout: .seconds(15)) {
                     request, deadline in
                     try await first.host.invoke(token: old,
-                        encodedRequest: JSONEncoder().encode(request), deadline: deadline)
+                        request: request, deadline: deadline)
                 }
                 let worker = try V2ContentReviewWorker(
                     store: PostgresV2ContentReviewStore(database: database),
@@ -325,13 +325,13 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     operationID: try .init(message.messageID.rawValue), action: .redactMessage,
                     messageID: message.messageID, expectedMessageRevision: 1,
                     reasonCode: "content_policy_violation")))
-                let encoded = try JSONEncoder().encode(safety)
+                let encoded = try safety
                 await cancelMaintenanceExpectFailure(.notAccepted(.staleActivation), Task {
-                    try await first.host.invoke(token: old, encodedRequest: encoded,
+                    try await first.host.invoke(token: old, request: encoded,
                         deadline: .now + .seconds(5))
                 })
                 guard case .administration(.trustedSafety(.idempotent(let replay))) =
-                    try await next.host.invoke(token: fresh, encodedRequest: encoded,
+                    try await next.host.invoke(token: fresh, request: encoded,
                         deadline: .now + .seconds(5)) else {
                     throw CancelMaintenanceFailure.unexpectedResult
                 }
@@ -361,7 +361,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let freshApplicator = V2RoomContentReviewSafetyApplicator {
                     request, deadline in
                     try await next.host.invoke(token: fresh,
-                        encodedRequest: JSONEncoder().encode(request), deadline: deadline)
+                        request: request, deadline: deadline)
                 }
                 let retryAt = now.addingTimeInterval(61)
                 let freshWorker = try V2ContentReviewWorker(
@@ -446,9 +446,9 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 try await gate.waitUntilHeld()
                 let old = try await cancelMaintenanceActivate(host: first.host)
                 let command = V2RoomRequest.forward(.importExport(.init(domain: export)))
-                let request = try JSONEncoder().encode(command)
+                let request = try command
                 let importing = Task { try await first.host.invoke(token: old,
-                    encodedRequest: request, deadline: .now + .seconds(15)) }
+                    request: request, deadline: .now + .seconds(15)) }
                 try await cancelMaintenanceWaitUntil { try await cancelMaintenanceAdvisoryWait(sql: sql) }
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.message_forward_inbox") == 0)
@@ -481,11 +481,11 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 let fresh = try await cancelMaintenanceActivate(host: next.host)
                 #expect(fresh.activationEpoch.rawValue == old.activationEpoch.rawValue + 1)
                 await cancelMaintenanceExpectFailure(.notAccepted(.staleActivation), Task {
-                    try await first.host.invoke(token: old, encodedRequest: request,
+                    try await first.host.invoke(token: old, request: request,
                         deadline: .now + .seconds(5))
                 })
                 let replay = try await next.host.invoke(token: fresh,
-                    encodedRequest: request, deadline: .now + .seconds(5))
+                    request: request, deadline: .now + .seconds(5))
                 #expect(replay == .forward(.imported(.accepted(messageID: messageID,
                     roomSequence: sequence))))
                 #expect(try await cancelMaintenanceImportRow(sql: sql, export: export.intent.exportID,
@@ -556,10 +556,10 @@ private func cancelMaintenanceActivate(
     return token
 }
 
-private func cancelMaintenanceSendBytes(operation: UUID, text: String) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: roomID,
+private func cancelMaintenanceSendBytes(operation: UUID, text: String) throws -> V2RoomRequest {
+    try V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: roomID,
         senderUserID: senderID, clientMessageID: .init(uuid: operation), text: text,
-        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000))))
+        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000)))
 }
 
 private func cancelMaintenanceExpectFailure<T: Sendable>(_ expected: V2RoomCallFailure,

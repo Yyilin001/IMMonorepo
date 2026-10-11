@@ -279,14 +279,13 @@ private actor V2RoomSubscriptionLanePump {
                 enqueue(group)
                 continue
             }
-            var selected: [V2RoomSubscriptionDelivery] = []
+            var builder = V2RoomSubscriptionDeliveryBatch.Builder()
             var work: [Work] = []
             var descriptor: V2GatewayRealtimeDescriptor?
-            var encodedBytes = 17 // {"deliveries":[]} plus element JSON and commas.
             let candidates = min(groupKeys[group]?.count ?? 0, maximumBatchItems)
             activePeers.insert(group.gateway)
             for _ in 0..<candidates {
-                guard !closed, selected.count < maximumBatchItems,
+                guard !closed, builder.count < maximumBatchItems,
                       let key = groupKeys[group]?.popFirst() else { break }
                 queuedKeys.remove(key)
                 if bindingReservations[key] != nil { signal(key); continue }
@@ -306,11 +305,9 @@ private actor V2RoomSubscriptionLanePump {
                 let pending = await entry.relay.pending(for: key.gateway, lane: lane)
                 guard entries[key]?.id == entry.id, !closed else { releaseReservation(key, entryID: entry.id); continue }
                 var last: V2RoomSubscriptionDelivery?
-                for delivery in pending.prefix(maximumBatchItems - selected.count) {
-                    guard let bytes = try? JSONEncoder().encode(delivery).count,
-                          encodedBytes + bytes + (selected.isEmpty ? 0 : 1) <= maximumBatchBytes else { break }
-                    encodedBytes += bytes + (selected.isEmpty ? 0 : 1)
-                    selected.append(delivery); last = delivery
+                for delivery in pending.prefix(maximumBatchItems - builder.count) {
+                    guard (try? builder.append(delivery, maximumBytes: maximumBatchBytes)) == true else { break }
+                    last = delivery
                 }
                 if let last {
                     work.append(.init(key: key, entry: entry, last: last))
@@ -318,7 +315,7 @@ private actor V2RoomSubscriptionLanePump {
                 } else {
                     releaseReservation(key, entryID: entry.id)
                     if pending.isEmpty { continue }
-                    if selected.isEmpty { requireBaseline(key, entry: entry, status: status) }
+                    if builder.count == 0 { requireBaseline(key, entry: entry, status: status) }
                     else { signal(key); break }
                 }
             }
@@ -328,7 +325,7 @@ private actor V2RoomSubscriptionLanePump {
                 for item in work { releaseReservation(item.key, entryID: item.entry.id) }
                 activePeers.remove(group.gateway); continue
             }
-            let batch = V2RoomSubscriptionDeliveryBatch(deliveries: selected)
+            let batch = builder.finish()
             let callID = UUID()
             let admittedWork = work
             let sendBatch = self.sendBatch

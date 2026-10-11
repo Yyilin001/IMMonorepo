@@ -62,14 +62,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     owner: .init(shardID: "room-b", epoch: 0), deadline: .now + .seconds(10)) else {
                     throw V2RoomCallFailure.notAccepted(.notReady)
                 }
-                let first = try await host.invoke(token: token, encodedRequest: repliedRequest(room: opened.roomID), deadline: .now + .seconds(10))
+                let first = try await host.invoke(token: token, request: repliedRequest(room: opened.roomID), deadline: .now + .seconds(10))
                 try repliedAccepted(first)
                 #expect(try await owners.cachedSnapshots(scopes: [.stranger(memberTwoUUID)]) == nil)
                 // Warm sends must not request a missing stranger scope. A cold
                 // reader would fail SQL name resolution after this rename.
                 try await controlSQL.raw("ALTER TABLE im_v2.user_stranger_message_preferences RENAME TO stranger_reply_hidden").run()
                 hidden = true
-                try repliedAccepted(try await host.invoke(token: token, encodedRequest: repliedRequest(room: opened.roomID), deadline: .now + .seconds(10)))
+                try repliedAccepted(try await host.invoke(token: token, request: repliedRequest(room: opened.roomID), deadline: .now + .seconds(10)))
                 #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count == 2)
                 try await controlSQL.raw("ALTER TABLE im_v2.stranger_reply_hidden RENAME TO user_stranger_message_preferences").run()
                 hidden = false
@@ -77,7 +77,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let block = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                     operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: Date())
                 _ = try await social.submitSocialOperation(block)
-                let response = try await host.invoke(token: token, encodedRequest: repliedRequest(room: opened.roomID), deadline: .now + .seconds(10))
+                let response = try await host.invoke(token: token, request: repliedRequest(room: opened.roomID), deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let receipt))) = response else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 #expect(receipt.outcome == .rejected(.directPolicyDenied))
                 #expect(try await owners.cachedSnapshots(scopes: [.stranger(memberTwoUUID)]) == nil)
@@ -98,10 +98,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 }
 private struct RepliedCount: Decodable { let value: Int64 }
-private func repliedRequest(room: RoomID) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: room,
+private func repliedRequest(room: RoomID) throws -> V2RoomRequest {
+    try V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: room,
         senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "replied", limits: .init(maxUTF8Bytes: 64)),
-        firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 60_000))))
+        firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)))
 }
 private func repliedAccepted(_ response: V2RoomResponse) throws {
     guard case .messaging(.sendOperation(.receipt(let receipt))) = response, case .accepted = receipt.outcome else {

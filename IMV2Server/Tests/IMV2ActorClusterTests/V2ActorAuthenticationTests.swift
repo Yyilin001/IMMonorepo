@@ -8,7 +8,7 @@ import Testing
 
 @Suite("Signed actor sessions bind authority and reject replay")
 struct V2ActorAuthenticationTests {
-    @Test("signed JSON authenticates transmitted bytes independently of key order")
+    @Test("signed PB authenticates transmitted bytes independently of field order")
     func signedBodyKeyOrder() throws {
         struct Body: Codable, Equatable { let a: Int; let z: String }
         let key = Curve25519.Signing.PrivateKey()
@@ -17,8 +17,10 @@ struct V2ActorAuthenticationTests {
         let trust = try V2ActorTrustStore(services: [try .init(serviceID: serviceID,
             publicKey: key.publicKey.rawRepresentation, permissions: [])])
         let value = Body(a: 1, z: "消息")
-        let sorted = Data(#"{"a":1,"z":"消息"}"#.utf8)
-        let reversed = Data(#"{"z":"消息","a":1}"#.utf8)
+        let sorted = try V2ActorProtobuf.encode(value)
+        var wire = try Im_Actor_V1_Value(serializedBytes: sorted)
+        wire.objectValue.fields.reverse()
+        let reversed = try wire.serializedData()
         for bytes in [sorted, reversed] {
             let packet = V2ActorSignedPacket(signerID: serviceID, body: bytes,
                 signature: try key.signature(for: bytes))
@@ -76,7 +78,8 @@ struct V2ActorAuthenticationTests {
     func versionedPolicyUpdateAuthority(allowed: Bool) async throws {
         let fixture = try Fixture(clientPermissions: allowed ? [.policyMutation] : [.policyRegistration])
         let grant = try await fixture.open()
-        let snapshot = try V2PolicySnapshotWire(scope: .init(account: UUID()), version: 2, facts: Data("{}".utf8))
+        let scope = V2PolicyScopeWire(account: UUID())
+        let snapshot = try V2PolicySnapshotWire(scope: scope, version: 2, facts: .account(.init(userID: scope.first, isActive: true)))
         let request = V2ActorRPCRequest.updatePolicySnapshot(try .init(endpoint: "owner", snapshot: snapshot))
         func call(_ principal: V2ActorCallPrincipal, sequence: UInt64) throws -> V2ActorAuthenticatedCall {
             .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
@@ -134,7 +137,7 @@ struct V2ActorAuthenticationTests {
         let fixture = try Fixture(clientPermissions: allowed ? [.policyMutation] : [.policyRegistration])
         let grant = try await fixture.open()
         let request = try V2PolicyMutationWire(endpoint: "owner", scope: .init(account: UUID()),
-            operationKey: "operation", fingerprint: Data(repeating: 1, count: 32), command: Data("{}".utf8))
+            operationKey: "operation", fingerprint: Data(repeating: 1, count: 32), command: .disable(.init(userID: UUID(), operationID: UUID(), reason: "user_requested", operatorPrincipal: "test")))
         func call(_ principal: V2ActorCallPrincipal, sequence: UInt64) throws -> V2ActorAuthenticatedCall {
             .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
                 sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
@@ -156,7 +159,7 @@ struct V2ActorAuthenticationTests {
             }
         } else { await failure(.forbidden) { _ = try await fixture.auth.accept(packet) } }
         let receipt = try V2PolicyMutationReceiptWire(scope: request.scope, operationKey: request.operationKey,
-            fingerprint: request.fingerprint, receipt: Data([1]), replayed: false)
+            fingerprint: request.fingerprint, receipt: .disable(.init(kind: .disabled, disabledAt: Date())), replayed: false)
         #expect(receipt.matches(request))
         let other = try V2PolicyMutationWire(endpoint: request.endpoint, scope: request.scope,
             operationKey: "other", fingerprint: request.fingerprint, command: request.command)
@@ -168,34 +171,36 @@ struct V2ActorAuthenticationTests {
         let a = UUID(), b = UUID()
         let forward = try V2PolicyScopeWire(pair: a, b), reverse = try V2PolicyScopeWire(pair: b, a)
         #expect(forward == reverse)
-        #expect(try JSONDecoder().decode(V2PolicyScopeWire.self, from: JSONEncoder().encode(reverse)) == forward)
+        #expect(try V2ActorProtobuf.decode(V2PolicyScopeWire.self, from: V2ActorProtobuf.encode(reverse)) == forward)
         #expect(throws: (any Error).self) { try V2PolicyScopeWire(pair: a, a) }
         #expect(throws: (any Error).self) { try V2PolicySnapshotRequestWire(endpoint: "owner", scopes: [forward, reverse],
             subscriber: .init(hostID: .init(uuid: UUID()), endpoint: "gateway")) }
-        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(V2PolicyScopeWire(account: a))) as? [String: Any])
-        object["second"] = b.uuidString
+        var object = try V2ActorProtobuf.message(V2PolicyScopeWire(account: a))
+        var extra = Im_Actor_V1_Field(); extra.name = "second"; extra.value = try V2ActorProtobuf.message(b)
+        object.objectValue.fields.append(extra)
         #expect(throws: (any Error).self) {
-            try JSONDecoder().decode(V2PolicyScopeWire.self, from: JSONSerialization.data(withJSONObject: object))
+            try V2ActorProtobuf.decode(V2PolicyScopeWire.self, from: object.serializedData())
         }
         #expect(throws: (any Error).self) {
-            try V2PolicySnapshotWire(scope: forward, version: 0, facts: Data([1]))
+            try V2PolicySnapshotWire(scope: forward, version: 0, facts: .pair(.init(blocked: false, isFriend: false)))
         }
     }
 
     @Test("policy snapshot decoding validates durable versions and fact size")
     func policySnapshotWireBounds() throws {
         let scope = V2PolicyScopeWire(account: UUID())
-        let wire = try V2PolicySnapshotWire(scope: scope, version: 1, facts: Data([1]))
-        #expect(try JSONDecoder().decode(V2PolicySnapshotWire.self, from: JSONEncoder().encode(wire)) == wire)
+        let wire = try V2PolicySnapshotWire(scope: scope, version: 1, facts: .account(.init(userID: scope.first, isActive: true)))
+        #expect(try V2ActorProtobuf.decode(V2PolicySnapshotWire.self, from: V2ActorProtobuf.encode(wire)) == wire)
         for version: Int64 in [0, -1] {
-            #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: version, facts: Data([1])) }
+            #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: version, facts: .account(.init(userID: scope.first, isActive: true))) }
         }
-        #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: 1, facts: Data()) }
-        #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: 1, facts: Data(repeating: 1, count: 16_385)) }
-        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(wire)) as? [String: Any])
-        object["version"] = 0
+        #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: 1, facts: .pair(.init(blocked: false, isFriend: false))) }
+        #expect(throws: (any Error).self) { try V2PolicySnapshotWire(scope: scope, version: 1, facts: .account(.init(userID: scope.first, isActive: true, specialKind: String(repeating: "x", count: 16_385)))) }
+        var object = try V2ActorProtobuf.message(wire)
+        let index = try #require(object.objectValue.fields.firstIndex { $0.name == "version" })
+        object.objectValue.fields[index].value.signedValue = 0
         #expect(throws: (any Error).self) {
-            try JSONDecoder().decode(V2PolicySnapshotWire.self, from: JSONSerialization.data(withJSONObject: object))
+            try V2ActorProtobuf.decode(V2PolicySnapshotWire.self, from: object.serializedData())
         }
     }
 
@@ -204,7 +209,7 @@ struct V2ActorAuthenticationTests {
         let fixture = try Fixture(clientPermissions: [.userRoomCalls, .realtimeReceive], gatewayNodeIDs: ["gateway-alias"])
         let grant = try await fixture.open()
         let descriptor = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "gateway-alias", serviceID: "gateway",
-            incarnationID: grant.callerIncarnation), endpointReference: Data(repeating: 1, count: 512),
+            incarnationID: grant.callerIncarnation), endpointReference: Data(repeating: 1, count: 1024),
             address: "127.0.0.1", port: 12345)
         let items = try (0..<64).map { _ -> V2RoomSubscriptionRenewBatchItem in
             let token = V2RoomActivationToken(roomID: RoomID(uuid: UUID()), owner: fixture.token.owner,
@@ -218,7 +223,7 @@ struct V2ActorAuthenticationTests {
         let call = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
             recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 1, attemptID: UUID(), traceID: UUID(),
             remainingBudget: try .init(5_000), principal: .service, request: .subscriptionRenewBatch(items))
-        let bytes = try JSONEncoder().encode(call).count
+        let bytes = try V2ActorProtobuf.encode(call).count
         #expect(bytes > 65_536)
         #expect(throws: V2ActorAuthenticationError.oversized) {
             _ = try fixture.client.sign(call, maximumBytes: 65_536)
@@ -288,8 +293,8 @@ struct V2ActorAuthenticationTests {
         await failure(.forbidden) {
             _ = try await fixture.auth.accept(fixture.client.sign(call([item(fence: fence, descriptor: impostor)], sequence: 2), maximumBytes: 65_536))
         }
-        #expect(try JSONDecoder().decode(V2ActorAuthenticatedCall.self,
-            from: JSONEncoder().encode(call([valid], sequence: 2))).request == .subscriptionRenewBatch([valid]))
+        #expect(try V2ActorProtobuf.decode(V2ActorAuthenticatedCall.self,
+            from: V2ActorProtobuf.encode(call([valid], sequence: 2))).request == .subscriptionRenewBatch([valid]))
     }
 
     @Test("room subscription binds user and Gateway callback to authenticated service incarnation")
@@ -351,15 +356,15 @@ struct V2ActorAuthenticationTests {
             _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
                 principal: .service, request: reset), maximumBytes: 16_384))
         }
-        #expect(try JSONDecoder().decode(V2RoomRequest.self, from: JSONEncoder().encode(reset)) == reset)
+        #expect(try V2ActorProtobuf.decode(V2RoomRequest.self, from: V2ActorProtobuf.encode(reset)) == reset)
         let unsubscribe = V2RoomRequest.roomSubscription(.unsubscribe(.init(roomID: fixture.token.roomID,
             actorUserID: fixture.user, gatewayDescriptor: descriptor(), memberRevision: 0)))
         _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
             request: unsubscribe), maximumBytes: 16_384))
         let response = V2RoomResponse.roomSubscription(.granted(.init(fence: fence, memberRevision: 0,
             userBaselineSequence: 7, remainingLeaseMilliseconds: 10_000)))
-        #expect(try JSONDecoder().decode(V2RoomResponse.self, from: JSONEncoder().encode(response)) == response)
-        #expect(try JSONDecoder().decode(V2RoomRequest.self, from: JSONEncoder().encode(activation)) == activation)
+        #expect(try V2ActorProtobuf.decode(V2RoomResponse.self, from: V2ActorProtobuf.encode(response)) == response)
+        #expect(try V2ActorProtobuf.decode(V2RoomRequest.self, from: V2ActorProtobuf.encode(activation)) == activation)
         let missingReceiverPermission = try Fixture()
         let missingGrant = try await missingReceiverPermission.open()
         let target = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "gateway", serviceID: "gateway",
@@ -697,29 +702,29 @@ struct V2ActorAuthenticationTests {
                 principal: call.principal, request: call.request)
         }
         await failure(.unsupportedVersion) {
-            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(changed(version: 2),
-                binary: binary, maximumBytes: 65_536))
+            _ = try await fixture.auth.accept(fixture.client.sign(changed(version: 2),
+                maximumBytes: 65_536))
         }
         await failure(.wrongRecipient) {
-            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(changed(recipient:
-                .init(hostID: call.recipient.hostID, incarnationID: UUID())), binary: binary, maximumBytes: 65_536))
+            _ = try await fixture.auth.accept(fixture.client.sign(changed(recipient:
+                .init(hostID: call.recipient.hostID, incarnationID: UUID())), maximumBytes: 65_536))
         }
         await failure(.sessionExpired) {
-            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(changed(caller: UUID()),
-                binary: binary, maximumBytes: 65_536))
+            _ = try await fixture.auth.accept(fixture.client.sign(changed(caller: UUID()),
+                maximumBytes: 65_536))
         }
-        let packet = try fixture.client.signAuthenticated(call, binary: binary, maximumBytes: 65_536)
+        let packet = try fixture.client.sign(call, maximumBytes: 65_536)
         #expect(try await fixture.auth.accept(packet).call == call)
         await failure(.replay) { _ = try await fixture.auth.accept(packet) }
         let forbidden = try fixture.call(grant: grant, sequence: 2, principal: .service)
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(forbidden,
-                binary: binary, maximumBytes: 65_536))
+            _ = try await fixture.auth.accept(fixture.client.sign(forbidden,
+                maximumBytes: 65_536))
         }
         clock.advance(.milliseconds(1_001))
         await failure(.sessionExpired) {
-            _ = try await fixture.auth.accept(fixture.client.signAuthenticated(fixture.call(grant: grant, sequence: 3),
-                binary: binary, maximumBytes: 65_536))
+            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 3),
+                maximumBytes: 65_536))
         }
     }
 

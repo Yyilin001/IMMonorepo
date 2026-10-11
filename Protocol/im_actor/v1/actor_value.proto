@@ -1,0 +1,159 @@
+syntax = "proto3";
+package im.actor.v1;
+// Closed Swift Codable contracts carried as typed Protobuf values. No JSON
+// text or base64 is embedded. Keys preserve the domain's CodingKeys; changing
+// an enum case or key is an internal protocol change requiring joint rollout.
+message Value {
+  oneof kind {
+    bool null_value = 1;
+    bool bool_value = 2;
+    sint64 signed_value = 3;
+    uint64 unsigned_value = 4;
+    double double_value = 5;
+    string string_value = 6;
+    bytes bytes_value = 7;
+    Object object_value = 8;
+    Array array_value = 9;
+  }
+}
+message Field { string name = 1; Value value = 2; }
+message Object { repeated Field fields = 1; }
+message Array { repeated Value values = 1; }
+
+// The hot authenticated envelopes use fixed field numbers instead of named
+// Codable fields. Domain bodies use HotRPCRequest/HotRPCResponse, decoded once.
+message HostIdentity { string host_id = 1; bytes incarnation_id = 2; }
+message AuthenticatedCall {
+  sint64 version = 1;
+  string service_id = 2;
+  bytes caller_incarnation = 3;
+  HostIdentity recipient = 4;
+  bytes session_id = 5;
+  uint64 sequence = 6;
+  bytes attempt_id = 7;
+  bytes trace_id = 8;
+  uint64 remaining_budget_ms = 9;
+  oneof principal { string user_id = 10; bool service = 11; }
+  // One encoded HotRPCRequest body. Header serialization never walks the body.
+  bytes request_body = 12;
+}
+message AuthenticatedReply {
+  sint64 version = 1;
+  HostIdentity host = 2;
+  bytes session_id = 3;
+  uint64 sequence = 4;
+  bytes attempt_id = 5;
+  bytes response_body = 6;
+}
+
+// Fixed hot contracts. cold_value is reserved for low-frequency operations;
+// hot branches must never be emitted or accepted through that escape hatch.
+message HotEmpty {}
+message HotOwner { string shard_id = 1; sint64 epoch = 2; }
+message HotActivation { string room_id = 1; HotOwner owner = 2; sint64 activation_epoch = 3; HostIdentity host = 4; }
+message HotGateway { string node_id = 1; string service_id = 2; bytes incarnation_id = 3; }
+message HotGatewayDescriptor { HotGateway identity = 1; bytes endpoint_reference = 2; string address = 3; sint64 port = 4; }
+message HotFence { HotActivation activation = 1; bytes subscription_id = 2; uint64 generation = 3; uint64 baseline_sequence = 4; }
+message HotMember { string user_id = 1; uint64 revision = 2; }
+message HotMention { oneof target { string user_id = 1; bool everyone = 2; } }
+message HotEntity { sint64 offset = 1; sint64 length = 2; string kind = 3; optional string link = 4; }
+message HotSend {
+  string room_id = 1; string sender_id = 2; string client_message_id = 3; string text = 4;
+  repeated string media_ids = 5; repeated HotMention mentions = 6; repeated HotEntity entities = 7;
+  optional string reply_message_id = 8; uint64 first_submission_deadline_ms = 9;
+}
+message HotSendIdentity { string account_id = 1; string room_id = 2; string client_message_id = 3; }
+message HotFingerprint { uint32 version = 1; bytes digest = 2; }
+message HotAccepted { string message_id = 1; uint64 room_sequence = 2; }
+message HotSendReceipt {
+  HotSendIdentity identity = 1; HotFingerprint fingerprint = 2; uint64 resolved_at_ms = 3;
+  oneof outcome { HotAccepted accepted = 4; string rejected = 5; }
+}
+message HotRetry { HotSendIdentity identity = 1; HotFingerprint fingerprint = 2; string reason = 3; optional uint64 retry_after_ms = 4; }
+message HotSendResult { oneof outcome { HotSendReceipt receipt = 1; HotRetry deferred = 2; HotEmpty unresolved = 3; HotEmpty fingerprint_conflict = 4; } }
+message HotSubscriptionCommand {
+  string room_id = 1; string user_id = 2; HotGatewayDescriptor gateway = 3;
+  // 1 subscribe, 2 activate, 3 reset, 4 unsubscribe, 5 renew. Unrecognized kinds fail closed.
+  uint32 kind = 4; HotFence fence = 5; uint64 member_revision = 6; uint64 applied_control_sequence = 7;
+}
+message HotSubscriptionLease { HotFence fence = 1; uint64 member_revision = 2; uint64 baseline = 3; sint64 remaining_ms = 4; uint64 applied_control_sequence = 5; uint64 committed_sequence = 6; }
+message HotSubscriptionResult { oneof outcome { HotSubscriptionLease granted = 1; HotSubscriptionLease renewed = 2; HotEmpty activated = 3; HotEmpty unsubscribed = 4; string failure = 5; } }
+message HotLogPull { string room_id = 1; string user_id = 2; uint64 after_sequence = 3; sint64 page_size = 4; }
+message HotLogSubscribe { string room_id = 1; string user_id = 2; }
+message HotLogEntry { string event_id = 1; uint64 sequence = 2; string projection_kind = 3; bytes payload = 4; }
+message HotLogPage { string room_id = 1; repeated HotLogEntry events = 2; uint64 next_sequence = 3; bool has_more = 4; uint64 trimmed_through = 5; }
+message HotLogSubscription { string room_id = 1; uint64 high_watermark = 2; uint64 membership_revision = 3; }
+message HotRoomRequest { oneof operation { HotSend send = 1; HotSubscriptionCommand subscription = 2; HotLogPull log_pull = 3; HotLogSubscribe log_subscribe = 4; bytes cold_value = 100; } }
+message HotRoomResponse { oneof result { HotSendResult send = 1; HotSubscriptionResult subscription = 2; HotLogPage log_page = 3; HotLogSubscription log_subscription = 4; string log_failure = 5; bytes cold_value = 100; } }
+message HotInvoke { HotActivation token = 1; HotRoomRequest request = 2; }
+message HotRenewItem { HotActivation token = 1; HotSubscriptionCommand command = 2; }
+message HotRenewBatch { repeated HotRenewItem items = 1; }
+message HotRenewOutcome { HotActivation token = 1; oneof outcome { HotSubscriptionResult result = 2; bytes cold_failure = 100; } }
+message HotRenewResults { repeated HotRenewOutcome items = 1; }
+message HotReady { HotActivation token = 1; bytes physical_reference = 2; }
+message HotRPCRequest { oneof operation { HotInvoke invoke = 1; HotActivation lookup = 2; HotRenewBatch renew = 3; bytes cold_value = 100; } }
+message HotRPCResponse { oneof result { HotRoomResponse response = 1; HotReady ready = 2; HotRenewResults renew = 3; bool completed = 4; HotEmpty acknowledged = 5; bytes cold_value = 100; } }
+
+message HotEvent {
+  string room_id = 1; uint64 high_watermark = 2; string event_id = 3; uint64 sequence = 4;
+  string projection_kind = 5; bytes payload = 6; repeated string recipient_ids = 7;
+  optional uint64 group_revision = 8; optional uint64 accepted_revision = 9; optional bytes excluded_connection = 10;
+}
+message HotMembers { repeated HotMember members = 1; }
+message HotBaselinePage { sint64 index = 1; sint64 total = 2; repeated HotMember members = 3; }
+message HotGrant { HotMember member = 1; uint64 baseline = 2; }
+message HotEventMembers { HotEvent event = 1; repeated HotMember members = 2; }
+message HotSubscriptionDelivery {
+  HotFence fence = 1; uint64 delivery_sequence = 2; uint64 authorization_sequence = 3;
+  oneof payload { HotMembers baseline = 4; HotBaselinePage baseline_page = 5; HotGrant grant = 6; HotEvent broadcast = 7; HotEventMembers event = 8; uint64 head = 9; HotEmpty invalidated = 10; HotMember revoke = 11; }
+}
+message HotDeliveryResult { oneof result { uint64 applied_through = 1; HotEmpty snapshot_required = 2; HotEmpty stale = 3; } }
+message HotSubscriptionReceipt { HotFence fence = 1; HotDeliveryResult result = 2; }
+message HotDeliveryBatch { repeated HotSubscriptionDelivery deliveries = 1; }
+message HotDeliveryReceipts { repeated HotSubscriptionReceipt receipts = 1; }
+message HotRealtimeHeader {
+  string service_id = 1; sint64 version = 2; bytes caller_incarnation = 3; HotGateway recipient = 4;
+  bytes session_id = 5; uint64 sequence = 6; bytes attempt_id = 7;
+}
+message HotSubscriptionCall { HotRealtimeHeader header = 1; string source_shard_id = 2; HotSubscriptionDelivery delivery = 3; }
+message HotSubscriptionReply { HotRealtimeHeader header = 1; HotDeliveryResult result = 2; }
+message HotSubscriptionBatchCall { HotRealtimeHeader header = 1; string source_shard_id = 2; HotDeliveryBatch batch = 3; }
+message HotSubscriptionBatchReply { HotRealtimeHeader header = 1; HotDeliveryReceipts result = 2; }
+message HotTopic { string kind = 1; string id = 2; HotOwner owner = 3; }
+message HotRoomWake { string room_id = 1; uint64 watermark = 2; }
+message HotUserSync { string user_id = 1; uint64 watermark = 2; }
+message HotTyping { string room_id = 1; string user_id = 2; bool is_typing = 3; double expires = 4; bytes connection_id = 5; uint64 sequence = 6; }
+message HotEvents { repeated HotEvent events = 1; }
+message HotRealtimePayload { oneof payload { HotRoomWake room_wake = 1; HotEvents room_events = 2; HotUserSync user_sync = 3; string presence = 4; HotTyping typing = 5; } }
+message HotRealtimeDelivery { HotTopic topic = 1; sint64 partition_id = 2; sint64 partition_epoch = 3; bytes session_id = 4; sint64 interest_generation = 5; bytes gateway_incarnation = 6; HotRealtimePayload payload = 7; }
+message HotRealtimeBatch { bytes batch_id = 1; HotGateway recipient = 2; repeated HotRealtimeDelivery deliveries = 3; }
+message HotRealtimeCall { HotRealtimeHeader header = 1; HotRealtimeBatch batch = 2; }
+message HotRealtimeReply { HotRealtimeHeader header = 1; string acceptance = 2; }
+message HotJournalSource { string source_id = 1; bytes incarnation_id = 2; sint64 partition_id = 3; }
+message HotJournalFence {
+  bytes publisher_incarnation = 1; sint64 source_epoch = 2; bytes source_token = 3; double source_expires = 4;
+  sint64 routing_epoch = 5; bytes routing_token = 6; bytes session_id = 7; sint64 interest_generation = 8; bytes gateway_incarnation = 9;
+}
+message HotJournalAuthorization { string room_id = 1; uint64 owner_epoch = 2; uint64 permission_version = 3; uint64 control_version = 4; repeated HotMember viewers = 5; uint64 watermark = 6; }
+message HotJournalHead { string room_id = 1; uint64 watermark = 2; uint64 owner_epoch = 3; uint64 control_version = 4; }
+message HotJournalChange {
+  uint32 kind = 1; HotJournalAuthorization authorization = 2; string subject_id = 3;
+  uint64 watermark = 4; uint64 owner_epoch = 5; uint64 permission_version = 6; uint64 control_version = 7;
+  optional bytes device_id = 8; optional string membership_room_id = 9;
+}
+message HotJournalEntry { sint64 sequence = 1; HotJournalChange change = 2; }
+message HotJournalChanges { sint64 from_exclusive = 1; sint64 through_inclusive = 2; repeated HotJournalEntry entries = 3; }
+message HotJournalSnapshot { sint64 cut = 1; repeated HotJournalAuthorization rooms = 2; }
+message HotJournalHeads { repeated HotJournalHead heads = 1; }
+message HotJournalBatch {
+  bytes batch_id = 1; HotJournalSource source = 2; HotJournalFence fence = 3;
+  oneof payload { sint64 baseline = 4; HotJournalChanges changes = 5; HotJournalSnapshot snapshot = 6; HotJournalHeads heads = 7; }
+}
+message HotJournalApplied { bytes batch_id = 1; HotJournalSource source = 2; HotJournalFence fence = 3; sint64 applied_through = 4; bool snapshot_installed = 5; }
+message HotJournalResult { oneof result { HotJournalApplied applied = 1; HotJournalApplied heads_applied = 2; HotEmpty stale = 3; HotEmpty snapshot_required = 4; HotEmpty overloaded = 5; HotEmpty invalid = 6; } }
+message HotJournalCall { HotRealtimeHeader header = 1; HotJournalBatch batch = 2; }
+message HotJournalReply { HotRealtimeHeader header = 1; HotJournalResult result = 2; }
+message HotShardToken { sint64 partition_id = 1; HotGateway host = 2; sint64 epoch = 3; bytes lease_token = 4; }
+message HotPublish { HotShardToken token = 1; HotTopic topic = 2; HotRealtimePayload payload = 3; }
+message HotShardCall { HotRealtimeHeader header = 1; oneof operation { HotPublish publish = 2; bytes cold_control = 100; } }
+message HotShardReply { HotRealtimeHeader header = 1; oneof result { string publish = 2; bytes cold_control = 100; } }

@@ -11,12 +11,12 @@ struct V2RoomCommandBudgetTests {
         let budget = V2RoomCommandBudget(configuration: try configuration())
         let hot = try RoomID("hot")
         let healthy = try RoomID("healthy")
-        let first = try budget.acquire(roomID: hot, encodedRequest: bytes(10))
-        let second = try budget.acquire(roomID: hot, encodedRequest: bytes(10))
+        let first = try budget.acquire(roomID: hot, byteCount: 10)
+        let second = try budget.acquire(roomID: hot, byteCount: 10)
         #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-            try budget.acquire(roomID: hot, encodedRequest: bytes(1))
+            try budget.acquire(roomID: hot, byteCount: 1)
         }
-        let third = try budget.acquire(roomID: healthy, encodedRequest: bytes(10))
+        let third = try budget.acquire(roomID: healthy, byteCount: 10)
         #expect(budget.snapshot().commandCount == 3)
         #expect(budget.release(first))
         #expect(budget.release(second))
@@ -37,7 +37,7 @@ struct V2RoomCommandBudgetTests {
             for index in 0..<100 {
                 let room = try RoomID("room-\(index)")
                 group.addTask {
-                    do { return try budget.acquire(roomID: room, encodedRequest: bytes(10)) }
+                    do { return try budget.acquire(roomID: room, byteCount: 10) }
                     catch V2RoomCallFailure.notAccepted(.overloaded) { return nil }
                 }
             }
@@ -58,7 +58,7 @@ struct V2RoomCommandBudgetTests {
     func duplicateAndForeignRelease() async throws {
         let first = V2RoomCommandBudget(configuration: try configuration())
         let other = V2RoomCommandBudget(configuration: try configuration())
-        let permit = try first.acquire(roomID: RoomID("room"), encodedRequest: bytes(10))
+        let permit = try first.acquire(roomID: RoomID("room"), byteCount: 10)
         #expect(!(other.release(permit)))
         #expect(first.snapshot().byteCount == 10)
         let releaseCount = await withTaskGroup(of: Bool.self) { group in
@@ -76,20 +76,20 @@ struct V2RoomCommandBudgetTests {
         let budget = V2RoomCommandBudget(configuration: try configuration())
         let room = try RoomID("room")
         #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
-            try budget.acquire(roomID: room, encodedRequest: Data())
+            try budget.acquire(roomID: room, byteCount: 0)
         }
         #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
-            try budget.acquire(roomID: room, encodedRequest: bytes(31))
+            try budget.acquire(roomID: room, byteCount: 31)
         }
-        let first = try budget.acquire(roomID: room, encodedRequest: bytes(24))
-        #expect(first.encodedRequest == bytes(24))
-        #expect(first.byteCount == first.encodedRequest.count)
+        let first = try budget.acquire(roomID: room, byteCount: 24)
+        #expect(first.byteCount == 24)
+        #expect(first.byteCount == 24)
         #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-            try budget.acquire(roomID: room, encodedRequest: bytes(7))
+            try budget.acquire(roomID: room, byteCount: 7)
         }
-        let second = try budget.acquire(roomID: RoomID("other"), encodedRequest: bytes(16))
+        let second = try budget.acquire(roomID: RoomID("other"), byteCount: 16)
         #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-            try budget.acquire(roomID: RoomID("third"), encodedRequest: bytes(1))
+            try budget.acquire(roomID: RoomID("third"), byteCount: 1)
         }
         #expect(budget.snapshot().commandCount == 2)
         #expect(budget.release(first))
@@ -104,7 +104,7 @@ struct V2RoomCommandBudgetTests {
                 group.addTask {
                     do {
                         return try budget.acquireReservation(roomID: RoomID("reserved-\(index)"),
-                                                             encodedRequest: bytes(10))
+                                                             byteCount: 10)
                     } catch { return nil }
                 }
             }
@@ -114,10 +114,10 @@ struct V2RoomCommandBudgetTests {
         }
         #expect(permits.count == 2)
         #expect(budget.snapshot().reservationCount == 2)
-        let ordinary = try budget.acquire(roomID: RoomID("ordinary"), encodedRequest: bytes(20))
+        let ordinary = try budget.acquire(roomID: RoomID("ordinary"), byteCount: 20)
         #expect(budget.snapshot().byteCount == 40)
         #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-            try budget.acquire(roomID: RoomID("full"), encodedRequest: bytes(1))
+            try budget.acquire(roomID: RoomID("full"), byteCount: 1)
         }
         let releases = await withTaskGroup(of: Bool.self) { group in
             for permit in permits + [ordinary] {

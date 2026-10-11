@@ -62,7 +62,7 @@ public struct V2RoomTurnLaneSnapshot: Sendable {
 
 /// 此调度器面向封闭且有类型的请求集合，不按方法名分发，
 /// 也不接受任意载荷集合。解码始终使用已计入宿主准入预算的确切不可变字节。
-public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
+public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
     public typealias Execute = @Sendable (V2RoomTurn<Request>) async -> V2RoomTransactionCompletion<[Response]>
 
     public let token: V2RoomActivationToken
@@ -119,21 +119,11 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
         activity.withLock { $0 > cutoff }
     }
 
-    public func submit(
-        encodedRequest: Data,
-        deadline: ContinuousClock.Instant
-    ) async throws -> Response {
-        try await submit(encodedRequest: encodedRequest, decodedRequest: nil, deadline: deadline)
+    public func submit(request: Request, deadline: ContinuousClock.Instant) async throws -> Response {
+        try await submit(decodedInvocation: V2RoomInvocation(request), deadline: deadline)
     }
-
-    func submit(decodedInvocation: V2DecodedRoomInvocation<Request>,
+    func submit(decodedInvocation: V2RoomInvocation<Request>,
                 deadline: ContinuousClock.Instant) async throws -> Response {
-        try await submit(encodedRequest: decodedInvocation.encodedRequest,
-                         decodedRequest: decodedInvocation.request, deadline: deadline)
-    }
-
-    private func submit(encodedRequest: Data, decodedRequest: Request?,
-                        deadline: ContinuousClock.Instant) async throws -> Response {
         V2SendPathTrace.current?.mark("lane_submit_enter")
         let requestID = UUID()
         return try await withTaskCancellationHandler {
@@ -142,7 +132,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
             pendingAdmissions += 1
             defer { pendingAdmissions -= 1 }
-            let permit = try budget.acquire(roomID: token.roomID, encodedRequest: encodedRequest)
+            let permit = try budget.acquire(roomID: token.roomID, byteCount: decodedInvocation.byteCount)
             // Synchronous admission still consumes time; recheck cancellation and deadline.
             guard phase == .ready, !Task.isCancelled, clock.now < deadline else {
                 let failure = phase != .ready ? rejection() : V2RoomCallFailure.notAccepted(
@@ -151,15 +141,7 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
                 budget.release(permit)
                 throw failure
             }
-            let request: Request
-            do {
-                if let decodedRequest { request = decodedRequest }
-                else { request = try JSONDecoder().decode(Request.self, from: permit.encodedRequest) }
-            }
-            catch {
-                budget.release(permit)
-                throw V2RoomCallFailure.notAccepted(.invalidRequest)
-            }
+            let request = decodedInvocation.request
             if case .profileVisibility = classify(request), permit.byteCount > 64 * 1_024 {
                 budget.release(permit)
                 throw V2RoomCallFailure.notAccepted(.invalidRequest)
@@ -213,10 +195,9 @@ public actor V2RoomTurnLane<Request: Decodable & Sendable, Response: Sendable> {
             guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
             let boundedDeadline = min(deadline, clock.now + configuration.reservationTimeout.duration)
             guard clock.now < boundedDeadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-            let bytes = try JSONEncoder().encode(grant)
             pendingAdmissions += 1
             defer { pendingAdmissions -= 1 }
-            let permit = try budget.acquireReservation(roomID: token.roomID, encodedRequest: bytes)
+            let permit = try budget.acquireReservation(roomID: token.roomID, byteCount: V2ActorPayloadBudget.retainedBytes(of: grant))
             guard phase == .ready, !Task.isCancelled, clock.now < boundedDeadline, nextOrdinal < UInt64.max else {
                 let failure = phase != .ready ? rejection() : V2RoomCallFailure.notAccepted(
                     Task.isCancelled ? .cancelled : .deadlineExceeded

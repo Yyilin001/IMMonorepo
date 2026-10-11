@@ -20,8 +20,10 @@ struct V2IndexedFIFOTests {
         #expect(queue.isEmpty && queue.first == nil && queue.removeFirst() == nil)
         queue.append(12, key: 12)
         #expect(queue.first == 12 && queue.count == 1)
+        #expect(queue.firstMap { $0 * 2 } == 24)
         queue.removeAll()
         #expect(queue.isEmpty && queue.count == 0)
+        #expect(queue.firstMap { $0 * 2 } == nil)
     }
     @Test("expiry and in-place updates preserve order and permit key reuse")
     func borrowedTraversalAndExpiry() {

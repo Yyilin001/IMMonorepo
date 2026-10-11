@@ -4,17 +4,23 @@ import Foundation
 public struct V2PolicySnapshotWire: Codable, Equatable, Sendable {
     public let scope: V2PolicyScopeWire
     public let version: Int64
-    public let facts: Data
-    public init(scope: V2PolicyScopeWire, version: Int64, facts: Data) throws {
-        guard version > 0, !facts.isEmpty, facts.count <= 16_384 else {
+    public let facts: V2PolicyOwnerFacts
+    public init(scope: V2PolicyScopeWire, version: Int64, facts: V2PolicyOwnerFacts) throws {
+        guard version > 0, V2ActorPayloadBudget.retainedBytes(of: facts) <= 16_384 else {
             throw V2ActorContractError.invalidConfiguration("policy snapshot")
+        }
+        switch (scope.kind, facts) {
+        case (.account, .account(let account)) where account.userID == scope.first: break
+        case (.stranger, .stranger(let setting)) where setting.userID == scope.first: break
+        case (.pair, .pair): break
+        default: throw V2ActorContractError.invalidConfiguration("policy snapshot scope")
         }
         self.scope = scope; self.version = version; self.facts = facts
     }
     public init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(scope: c.decode(V2PolicyScopeWire.self, forKey: .scope),
-            version: c.decode(Int64.self, forKey: .version), facts: c.decode(Data.self, forKey: .facts))
+            version: c.decode(Int64.self, forKey: .version), facts: c.decode(V2PolicyOwnerFacts.self, forKey: .facts))
     }
 }
 public struct V2PolicySnapshotSubscriberWire: Codable, Hashable, Sendable {

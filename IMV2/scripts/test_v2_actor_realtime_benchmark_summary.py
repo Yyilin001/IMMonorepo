@@ -71,7 +71,7 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
             two = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
             self.assertEqual(two['IM_V2_SEND_PATH_TRACE_MODE'], 'sampled')
             self.assertEqual(two['IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED'], 'true')
-            self.assertEqual(two['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'], 'false')
+            self.assertEqual(two['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'], 'true')
             args.candidate_actor_binary_invocations = 'enabled'
             args.candidate_send_path_trace_mode = 'all'
             args.candidate_message_write_prepared_queries = 'disabled'

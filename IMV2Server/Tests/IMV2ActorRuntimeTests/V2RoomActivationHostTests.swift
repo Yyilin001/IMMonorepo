@@ -7,7 +7,7 @@ import Testing
 
 @Suite("Room activation host owns restore, lease and retirement")
 struct V2RoomActivationHostTests {
-    @Test("host pure-read inspection reuses one decoding for ordinary lane execution")
+    @Test("local host and execution handle never encode or decode ordinary requests")
     func ordinaryInvocationDecodesOnce() async throws {
         DecodeCountCommand.count.withLock { $0 = 0 }
         let configuration = try V2RoomRuntimeConfiguration(maximumRequestBytes: 128)
@@ -29,18 +29,21 @@ struct V2RoomActivationHostTests {
             let room = RoomID(uuid: UUID()), owner = try V2RoomDataOwner(shardID: "decode-once", epoch: 0)
             guard case .ready(let token) = try await host.activate(roomID: room, owner: owner,
                 deadline: .now + .seconds(2)) else { throw TestFailure.restore }
-            let bytes = try JSONEncoder().encode(DecodeCountCommand(value: 31))
-            #expect(try await host.invoke(token: token, encodedRequest: bytes, deadline: .now + .seconds(2)) == 31)
-            #expect(DecodeCountCommand.count.withLock { $0 } == 1)
-            // The unchanged public handle still accepts only raw bytes and decodes once.
+            let request = DecodeCountCommand(value: 31)
+            #expect(try await host.invoke(token: token, request: request, deadline: .now + .seconds(2)) == 31)
+            #expect(DecodeCountCommand.count.withLock { $0 } == 0)
+            // Local callers retain and pass models without invoking Codable.
             let handle = try host.executionHandle(token: token)
-            #expect(try await handle.invoke(encodedRequest: bytes, deadline: .now + .seconds(2)) == 31)
-            #expect(DecodeCountCommand.count.withLock { $0 } == 2)
+            #expect(try await handle.invoke(request: request, deadline: .now + .seconds(2)) == 31)
+            #expect(DecodeCountCommand.count.withLock { $0 } == 0)
+            #expect(try await host.invoke(token: token, request: DecodeCountCommand(value: 32), deadline: .now + .seconds(2)) == 32)
+            #expect(try await handle.invoke(request: DecodeCountCommand(value: 33), deadline: .now + .seconds(2)) == 33)
+            #expect(DecodeCountCommand.count.withLock { $0 } == 0)
             await #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
-                try await host.invoke(token: token, encodedRequest: Data(repeating: 32, count: 129),
+                try await host.invoke(token: token, request: DecodeCountCommand(value: 1, padding: String(repeating: "x", count: 129)),
                                       deadline: .now + .seconds(2))
             }
-            #expect(DecodeCountCommand.count.withLock { $0 } == 2)
+            #expect(DecodeCountCommand.count.withLock { $0 } == 0)
             #expect(budget.snapshot().commandCount == 0)
             #expect((await host.stop(deadline: .now + .seconds(2))).completed)
         } catch {
@@ -51,8 +54,10 @@ struct V2RoomActivationHostTests {
     private struct DecodeCountCommand: Codable, Sendable {
         static let count = Mutex(0)
         let value: Int
-        init(value: Int) { self.value = value }
+        let padding: String
+        init(value: Int, padding: String = "") { self.value = value; self.padding = padding }
         init(from decoder: any Decoder) throws {
+            padding = ""
             Self.count.withLock { $0 += 1 }
             value = try decoder.container(keyedBy: CodingKeys.self).decode(Int.self, forKey: .value)
         }
@@ -70,7 +75,7 @@ struct V2RoomActivationHostTests {
             #expect(didEnter)
         do {
             #expect(try await fixture.host.invoke(token: token,
-                encodedRequest: JSONEncoder().encode(Command(value: 1)), deadline: .now + .milliseconds(200)) == 1)
+                request: Command(value: 1), deadline: .now + .milliseconds(200)) == 1)
             release.signal(); await held.value
             #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
         } catch {
@@ -89,7 +94,7 @@ struct V2RoomActivationHostTests {
         let handle = try fixture.host.executionHandle(token: token)
         qualification.revoke()
         await #expect(throws: V2RoomCallFailure.notAccepted(.leaseLost)) {
-            try await handle.invoke(encodedRequest: JSONEncoder().encode(Command(value: 1)), deadline: .now + .seconds(1))
+            try await handle.invoke(request: Command(value: 1), deadline: .now + .seconds(1))
         }
         await fixture.host.qualificationDidChange()
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
@@ -729,13 +734,13 @@ struct V2RoomActivationHostTests {
         let end = ContinuousClock.now + .seconds(5)
         let request = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
             afterRoomSequence: 0, pageSize: 1)))
-        let bytes = try JSONEncoder().encode(request)
+        let bytes = try request
         let heldWrite = try await host.reserve(token: token, requestID: UUID(), deadline: end)
         let successfulRead = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
             afterRoomSequence: 0, pageSize: 2)))
-        let successfulBytes = try JSONEncoder().encode(successfulRead)
+        let successfulBytes = try successfulRead
         let reads = [successfulBytes, bytes].map { body in
-            Task { try await host.invoke(token: token, encodedRequest: body, deadline: end) }
+            Task { try await host.invoke(token: token, request: body, deadline: end) }
         }
         var late: Task<V2RoomResponse, any Error>?
         var lateKnown: Task<V2RoomResponse, any Error>?
@@ -746,7 +751,7 @@ struct V2RoomActivationHostTests {
             reads[0].cancel()
             #expect(budget.snapshot().commandCount == 3)
             await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-                _ = try await host.invoke(token: token, encodedRequest: bytes, deadline: end)
+                _ = try await host.invoke(token: token, request: bytes, deadline: end)
             }
             await readGate.open()
             await expectFailure(.notAccepted(.cancelled), reads[0])
@@ -756,16 +761,16 @@ struct V2RoomActivationHostTests {
             #expect(await invalidations.count == 0)
             #expect(await host.abortReservation(heldWrite))
             let subscribe = V2RoomRequest.roomLog(.subscribe(.init(roomID: room, actorUserID: viewer)))
-            _ = try await host.invoke(token: token, encodedRequest: JSONEncoder().encode(subscribe), deadline: end)
+            _ = try await host.invoke(token: token, request: subscribe, deadline: end)
             #expect(await laneExecutions.count == 1) // Subscribe retains the original lane.
             let second = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
                 afterRoomSequence: 1, pageSize: 1)))
-            let secondBytes = try JSONEncoder().encode(second)
-            late = Task { try await host.invoke(token: token, encodedRequest: secondBytes, deadline: end) }
+            let secondBytes = try second
+            late = Task { try await host.invoke(token: token, request: secondBytes, deadline: end) }
             let known = V2RoomRequest.roomLog(.pull(try .init(roomID: room, actorUserID: viewer,
                 afterRoomSequence: 1, pageSize: 2)))
-            let knownBytes = try JSONEncoder().encode(known)
-            lateKnown = Task { try await host.invoke(token: token, encodedRequest: knownBytes, deadline: end) }
+            let knownBytes = try known
+            lateKnown = Task { try await host.invoke(token: token, request: knownBytes, deadline: end) }
             try await lateGate.waitForEntries(2)
             qualification.revoke()
             await host.qualificationDidChange()
@@ -826,22 +831,22 @@ struct V2RoomActivationHostTests {
         let peer = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "g", serviceID: "g", incarnationID: UUID()),
             endpointReference: Data([1]), address: "127.0.0.1", port: 9000)
         let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        func bytes(_ sequence: UInt64) throws -> Data {
-            try JSONEncoder().encode(V2RoomRequest.roomSubscription(.renew(.init(roomID: room, actorUserID: user,
-                gatewayDescriptor: peer, expectedFence: fence, appliedControlSequence: sequence))))
+        func bytes(_ sequence: UInt64) throws -> V2RoomRequest {
+            try V2RoomRequest.roomSubscription(.renew(.init(roomID: room, actorUserID: user,
+                gatewayDescriptor: peer, expectedFence: fence, appliedControlSequence: sequence)))
         }
         let end = ContinuousClock.now + .seconds(5)
         let held = try await host.reserve(token: token, requestID: UUID(), deadline: end)
         let unknownBytes = try bytes(1), knownBytes = try bytes(2)
-        let unknown = Task { try await host.invoke(token: token, encodedRequest: unknownBytes, deadline: end) }
-        let cancelled = Task { try await host.invoke(token: token, encodedRequest: knownBytes, deadline: end) }
+        let unknown = Task { try await host.invoke(token: token, request: unknownBytes, deadline: end) }
+        let cancelled = Task { try await host.invoke(token: token, request: knownBytes, deadline: end) }
         do {
             try await gate.waitForEntries(2)
             #expect(await lane.count == 0)
             #expect(budget.snapshot().commandCount == 3)
             cancelled.cancel()
             await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-                _ = try await host.invoke(token: token, encodedRequest: knownBytes, deadline: end)
+                _ = try await host.invoke(token: token, request: knownBytes, deadline: end)
             }
             await gate.open()
             await expectFailure(.outcomeUnknown, unknown)
@@ -851,11 +856,11 @@ struct V2RoomActivationHostTests {
             #expect(await host.abortReservation(held))
             let subscribe = V2RoomRequest.roomSubscription(.subscribe(.init(roomID: room, actorUserID: user,
                                                                            gatewayDescriptor: peer)))
-            _ = try await host.invoke(token: token, encodedRequest: JSONEncoder().encode(subscribe), deadline: end)
+            _ = try await host.invoke(token: token, request: subscribe, deadline: end)
             #expect(await lane.count == 1)
             qualification.revoke()
             await #expect(throws: V2RoomCallFailure.self) {
-                _ = try await host.invoke(token: token, encodedRequest: knownBytes, deadline: end)
+                _ = try await host.invoke(token: token, request: knownBytes, deadline: end)
             }
             #expect(budget.snapshot().commandCount == 0)
         } catch {
@@ -953,7 +958,7 @@ struct V2RoomActivationHostTests {
 
         func invoke(token: V2RoomActivationToken) -> Task<Int, any Error> {
             Task {
-                try await host.invoke(token: token, encodedRequest: JSONEncoder().encode(Command(value: 1)),
+                try await host.invoke(token: token, request: Command(value: 1),
                                       deadline: .now + .seconds(2))
             }
         }

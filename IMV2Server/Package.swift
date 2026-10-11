@@ -54,7 +54,7 @@ let package = Package(
         .executableTarget(name: "IMV2ResourceImageWorker"),
         .target(
             name: "IMV2ActorContracts",
-            dependencies: ["IMV2Core"]
+            dependencies: ["IMV2Core", .product(name: "SwiftProtobuf", package: "swift-protobuf")]
         ),
         .testTarget(
             name: "IMV2ActorContractsTests",
@@ -73,6 +73,7 @@ let package = Package(
             name: "IMV2ActorCluster",
             dependencies: [
                 "IMV2ActorRuntime", "IMV2ActorContracts", "IMV2Core",
+                .product(name: "SwiftProtobuf", package: "swift-protobuf"),
                 .product(name: "DistributedCluster", package: "swift-distributed-actors"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),

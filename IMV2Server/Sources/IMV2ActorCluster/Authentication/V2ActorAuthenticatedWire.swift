@@ -25,7 +25,7 @@ public enum V2ActorCallPrincipal: Codable, Equatable, Sendable {
 
 /// 加密字节是下方封闭类型消息体的编码，而非按字符串分发的业务载荷。
 /// 接收方先限制字节长度并验证原始签名，再解码为预期的消息体类型；
-/// 验证其他平台发来的签名时，不会重新编码 JSON。
+/// 验签不重新编码消息体。
 public struct V2ActorSignedPacket: Codable, Equatable, Sendable {
     public let signerID: V2ActorServiceID
     public let body: Data

@@ -185,7 +185,7 @@ public actor V2RoomClusterInboundService {
         let maximumBytes: Int
         if isBoundedBatch(verified.call.request) { maximumBytes = min(262_144, limits.maximumReplyBytes) }
         else { maximumBytes = limits.maximumReplyBytes }
-        return try signer.signAuthenticated(reply, binary: V2ActorAuthenticatedBodyFraming.recognizes(packet.body),
+        return try signer.sign(reply,
             maximumBytes: maximumBytes)
     }
 
@@ -346,7 +346,7 @@ public actor V2RoomClusterInboundService {
             removePhysicalReference(for: token, actorID: actor.id)
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
-        return try JSONEncoder().encode(actor.id)
+        return try V2ActorProtobuf.encode(actor.id)
     }
 
     private func dispatch(_ request: V2ActorRPCRequest,
@@ -396,11 +396,8 @@ public actor V2RoomClusterInboundService {
             return .ready(token: token, physicalReference: try await physicalReference(for: token))
         case .invoke(let token, let request):
             V2SendPathTrace.current?.mark("receiver_invoke_enter")
-            let bytes: Data
-            do { bytes = try JSONEncoder().encode(request) }
-            catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             V2SendPathTrace.current?.mark("receiver_host_dispatch")
-            let result = try await host.invoke(token: token, encodedRequest: bytes, deadline: deadline)
+            let result = try await host.invoke(token: token, request: request, deadline: deadline)
             V2SendPathTrace.current?.mark("receiver_host_return")
             return .result(result)
         case .subscriptionRenewBatch(let items):
@@ -410,8 +407,7 @@ public actor V2RoomClusterInboundService {
                 for (index, item) in items.enumerated() {
                     group.addTask { [host] in
                         do {
-                            let bytes = try JSONEncoder().encode(V2RoomRequest.roomSubscription(.renew(item.command)))
-                            let reply = try await host.invoke(token: item.token, encodedRequest: bytes, deadline: deadline)
+                            let reply = try await host.invoke(token: item.token, request: .roomSubscription(.renew(item.command)), deadline: deadline)
                             guard case .roomSubscription(let result) = reply else { throw V2RoomCallFailure.outcomeUnknown }
                             return (index, .init(token: item.token, outcome: .result(result)))
                         } catch let failure as V2RoomCallFailure {

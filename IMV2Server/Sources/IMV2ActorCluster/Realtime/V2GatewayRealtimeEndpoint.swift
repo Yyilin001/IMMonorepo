@@ -83,6 +83,7 @@ struct RoomSubscriptionBatchCall: Codable, Sendable {
     let attemptID: UUID
     let sourceShardID: String
     let batch: V2RoomSubscriptionDeliveryBatch
+
 }
 struct RoomSubscriptionBatchReply: Codable, Sendable {
     let recipient: V2GatewayRealtimeIdentity
@@ -466,7 +467,7 @@ public actor V2RealtimeClusterSender {
         let limits = self.limits; let incarnation = self.incarnation
         let started = ContinuousClock.now
         let task = Task<Session, Error> {
-            let id = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: target.endpointReference)
+            let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: target.endpointReference)
             guard id.node.endpoint.host == target.address, id.node.endpoint.port == target.port else { throw V2ActorAuthenticationError.wrongRecipient }
             let endpoint = try V2GatewayRealtimeEndpoint.resolve(id: id, using: system)
             let hello = RealtimeHello(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation, recipient: target.identity, handshakeID: UUID(),
@@ -554,7 +555,7 @@ func buildRealtimeTransport(system: ClusterSystem, identity: V2GatewayRealtimeId
     let inbound = V2GatewayRealtimeInbound(identity: identity, signer: signer, trust: trust, ingress: ingress,
                                            serviceOwnerAccess: serviceOwnerAccess, limits: limits)
     let endpoint = V2GatewayRealtimeEndpoint(actorSystem: system, service: inbound)
-    let descriptor = V2GatewayRealtimeDescriptor(identity: identity, endpointReference: try JSONEncoder().encode(endpoint.id), address: address, port: port)
+    let descriptor = V2GatewayRealtimeDescriptor(identity: identity, endpointReference: try V2ActorProtobuf.encode(endpoint.id), address: address, port: port)
     try descriptor.validate()
     inbound.bindEndpointReference(descriptor.endpointReference)
     return V2RealtimeTransportHandle(descriptor: descriptor,

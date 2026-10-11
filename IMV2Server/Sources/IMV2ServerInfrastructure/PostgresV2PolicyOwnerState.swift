@@ -1,32 +1,14 @@
+import IMV2ActorContracts
 import Foundation
 import FluentKit
 import IMV2ServerApplication
 import SQLKit
 
-package struct V2PolicyAccountFacts: Codable, Equatable, Sendable {
-    package let userID: UUID
-    package let isActive: Bool
-    package let specialKind: String?
-    package let specialStatus: String?
-    package let allowsServiceMessages: Bool?
-    package let allowsCustomerMessages: Bool?
+extension V2PolicyAccountFacts {
     var controlAccount: V2DirectSendControlAccount {
         .init(userID: userID, isActive: isActive, specialKind: specialKind, specialStatus: specialStatus,
             allowsServiceMessages: allowsServiceMessages, allowsCustomerMessages: allowsCustomerMessages)
     }
-}
-package struct V2PolicyPairFacts: Codable, Equatable, Sendable {
-    package let blocked: Bool
-    package let isFriend: Bool
-}
-package struct V2PolicyStrangerFacts: Codable, Equatable, Sendable {
-    package let userID: UUID
-    package let allowsStrangers: Bool
-}
-package enum V2PolicyOwnerFacts: Codable, Equatable, Sendable {
-    case account(V2PolicyAccountFacts)
-    case stranger(V2PolicyStrangerFacts)
-    case pair(V2PolicyPairFacts)
 }
 /// Mutation facts are read while holding the scope and domain locks.
 struct PostgresV2PolicyOwnerStateReader: Sendable {

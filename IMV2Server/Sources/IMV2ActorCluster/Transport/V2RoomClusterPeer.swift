@@ -645,17 +645,16 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     /// explicit request failure, never a partially dispatched packing attempt.
     static func renewalBatches(_ items: [V2RoomSubscriptionRenewBatchItem],
         template: V2ActorAuthenticatedCall, maximumBytes: Int) throws -> [[V2RoomSubscriptionRenewBatchItem]] {
-        let encoder = JSONEncoder()
         let empty = V2ActorAuthenticatedCall(version: template.version, serviceID: template.serviceID,
             callerIncarnation: template.callerIncarnation, recipient: template.recipient,
             sessionID: template.sessionID, sequence: template.sequence, attemptID: template.attemptID,
             traceID: template.traceID, remainingBudget: template.remainingBudget,
             principal: template.principal, request: .subscriptionRenewBatch([]))
-        let overhead = try encoder.encode(empty).count
+        let overhead = V2ActorPayloadBudget.retainedBytes(of: empty)
         var batches: [[V2RoomSubscriptionRenewBatchItem]] = [], pending: [V2RoomSubscriptionRenewBatchItem] = []
         var pendingBytes = overhead
         for item in items {
-            let itemBytes = try encoder.encode(item).count
+            let itemBytes = V2ActorPayloadBudget.retainedBytes(of: item)
             guard itemBytes <= maximumBytes - overhead else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             let separator = pending.isEmpty ? 0 : 1
             if pending.count == 64 || pendingBytes + separator + itemBytes > maximumBytes {
@@ -954,7 +953,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
 
     @concurrent private nonisolated func signRequest(_ call: V2ActorAuthenticatedCall,
         maximumBytes: Int) async throws -> V2ActorSignedPacket {
-        try signer.signAuthenticated(call, binary: system.settings.serialization.binaryDistributedInvocations,
+        try signer.sign(call,
             maximumBytes: maximumBytes)
     }
     @concurrent private nonisolated func verifyReply(_ reply: TransportReply,
@@ -1297,7 +1296,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private func rememberPhysical(_ bytes: Data, token: V2RoomActivationToken) throws {
         pruneReservations()
         guard !bytes.isEmpty, bytes.count <= 16_384 else { throw V2ActorAuthenticationError.oversized }
-        let id = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: bytes)
+        let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: bytes)
         if physicalReferences.actor(for: token)?.id == id { return }
         let actor = try V2RoomClusterActor.resolve(id: id, using: system)
         let previous = physicalReferences.actor(for: token)

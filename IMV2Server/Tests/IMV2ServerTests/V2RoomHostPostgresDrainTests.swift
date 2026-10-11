@@ -88,7 +88,7 @@ struct V2RoomHostPostgresDrainTests {
 
             let call = Task {
                 try await host.invoke(token: firstToken,
-                    encodedRequest: JSONEncoder().encode(DrainCommand()),
+                    request: DrainCommand(),
                     deadline: .now + .seconds(5))
             }
             try await transactionGate.waitForEntry()

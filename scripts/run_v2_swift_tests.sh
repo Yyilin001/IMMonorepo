@@ -6,6 +6,7 @@ repo_root="$(cd "${script_dir}/.." && pwd)"
 
 python3 "${repo_root}/scripts/check_v2_postgres_vendor.py"
 python3 "${repo_root}/scripts/check_v2_server_boundaries.py"
+python3 "${repo_root}/scripts/check_actor_serialization_boundaries.py"
 
 for package in IMV2Core IMV2ClientKit IMV2Server; do
   # Let the selected Swift toolchain run Swift Testing itself. Invoking
@@ -23,6 +24,7 @@ done
 # coverage and strict deployment examples in the same required gate as the
 # code they describe. A green unit suite must not permit deployment drift.
 bash "${repo_root}/scripts/check_v2_protobuf_generated.sh"
+bash "${repo_root}/scripts/check_actor_protobuf_generated.sh"
 bash "${repo_root}/IMV2/scripts/test_v2_local_environment_contract.sh"
 bash "${repo_root}/scripts/check_v2_schema_readiness_tables.sh"
 if [[ "${V2_SCHEMA_BOOTSTRAP_COVERED_BY_POSTGRES_INTEGRATION:-0}" == "1" ]]; then

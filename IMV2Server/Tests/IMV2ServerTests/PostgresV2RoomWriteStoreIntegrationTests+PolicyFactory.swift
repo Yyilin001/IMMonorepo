@@ -253,12 +253,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)))
                 }
                 let first = try request("factory policy accepted")
-                let accepted = try await host.invoke(token: token, encodedRequest: JSONEncoder().encode(first), deadline: .now + .seconds(10))
+                let accepted = try await host.invoke(token: token, request: first, deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let receipt))) = accepted, case .accepted = receipt.outcome else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
                 let encodedForwards = try exports.map { value in
-                    try JSONEncoder().encode(V2RoomRequest.forward(.importExport(V2ActorForwardExportWire(domain: value))))
+                    try V2RoomRequest.forward(.importExport(V2ActorForwardExportWire(domain: value)))
                 }
                 let roomCommandUsage = try await ownerSQL.raw("SELECT command_window_used AS value FROM im_v2.room_admission WHERE room_id=\(bind: roomID.uuidValue!)").first(decoding: PolicyFactoryCount.self)?.value
                 let shardCommandUsage = try await ownerSQL.raw("SELECT command_window_used AS value FROM im_v2.shard_admission_pools WHERE room_shard_id='room-b'").first(decoding: PolicyFactoryCount.self)?.value
@@ -271,7 +271,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(await coldAdmission.snapshot().syncInFlight == 1)
                     // Occupy all control preparation capacity. This warm
                     // room must still forward using its cached facts.
-                    return try await host.invoke(token: token, encodedRequest: encodedForwards[0], deadline: .now + .seconds(10))
+                    return try await host.invoke(token: token, request: encodedForwards[0], deadline: .now + .seconds(10))
                 }
                 guard case .forward(.imported(.accepted)) = firstForward else { throw PolicyFactoryForwardError.unexpectedForward(firstForward) }
                 let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: policyOwners)
@@ -294,20 +294,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table) RENAME TO \(unsafeRaw: table + "_group_hidden")").run()
                         }
                     }
-                    let warmRequest = try JSONEncoder().encode(request("group ignores pair block"))
+                    let warmRequest = try request("group ignores pair block")
                     let unaffected = try await v2WithAdmittedRoomDatabaseWork(coldAdmission, workClass: .sync,
                         callerDeadline: .now + .seconds(10)) {
                         #expect(await coldAdmission.snapshot().syncInFlight == 1)
-                        return try await host.invoke(token: token, encodedRequest: warmRequest, deadline: .now + .seconds(10))
+                        return try await host.invoke(token: token, request: warmRequest, deadline: .now + .seconds(10))
                     }
                     guard case .messaging(.sendOperation(.receipt(let value))) = unaffected,
                           case .accepted = value.outcome else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                    let groupForward = try await host.invoke(token: token, encodedRequest: encodedForwards[1], deadline: .now + .seconds(10))
+                    let groupForward = try await host.invoke(token: token, request: encodedForwards[1], deadline: .now + .seconds(10))
                     guard case .forward(.imported(.accepted)) = groupForward else { throw PolicyFactoryForwardError.cachedImport }
                     #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                     try await ownerSQL.raw("UPDATE im_v2.room_memberships SET left_revision=0 WHERE room_id=\(bind: roomID.uuidValue!) AND user_id=\(bind: senderUUID)").run()
                     let nonmember = try await host.invoke(token: token,
-                        encodedRequest: JSONEncoder().encode(request("former member denied")), deadline: .now + .seconds(10))
+                        request: request("former member denied"), deadline: .now + .seconds(10))
                     guard case .messaging(.sendOperation(.receipt(let nonmemberReceipt))) = nonmember,
                           nonmemberReceipt.outcome == .rejected(.permissionDenied) else { throw V2RoomWriteStoreError.corruptPersistenceState }
                     try await ownerSQL.raw("UPDATE im_v2.room_memberships SET left_revision=NULL WHERE room_id=\(bind: roomID.uuidValue!) AND user_id=\(bind: senderUUID)").run()
@@ -316,7 +316,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         VALUES (\(bind: roomID.uuidValue!),\(bind: senderUUID),clock_timestamp()+interval '1 minute',\(bind: memberTwoUUID),\(bind: UUID()),clock_timestamp())
                         """).run()
                     let muted = try await host.invoke(token: token,
-                        encodedRequest: JSONEncoder().encode(request("muted member denied")), deadline: .now + .seconds(10))
+                        request: request("muted member denied"), deadline: .now + .seconds(10))
                     guard case .messaging(.sendOperation(.receipt(let muteReceipt))) = muted,
                           muteReceipt.outcome == .rejected(.permissionDenied) else { throw V2RoomWriteStoreError.corruptPersistenceState }
                     try await ownerSQL.raw("DELETE FROM im_v2.room_member_mutes WHERE room_id=\(bind: roomID.uuidValue!)").run()
@@ -328,17 +328,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let disable = try V2PostgresAccountDisableService(operatorPrincipal: "operator:test", policyOwners: policyOwners)
                     _ = try await disable.disable(.init(userID: senderID, operationID: UUID(), reason: .policyEnforcement))
                 }
-                let rejectedForward = try await host.invoke(token: token, encodedRequest: encodedForwards[group ? 2 : 1], deadline: .now + .seconds(10))
+                let rejectedForward = try await host.invoke(token: token, request: encodedForwards[group ? 2 : 1], deadline: .now + .seconds(10))
                 guard case .forward(.imported(.rejected(let code))) = rejectedForward,
                       code == (group ? "FORBIDDEN" : "DIRECT_MESSAGE_RESTRICTED") else {
                     throw PolicyFactoryForwardError.deniedImport
                 }
-                #expect(try await host.invoke(token: token, encodedRequest: encodedForwards[0], deadline: .now + .seconds(10)) == firstForward)
-                let denied = try await host.invoke(token: token, encodedRequest: JSONEncoder().encode(request("factory policy denied")),
+                #expect(try await host.invoke(token: token, request: encodedForwards[0], deadline: .now + .seconds(10)) == firstForward)
+                let denied = try await host.invoke(token: token, request: request("factory policy denied"),
                     deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let denial))) = denied,
                       denial.outcome == .rejected(group ? .permissionDenied : .directPolicyDenied) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                #expect(try await host.invoke(token: token, encodedRequest: JSONEncoder().encode(first), deadline: .now + .seconds(10)) == accepted)
+                #expect(try await host.invoke(token: token, request: first, deadline: .now + .seconds(10)) == accepted)
                 let combined = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations[.durableFenceCombined]
                 #expect(combined?.settledToResumedCount ?? 0 == 0)
                 #expect(combined?.resumedToDispatchCount ?? 0 == 0)

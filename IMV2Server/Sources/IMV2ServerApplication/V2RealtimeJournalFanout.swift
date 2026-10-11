@@ -299,11 +299,11 @@ public actor V2RealtimeJournalFanout {
         var result: [[T]] = [], chunk: [T] = []
         for item in items {
             let candidate = chunk + [item]
-            let encodedSize = try JSONEncoder().encode(candidate).count
+            let encodedSize = V2ActorPayloadBudget.retainedBytes(of: candidate)
             if candidate.count > maximumItems || encodedSize > maximumBytes - 4_096 {
                 guard !chunk.isEmpty else { throw V2RealtimeJournalError.invalidInput }
                 result.append(chunk); chunk = [item]
-                guard (try JSONEncoder().encode(chunk).count) <= maximumBytes - 4_096 else { throw V2RealtimeJournalError.invalidInput }
+                guard (V2ActorPayloadBudget.retainedBytes(of: chunk)) <= maximumBytes - 4_096 else { throw V2RealtimeJournalError.invalidInput }
             } else { chunk = candidate }
         }
         if !chunk.isEmpty { result.append(chunk) }

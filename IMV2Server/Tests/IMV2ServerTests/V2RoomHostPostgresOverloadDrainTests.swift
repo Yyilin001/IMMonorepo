@@ -67,7 +67,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 let firstID = UUID(), secondID = UUID(), rejectedID = UUID()
                 let first = Task {
                     try await host.invoke(token: hotToken,
-                        encodedRequest: try overloadSendBytes(room: roomID, operation: firstID),
+                        request: try overloadSendBytes(room: roomID, operation: firstID),
                         deadline: .now + .seconds(12))
                 }
                 try await overloadWaitUntil {
@@ -75,7 +75,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 }
                 let second = Task {
                     try await host.invoke(token: hotToken,
-                        encodedRequest: try overloadSendBytes(room: roomID, operation: secondID),
+                        request: try overloadSendBytes(room: roomID, operation: secondID),
                         deadline: .now + .seconds(12))
                 }
                 try await overloadWaitUntil { await hosted.budget.snapshot().commandCount == 2 }
@@ -83,14 +83,14 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 // the per-room limit, independently of the later host limit.
                 await overloadExpectFailure(.notAccepted(.overloaded), Task {
                     try await host.invoke(token: hotToken,
-                        encodedRequest: try overloadSendBytes(room: roomID, operation: rejectedID),
+                        request: try overloadSendBytes(room: roomID, operation: rejectedID),
                         deadline: .now + .seconds(5))
                 })
                 #expect(try await overloadCompletionCount(sql, room: roomID, operation: rejectedID) == 0)
                 #expect(await hosted.budget.snapshot().commandCount == 2)
                 let healthyCall = Task {
                     try await host.invoke(token: healthyToken,
-                        encodedRequest: try overloadRecoveryBytes(room: healthy),
+                        request: try overloadRecoveryBytes(room: healthy),
                         deadline: .now + .seconds(12))
                 }
                 try await overloadWaitUntil { await hosted.budget.snapshot().commandCount == 3 }
@@ -98,7 +98,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 // rejection can only come from the host-wide three-call cap.
                 await overloadExpectFailure(.notAccepted(.overloaded), Task {
                     try await host.invoke(token: excessToken,
-                        encodedRequest: try overloadRecoveryBytes(room: excess),
+                        request: try overloadRecoveryBytes(room: excess),
                         deadline: .now + .seconds(5))
                 })
                 #expect(await hosted.budget.snapshot().commandCount == 3)
@@ -119,7 +119,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 #expect(try await overloadLiveLease(sql, room: roomID, token: hotToken))
                 await overloadExpectFailure(.notAccepted(.staleActivation), Task {
                     try await host.invoke(token: hotToken,
-                        encodedRequest: try overloadSendBytes(room: roomID, operation: UUID()),
+                        request: try overloadSendBytes(room: roomID, operation: UUID()),
                         deadline: .now + .seconds(5))
                 })
                 await hotLockerGate.open()
@@ -179,9 +179,9 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 let firstRequest = try overloadSendBytes(room: roomID, operation: firstID)
                 let secondRequest = try overloadSendBytes(room: secondRoom, operation: secondID)
                 let first = Task { try await host.invoke(token: firstToken,
-                    encodedRequest: firstRequest, deadline: .now + .seconds(8)) }
+                    request: firstRequest, deadline: .now + .seconds(8)) }
                 let second = Task { try await host.invoke(token: secondToken,
-                    encodedRequest: secondRequest, deadline: .now + .seconds(8)) }
+                    request: secondRequest, deadline: .now + .seconds(8)) }
                 try await overloadWaitUntil {
                     try await sql.raw("""
                         SELECT count(*)::bigint AS value FROM pg_stat_activity
@@ -265,15 +265,15 @@ private func overloadActivate(_ host: V2RoomActivationHost<V2RoomRequest, V2Room
     return token
 }
 
-private func overloadSendBytes(room: RoomID, operation: UUID) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: room,
+private func overloadSendBytes(room: RoomID, operation: UUID) throws -> V2RoomRequest {
+    try V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: room,
         senderUserID: senderID, clientMessageID: .init(uuid: operation), text: "overload",
-        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000))))
+        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000)))
 }
 
-private func overloadRecoveryBytes(room: RoomID) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.recovery(.init(roomID: room,
-        actorUserID: senderID, kind: .state)))
+private func overloadRecoveryBytes(room: RoomID) throws -> V2RoomRequest {
+    try V2RoomRequest.recovery(.init(roomID: room,
+        actorUserID: senderID, kind: .state))
 }
 
 private func overloadRequireAccepted(_ response: V2RoomResponse) throws {

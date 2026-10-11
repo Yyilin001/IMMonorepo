@@ -330,10 +330,10 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                                       advertisement.partitions.count <= 256,
                                       Set(advertisement.partitions.map { $0.token.partitionID }).count == advertisement.partitions.count else { throw V2ActorAuthenticationError.wrongRecipient }
                                 // Preserve the exact opaque bytes bound by the host. Re-encoding
-                                // an ActorID can reorder JSON keys and change its handshake digest.
+                                // the ActorID is unnecessary and would replace the signed byte identity.
                                 let reference = advertisement.endpointReference
                                 guard !reference.isEmpty, reference.count <= 16_384,
-                                      try JSONDecoder().decode(ClusterSystem.ActorID.self, from: reference) == advertisement.endpointID else {
+                                      try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: reference) == advertisement.endpointID else {
                                     throw V2ActorAuthenticationError.wrongRecipient
                                 }
                                 let values = try advertisement.partitions.map { lease in
@@ -383,7 +383,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             watchedDescriptors.removeValue(forKey: nodeID)
         }
         await publishQualification()
-        cache = cache.filter { (try? JSONDecoder().decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference)) != id }
+        cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference)) != id }
     }
     private func installDiscovered(_ result: DiscoveryResult) async {
         guard !stopped, result.generation >= appliedPollGeneration else { return }
@@ -470,7 +470,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             guard await sender.beginRetirement(retiring.identity, reference: retiring.reference) else { continue }
             guard let current = retiringReferences[id] else { continue }
             if !current.replaced {
-                cache = cache.filter { (try? JSONDecoder().decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
+                cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
                 softSuspendedReferences.insert(id)
                 retiringReferences.removeValue(forKey: id)
                 // Keep exact watch/identity; a new authenticated challenge may
@@ -488,7 +488,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                 watchedDescriptors.removeValue(forKey: retiring.identity.nodeID)
                 reachable.removeValue(forKey: retiring.identity.nodeID)
             }
-            cache = cache.filter { (try? JSONDecoder().decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
+            cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
             system.log.warning("Realtime shard reference retirement: actual calls settled", metadata: [
                 "realtime/retirement_reason": "authenticated_replacement_or_termination"
             ])
@@ -547,10 +547,10 @@ func buildRealtimeShardTransport(system: ClusterSystem, identity: V2GatewayRealt
             system.log.warning("Realtime shard authentication rejected", metadata: ["realtime/authentication_stage": "\(stage)"])
         })
     let endpoint = V2RealtimeShardEndpoint(actorSystem: system, service: inbound)
-    let endpointReference = try JSONEncoder().encode(endpoint.id)
+    let endpointReference = try V2ActorProtobuf.encode(endpoint.id)
     inbound.bindEndpointReference(endpointReference)
     let roster = Dictionary(uniqueKeysWithValues: discoveryPeers.map { ($0.nodeID, $0.serviceID) })
-    let rosterData = try JSONEncoder().encode(roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })
+    let rosterData = try V2ActorProtobuf.encode(roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })
     let digest = Data(SHA256.hash(data: rosterData))
     guard serviceQualification?.matches(localNodeID: identity.nodeID, roster: Set(roster.keys)) != false else { throw V2ActorAuthenticationError.invalidConfiguration }
     let qualification = try serviceQualification ?? V2ActorServiceQualification(localNodeID: identity.nodeID, roster: Set(roster.keys))

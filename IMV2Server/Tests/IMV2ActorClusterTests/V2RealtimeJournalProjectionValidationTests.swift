@@ -45,8 +45,8 @@ struct V2RealtimeJournalProjectionValidationTests {
                 membershipRoomID: RoomID(uuid: UUID())))
         try validateJournalProjectionBatch(.init(source: source, fence: fence,
             payload: .changes(fromExclusive: 0, throughInclusive: 1, entries: [membership])), limits: .init())
-        let encoded = try JSONEncoder().encode(membership)
-        #expect(try JSONDecoder().decode(V2RealtimeJournalProjectionEntry.self, from: encoded) == membership)
+        let encoded = try V2ActorProtobuf.encode(membership)
+        #expect(try V2ActorProtobuf.decode(V2RealtimeJournalProjectionEntry.self, from: encoded) == membership)
         let malformedRoom = V2RealtimeJournalProjectionEntry(sequence: 1,
             change: .userControlInvalidation(userID: user, controlVersion: 2, deviceID: nil,
                 membershipRoomID: try RoomID("invalid")))

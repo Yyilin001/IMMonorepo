@@ -1,3 +1,4 @@
+import IMV2ActorContracts
 import IMV2ServerContracts
 import Foundation
 import IMV2Core
@@ -55,7 +56,7 @@ public actor V2AuthorPresentationDispatcher {
         var hints: [V2ProfileViewLookupKey: Hint] = [:]
     }
     private struct Hint {
-        let fingerprint: Data; let deadline: ContinuousClock.Instant; let bytes: Int
+        let fingerprint: Fingerprint; let deadline: ContinuousClock.Instant; let bytes: Int
         var touched: ContinuousClock.Instant
     }
     private struct Job: Sendable {
@@ -70,7 +71,7 @@ public actor V2AuthorPresentationDispatcher {
         let job: Job; let bytes: Data; let hints: [V2ProfileViewLookupKey: Hint]
         var byteCost: Int { bytes.count + (V2AuthorPresentationDelta.maximumFrameBytes - V2AuthorPresentationDelta.maximumEncodedBytes) + hints.values.reduce(0) { $0 + $1.bytes } }
     }
-    private struct Fingerprint: Encodable {
+    private struct Fingerprint: Equatable {
         let view: V2ProfileView; let contextRevision: UInt64
         let groupMember: V2GroupMemberPresentation?
         let mediaID: MediaID?; let variantID: ResourceVariantID?; let version: Int64?; let checksum: V2ResourceChecksum?
@@ -179,7 +180,7 @@ public actor V2AuthorPresentationDispatcher {
         for author in authors where seen.insert(author).inserted {
             let key = V2ProfileViewLookupKey(userID: author, context: .room(roomID))
             guard connection.costs[key] == nil, !connection.activeKeys.contains(key) else { continue }
-            guard let cost = try? JSONEncoder().encode(key).count else { rejectedOffers += 1; return false }
+            let cost = V2ActorPayloadBudget.retainedBytes(of: key)
             additions.append((key, cost))
         }
         guard !additions.isEmpty else { return true }
@@ -378,10 +379,9 @@ public actor V2AuthorPresentationDispatcher {
                     let expiry = min(value.lease.validUntilUnixMilliseconds, avatar?.plan.expiresAtUnixMilliseconds ?? Int64.max)
                     if expiry <= serverNow { candidate = .retryable(item.key) }
                     else {
-                        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-                        let fingerprint = try encoder.encode(Fingerprint(view: value.view, contextRevision: value.lease.contextRevision,
+                        let fingerprint = Fingerprint(view: value.view, contextRevision: value.lease.contextRevision,
                             groupMember: value.groupMember,
-                            mediaID: avatar?.mediaID, variantID: avatar?.variantID, version: avatar?.version, checksum: avatar?.checksum))
+                            mediaID: avatar?.mediaID, variantID: avatar?.variantID, version: avatar?.version, checksum: avatar?.checksum)
                         if var old = connection.hints[item.key], old.deadline > .now, old.fingerprint == fingerprint {
                             old.touched = .now; connection.hints[item.key] = old
                             suppressedEntries += 1; continue
@@ -393,7 +393,7 @@ public actor V2AuthorPresentationDispatcher {
                         if hintLifetime > 0 {
                             newHints[item.key] = .init(fingerprint: fingerprint,
                                 deadline: .now + .milliseconds(hintLifetime),
-                                bytes: fingerprint.count + (try JSONEncoder().encode(item.key).count), touched: .now)
+                                bytes: V2ActorPayloadBudget.retainedBytes(of: fingerprint) + V2ActorPayloadBudget.retainedBytes(of: item.key), touched: .now)
                         }
                     }
                 } else if case .unavailable = item, let old = connection.hints.removeValue(forKey: item.key) {

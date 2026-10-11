@@ -73,8 +73,8 @@ struct V2RoomProfileCohortPostgresTests {
             var tasks: [Task<V2RoomResponse, any Error>] = []
             do {
                 for request in requests {
-                    let bytes = try JSONEncoder().encode(V2RoomRequest.mediaAuthorization(.profileVisibilityBatch(request)))
-                    tasks.append(Task { try await lane.submit(encodedRequest: bytes, deadline: .now + .seconds(10)) })
+                    let bytes = try V2RoomRequest.mediaAuthorization(.profileVisibilityBatch(request))
+                    tasks.append(Task { try await lane.submit(request: bytes, deadline: .now + .seconds(10)) })
                     let deadline = ContinuousClock.now + .seconds(3)
                     while await lane.snapshot().queuedCount != tasks.count {
                         guard ContinuousClock.now < deadline else { throw CohortFailure.waitExpired }

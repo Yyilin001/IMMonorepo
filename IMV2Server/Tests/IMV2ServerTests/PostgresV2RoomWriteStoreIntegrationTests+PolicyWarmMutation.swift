@@ -92,7 +92,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     tokens.append(token)
                     let response = try await warmMutationColdSendWithHeldWrites(reader: initializationReader, writer: sendDatabase) {
                         try await host.invoke(token: token,
-                            encodedRequest: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10))
+                            request: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10))
                     }
                     try warmMutationAccepted(response)
                 }
@@ -149,13 +149,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(factsBefore > 0 && transactionsBefore > 0)
                 let warmRequest = try warmMutationRequest(room: rooms[0], text: "before policy commit")
                 try warmMutationAccepted(try await host.invoke(token: tokens[0],
-                    encodedRequest: warmRequest, deadline: .now + .seconds(10)))
+                    request: warmRequest, deadline: .now + .seconds(10)))
                 if kind == "remove" {
                     let implicitCount = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0
                     #expect(implicitCount == 1)
                     // The identical client operation replays without a second write.
                     try warmMutationAccepted(try await host.invoke(token: tokens[0],
-                        encodedRequest: warmRequest, deadline: .now + .seconds(10)))
+                        request: warmRequest, deadline: .now + .seconds(10)))
                     #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0 == implicitCount)
                 }
                 #expect(await owners.pressure().roots == 1)
@@ -163,7 +163,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateTransaction]?.count ?? 0 == transactionsBefore)
                 // An unrelated room must progress while the policy transaction is held.
                 try warmMutationAccepted(try await host.invoke(token: tokens[1],
-                    encodedRequest: warmMutationRequest(room: rooms[1], text: "during related change"),
+                    request: warmMutationRequest(room: rooms[1], text: "during related change"),
                     deadline: .now + .seconds(10)))
                 await policySQLGate.release()
                 if let holdingPolicySQL { try await holdingPolicySQL.value }
@@ -184,13 +184,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                 }
                 let denied = try await host.invoke(token: tokens[0],
-                    encodedRequest: warmMutationRequest(room: rooms[0], text: "after change"), deadline: .now + .seconds(10))
+                    request: warmMutationRequest(room: rooms[0], text: "after change"), deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let receipt))) = denied else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
                 #expect(receipt.outcome == .rejected(.directPolicyDenied))
                 try warmMutationAccepted(try await host.invoke(token: tokens[1],
-                    encodedRequest: warmMutationRequest(room: rooms[1], text: "unrelated room"), deadline: .now + .seconds(10)))
+                    request: warmMutationRequest(room: rooms[1], text: "unrelated room"), deadline: .now + .seconds(10)))
                 // Warm sends sample current policy while reusing cached facts;
                 // room registration and owner SQL remain absent.
                 let policySample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
@@ -240,10 +240,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                     stage = "sending with restored policy"
                     try warmMutationAccepted(try await host.invoke(token: tokens[0],
-                        encodedRequest: warmMutationRequest(room: rooms[0], text: "permission restored"),
+                        request: warmMutationRequest(room: rooms[0], text: "permission restored"),
                         deadline: .now + .seconds(10)))
                     try warmMutationAccepted(try await host.invoke(token: tokens[1],
-                        encodedRequest: warmMutationRequest(room: rooms[1], text: "unrelated after restoration"),
+                        request: warmMutationRequest(room: rooms[1], text: "unrelated after restoration"),
                         deadline: .now + .seconds(10)))
                     let sample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
                     #expect(sample.count == 8 && sample.inFlight == 0)
@@ -357,10 +357,10 @@ private func warmMutationObserve(_ check: () async throws -> Bool) async throws 
     }
     try #require(try await check())
 }
-private func warmMutationRequest(room: RoomID, text: String) throws -> Data {
-    try JSONEncoder().encode(V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: room,
+private func warmMutationRequest(room: RoomID, text: String) throws -> V2RoomRequest {
+    try V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: room,
         senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: text, limits: .init(maxUTF8Bytes: 64)),
-        firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 60_000))))
+        firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 60_000)))
 }
 private func warmMutationAccepted(_ response: V2RoomResponse) throws {
     guard case .messaging(.sendOperation(.receipt(let receipt))) = response, case .accepted = receipt.outcome else {

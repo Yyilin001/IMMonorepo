@@ -442,7 +442,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
                 // An unbound ticket must not clip a later room to another room's deadline.
                 var latestDeadline: ContinuousClock.Instant?
                 readyRooms.forEach { room in
-                    if let deadline = queues[room]?.first?.deadline {
+                    if let deadline = queues[room]?.firstMap({ $0.deadline }) {
                         latestDeadline = latestDeadline.map { max($0, deadline) } ?? deadline
                     }
                 }
