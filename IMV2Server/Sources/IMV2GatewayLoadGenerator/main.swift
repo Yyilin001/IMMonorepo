@@ -2491,7 +2491,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "fc1f9233f15ae37c7a3c04201bfbd9756b9eb865d2a10791ff591463d090440a"
+    static let algorithmSourceSHA256 = "18796f7b594cc7cd2fdf1e77381a5c7d1fa00748f9da52a43d2fcdca9b4f9d6d"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     static let maximumMessageWireAttempts = 5
@@ -3734,9 +3734,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                         statistics.recordRoomEventLocalEchoApplied()
                         cancelRoomEventRecoveryGraceIfCaughtUp(roomID: roomID)
                     } else if accepted.roomSequence > cursor {
+                        // An ACK confirms only this locally known message. It
+                        // neither proves a delivery gap nor announces a recovery
+                        // target. Let realtime delivery/progress and reconnect
+                        // recovery detect missing predecessors independently.
                         statistics.recordRoomEventLocalEchoGapDetected()
-                        roomEventAnnouncedHighWatermarks[roomID] = max(roomEventAnnouncedHighWatermarks[roomID, default: 0], accepted.roomSequence)
-                        try scheduleRoomEventRecoveryIfNeeded(roomID: roomID, context: context)
                     }
                 }
                 if roomLogReads, roomLogReadTrigger == .messageAcknowledgement {
