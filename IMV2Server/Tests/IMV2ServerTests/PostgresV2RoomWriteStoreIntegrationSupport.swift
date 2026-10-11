@@ -279,7 +279,7 @@ private struct V2LocalCapacityRegressionLimits {
     }
 
     private static func read(_ name: String, defaultValue: Int) throws -> Int {
-        guard let raw = Environment.get(name) else { return defaultValue }
+        guard let raw = ProcessInfo.processInfo.environment[name] else { return defaultValue }
         guard let value = Int(raw), value > 0 else {
             throw TestConfigurationError.invalidLocalCapacityLimit(name)
         }
@@ -323,11 +323,11 @@ private struct V2ConcurrentRoomWorkloadConfiguration {
         eventPayloadBytes = try Self.read(
             "IMV2_CONCURRENT_ROOM_EVENT_PAYLOAD_BYTES", defaultValue: 0, range: 0...16_384
         )
-        forceGenericProjectionSequenceReservation = Environment.get("IMV2_FORCE_GENERIC_PROJECTION_SEQUENCE_RESERVATION") == "1"
+        forceGenericProjectionSequenceReservation = ProcessInfo.processInfo.environment["IMV2_FORCE_GENERIC_PROJECTION_SEQUENCE_RESERVATION"] == "1"
     }
 
     private static func read(_ name: String, defaultValue: Int, range: ClosedRange<Int>) throws -> Int {
-        guard let raw = Environment.get(name) else { return defaultValue }
+        guard let raw = ProcessInfo.processInfo.environment[name] else { return defaultValue }
         guard let value = Int(raw), range.contains(value) else {
             throw TestConfigurationError.invalidConcurrentRoomWorkloadValue(name)
         }

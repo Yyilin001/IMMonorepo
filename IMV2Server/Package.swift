@@ -37,7 +37,7 @@ let package = Package(
         .package(url: "https://github.com/swift-server/swift-service-lifecycle.git", from: "2.11.0"),
         .package(path: "../IMV2Core"),
         .package(path: "../IMV2Compression"),
-        .package(url: "https://github.com/vapor/vapor.git", exact: "5.0.0-beta.2"),
+        .package(url: "https://github.com/vapor/vapor.git", exact: "5.0.0-beta.3"),
         .package(url: "https://github.com/vapor/fluent-kit.git", exact: "1.57.0"),
         .package(url: "https://github.com/vapor/fluent-postgres-driver.git", from: "2.9.0"),
         .package(path: "Vendor/postgres-nio"),

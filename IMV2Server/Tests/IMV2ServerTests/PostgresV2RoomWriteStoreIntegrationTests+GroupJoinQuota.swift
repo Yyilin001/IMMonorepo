@@ -115,7 +115,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let fields = try JSONDecoder().decode([String: String].self, from: Data(raw.utf8))
         let resources = makeV2DatabaseTestResources()
         do {
-            let controlURL = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL")), ownerURL = try #require(Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"))
+            let controlURL = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"]), ownerURL = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
             let ownerID = DatabaseID(string: "quota-child-owner")
             resources.databases.use(try .postgres(url: controlURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
             resources.databases.use(try .postgres(url: ownerURL, maxConnectionsPerEventLoop: 2), as: ownerID)
@@ -173,7 +173,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { ownerA, secondOwner, sql, secondSQL, secondRoom in
             let controlResources = makeV2DatabaseTestResources()
             do {
-                let primaryURL = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"))
+                let primaryURL = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"])
                 // Owner transactions may read control identity while holding a room lock.
                 // Control work must not compete for those same owner connections.
                 controlResources.databases.use(try .postgres(url: primaryURL, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
@@ -364,8 +364,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("applicant cancellation preserves decisions, releases quota, and serializes with approval", arguments: ["pending", "expired", "revoked", "approve-first", "reject-first", "race"])
     func invitationApplicantCancellation(_ scenario: String) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         var installed = false
         do {

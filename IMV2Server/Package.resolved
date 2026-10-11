@@ -1,5 +1,5 @@
 {
-  "originHash" : "b48bf8a569ebd7cde19bd35f19f540c1c9ebee4698bc5d03f629372f50de1d56",
+  "originHash" : "0109ae967df636205d2cf7f622efd3d969f1d599c0d2587677dac1785b8331d4",
   "pins" : [
     {
       "identity" : "async-http-client",
@@ -195,8 +195,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/swift-server/swift-http-server.git",
       "state" : {
-        "revision" : "9b75bce220c97a2078eda303f6c11de376a29755",
-        "version" : "0.2.0"
+        "revision" : "cc494f5ceebd06727c6e250bb502c405f912836b",
+        "version" : "0.3.0"
       }
     },
     {
@@ -240,8 +240,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio.git",
       "state" : {
-        "revision" : "0b18836bd8b0162e7e17a995a3fbee20ed8f3b2b",
-        "version" : "2.101.3"
+        "revision" : "6db9d9abd92ad7399b8a564cafbb87d3507245fa",
+        "version" : "2.104.0"
       }
     },
     {
@@ -348,8 +348,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/vapor/vapor.git",
       "state" : {
-        "revision" : "5dfe8b81197d9edfe0298a3961ee119c11e413fd",
-        "version" : "5.0.0-beta.2"
+        "revision" : "2067b1e4710fbd509a4004cdb5f7d152d4c282a7",
+        "version" : "5.0.0-beta.3"
       }
     }
   ],

@@ -5,12 +5,19 @@
 ## 工具链与依赖
 
 - Server 使用 Swift 6.4，macOS 最低版本为 26.2；Linux 使用 Swift 6.4 Jammy。
-- Vapor 固定为 `5.0.0-beta.2`，FluentKit 固定为 `1.57.0`。移除依赖 Vapor 4 的 `vapor/fluent` 集成包。
-- PostgreSQL 驱动、PostgresNIO、SQLKit、AsyncKit 和 NIO 保留迁移基线中的解析版本；以 `IMV2Server/Package.resolved` 为准。
+- Vapor 固定为 `5.0.0-beta.3`，FluentKit 固定为 `1.57.0`。移除依赖 Vapor 4 的 `vapor/fluent` 集成包。
+- PostgreSQL 驱动、PostgresNIO、SQLKit 和 AsyncKit 保留迁移基线中的解析版本；beta.3 升级将 Swift HTTP Server 从 0.2.0 更新为 0.3.0，并将 NIO 从 2.101.3 更新为 2.104.0，以满足 HTTP Server 的 NIO 2.103.0 最低要求。以 `IMV2Server/Package.resolved` 为准。
 - PostgresNIO 1.33.1 通过 `Vendor/postgres-nio` 固定源码提供，只有一处等值比较的 Swift 6.4 Linux 编译兼容补丁；其版本和逐文件校验记录在 `UPSTREAM.json`，原因见 [补丁说明](../../../IMV2Server/Vendor/postgres-nio/PATCHES.md)。它由本地 package 提供，因此不再出现在远程锁文件条目中。Collections 保持 1.6.0。
 - Server 解析 Crypto 4.5.2。Core 允许 Crypto 3.9 至 5.0 之前的版本，独立 Core 与 ClientKit 的锁文件仍使用 Crypto 3.15.1。客户端最低系统要求保持原有约束。
 - Docker 构建和运行阶段、Linux CI 使用同一个 Swift 镜像摘要：`sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6`。
 - 正常构建与测试使用 `--disable-automatic-resolution`。升级 beta 或其依赖时必须显式更新锁文件，再执行本页的验证。
+
+## beta.3 升级验证（2026-10-11）
+
+- Vapor 固定为 `5.0.0-beta.3`；锁文件同步更新 Swift HTTP Server 0.3.0 与 SwiftNIO 2.104.0，数据库驱动及 Crypto 版本保持不变。
+- beta.3 移除旧的 `Environment.get` 接口；测试改为通过 `ProcessInfo.processInfo.environment` 读取进程环境，生产业务实现没有新增兼容包装。
+- macOS / Swift 6.4 下，使用锁文件完成服务端全部 Release 产品构建；HTTP 路由、认证边界、监听冲突、取消、流式响应关闭与数据库资源管理相关的 102 个测试（28 个套件）通过。
+- 本轮没有启用真实 PostgreSQL 集成测试。Docker 守护进程未运行，Linux 容器验证未执行；以上结果不代表性能压测通过。
 
 ## 运行时归属
 
@@ -35,6 +42,8 @@ Schema readiness 在读取 PostgreSQL catalog 时临时使用空 `search_path`�
 - 自建 NIO TLS、Protobuf、压缩帧、DTO、密钥格式和数据库 schema 均不随此次迁移改动。
 
 ## 验证入口
+
+下述已完成的迁移验收数据属于 Vapor beta.2 的历史记录，不代表 beta.3 的验证结果。
 
 本次迁移按约定以本地 Linux 容器作为最终验收环境。隔离测试栈提供三个 PostgreSQL 实例和 NATS，源码只读挂载，构建产物写入独立 volume。迁移重点回归可使用：
 
@@ -92,7 +101,7 @@ Linux 的 NIO FileSystem 可以用 `O_TMPFILE` 写入匿名暂存文件，上传
 
 ## 上游依据
 
-- [Vapor beta.2 固定源码与依赖](https://github.com/vapor/vapor/tree/5.0.0-beta.2)
-- [Application 生命周期](https://github.com/vapor/vapor/blob/5.0.0-beta.2/Sources/Vapor/Application.swift)
-- [VaporTesting](https://github.com/vapor/vapor/tree/5.0.0-beta.2/Sources/VaporTesting)
+- [Vapor beta.3 固定源码与依赖](https://github.com/vapor/vapor/tree/5.0.0-beta.3)
+- [Application 生命周期](https://github.com/vapor/vapor/blob/5.0.0-beta.3/Sources/Vapor/Application.swift)
+- [VaporTesting](https://github.com/vapor/vapor/tree/5.0.0-beta.3/Sources/VaporTesting)
 - [FluentKit 1.57.0](https://github.com/vapor/fluent-kit/tree/1.57.0)

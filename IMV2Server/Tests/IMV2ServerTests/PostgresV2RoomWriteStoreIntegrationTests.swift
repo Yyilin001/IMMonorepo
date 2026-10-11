@@ -24,7 +24,7 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("media authorization refuses content from a membership gap even with a stale projection")
     func mediaAuthorizationFollowsTheMembershipGap() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"], ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
@@ -253,8 +253,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("room activity time tracks sequence advances and ignores unrelated updates")
     func roomActivityTimestampTracksSequenceAdvances() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)

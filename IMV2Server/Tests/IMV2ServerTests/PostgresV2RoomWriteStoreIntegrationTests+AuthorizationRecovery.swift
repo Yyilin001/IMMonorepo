@@ -184,8 +184,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
           .timeLimit(.minutes(1)), arguments: [false, true])
     func routedDirectControlPools(colocated: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { _, _, _, _, groupRoom in
-            let primary = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"))
-            let secondary = try #require(Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"))
+            let primary = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"])
+            let secondary = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
             let resources = makeV2DatabaseTestResources()
             do {
                 let controlID = DatabaseID(string: "send-authority")
@@ -591,7 +591,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let controlResources = makeV2DatabaseTestResources()
             let identityPoolID = DatabaseID(string: "special-audit-identity")
             let routePoolID = DatabaseID(string: "special-audit-route")
-            let primary = try #require(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"))
+            let primary = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"])
             controlResources.databases.use(try .postgres(url: primary, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
             controlResources.databases.use(try .postgres(url: primary, maxConnectionsPerEventLoop: 4), as: identityPoolID)
             // The pair-route fence holds a transaction across the handoff call.

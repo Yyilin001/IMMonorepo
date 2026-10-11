@@ -10,8 +10,8 @@ import Vapor
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("revocation IDs serialize before allocation and remain visible to both consumers", arguments: [false, true])
     func deviceRevocationCommitOrder(rollbackFirst: Bool) async throws {
-        guard let url = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)

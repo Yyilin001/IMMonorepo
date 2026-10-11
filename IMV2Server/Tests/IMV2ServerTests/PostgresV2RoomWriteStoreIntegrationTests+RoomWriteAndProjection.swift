@@ -24,8 +24,8 @@ import VaporTesting
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("one room-shard transaction accepts a message without public fanout")
     func atomicallyPersistsAcceptanceWriteSet() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else {
             return
         }
@@ -275,8 +275,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("sync-log statement triggers deduplicate users and preserve immutable effects")
     func syncLogStatementTriggersAreSetBased() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -459,8 +459,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("projection completion cannot lose a concurrent durable ready enqueue")
     func projectionCompletionFencesConcurrentReadyEnqueue() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -618,8 +618,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("concurrent projectors claim distinct users without duplicate versions")
     func concurrentUserProjectionClaimsRemainExclusive() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -698,8 +698,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("Push wake retries reclaim expired leases without double-spending admission")
     func pushWakeRetryRecoveryPreservesAdmissionBudget() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -770,8 +770,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("muted conversation suppresses a generic Push wake before budget admission")
     func mutedConversationSuppressesPushWake() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -837,7 +837,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("versioned Push intent survives reordering, replay, session changes and APNs rejection")
     func pushIntentConditionalWrites() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"), Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"], ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         let app = try await Application(.testing)
         do {
@@ -986,8 +986,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("Push endpoint encryption is device-bound and late rejection cannot disable a fresh registration")
     func pushEndpointRegistrationUsesGenerationFence() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -1049,8 +1049,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("direct rooms enforce recipient setting and stranger quota transactionally")
     func enforcesStrangerDirectMessagePolicy() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -1317,7 +1317,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                   AND projection_kind = 'direct_room_profile'
                   AND (payload->>'room_id')::uuid = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: CountRow.self)?.value == 0)
-            if let targetURL = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL") {
+            if let targetURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"] {
                 try await withUserEventDatabase(databaseURL: targetURL) { targetDatabase, targetSQL, targetSchema in
                     let outbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
                     let projector = try PostgresV2UserStateEventProjector(database: targetDatabase, schema: targetSchema)
@@ -1494,8 +1494,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("independent direct-room creation shares the shard fence and rejects an existing pair under another profile")
     func directRoomCreationUsesSharedShardFence() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()

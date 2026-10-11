@@ -24,8 +24,8 @@ import VaporTesting
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("registration cancellation serializes before, after and concurrently with issuance", arguments: ["before", "after", "race"])
     func registrationCancellationOrdering(order: String) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
@@ -79,8 +79,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("registration cancellation proof isolates identity, survives issue deadline, and rolls back with revocation")
     func registrationCancellationIsolationAndRollback() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
@@ -140,8 +140,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("cancellation authority and issued credentials share the same commit")
     func registrationCancellationIssuanceRollback() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
@@ -181,8 +181,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("revoke-only capability survives rotation, isolates sessions and commits atomically")
     func deviceRevocationCapabilityIsolation() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         let app = try await Application(.testing)
         do {
@@ -357,8 +357,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         "freeze", "mute", "moderation-remove", "membership-remove", "permission", "demote"
     ], ["standard-edit-first", "standard-policy-first", "hybrid-edit-first", "hybrid-policy-first"])
     func editPolicyCommitOrdering(restriction: String, schedule: String) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             // The blocker, both real service transactions, and the observer
@@ -568,7 +568,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     /// Deliberate lost-proof injection in a disposable test schema only. Restore
     /// the protection before committing; production never mutates this ledger.
     private func removeAcceptanceForCorruptionTest(database: any Database, message: UUID) async throws {
-        guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { throw CancellationError() }
+        guard ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { throw CancellationError() }
         try await database.transaction { tx in
             let sql = try #require(tx as? any SQLDatabase)
             try await sql.raw("ALTER TABLE im_v2.message_send_completions DISABLE TRIGGER USER").run()
@@ -950,7 +950,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } else if scenario == "wrong-completion" {
                 // Import-like malformed evidence: preserve its lookup key but
                 // bind the immutable result to a different message identity.
-                guard Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { throw CancellationError() }
+                guard ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { throw CancellationError() }
                 try await database.transaction { tx in
                     let faultSQL = try #require(tx as? any SQLDatabase)
                     try await faultSQL.raw("ALTER TABLE im_v2.message_send_completions DISABLE TRIGGER USER").run()
@@ -1040,7 +1040,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let newcomer = try await log.pull(roomID: roomID, actorUserID: .init(uuid: memberThreeUUID), afterRoomSequence: 0, pageSize: 10)
             #expect(newcomer.events.isEmpty)
             #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
-            if let root = Environment.get("IMV2_REPLACEMENT_TEST_FIXTURE_DIRECTORY") {
+            if let root = ProcessInfo.processInfo.environment["IMV2_REPLACEMENT_TEST_FIXTURE_DIRECTORY"] {
                 let fixture: [String: Any] = ["origin_event_id": acceptedEvent.rawValue, "event_id": visible.rawValue,
                     "accepted": try JSONSerialization.jsonObject(with: original.payload),
                     "edit": try JSONSerialization.jsonObject(with: edited.payload)]

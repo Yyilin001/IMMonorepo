@@ -517,10 +517,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("control identity and token directory drive two profile-free room owners", arguments: [V2GroupCapacityClass.standard, .large])
     func routedInvitationsUseControlIdentity(_ mode: V2GroupCapacityClass) async throws {
-        guard let controlURL = Environment.get("IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL"),
-              controlURL != Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              controlURL != Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let controlURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_CONTROL_DATABASE_URL"],
+              controlURL != ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              controlURL != ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         try await withForwardOwnerDatabases(mode: mode) { ownerA, ownerB, sqlA, sqlB, roomB in
             let resources = makeV2DatabaseTestResources(), app = try await Application(.testing)
             do {
@@ -763,23 +763,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("CI-required cross-store PostgreSQL endpoints are explicitly provisioned")
     func requiresCrossStorePostgresWhenConfigured() {
-        guard Environment.get("IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS") == "1" else { return }
-        #expect(Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1")
-        #expect(Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL")?.isEmpty == false)
-        #expect(Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL")?.isEmpty == false)
+        guard ProcessInfo.processInfo.environment["IMV2_REQUIRE_CROSS_STORE_POSTGRES_TESTS"] == "1" else { return }
+        #expect(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1")
+        #expect(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"]?.isEmpty == false)
+        #expect(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"]?.isEmpty == false)
         #expect(
-            Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL") !=
-            Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL")
+            ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"] !=
+            ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"]
         )
     }
 
     @Test("routed group creation validates identity on control and commits canonical rows only on owner")
     func routedGroupCreationUsesControlManifestAndRemoteOwner() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              let secondaryDatabaseURL = Environment.get(
-                "IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"
-              ),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              let secondaryDatabaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -915,8 +913,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("authorized group writes scope identity, replay and history to each room")
     func authorizedGroupWritesKeepRoomIdentityAndHistoryIndependent() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -1193,8 +1191,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("current durable group turns preserve sequence, completion and readable projection")
     func authorizedHybridGroupRoomMessagesPreserveSequence() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()

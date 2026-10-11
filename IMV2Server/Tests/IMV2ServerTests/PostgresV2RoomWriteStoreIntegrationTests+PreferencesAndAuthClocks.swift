@@ -336,7 +336,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.user_state_event_outbox WHERE projection_kind IN ('own_read_watermark', 'direct_read_receipt')").first(decoding: CountRow.self)?.value == 2)
             #expect(try await ownerSQL.raw("SELECT count(*) AS value FROM im_v2.user_sync_log WHERE projection_kind IN ('own_read_watermark', 'direct_read_receipt')").first(decoding: CountRow.self)?.value == 0)
             #expect(try await controlSQL.raw("SELECT count(*) AS value FROM im_v2.rooms WHERE room_id = \(bind: room.uuidValue!)").first(decoding: CountRow.self)?.value == 0)
-            let secondary = try #require(Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"))
+            let secondary = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
             try await withUserEventDatabase(databaseURL: secondary) { targetDB, targetSQL, targetSchema in
                 struct Fence: V2UserShardRouteFencing {
                     let database: any Database
@@ -387,7 +387,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.user_state_event_outbox", on: controlSQL) == 4)
             #expect(try await controlSQL.raw("SELECT count(*) AS value FROM im_v2.user_sync_log WHERE projection_kind = 'direct_read_receipt'").first(decoding: CountRow.self)?.value == 0)
             _ = try await preferences.executePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: UUID())), value: .readReceipt(allowsDirectReadReceipts: true, allowsGroupReadReceipts: true), now: now)
-            let secondary = try #require(Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"))
+            let secondary = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
             try await withUserEventDatabase(databaseURL: secondary) { targetDB, targetSQL, targetSchema in
                 struct Fence: V2UserShardRouteFencing {
                     let database: any Database

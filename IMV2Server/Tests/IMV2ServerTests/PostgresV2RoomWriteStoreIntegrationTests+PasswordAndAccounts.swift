@@ -23,8 +23,8 @@ import VaporTesting
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("audit member removal is atomic, replayable, and personally delivered to the departing member")
     func moderatedMemberRemovalIsDurableAndDeliveredToTarget() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -88,8 +88,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("durable-work metrics query aggregate backlog without exposing routes or identifiers")
     func readsDurableWorkBacklog() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -217,8 +217,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("room retention protects missing receipts and rotates past blocked rooms", arguments: [V2RoomLogRetentionMode.permanent, .window])
     func roomRetentionMissingReceiptsAndRotation(mode: V2RoomLogRetentionMode) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL), as: .psql, isDefault: true)
@@ -271,8 +271,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("room log retention follows active readers and marks trimmed history")
     func roomLogRetentionFollowsActiveReaders() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -357,8 +357,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("new device issuance enforces active and durable account budgets")
     func deviceRegistrationBudgetsBoundDurableIdentityGrowth() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -449,8 +449,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("absolute device expiry bounds rotations, replay, authentication and Push eligibility")
     func deviceSessionAbsoluteExpiry() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
@@ -559,8 +559,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("trusted device registration and refresh rotation are durable, replayable, and revoke on reuse")
     func deviceCredentialRotationFencesReuse() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -636,8 +636,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("unknown device refresh is terminal without a foreign-key failure or cross-account mutation")
     func unknownDeviceCredentialRefreshIsTerminalNoOp() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -675,8 +675,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("device sessions paginate metadata and revoke remote installations with bounded SQL")
     func deviceSessionManagementRevokesOnlyTheRequestedDevice() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -749,8 +749,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("account disable fences credential issuance, revokes every device, and preserves one audit fact")
     func accountDisableRevokesCredentialsAndFencesFutureIssue() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -855,8 +855,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("PostgreSQL device-revocation cursor initializes new nodes and advances existing nodes")
     func deviceRevocationCursorReadsAndAcknowledgesEvents() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -931,8 +931,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("account HTTP retries replay one durable credential result after response loss")
     func deviceCredentialHTTPRetriesReplayPersistedResult() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         let app = try await Application(.testing)
@@ -1047,8 +1047,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("one poison user backs off and pauses without blocking healthy projection work")
     func userProjectionPoisonIsolationAndReplay() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -1157,8 +1157,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("sync-log compaction is device-independent and low cursors lazily share one snapshot")
     func userSyncLogCompactionAndLowCursorReset() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -1349,8 +1349,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("snapshot reset authorizes against control plane for an independent user shard")
     func snapshotResetUsesControlPlaneDeviceAuthority() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         let shardSchema = "im_v2_reset_shard"
@@ -1493,8 +1493,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("snapshot V3 resumes page-by-page, publishes immediately, and GC preserves active baselines")
     func snapshotV3ArtifactResumptionAndVersionGC() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -1709,8 +1709,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("snapshot V3 publishes an empty account and rolls back a failed build generation")
     func snapshotV3EmptyAccountAndFailedBuildRecovery() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()
@@ -1866,9 +1866,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("direct and social sync records shadow to a forwarding user shard with their source sequence")
     func currentOwnerReceivesDirectAndSocialUserSyncRecords() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              let secondaryDatabaseURL = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              let secondaryDatabaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let resources = makeV2DatabaseTestResources()

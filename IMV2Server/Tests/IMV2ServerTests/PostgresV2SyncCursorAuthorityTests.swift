@@ -13,8 +13,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("sync cursor authority uses a fresh snapshot after device or retention lock waiting",
           arguments: ["revocation", "firstCursor", "retention"])
     func syncCursorAuthorityAfterLockWaiting(scenario: String) async throws {
-        guard let url = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         var ownsSchema = false
         do {

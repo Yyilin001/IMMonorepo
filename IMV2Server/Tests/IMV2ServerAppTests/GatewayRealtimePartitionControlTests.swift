@@ -103,8 +103,8 @@ struct GatewayRealtimePartitionControlTests {
 
     @Test("Unavailable control storage preserves only the original lease's signed cached service")
     func unavailableControlStoreDoesNotRefreshCachedAuthority() async throws {
-        guard let url = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: 1),
             logger: Logger(label: "imv2.control.outage.tests"), ownsEventLoopGroup: true, threadPoolThreads: 1)
         let schema = "imv2_outage_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
@@ -282,8 +282,8 @@ struct GatewayRealtimePartitionControlTests {
 
     @Test("Unknown claim confirms its original token and shutdown waits for actual controller settlement")
     func confirmedClaimRetryAndActualShutdown() async throws {
-        guard let url = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: 1),
             logger: Logger(label: "imv2.partition.controller.tests"), ownsEventLoopGroup: true, threadPoolThreads: 1)
         let schema = "imv2_controller_" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()

@@ -740,8 +740,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("multi-hop media forwards use exact active source references and reject late revocation", arguments: [V2GroupCapacityClass.standard, .large])
     func forwardedMediaUsesSourceReferences(capacityClass: V2GroupCapacityClass) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         let root = FileManager.default.temporaryDirectory.appending(path: "forward-references-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -871,8 +871,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("forward requires the current content version audience after rejoin", arguments: [V2GroupCapacityClass.standard, .large])
     func forwardChecksEditedVersionAudience(capacityClass: V2GroupCapacityClass) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
@@ -1050,8 +1050,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("forward source revision survives ABA, retry, and completion")
     func forwardSourceRevisionFencesABAAndRetry() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1" else { return }
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1" else { return }
         let resources = makeV2DatabaseTestResources()
         do {
             resources.databases.use(try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1), as: .psql, isDefault: true)
@@ -1178,8 +1178,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("forward reads and acceptance intersect original and current membership intervals", arguments: ["room_event", "message_row"])
     func forwardRequiresHistoricalAndCurrentMembership(storage: String) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -1321,8 +1321,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("Current Actor pair forwards serialize opposite room lock sets and recheck source membership", arguments: [false, true])
     func oppositeForwardsUseCanonicalRoomLocks(reverseArrival: Bool) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {
@@ -1458,9 +1458,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("a 100k hybrid group creation commits one atomic membership and personal discovery events")
     func createsOneHundredThousandMemberHybridRoomAtomically() async throws {
-        guard Environment.get("IMV2_RUN_HYBRID_100K_GROUP_CREATE") == "1",
-              let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard ProcessInfo.processInfo.environment["IMV2_RUN_HYBRID_100K_GROUP_CREATE"] == "1",
+              let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
 
         let startedAt = Date()
@@ -1546,8 +1546,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("reciprocal sends preserve stranger limits, activation fencing and active policy changes", arguments: [false, true])
     func reciprocalSendsRespectCurrentPolicy(_ actorScoped: Bool) async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
+        guard let databaseURL = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"],
+              ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
         else { return }
         let resources = makeV2DatabaseTestResources()
         do {

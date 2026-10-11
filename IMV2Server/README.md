@@ -6,7 +6,7 @@
 
 ## 部署准备
 
-服务端要求 Swift 6.4；macOS 环境要求 macOS 26.2 或更高版本，并固定使用 Vapor 5.0.0-beta.2。Linux 镜像与 CI 使用相同摘要的 Swift 6.4 Jammy 镜像。数据库所有权、关闭顺序、依赖边界与验证要求见 [Vapor 5 迁移合同](../IMV2/docs/00-foundation/vapor5-migration.md)。
+服务端要求 Swift 6.4；macOS 环境要求 macOS 26.2 或更高版本，并固定使用 Vapor 5.0.0-beta.3。Linux 镜像与 CI 使用相同摘要的 Swift 6.4 Jammy 镜像。数据库所有权、关闭顺序、依赖边界与验证要求见 [Vapor 5 迁移合同](../IMV2/docs/00-foundation/vapor5-migration.md)。
 
 1. 创建空 PostgreSQL 数据库并安装唯一的当前结构：`psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f IMV2/sql/schema.sql`。部署前，在隔离 Docker PostgreSQL 上运行 `bash scripts/test_v2_postgres_schema_bootstrap.sh`，检查空库初始化、当前结构合同，以及结构导出/恢复等价性。使用现有 PostgreSQL 时，设置 `IMV2_SCHEMA_BOOTSTRAP_NATIVE=1`、`PGHOST`、`PGPORT`、`PGUSER` 和必要凭据，将 PostgreSQL 16 的 `psql`、`pg_dump` 加入 `PATH`。原生检查会创建并删除两个唯一命名的测试数据库，要求具有建库权限。尚未发布的项目只安装当前结构，历史升级脚本和混合版本部署路径已移除。
 2. 通过部署密钥存储提供 PEM 证书链和私钥文件。
