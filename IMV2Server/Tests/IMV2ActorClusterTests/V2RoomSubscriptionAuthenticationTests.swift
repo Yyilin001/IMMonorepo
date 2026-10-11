@@ -172,6 +172,35 @@ struct V2RoomSubscriptionAuthenticationTests {
         }
     }
 
+    @Test("subscription session MAC authenticates replies and rejects replay and downgrade")
+    func subscriptionSessionMAC() async throws {
+        let fixture = try Fixture()
+        let agreement = Curve25519.KeyAgreement.PrivateKey()
+        let hello = RealtimeHello(serviceID: fixture.publisher.serviceID, version: 1,
+            callerIncarnation: fixture.incarnation, recipient: fixture.identity, handshakeID: UUID(),
+            endpointDigest: Data(SHA256.hash(data: Data())), agreementKey: agreement.publicKey.rawRepresentation)
+        let signed = try await fixture.inbound.openSession(fixture.publisher.sign(hello, maximumBytes: 16_384))
+        let (grant, peer) = try fixture.trust.verify(signed, as: RealtimeGrant.self, maximumBytes: 16_384)
+        let mac = try V2ActorSessionMAC(privateKey: agreement, peerKey: #require(grant.agreementKey),
+            transcript: V2ActorProtobuf.encode(hello), sessionID: grant.sessionID,
+            client: fixture.publisher.serviceID, server: peer.serviceID)
+        let call = fixture.call(session: grant.sessionID, sequence: 1)
+        let packet = try mac.seal(call, reply: false, maximumBytes: 262_144)
+        var body = packet.body; body[body.count - 1] ^= 1
+        await #expect(throws: V2ActorAuthenticationError.invalidSignature) {
+            _ = try await fixture.inbound.deliverRoomSubscription(.init(signerID: packet.signerID, body: body, signature: packet.signature))
+        }
+        await #expect(throws: V2ActorAuthenticationError.invalidSignature) {
+            _ = try await fixture.inbound.deliverRoomSubscription(fixture.publisher.sign(call, maximumBytes: 262_144))
+        }
+        let response = try await fixture.inbound.deliverRoomSubscription(packet)
+        let reply = try mac.open(response, as: RoomSubscriptionReply.self, reply: true, maximumBytes: 16_384)
+        #expect(reply.sessionID == call.sessionID && reply.sequence == call.sequence && reply.attemptID == call.attemptID)
+        await #expect(throws: V2ActorAuthenticationError.replay) {
+            _ = try await fixture.inbound.deliverRoomSubscription(packet)
+        }
+    }
+
     private struct Fixture {
         let publisher: V2ActorSigningIdentity
         let trust: V2ActorTrustStore

@@ -64,13 +64,16 @@ actor V2RealtimeShardInbound {
         let service: V2ActorServiceID
         let incarnation: UUID
         let handshake: UUID
+        let helloDigest: Data
         let expires: ContinuousClock.Instant
+        let mac: V2ActorSessionMAC?
+        let agreementKey: Data?
         var highest: UInt64 = 0
         var slots: [(sequence: UInt64, attemptID: UUID)?] = Array(repeating: nil, count: 1_024)
         var attempts: [UUID: UInt64] = [:]
 
-        init(service: V2ActorServiceID, incarnation: UUID, handshake: UUID, expires: ContinuousClock.Instant) {
-            self.service = service; self.incarnation = incarnation; self.handshake = handshake; self.expires = expires
+        init(service: V2ActorServiceID, incarnation: UUID, handshake: UUID, helloDigest: Data, mac: V2ActorSessionMAC?, agreementKey: Data?, expires: ContinuousClock.Instant) {
+            self.service = service; self.incarnation = incarnation; self.handshake = handshake; self.helloDigest = helloDigest; self.mac = mac; self.agreementKey = agreementKey; self.expires = expires
         }
         func accept(sequence: UInt64, attemptID: UUID) throws {
             let window = UInt64(slots.count)
@@ -120,21 +123,46 @@ actor V2RealtimeShardInbound {
         }
         let now = ContinuousClock.now
         sessions = sessions.filter { $0.value.expires > now }
+        let transcript = try V2ActorProtobuf.encode(hello)
+        let helloDigest = Data(SHA256.hash(data: transcript))
         let id: UUID
         if let existing = sessions.first(where: { $0.value.service == peer.serviceID && $0.value.incarnation == hello.callerIncarnation && $0.value.handshake == hello.handshakeID }) {
+            guard existing.value.helloDigest == helloDigest else { throw V2ActorAuthenticationError.invalidRequest }
             id = existing.key
         } else {
             guard sessions.count < 256, sessions.values.filter({ $0.service == peer.serviceID }).count < 8 else { throw V2ActorAuthenticationError.overloaded }
             id = UUID()
-            sessions[id] = Session(service: peer.serviceID, incarnation: hello.callerIncarnation, handshake: hello.handshakeID, expires: now + .seconds(300))
+            let agreement = hello.agreementKey.map { _ in Curve25519.KeyAgreement.PrivateKey() }
+            let mac = try agreement.map { try V2ActorSessionMAC(privateKey: $0, peerKey: hello.agreementKey!,
+                transcript: transcript, sessionID: id, client: peer.serviceID, server: signer.serviceID) }
+            sessions[id] = Session(service: peer.serviceID, incarnation: hello.callerIncarnation, handshake: hello.handshakeID, helloDigest: helloDigest, mac: mac, agreementKey: agreement?.publicKey.rawRepresentation, expires: now + .seconds(300))
         }
         let duration = now.duration(to: sessions[id]!.expires).components
         let remaining = duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000
-        return try signer.sign(RealtimeGrant(hello: hello, sessionID: id, remainingMilliseconds: remaining), maximumBytes: 16_384)
+        return try signer.sign(RealtimeGrant(hello: hello, sessionID: id, remainingMilliseconds: remaining, agreementKey: sessions[id]!.agreementKey), maximumBytes: 16_384)
+    }
+    private func verifySessionPacket<Body: Decodable & V2ActorSessionBoundCall>(_ packet: V2ActorSignedPacket,
+        as type: Body.Type) throws -> (Body, V2ActorTrustedService) {
+        if packet.signature.count == 32 {
+            let id = try V2ActorSessionMAC.packetSessionID(packet)
+            guard let session = sessions[id], session.expires > .now, let mac = session.mac else {
+                throw V2ActorAuthenticationError.sessionExpired
+            }
+            let body = try mac.open(packet, as: type, reply: false, maximumBytes: limits.maximumPacketBytes)
+            guard body.sessionID == id else { throw V2ActorAuthenticationError.wrongRecipient }
+            return (body, try trust.configuredService(packet.signerID))
+        }
+        let (body, peer) = try trust.verify(packet, as: type, maximumBytes: limits.maximumPacketBytes)
+        guard sessions[body.sessionID]?.mac == nil else { throw V2ActorAuthenticationError.invalidSignature }
+        return (body, peer)
+    }
+    private func sessionReply<Body: Encodable>(_ body: Body, session: Session, maximumBytes: Int) throws -> V2ActorSignedPacket {
+        if let mac = session.mac { return try mac.seal(body, reply: true, maximumBytes: maximumBytes) }
+        return try signer.sign(body, maximumBytes: maximumBytes)
     }
     func exchange(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
-        let (call, peer) = try trust.verify(packet, as: ShardCall.self, maximumBytes: limits.maximumPacketBytes)
+        let (call, peer) = try verifySessionPacket(packet, as: ShardCall.self)
         guard call.serviceID == peer.serviceID, peer.permissions.contains(.realtimePublish) else { throw V2ActorAuthenticationError.forbidden }
         guard call.version == 1, call.recipient == identity else { throw V2ActorAuthenticationError.wrongRecipient }
         guard let session = sessions[call.sessionID], session.expires > .now,
@@ -166,8 +194,8 @@ actor V2RealtimeShardInbound {
             defer { activePublish -= 1 }
             result = .publish(try await serving.publish(request))
         }
-        return try signer.sign(ShardReply(recipient: identity, sessionID: call.sessionID,
-            sequence: call.sequence, attemptID: call.attemptID, result: result), maximumBytes: 16_384)
+        return try sessionReply(ShardReply(recipient: identity, sessionID: call.sessionID,
+            sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: 16_384)
     }
 }
 
@@ -186,6 +214,7 @@ actor V2RealtimeShardSender {
     private struct Session: Sendable {
         let endpoint: V2RealtimeShardEndpoint
         let id: UUID
+        let mac: V2ActorSessionMAC
         let expires: ContinuousClock.Instant
         var sequence: UInt64
     }
@@ -296,11 +325,12 @@ actor V2RealtimeShardSender {
         session.sequence += 1; sessions[target] = session
         let call = ShardCall(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation, recipient: target.identity,
                                 sessionID: session.id, sequence: session.sequence, attemptID: UUID(), operation: operation)
-        let packet = try signer.sign(call, maximumBytes: limits.maximumPacketBytes)
+        let packet = try session.mac.seal(call, reply: false, maximumBytes: limits.maximumPacketBytes)
         do {
             let endpoint = session.endpoint
             let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.exchange(packet) }
-            let (reply, peer) = try trust.verify(response, as: ShardReply.self, maximumBytes: 16_384)
+            let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
+            let reply = try session.mac.open(response, as: ShardReply.self, reply: true, maximumBytes: 16_384)
             try validatePeer(peer, target: target)
             guard reply.recipient == target.identity, reply.sessionID == call.sessionID,
                   reply.sequence == call.sequence, reply.attemptID == call.attemptID else { throw V2ActorAuthenticationError.wrongRecipient }
@@ -330,8 +360,9 @@ actor V2RealtimeShardSender {
             let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: target.endpointReference)
             guard id.node.endpoint.host == target.address, id.node.endpoint.port == target.port else { throw V2ActorAuthenticationError.wrongRecipient }
             let endpoint = try V2RealtimeShardEndpoint.resolve(id: id, using: system)
+            let agreement = Curve25519.KeyAgreement.PrivateKey()
             let hello = RealtimeHello(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation, recipient: target.identity, handshakeID: UUID(),
-                                      endpointDigest: Data(SHA256.hash(data: target.endpointReference)))
+                                      endpointDigest: Data(SHA256.hash(data: target.endpointReference)), agreementKey: agreement.publicKey.rawRepresentation)
             let packet = try signer.sign(hello, maximumBytes: 16_384)
             let response = try await RemoteCall.with(timeout: limits.callTimeout) { try await endpoint.openSession(packet) }
             let (grant, peer) = try trust.verify(response, as: RealtimeGrant.self, maximumBytes: 16_384)
@@ -339,9 +370,12 @@ actor V2RealtimeShardSender {
                   peer.gatewayNodeIDs.contains(target.identity.nodeID) || peer.serviceID.rawValue == target.identity.nodeID,
                   grant.hello.serviceID == signer.serviceID, grant.hello.version == 1, grant.hello.callerIncarnation == incarnation,
                   grant.hello.recipient == target.identity, grant.hello.handshakeID == hello.handshakeID,
-                  grant.hello.endpointDigest == hello.endpointDigest,
+                  grant.hello.endpointDigest == hello.endpointDigest, grant.hello.agreementKey == hello.agreementKey,
                   (1...300_000).contains(grant.remainingMilliseconds) else { throw V2ActorAuthenticationError.wrongRecipient }
-            return Session(endpoint: endpoint, id: grant.sessionID, expires: started + .milliseconds(grant.remainingMilliseconds), sequence: 0)
+            let mac = try V2ActorSessionMAC(privateKey: agreement, peerKey: grant.agreementKey ?? Data(),
+                transcript: V2ActorProtobuf.encode(hello), sessionID: grant.sessionID,
+                client: signer.serviceID, server: peer.serviceID)
+            return Session(endpoint: endpoint, id: grant.sessionID, mac: mac, expires: started + .milliseconds(grant.remainingMilliseconds), sequence: 0)
         }
         openings[target] = task
         do {

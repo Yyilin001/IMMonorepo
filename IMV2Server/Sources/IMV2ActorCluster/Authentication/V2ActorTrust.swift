@@ -77,6 +77,11 @@ public struct V2ActorTrustStore: Sendable {
         return service.serviceID
     }
 
+    func configuredService(_ id: V2ActorServiceID) throws -> V2ActorTrustedService {
+        guard let peer = services[id] else { throw V2ActorAuthenticationError.unknownService }
+        return peer
+    }
+
     func verify<Body: Decodable>(_ packet: V2ActorSignedPacket, as type: Body.Type,
                                 maximumBytes: Int) throws -> (Body, V2ActorTrustedService) {
         guard maximumBytes > 0, !packet.body.isEmpty, packet.body.count <= maximumBytes else {
@@ -152,7 +157,7 @@ public struct V2ActorTrustStore: Sendable {
         return try verifyReplyBinding(payload.body, for: call)
     }
 
-    private func verifyReplyBinding(_ reply: V2ActorAuthenticatedReply,
+    func verifyReplyBinding(_ reply: V2ActorAuthenticatedReply,
                                     for call: V2ActorAuthenticatedCall) throws -> V2ActorRPCResponse {
         guard reply.host == call.recipient, reply.version == V2ActorSessionHello.protocolVersion,
               reply.sessionID == call.sessionID, reply.sequence == call.sequence,

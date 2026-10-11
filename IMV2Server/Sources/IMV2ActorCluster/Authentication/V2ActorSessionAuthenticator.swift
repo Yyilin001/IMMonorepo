@@ -1,3 +1,4 @@
+import Crypto
 import Foundation
 import IMV2ActorContracts
 
@@ -27,12 +28,13 @@ public struct V2ActorAuthenticationLimits: Sendable {
     }
 }
 
-/// 仅在签名、身份、角色与重放检查后创建的非 Codable 证明。
+/// 仅在报文认证、身份、角色与重放检查后创建的非 Codable 证明。
 /// 原生与远程适配器都必须经过此边界。
 public struct V2ActorVerifiedCall: Sendable {
     public let call: V2ActorAuthenticatedCall
     public let deadline: ContinuousClock.Instant
     // Diagnostic monotonic boundaries only; never used to grant authority.
+    var sessionMAC: V2ActorSessionMAC? = nil
     var authenticationEnteredAt: ContinuousClock.Instant? = nil
     var authenticationReturnedAt: ContinuousClock.Instant? = nil
 }
@@ -109,14 +111,21 @@ public actor V2ActorSessionAuthenticator {
         let instant = now()
         prune(at: instant)
         let key = HelloKey(serviceID: peer.serviceID, incarnation: hello.callerIncarnation, handshake: hello.handshakeID)
+        let transcript = try V2ActorProtobuf.encode(hello)
+        let helloDigest = Data(SHA256.hash(data: transcript))
         if let id = helloSessions[key], let session = sessions[id] {
+            guard session.helloDigest == helloDigest else { throw V2ActorAuthenticationError.invalidRequest }
             return try grant(session, id: id, at: instant)
         }
         guard sessions.count < limits.maximumSessions,
               serviceCounts[peer.serviceID, default: 0] < limits.maximumSessionsPerService
         else { throw V2ActorAuthenticationError.overloaded }
         let id = UUID()
-        let session = Session(key: key, expires: instant + limits.sessionLifetime.duration, window: limits.replayWindow)
+        let agreement = hello.agreementKey.map { _ in Curve25519.KeyAgreement.PrivateKey() }
+        let mac = try agreement.map { try V2ActorSessionMAC(privateKey: $0, peerKey: hello.agreementKey!,
+            transcript: transcript, sessionID: id, client: peer.serviceID,
+            server: trust.configuredHostServiceID(for: host.hostID)) }
+        let session = Session(key: key, helloDigest: helloDigest, agreementKey: agreement?.publicKey.rawRepresentation, mac: mac, expires: instant + limits.sessionLifetime.duration, window: limits.replayWindow)
         sessions[id] = session
         helloSessions[key] = id
         serviceCounts[peer.serviceID, default: 0] += 1
@@ -127,8 +136,20 @@ public actor V2ActorSessionAuthenticator {
     public func accept(_ packet: V2ActorSignedPacket) throws -> V2ActorVerifiedCall {
         let enteredAt = ContinuousClock.now
         let receivedAt = now()
-        let (call, peer) = try trust.verify(packet, as: V2ActorAuthenticatedCall.self,
-                                           maximumBytes: limits.maximumRequestBytes)
+        let call: V2ActorAuthenticatedCall
+        let peer: V2ActorTrustedService
+        if packet.signature.count == 32 {
+            let id = try V2ActorSessionMAC.packetSessionID(packet)
+            guard let session = sessions[id], session.expires > receivedAt, let mac = session.mac else {
+                throw V2ActorAuthenticationError.sessionExpired
+            }
+            call = try mac.open(packet, as: V2ActorAuthenticatedCall.self, reply: false, maximumBytes: limits.maximumRequestBytes)
+            guard call.sessionID == id else { throw V2ActorAuthenticationError.wrongRecipient }
+            peer = try trust.configuredService(packet.signerID)
+        } else {
+            (call, peer) = try trust.verify(packet, as: V2ActorAuthenticatedCall.self, maximumBytes: limits.maximumRequestBytes)
+            guard sessions[call.sessionID]?.mac == nil else { throw V2ActorAuthenticationError.invalidSignature }
+        }
         var verified = try acceptVerified(call, peer: peer, receivedAt: receivedAt)
         verified.authenticationEnteredAt = enteredAt
         verified.authenticationReturnedAt = .now
@@ -167,7 +188,7 @@ public actor V2ActorSessionAuthenticator {
         else { throw V2ActorAuthenticationError.sessionExpired }
         try authorize(call, peer: peer)
         try session.accept(sequence: call.sequence, attemptID: call.attemptID)
-        return V2ActorVerifiedCall(call: call, deadline: receivedAt + call.remainingBudget.duration)
+        return V2ActorVerifiedCall(call: call, deadline: receivedAt + call.remainingBudget.duration, sessionMAC: session.mac)
     }
 
     public func sessionCount() -> Int {
@@ -285,7 +306,7 @@ public actor V2ActorSessionAuthenticator {
         return .init(version: V2ActorSessionHello.protocolVersion, host: host,
                      serviceID: session.key.serviceID, callerIncarnation: session.key.incarnation,
                      handshakeID: session.key.handshake, sessionID: id,
-                     remainingLifetime: try .init(milliseconds))
+                     remainingLifetime: try .init(milliseconds), agreementKey: session.agreementKey)
     }
 
     private func prune(at instant: ContinuousClock.Instant) {
@@ -308,13 +329,18 @@ public actor V2ActorSessionAuthenticator {
 
     private final class Session {
         let key: HelloKey
+        let helloDigest: Data
         let expires: ContinuousClock.Instant
+        let agreementKey: Data?
+        let mac: V2ActorSessionMAC?
         var highest: UInt64 = 0
         var slots: [(sequence: UInt64, attemptID: UUID)?]
         var attempts: [UUID: UInt64] = [:]
 
-        init(key: HelloKey, expires: ContinuousClock.Instant, window: Int) {
+        init(key: HelloKey, helloDigest: Data, agreementKey: Data?, mac: V2ActorSessionMAC?, expires: ContinuousClock.Instant, window: Int) {
             self.key = key
+            self.helloDigest = helloDigest
+            self.agreementKey = agreementKey; self.mac = mac
             self.expires = expires
             self.slots = Array(repeating: nil, count: window)
         }

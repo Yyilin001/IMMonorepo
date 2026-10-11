@@ -728,6 +728,44 @@ struct V2ActorAuthenticationTests {
         }
     }
 
+    @Test("session MAC preserves authority, direction, replay, expiry and forbids signed downgrade")
+    func sessionMACAdmission() async throws {
+        let clock = TestClock()
+        let fixture = try Fixture(limits: .init(sessionLifetimeMilliseconds: 1_000), clock: clock)
+        let agreement = Curve25519.KeyAgreement.PrivateKey()
+        let hello = V2ActorSessionHello(serviceID: fixture.client.serviceID, callerIncarnation: UUID(),
+            recipient: fixture.token.host, handshakeID: UUID(), agreementKey: agreement.publicKey.rawRepresentation)
+        let grant = try await fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 16_384))
+        let repeated = try await fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 16_384))
+        #expect(repeated.sessionID == grant.sessionID && repeated.agreementKey == grant.agreementKey)
+        let mac = try V2ActorSessionMAC(privateKey: agreement, peerKey: #require(grant.agreementKey),
+            transcript: V2ActorProtobuf.encode(hello), sessionID: grant.sessionID,
+            client: fixture.client.serviceID, server: fixture.hostSigner.serviceID)
+        let call = try fixture.call(grant: grant)
+        let packet = try mac.seal(call, reply: false, maximumBytes: 65_536)
+        #expect(packet.signature.count == 32)
+        var changed = packet.body; changed[changed.count - 1] ^= 1
+        await failure(.invalidSignature) {
+            _ = try await fixture.auth.accept(.init(signerID: packet.signerID, body: changed, signature: packet.signature))
+        }
+        await failure(.invalidSignature) { _ = try await fixture.auth.accept(fixture.client.sign(call, maximumBytes: 65_536)) }
+        await failure(.wrongRecipient) {
+            _ = try await fixture.auth.accept(.init(signerID: fixture.worker.serviceID, body: packet.body, signature: packet.signature))
+        }
+        let verified = try await fixture.auth.accept(packet)
+        #expect(verified.call == call)
+        await failure(.replay) { _ = try await fixture.auth.accept(packet) }
+        let reply = V2ActorAuthenticatedReply(call: call, response: .acknowledged)
+        let response = try #require(verified.sessionMAC).seal(reply, reply: true, maximumBytes: 65_536)
+        let decoded = try mac.open(response, as: V2ActorAuthenticatedReply.self, reply: true, maximumBytes: 65_536)
+        #expect(try fixture.trust.verifyReplyBinding(decoded, for: call) == .acknowledged)
+        #expect(throws: (any Error).self) { try mac.open(response, as: V2ActorAuthenticatedReply.self, reply: false, maximumBytes: 65_536) }
+        let forbidden = try fixture.call(grant: grant, sequence: 2, principal: .service)
+        await failure(.forbidden) { _ = try await fixture.auth.accept(mac.seal(forbidden, reply: false, maximumBytes: 65_536)) }
+        clock.advance(.milliseconds(1_001))
+        await failure(.sessionExpired) { _ = try await fixture.auth.accept(mac.seal(fixture.call(grant: grant, sequence: 3), reply: false, maximumBytes: 65_536)) }
+    }
+
     private func failure(_ expected: V2ActorAuthenticationError, _ action: () async throws -> Void) async {
         do { try await action(); Issue.record("untrusted call unexpectedly passed") }
         catch { #expect(error as? V2ActorAuthenticationError == expected) }

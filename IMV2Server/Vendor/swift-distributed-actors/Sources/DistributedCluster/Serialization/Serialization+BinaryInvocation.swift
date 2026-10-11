@@ -65,3 +65,39 @@ internal final class BinaryInvocationSerializer: Serializer<InvocationMessage> {
         return text
     }
 }
+
+/// Success values opt in through their declared codec; errors retain the
+/// existing typed error transport. No wire type name selects the return codec.
+internal struct BinaryRemoteCallReply: AnyRemoteCallReply {
+    let callID: ClusterSystem.CallID
+    let value: Data?
+    var thrownError: (any Error & Codable)? { nil }
+    init(callID: ClusterSystem.CallID, value: Data) { self.callID = callID; self.value = value }
+    init<Err: Error & Codable>(callID: ClusterSystem.CallID, error: Err) { self.callID = callID; self.value = nil }
+}
+
+internal final class BinaryRemoteCallReplySerializer: Serializer<BinaryRemoteCallReply> {
+    private let allocator: ByteBufferAllocator
+    private static let magic: UInt32 = 0x53415201
+    private static let maximumBytes = 16_777_600
+    private enum Failure: Error { case invalidFrame }
+    init(_ allocator: ByteBufferAllocator) { self.allocator = allocator; super.init() }
+    override func serialize(_ reply: BinaryRemoteCallReply) throws -> Serialization.Buffer {
+        guard let bytes = reply.value, bytes.count <= Self.maximumBytes else { throw Failure.invalidFrame }
+        var buffer = allocator.buffer(capacity: 24 + bytes.count)
+        buffer.writeInteger(Self.magic)
+        var id = reply.callID.uuid; withUnsafeBytes(of: &id) { buffer.writeBytes($0) }
+        buffer.writeInteger(UInt32(bytes.count)); buffer.writeBytes(bytes)
+        return .nioByteBuffer(buffer)
+    }
+    override func deserialize(from source: Serialization.Buffer) throws -> BinaryRemoteCallReply {
+        var buffer = source.asByteBuffer(allocator: allocator)
+        guard buffer.readInteger(as: UInt32.self) == Self.magic,
+              let bytes = buffer.readBytes(length: 16), let count = buffer.readInteger(as: UInt32.self),
+              count <= Self.maximumBytes, Int(count) == buffer.readableBytes,
+              let value = buffer.readData(length: Int(count)) else { throw Failure.invalidFrame }
+        var id: uuid_t = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+        withUnsafeMutableBytes(of: &id) { $0.copyBytes(from: bytes) }
+        return BinaryRemoteCallReply(callID: UUID(uuid: id), value: value)
+    }
+}

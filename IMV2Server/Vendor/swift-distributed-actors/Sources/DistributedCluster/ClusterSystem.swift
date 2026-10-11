@@ -1355,6 +1355,12 @@ extension ClusterSystem {
             body(callID)
         }
 
+        if let binary = reply as? BinaryRemoteCallReply,
+           let bytes = binary.value,
+           let type = Reply.Value.self as? any ClusterBinaryInvocationArgument.Type,
+           let decoded = try type.decodeClusterInvocationArgument(bytes) as? Reply.Value {
+            return Reply.init(callID: binary.callID, value: decoded)
+        }
         guard let reply = reply as? Reply else {
             // ClusterInvocationResultHandler.onThrow returns RemoteCallReply<_Done> for both
             // remoteCallVoid and remoteCall (i.e., it doesn't send back RemoteCallReply<Res>).
@@ -1644,6 +1650,12 @@ public struct ClusterInvocationResultHandler: DistributedTargetInvocationResultH
                 ]
             )
 
+            if system.settings.serialization.binaryDistributedInvocations,
+               let binary = value as? any ClusterBinaryInvocationArgument {
+                let reply = BinaryRemoteCallReply(callID: callID, value: try binary.encodeClusterInvocationArgument())
+                try await channel.writeAndFlush(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient))
+                return
+            }
             let reply = RemoteCallReply<Success>(callID: callID, value: value)
             try await channel.writeAndFlush(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient))
         }

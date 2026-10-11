@@ -185,8 +185,8 @@ public actor V2RoomClusterInboundService {
         let maximumBytes: Int
         if isBoundedBatch(verified.call.request) { maximumBytes = min(262_144, limits.maximumReplyBytes) }
         else { maximumBytes = limits.maximumReplyBytes }
-        return try signer.sign(reply,
-            maximumBytes: maximumBytes)
+        if let mac = verified.sessionMAC { return try mac.seal(reply, reply: true, maximumBytes: maximumBytes) }
+        return try signer.sign(reply, maximumBytes: maximumBytes)
     }
 
     func exchangeLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,

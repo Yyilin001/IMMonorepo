@@ -24,8 +24,8 @@ public enum V2ActorCallPrincipal: Codable, Equatable, Sendable {
 }
 
 /// 加密字节是下方封闭类型消息体的编码，而非按字符串分发的业务载荷。
-/// 接收方先限制字节长度并验证原始签名，再解码为预期的消息体类型；
-/// 验签不重新编码消息体。
+/// 握手与发现使用 Ed25519；已协商会话使用 32 字节 HMAC 和会话前缀。
+/// 接收方限制长度并认证原始字节后才解码，不重新编码业务消息体。
 public struct V2ActorSignedPacket: Codable, Equatable, Sendable {
     public let signerID: V2ActorServiceID
     public let body: Data
@@ -45,14 +45,16 @@ public struct V2ActorSessionHello: Codable, Equatable, Sendable {
     public let callerIncarnation: UUID
     public let recipient: V2ActorHostIdentity
     public let handshakeID: UUID
+    public let agreementKey: Data?
 
     public init(version: Int = Self.protocolVersion, serviceID: V2ActorServiceID,
-                callerIncarnation: UUID, recipient: V2ActorHostIdentity, handshakeID: UUID) {
+                callerIncarnation: UUID, recipient: V2ActorHostIdentity, handshakeID: UUID, agreementKey: Data? = nil) {
         self.version = version
         self.serviceID = serviceID
         self.callerIncarnation = callerIncarnation
         self.recipient = recipient
         self.handshakeID = handshakeID
+        self.agreementKey = agreementKey
     }
 }
 
@@ -64,6 +66,7 @@ public struct V2ActorSessionGrant: Codable, Equatable, Sendable {
     public let handshakeID: UUID
     public let sessionID: UUID
     public let remainingLifetime: V2ActorMilliseconds
+    public var agreementKey: Data? = nil
 }
 
 public enum V2ActorRPCRequest: Codable, Equatable, Sendable {

@@ -88,13 +88,15 @@ struct V2RoomLocalCapabilityIntegrationTests {
         }
     }
 
+    // Local limits account for retained models, including the activation envelope.
+    // Leave room for setup, then exceed the limit with the business payload.
     @Test("the caller's smaller request ceiling rejects before local dispatch")
     func callerRequestCeiling() async throws {
-        try await withFixture(clientLimits: .init(maximumRequestBytes: 900)) { fixture in
+        try await withFixture(clientLimits: .init(maximumRequestBytes: 16_384)) { fixture in
             let token = try await fixture.activate()
             do {
                 _ = try await fixture.client.invoke(token, request: fixture.send(
-                    text: String(repeating: "x", count: 900)), principal: .user(fixture.user),
+                    text: String(repeating: "x", count: 16_384)), principal: .user(fixture.user),
                     deadline: .now + .seconds(5))
                 Issue.record("oversized local request dispatched")
             } catch {
@@ -106,11 +108,11 @@ struct V2RoomLocalCapabilityIntegrationTests {
 
     @Test("the host's smaller request ceiling rejects under its own trust boundary")
     func hostRequestCeiling() async throws {
-        try await withFixture(hostLimits: .init(maximumRequestBytes: 700)) { fixture in
+        try await withFixture(hostLimits: .init(maximumRequestBytes: 16_384)) { fixture in
             let token = try await fixture.activate()
             do {
                 _ = try await fixture.client.invoke(token, request: fixture.send(
-                    text: String(repeating: "x", count: 700)), principal: .user(fixture.user),
+                    text: String(repeating: "x", count: 16_384)), principal: .user(fixture.user),
                     deadline: .now + .seconds(5))
                 Issue.record("host-oversized local request dispatched")
             } catch {
@@ -122,7 +124,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
 
     @Test("the host's smaller reply ceiling is enforced after local execution")
     func hostReplyCeiling() async throws {
-        try await withFixture(hostLimits: .init(maximumReplyBytes: 1_024),
+        try await withFixture(hostLimits: .init(maximumReplyBytes: 16_384),
                               largeReply: true) { fixture in
             let token = try await fixture.activate()
             do {
@@ -431,7 +433,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let oversizedResponse: V2RoomResponse = .roomLog(.page(try .init(
                 roomID: .init(uuid: UUID()),
                 events: [try .init(sourceEventID: .init(uuid: UUID()), roomSequence: 1,
-                                   projectionKind: "test", payload: Data(repeating: 7, count: 4_096))],
+                                   projectionKind: "test", payload: Data(repeating: 7, count: 32_768))],
                 nextRoomSequence: 1, hasMore: false, logTrimmedThroughRoomSequence: 0)))
             let leaseStore = LocalLeaseStore()
             leases = leaseStore

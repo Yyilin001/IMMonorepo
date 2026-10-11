@@ -1,5 +1,6 @@
 import Distributed
 import DistributedCluster
+import Crypto
 import Foundation
 import IMV2ActorContracts
 import IMV2ActorRuntime
@@ -845,7 +846,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         if isLocal {
             remotePacket = nil
         } else {
-            do { remotePacket = try await signRequest(call, maximumBytes: requestBytes) }
+            do { remotePacket = try await signRequest(call, mac: live.mac, maximumBytes: requestBytes) }
             catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         }
         guard accepting, descriptorGenerations[host] == generation,
@@ -929,7 +930,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         sendTrace?.mark("rpc_transport_return")
         do {
-            let response = try await verifyReply(transportReply, for: call, maximumBytes: replyBytes)
+            let response = try await verifyReply(transportReply, for: call, mac: live.mac, maximumBytes: replyBytes)
             // 节点替换不会使已分发调用的正确签名响应失效。
             // 旧令牌不能授权新激活，但调用方必须收到实际结果。
             if case .failure(let failure) = response {
@@ -951,15 +952,20 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
     }
 
-    @concurrent private nonisolated func signRequest(_ call: V2ActorAuthenticatedCall,
+    @concurrent private nonisolated func signRequest(_ call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?,
         maximumBytes: Int) async throws -> V2ActorSignedPacket {
-        try signer.sign(call,
-            maximumBytes: maximumBytes)
+        if let mac { return try mac.seal(call, reply: false, maximumBytes: maximumBytes) }
+        return try signer.sign(call, maximumBytes: maximumBytes)
     }
     @concurrent private nonisolated func verifyReply(_ reply: TransportReply,
-        for call: V2ActorAuthenticatedCall, maximumBytes: Int) async throws -> V2ActorRPCResponse {
+        for call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?, maximumBytes: Int) async throws -> V2ActorRPCResponse {
         switch reply {
-        case .signed(let packet): return try trust.verifyReply(packet, for: call, maximumBytes: maximumBytes)
+        case .signed(let packet):
+            if let mac {
+                let reply = try mac.open(packet, as: V2ActorAuthenticatedReply.self, reply: true, maximumBytes: maximumBytes)
+                return try trust.verifyReplyBinding(reply, for: call)
+            }
+            return try trust.verifyReply(packet, for: call, maximumBytes: maximumBytes)
         case .local(let payload):
             guard let port = localPort else { throw V2ActorAuthenticationError.wrongRecipient }
             return try trust.verifyLocalReply(payload, for: call, from: port.identity, maximumBytes: maximumBytes)
@@ -1237,9 +1243,11 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
 
     private func openSession(_ descriptor: V2RoomClusterHostDescriptor,
                              deadline: ContinuousClock.Instant) async throws -> Session {
+        let local = localPort.map { descriptor.identity == $0.identity && descriptor.endpointID == $0.endpointID } == true
+        let agreement: Curve25519.KeyAgreement.PrivateKey? = local ? nil : .init()
         let hello = V2ActorSessionHello(
             serviceID: signer.serviceID, callerIncarnation: callerIncarnation,
-            recipient: descriptor.identity, handshakeID: UUID()
+            recipient: descriptor.identity, handshakeID: UUID(), agreementKey: agreement?.publicKey.rawRepresentation
         )
         let packet = try signer.sign(hello, maximumBytes: min(16_384, limits.maximumRequestBytes))
         var last: (any Error)?
@@ -1268,7 +1276,10 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 }
                 let expires = callStarted + grant.remainingLifetime.duration - .milliseconds(100)
                 let permit = try budget.acquire(.session, expiresAt: expires)
-                return Session(grant: grant, expires: expires,
+                let mac = try agreement.map { try V2ActorSessionMAC(privateKey: $0, peerKey: grant.agreementKey ?? Data(),
+                    transcript: V2ActorProtobuf.encode(hello), sessionID: grant.sessionID, client: signer.serviceID,
+                    server: trust.configuredHostServiceID(for: descriptor.identity.hostID)) }
+                return Session(grant: grant, mac: mac, expires: expires,
                     nextSequence: 0, localCapability: capability, permit: permit)
             } catch {
                 last = error
@@ -1662,6 +1673,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
 
     private struct Session: Sendable {
         let grant: V2ActorSessionGrant
+        let mac: V2ActorSessionMAC?
         let expires: ContinuousClock.Instant
         var nextSequence: UInt64
         let localCapability: V2ActorLocalCapability?

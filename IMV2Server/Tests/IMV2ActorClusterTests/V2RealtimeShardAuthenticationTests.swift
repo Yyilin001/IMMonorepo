@@ -14,8 +14,9 @@ struct V2RealtimeShardAuthenticationTests {
         let direct = V2RealtimeTopicKey(kind: .userSync, id: upper)
         let other = V2RealtimeTopicKey(kind: .userSync, id: lower)
         #expect(direct == other && direct.id == lower && direct.partitionID() == other.partitionID())
-        let json = Data("{\"kind\":\"userSync\",\"id\":\"\(upper)\"}".utf8)
-        let decoded = try V2ActorProtobuf.decode(V2RealtimeTopicKey.self, from: json)
+        struct RawTopic: Encodable { let kind: V2RealtimeTopicKind; let id: String }
+        let wire = try V2ActorProtobuf.encode(RawTopic(kind: .userSync, id: upper))
+        let decoded = try V2ActorProtobuf.decode(V2RealtimeTopicKey.self, from: wire)
         #expect(decoded == direct)
         let encoded = try V2ActorProtobuf.encode(decoded)
         #expect(try V2ActorProtobuf.decode(V2RealtimeTopicKey.self, from: encoded) == other)

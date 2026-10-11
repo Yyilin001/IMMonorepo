@@ -6,6 +6,23 @@ import Testing
 
 @Suite("Binary invocation preserves argument bytes and rejects malformed frames")
 struct V2BinaryInvocationTests {
+    @Test func binaryReplyRoundTripAndMalformedFrames() throws {
+        let codec = BinaryRemoteCallReplySerializer(.init())
+        let original = BinaryRemoteCallReply(callID: UUID(), value: Data(repeating: 42, count: 16_384))
+        let encoded = try codec.serialize(original).readData()
+        let decoded = try codec.deserialize(from: .data(encoded))
+        #expect(decoded.callID == original.callID && decoded.value == original.value)
+        #expect(encoded.count == 24 + original.value!.count)
+        for end in [0, 3, 4, 19, 20, 23, 24, encoded.count - 1] {
+            #expect(throws: (any Error).self) { try codec.deserialize(from: .data(encoded.prefix(end))) }
+        }
+        #expect(throws: (any Error).self) { try codec.deserialize(from: .data(encoded + Data([0]))) }
+        var changed = encoded; changed[0] ^= 1
+        #expect(throws: (any Error).self) { try codec.deserialize(from: .data(changed)) }
+        changed = encoded; changed.replaceSubrange(20..<24, with: [255,255,255,255])
+        #expect(throws: (any Error).self) { try codec.deserialize(from: .data(changed)) }
+    }
+
     @Test func roundTripAndSize() throws {
         let codec = BinaryInvocationSerializer(.init())
         let original = InvocationMessage(callID: UUID(), targetIdentifier: "调用/target",

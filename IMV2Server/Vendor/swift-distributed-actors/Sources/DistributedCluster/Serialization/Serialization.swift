@@ -81,6 +81,11 @@ public class Serialization {
             BinaryInvocationSerializer($0)
         }
 
+        settings.register(BinaryRemoteCallReply.self, serializerID: binaryInvocationID)
+        settings.registerSpecializedSerializer(BinaryRemoteCallReply.self, serializerID: binaryInvocationID) {
+            BinaryRemoteCallReplySerializer($0)
+        }
+
         // ==== Declare mangled names of some known popular types // TODO: hardcoded mangled name until we have _mangledTypeName
         //        settings.register(Bool.self, hint: "b", serializerID: .specializedWithTypeHint)
         //        settings.registerSpecializedSerializer(Bool.self, hint: "b", serializerID: .specializedWithTypeHint) { allocator in
