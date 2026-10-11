@@ -26,7 +26,7 @@ private func v2CurrentPolicySnapshot(
         }
         var result = states!
         if let recipient {
-            guard let relationship = result.first(where: { $0.scope.key == V2PolicyAuthorizationScope.pair(sender, recipient).key }),
+            guard let relationship = result.first(where: { $0.scope == V2PolicyAuthorizationScope.pair(sender, recipient).canonical }),
                   case .pair(let pair) = relationship.facts else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
             let ordinaryAccounts = result.filter { snapshot in
                 guard case .account(let account) = snapshot.facts else { return false }

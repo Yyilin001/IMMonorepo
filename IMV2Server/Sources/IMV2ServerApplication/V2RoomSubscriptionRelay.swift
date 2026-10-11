@@ -374,6 +374,17 @@ public actor V2RoomSubscriptionRelay {
         return lane == .authorization ? subscription.authorizationOutbox : subscription.messageOutbox
     }
 
+    /// Select status and its lane prefix in one actor turn. The immutable array
+    /// remains a snapshot while the pump reserves and sends the actual call.
+    package func pendingSnapshot(for gateway: V2GatewayRealtimeIdentity, lane: V2RoomSubscriptionLane)
+        -> (status: Status, pending: [V2RoomSubscriptionDelivery])? {
+        guard let subscription = subscriptions[gateway] else { return nil }
+        let status = Status(fence: subscription.fence, latestHighWatermark: subscription.latestHighWatermark,
+            needsBaseline: subscription.needsBaseline || (subscription.controlInvalidated
+                && subscription.authorizationOutbox.isEmpty && subscription.messageOutbox.isEmpty))
+        return (status, lane == .authorization ? subscription.authorizationOutbox : subscription.messageOutbox)
+    }
+
     /// Trusted Owner reconciliation after a complete shared-stream reset.
     package func subscriptionMembers(for gateway: V2GatewayRealtimeIdentity) -> [V2RoomSubscriptionMember] {
         (subscriptions[gateway]?.members ?? [:]).map { .init(userID: $0.key, memberRevision: $0.value) }
@@ -444,7 +455,8 @@ public actor V2RoomSubscriptionRelay {
     public func status(for gateway: V2GatewayRealtimeIdentity) -> Status? {
         guard let subscription = subscriptions[gateway] else { return nil }
         return .init(fence: subscription.fence, latestHighWatermark: subscription.latestHighWatermark,
-                     needsBaseline: subscription.needsBaseline || (subscription.controlInvalidated && subscription.pending.isEmpty))
+                     needsBaseline: subscription.needsBaseline || (subscription.controlInvalidated
+                        && subscription.authorizationOutbox.isEmpty && subscription.messageOutbox.isEmpty))
     }
 
     /// The authenticated Gateway checkpoint must include every issued authority control.

@@ -7,6 +7,45 @@ import IMV2ActorContracts
 
 @Suite("Room delivery pump peer isolation")
 struct V2RoomSubscriptionDeliveryPumpTests {
+    @Test(arguments: ["duplicate", "missing", "foreign"])
+    func malformedSharedReceiptsRetainEveryRoom(mode: String) async throws {
+        let user = UserID(uuid: UUID())
+        let gateway = V2GatewayRealtimeIdentity(nodeID: "malformed", serviceID: "gateway", incarnationID: UUID())
+        let requested = Mutex<Set<RoomID>>([])
+        let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1,
+            sendBatch: { batch, _, _ in
+                let first = batch.deliveries[0]
+                let receipt = V2RoomSubscriptionBatchReceipt(fence: first.fence,
+                    result: .appliedThrough(first.deliverySequence))
+                if mode == "missing" { return .init(receipts: [receipt]) }
+                let foreign = V2RoomSubscriptionFence(activation: first.fence.activation,
+                    subscriptionID: UUID(), generation: first.fence.generation,
+                    baselineSequence: first.fence.baselineSequence)
+                return .init(receipts: [receipt, .init(fence: mode == "duplicate" ? first.fence : foreign,
+                    result: .appliedThrough(first.deliverySequence))])
+            }, requestBaseline: { key, _ in requested.withLock { $0.insert(key.roomID) } })
+        var relays: [V2RoomSubscriptionRelay] = []
+        for _ in 0..<2 {
+            let room = RoomID(uuid: UUID())
+            let activation = try V2RoomActivationToken(roomID: room, owner: .init(shardID: "rooms", epoch: 0),
+                activationEpoch: .init(1), host: .init(hostID: .init("host"), incarnationID: UUID()))
+            let relay = try V2RoomSubscriptionRelay(activation: activation, baselineSequence: 0,
+                members: [.init(userID: user, memberRevision: 0)])
+            try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1,
+                operation: .subscribe(gateway: gateway, userID: user, memberRevision: 0,
+                    subscriptionID: UUID(), generation: 1)))
+            #expect(await pump.bind(.init(roomID: room, gateway: gateway), relay: relay,
+                descriptor: .init(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 9999),
+                sourceShardID: "rooms"))
+            relays.append(relay)
+        }
+        await pump.start()
+        do { try await waitUntil { requested.withLock { $0.count == 2 } } }
+        catch { await pump.close(); throw error }
+        for relay in relays { #expect(await relay.pending(for: gateway).count == 1) }
+        await pump.close()
+    }
+
     @Test func perBindingRetirementJoinsHeldSharedCallAndPreservesReplacement() async throws {
         let user = UserID(uuid: UUID())
         let gateway = V2GatewayRealtimeIdentity(nodeID: "joined", serviceID: "gateway", incarnationID: UUID())

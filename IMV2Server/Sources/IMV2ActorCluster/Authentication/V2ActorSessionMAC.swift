@@ -50,7 +50,7 @@ struct V2ActorSessionMAC: Sendable {
             V2MACAuthenticatedBytes(domain: Body.macDomain, body: packet.body), using: reply ? replyKey : requestKey) else {
             throw V2ActorAuthenticationError.invalidSignature
         }
-        do { return try V2ActorProtobuf.decode(Body.self, from: Data(packet.body.dropFirst(16))) }
+        do { return try V2ActorProtobuf.decode(Body.self, from: packet.body.bytes.extracting(16...)) }
         catch { throw V2ActorAuthenticationError.invalidRequest }
     }
 

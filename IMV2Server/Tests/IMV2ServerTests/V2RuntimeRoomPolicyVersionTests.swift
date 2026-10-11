@@ -1,4 +1,5 @@
 import Foundation
+import Foundation
 import Testing
 import IMV2ServerApplication
 @testable import IMV2ServerInfrastructure
@@ -50,4 +51,21 @@ struct V2RuntimeRoomPolicyVersionTests {
         #expect(initial.isFriend == current.isFriend && initial.blocked == current.blocked)
         #expect(initial != current)
     }
+    @Test("typed policy versions keep the existing string-key JSON representation")
+    func versionSerialization() throws {
+        let first = UUID(), second = UUID()
+        let pair = V2PolicyAuthorizationScope.pair(first, second).canonical
+        let versions = V2DirectSendPolicyVersions(values: [.account(first): 2, pair: 5])
+        let encoded = try JSONEncoder().encode(versions)
+        let legacy = try JSONDecoder().decode([String: Int64].self, from: encoded)
+        #expect(legacy == [V2PolicyAuthorizationScope.account(first).key: 2, pair.key: 5])
+        #expect(try JSONDecoder().decode(V2DirectSendPolicyVersions.self, from: encoded) == versions)
+        let reverseKey = "pair:" + second.uuidString.lowercased() + ":" + first.uuidString.lowercased()
+        let forwardKey = "pair:" + first.uuidString.lowercased() + ":" + second.uuidString.lowercased()
+        let duplicate = try JSONEncoder().encode([forwardKey: 1, reverseKey: 1])
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(V2DirectSendPolicyVersions.self, from: duplicate)
+        }
+    }
+
 }

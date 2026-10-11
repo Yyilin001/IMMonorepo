@@ -265,10 +265,11 @@ fileprivate actor V2RoomSubscriptionActor {
         return result
     }
     private func bind(_ permits: [V2GatewayRoomSubscriptionAuthority.Permit]) -> [V2GatewayRoomSubscriptionAuthority.Permit] {
-        permits.map { original in
+        let liveConnections = connections.snapshot().connections
+        return permits.map { original in
             var permit = original
             if users.insert(permit.userID).inserted { projectionDirty = true }
-            if let gate = connections.snapshot().connections[permit.connectionID]?.socketGate {
+            if let gate = liveConnections[permit.connectionID]?.socketGate {
                 permit.socketGate = gate
                 if projected[permit.connectionID]?.1 !== gate || projected[permit.connectionID]?.0 != permit.userID {
                     projected[permit.connectionID] = (permit.userID, gate, .denied); projectionDirty = true
@@ -328,7 +329,9 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         var eventSequence: UInt64 = 0
         var recoveryHighWatermark: UInt64 = 0
     }
-    private struct Room: Sendable {
+    // This reference never leaves the owning room actor. Mutating a room must
+    // not copy its membership and replay dictionaries on every delivery.
+    private final class Room {
         let fence: V2RoomSubscriptionFence
         let serviceID: String
         var deadline: ContinuousClock.Instant
@@ -337,6 +340,30 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         var deliverySequence: UInt64 = 0
         var receiptHistory: [UInt64: Data] = [:]
         var retired = false
+
+        init(fence: V2RoomSubscriptionFence, serviceID: String, deadline: ContinuousClock.Instant) {
+            self.fence = fence; self.serviceID = serviceID; self.deadline = deadline
+        }
+
+        func recordReceipt(sequence: UInt64, digest: Data) {
+            let previousHead = deliverySequence
+            deliverySequence = max(previousHead, sequence)
+            if deliverySequence > 256 {
+                let expiredThrough = deliverySequence - 256
+                if previousHead <= expiredThrough {
+                    receiptHistory.removeAll(keepingCapacity: true)
+                } else {
+                    let firstExpired = previousHead > 256 ? previousHead - 255 : 1
+                    if firstExpired <= expiredThrough {
+                        for expired in firstExpired...expiredThrough {
+                            receiptHistory.removeValue(forKey: expired)
+                        }
+                    }
+                }
+                guard sequence > expiredThrough else { return }
+            }
+            receiptHistory[sequence] = digest
+        }
     }
     private struct State {
         var rooms: [RoomID: Room] = [:]
@@ -452,11 +479,11 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             // from a delivery packet. Once history is evicted, unknown rooms
             // cannot use an ordinary grant to bypass the missing fence floor.
             guard value.rooms[fence.roomID] != nil || !value.unknownRoomsRequireReset || afterAuthoritativeReset else { return false }
-            if var old = value.rooms[fence.roomID] {
+            if let old = value.rooms[fence.roomID] {
                 if old.fence == fence {
                     guard !old.retired, old.serviceID == serviceID, old.deadline > now() else { return false }
                     guard reserve() else { return false }
-                    old.deadline = deadline; value.rooms[fence.roomID] = old; return true
+                    old.deadline = deadline; return true
                 }
                 if fence.activation == old.fence.activation {
                     guard fence.generation > old.fence.generation else { return false }
@@ -471,7 +498,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             let previous = value.rooms[fence.roomID]
             let retainedHead = previous?.fence.activation.owner == fence.activation.owner
                 ? previous?.messages.recoveryHighWatermark ?? 0 : 0
-            var replacement = Room(fence: fence, serviceID: serviceID, deadline: deadline)
+            let replacement = Room(fence: fence, serviceID: serviceID, deadline: deadline)
             replacement.messages.recoveryHighWatermark = max(retainedHead, fence.baselineSequence)
             if previous == nil || previous?.retired == true { value.activeRoomCount += 1 }
             value.retiredRooms.remove(fence.roomID)
@@ -483,11 +510,10 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     @discardableResult
     func pause(fence: V2RoomSubscriptionFence) -> Bool {
         withState { value in
-            guard var room = value.rooms[fence.roomID], room.fence == fence else { return false }
+            guard let room = value.rooms[fence.roomID], room.fence == fence else { return false }
             room.authorization.ready = false; room.authorization.members.removeAll()
             // A pre-baseline pause also needs a new fence, not initial activation.
             room.deliverySequence = max(1, room.deliverySequence)
-            value.rooms[fence.roomID] = room
             return true
         }
     }
@@ -514,7 +540,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         appliedControlSequence: UInt64, deadline: ContinuousClock.Instant) -> Bool {
         withState { value in
             let metrics = V2RoomSubscriptionHeadDeliveryMetrics.shared
-            guard !value.closed, var room = value.rooms[fence.roomID] else {
+            guard !value.closed, let room = value.rooms[fence.roomID] else {
                 metrics.record(.renewalAuthorityMissing); return false
             }
             guard room.fence == fence else { metrics.record(.renewalAuthorityFenceMismatch); return false }
@@ -527,7 +553,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 metrics.record(.renewalAuthorityControlMismatch); return false
             }
             room.deadline = deadline
-            value.rooms[fence.roomID] = room; return true
+            return true
         }
     }
 
@@ -536,11 +562,10 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     @discardableResult
     func recordCommittedHead(fence: V2RoomSubscriptionFence, serviceID: String, highWatermark: UInt64) -> Bool {
         withState { value in
-            guard !value.closed, var room = value.rooms[fence.roomID], !room.retired, room.fence == fence,
+            guard !value.closed, let room = value.rooms[fence.roomID], !room.retired, room.fence == fence,
                   room.serviceID == serviceID, highWatermark >= fence.baselineSequence,
                   highWatermark <= UInt64(Int64.max) else { return false }
             room.messages.recoveryHighWatermark = max(room.messages.recoveryHighWatermark, highWatermark)
-            value.rooms[fence.roomID] = room
             return true
         }
     }
@@ -559,14 +584,14 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         let digest = V2RoomSubscriptionDeliveryFingerprint.digest(delivery)
         return withState { value in
             let id = delivery.fence.roomID
-            guard !value.closed, var room = value.rooms[id], room.fence == delivery.fence,
+            guard !value.closed, let room = value.rooms[id], room.fence == delivery.fence,
                   room.serviceID == authenticatedServiceID else { return .stale }
             let terminal = delivery.payload == .authorizationInvalidated
             // Closing an exact, authenticated fence grants no authority. Its
             // actual receipt must remain possible after local expiry/retirement;
             // otherwise the Owner cannot finish this cut or issue a fresh fence.
             guard terminal || (!room.retired && room.deadline > now()) else {
-                room.authorization.ready = false; room.authorization.members.removeAll(); value.rooms[id] = room
+                room.authorization.ready = false; room.authorization.members.removeAll()
                 return .stale
             }
             if let previous = room.receiptHistory[delivery.deliverySequence] {
@@ -580,7 +605,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 }
                 guard terminal || (room.authorization.sequence < UInt64.max &&
                       delivery.authorizationSequence == room.authorization.sequence + 1) else {
-                    room.authorization.ready = false; room.authorization.members.removeAll(); value.rooms[id] = room
+                    room.authorization.ready = false; room.authorization.members.removeAll()
                     return .snapshotRequired
                 }
             } else {
@@ -642,6 +667,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 guard event.roomID == id, event.roomSequence > room.messages.eventSequence, validMembers(members) else { return .invalid }
                 room.messages.eventSequence = event.roomSequence
                 room.messages.recoveryHighWatermark = max(room.messages.recoveryHighWatermark, event.highWatermark)
+                let directory = value.directory.snapshot()
                 for recipient in members {
                     let userID = recipient.userID
                     guard (event.recipientUserIDs.isEmpty && event.groupMembershipRevision != nil)
@@ -649,9 +675,9 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                           let member = room.authorization.members[userID], recipient.memberRevision == member.revision,
                           event.roomSequence > member.baselineSequence else { continue }
                     // Enumerate only this delivery's users and their devices.
-                    for connectionID in value.connectionsByUser[userID] ?? [] {
+                    for connectionID in directory.connectionsByUser[userID] ?? [] {
                         guard connectionID != event.excludedConnectionID,
-                              let connection = value.connections[connectionID] else { continue }
+                              let connection = directory.connections[connectionID] else { continue }
                         permits.append(accountPermit(room: room, member: member, connectionID: connectionID, connection: connection))
                     }
                 }
@@ -660,12 +686,13 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 guard event.roomID == id, event.roomSequence > room.messages.eventSequence else { return .invalid }
                 room.messages.eventSequence = event.roomSequence
                 room.messages.recoveryHighWatermark = max(room.messages.recoveryHighWatermark, event.highWatermark)
+                let directory = value.directory.snapshot()
                 for (userID, member) in room.authorization.members {
                     guard event.roomSequence > member.baselineSequence else { continue }
                     // Enumerate only this delivery's users and their devices.
-                    for connectionID in value.connectionsByUser[userID] ?? [] {
+                    for connectionID in directory.connectionsByUser[userID] ?? [] {
                         guard connectionID != event.excludedConnectionID,
-                              let connection = value.connections[connectionID] else { continue }
+                              let connection = directory.connections[connectionID] else { continue }
                         permits.append(accountPermit(room: room, member: member, connectionID: connectionID, connection: connection))
                     }
                 }
@@ -679,18 +706,13 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 room.messages.recoveryHighWatermark = max(room.messages.recoveryHighWatermark, highWatermark)
                 // H is advisory. It never installs body or membership authority.
             }
-            room.deliverySequence = max(room.deliverySequence, delivery.deliverySequence)
-            room.receiptHistory[delivery.deliverySequence] = digest
-            if room.deliverySequence > 256 {
-                room.receiptHistory = room.receiptHistory.filter { $0.key > room.deliverySequence - 256 }
-            }
+            room.recordReceipt(sequence: delivery.deliverySequence, digest: digest)
             if delivery.payload.isAuthorizationControl {
                 room.authorization.sequence = delivery.authorizationSequence
                 room.authorization.history[delivery.authorizationSequence] = digest
                 if delivery.authorizationSequence > 256 { room.authorization.history.removeValue(forKey: delivery.authorizationSequence - 256) }
             }
             if !delivery.payload.isAuthorizationControl { room.messages.deliverySequence = delivery.deliverySequence }
-            value.rooms[id] = room
             return .applied(permits: permits)
         }
     }
@@ -705,7 +727,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     @discardableResult
     func retire(fence: V2RoomSubscriptionFence) -> Bool {
         withState { value in
-            guard !value.closed, var room = value.rooms[fence.roomID], room.fence == fence else { return false }
+            guard !value.closed, let room = value.rooms[fence.roomID], room.fence == fence else { return false }
             guard !room.retired else { return true }
             room.retired = true
             room.authorization = AuthorizationState()
@@ -713,7 +735,6 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             let head = room.messages.recoveryHighWatermark
             room.messages = MessageProgress()
             room.messages.recoveryHighWatermark = head
-            value.rooms[fence.roomID] = room
             value.activeRoomCount -= 1
             value.retiredRooms.insert(fence.roomID)
             if value.retiredRooms.count > maximumRetiredRooms, let evicted = value.retiredRooms.first {

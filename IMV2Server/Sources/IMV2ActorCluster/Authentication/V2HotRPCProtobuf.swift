@@ -16,8 +16,8 @@ extension V2ActorRPCRequest: V2ActorProtobufMessage {
         }
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotRPCRequest(serializedBytes: bytes); try V2HotPB.check(wire)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotRPCRequest(serializedBytes: copy bytes); try V2HotPB.check(wire)
         switch wire.operation {
         case .invoke(let value): try V2HotPB.check(value, value.hasToken && value.hasRequest); return .invoke(token: try value.token.model(), request: try value.request.model())
         case .lookup(let value): return .lookup(try value.model())
@@ -52,8 +52,8 @@ extension V2ActorRPCResponse: V2ActorProtobufMessage {
         }
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotRPCResponse(serializedBytes: bytes); try V2HotPB.check(wire)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotRPCResponse(serializedBytes: copy bytes); try V2HotPB.check(wire)
         switch wire.result {
         case .response(let value): return .result(try value.model())
         case .ready(let value): try V2HotPB.check(value, value.hasToken); return .ready(token: try value.token.model(), physicalReference: value.physicalReference)

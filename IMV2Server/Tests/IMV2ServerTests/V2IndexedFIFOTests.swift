@@ -44,4 +44,27 @@ struct V2IndexedFIFOTests {
         #expect(queue.removeFirst() == 123)
     }
 
+    @Test("LRU moves preserve values, head/tail links and copied queue independence")
+    func moveToLast() {
+        var queue = V2IndexedFIFO<Int, String>()
+        for key in 0..<4 { queue.append("v\(key)", key: key) }
+        let original = queue
+        #expect(queue.moveToLast(99) == false)
+        #expect(queue.moveToLast(3) == true)
+        #expect(queue.moveToLast(0) == true)
+        #expect(queue.moveToLast(2) == true)
+        var values: [String] = []
+        queue.forEach { values.append($0) }
+        #expect(values == ["v1", "v3", "v0", "v2"])
+        #expect(queue.count == 4)
+        #expect(original.first == "v0")
+        #expect(queue.remove(3) == "v3")
+        #expect(queue.removeFirst() == "v1")
+        #expect(queue.moveToLast(0) == true)
+        #expect(queue.removeFirst() == "v2")
+        #expect(queue.moveToLast(0) == true)
+        #expect(queue.removeFirst() == "v0")
+        #expect(queue.moveToLast(0) == false)
+    }
+
 }

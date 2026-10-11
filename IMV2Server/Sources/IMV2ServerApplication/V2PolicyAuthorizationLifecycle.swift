@@ -5,12 +5,22 @@ package enum V2PolicyAuthorizationScope: Hashable, Sendable {
     case stranger(UUID)
     case pair(UUID, UUID)
 
+    /// The two directions of a relationship share one in-memory identity.
+    package var canonical: Self {
+        guard case .pair(let first, let second) = self else { return self }
+        var a = first.uuid, b = second.uuid
+        let ordered = withUnsafeBytes(of: &a) { left in
+            withUnsafeBytes(of: &b) { left.lexicographicallyPrecedes($0) }
+        }
+        return ordered ? .pair(first, second) : .pair(second, first)
+    }
+
     package var key: String {
-        switch self {
+        switch canonical {
         case .stranger(let user): "stranger:" + user.uuidString.lowercased()
         case .account(let user): "account:" + user.uuidString.lowercased()
         case .pair(let first, let second):
-            "pair:" + [first, second].map { $0.uuidString.lowercased() }.sorted().joined(separator: ":")
+            "pair:" + first.uuidString.lowercased() + ":" + second.uuidString.lowercased()
         }
     }
 

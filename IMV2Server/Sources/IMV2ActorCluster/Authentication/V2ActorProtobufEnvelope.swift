@@ -36,8 +36,8 @@ extension V2ActorAuthenticatedCall: V2ActorProtobufMessage {
         value.requestBody = try V2ActorProtobuf.encode(request)
         return try value.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let value = try Im_Actor_V1_AuthenticatedCall(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let value = try Im_Actor_V1_AuthenticatedCall(serializedBytes: copy bytes)
         guard value.unknownFields.data.isEmpty, value.hasRecipient, !value.requestBody.isEmpty,
               let version = Int(exactly: value.version), let budget = Int64(exactly: value.remainingBudgetMs)
         else { throw V2ActorAuthenticationError.invalidRequest }
@@ -62,8 +62,8 @@ extension V2ActorAuthenticatedReply: V2ActorProtobufMessage {
         value.responseBody = try V2ActorProtobuf.encode(response)
         return try value.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let value = try Im_Actor_V1_AuthenticatedReply(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let value = try Im_Actor_V1_AuthenticatedReply(serializedBytes: copy bytes)
         guard value.unknownFields.data.isEmpty, value.hasHost, !value.responseBody.isEmpty,
               let version = Int(exactly: value.version) else { throw V2ActorAuthenticationError.invalidRequest }
         return try .init(version: version, host: hostModel(value.host), sessionID: uuid(value.sessionID),

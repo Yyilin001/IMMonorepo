@@ -7,6 +7,32 @@ import IMV2ServerContracts
 import Testing
 
 struct V2RoomSubscriptionRelayTests {
+    @Test func pendingSnapshotKeepsFenceAndLanePrefixAcrossReset() async throws {
+        let room = try RoomID("snapshot-room"), user = try UserID("snapshot-user")
+        let relay = try V2RoomSubscriptionRelay(activation: roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0),
+            baselineSequence: 0, members: [.init(userID: user, memberRevision: 1)])
+        #expect(await relay.pendingSnapshot(for: gateway, lane: .message) == nil)
+        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1,
+            operation: .subscribe(gateway: gateway, userID: user, memberRevision: 1,
+                subscriptionID: UUID(), generation: 1)))
+        let controls = try #require(await relay.pendingSnapshot(for: gateway, lane: .authorization))
+        #expect(controls.pending.count == 1)
+        #expect(controls.pending.allSatisfy { $0.fence == controls.status.fence })
+        try await relay.acknowledge(gateway: gateway, fence: controls.status.fence,
+            through: controls.pending[0].deliverySequence, lane: .authorization)
+        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 2, operation: .event(try event(room, sequence: 1))))
+        let messages = try #require(await relay.pendingSnapshot(for: gateway, lane: .message))
+        #expect(messages.pending.count == 1 && messages.status.latestHighWatermark == 1)
+        #expect(messages.status.fence == controls.status.fence)
+        #expect(await relay.pendingSnapshot(for: gateway, lane: .authorization)?.pending.isEmpty == true)
+        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 3,
+            operation: .reset(gateway: gateway, subscriptionID: UUID(), generation: 2)))
+        let replacement = try #require(await relay.pendingSnapshot(for: gateway, lane: .authorization))
+        #expect(replacement.status.fence != messages.status.fence)
+        #expect(messages.pending[0].fence == messages.status.fence)
+        #expect(replacement.pending.allSatisfy { $0.fence == replacement.status.fence })
+    }
+
     @Test func resetSplitsLargeAuthorizationBaseline() async throws {
         let room = RoomID(uuid: UUID()), id = UUID()
         let members = (0..<1_025).map { _ in V2RoomSubscriptionMember(userID: .init(uuid: UUID()), memberRevision: 1) }

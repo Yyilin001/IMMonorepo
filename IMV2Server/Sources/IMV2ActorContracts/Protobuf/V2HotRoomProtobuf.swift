@@ -89,7 +89,7 @@ extension V2RoomRequest: V2ActorProtobufMessage {
         return wire
     }
     package func protobufBytes() throws -> Data { try hotWire().serializedData() }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self { try Im_Actor_V1_HotRoomRequest(serializedBytes: bytes).model() }
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self { try Im_Actor_V1_HotRoomRequest(serializedBytes: copy bytes).model() }
 }
 extension Im_Actor_V1_HotRoomRequest {
     package func model() throws -> V2RoomRequest {
@@ -124,7 +124,7 @@ extension V2RoomResponse: V2ActorProtobufMessage {
         return wire
     }
     package func protobufBytes() throws -> Data { try hotWire().serializedData() }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self { try Im_Actor_V1_HotRoomResponse(serializedBytes: bytes).model() }
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self { try Im_Actor_V1_HotRoomResponse(serializedBytes: copy bytes).model() }
 }
 extension Im_Actor_V1_HotRoomResponse {
     package func model() throws -> V2RoomResponse {

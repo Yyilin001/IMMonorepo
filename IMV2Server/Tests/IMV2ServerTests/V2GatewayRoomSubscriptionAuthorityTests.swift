@@ -548,6 +548,33 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         #expect(permits.first?.userID == f.user)
     }
 
+    @Test("replay window preserves its boundary across sequence jumps and late controls")
+    func replayWindowAcrossJumps() async throws {
+        let f = Fixture(), authority = f.authority()
+        await f.connect(authority); try await f.baseline(authority)
+        for sequence in UInt64(2)...300 {
+            #expect(await authority.apply(f.delivery(sequence, .head(highWatermark: sequence + 10)),
+                authenticatedServiceID: "owner") == .applied(permits: []))
+        }
+        // At head 300, 45 is still fingerprint-protected; 44 has expired.
+        #expect(await authority.apply(f.delivery(45, .head(highWatermark: 999)),
+            authenticatedServiceID: "owner") == .stale)
+        #expect(await authority.apply(f.delivery(44, .head(highWatermark: 999)),
+            authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(f.delivery(1_000, .head(highWatermark: 1_010)),
+            authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(f.delivery(300, .head(highWatermark: 999)),
+            authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(f.delivery(1_000, .head(highWatermark: 1_011)),
+            authenticatedServiceID: "owner") == .stale)
+        // Authorization has its own order and may arrive behind a data head.
+        let control = f.delivery(999, authorization: 2, .revoke(userID: f.user, memberRevision: 1))
+        #expect(await authority.apply(control, authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(control, authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(f.delivery(999, authorization: 2, .head(highWatermark: 1_020)),
+            authenticatedServiceID: "owner") == .stale)
+    }
+
     @Test("exact last delivery retry ACKs without repeating fanout; conflicting duplicate is rejected")
     func lostAcknowledgement() async throws {
         let f = Fixture(), authority = f.authority()

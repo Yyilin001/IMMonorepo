@@ -194,8 +194,11 @@ private actor V2RoomSubscriptionLanePump {
     }
     public func signal(_ key: Key) {
         guard !closed, let entry = entries[key], !entry.waitingBaseline else { return }
+        // A queued key already owns a wake. Completion/retry wakes blocked
+        // groups explicitly, so repeated room signals need no extra hop.
+        guard queuedKeys.insert(key).inserted else { return }
         let group = Group(gateway: key.gateway, shardID: entry.shardID)
-        if queuedKeys.insert(key).inserted { groupKeys[group, default: KeyQueue()].append(key) }
+        groupKeys[group, default: KeyQueue()].append(key)
         enqueue(group)
         wakes.continuation.yield(())
     }
@@ -283,6 +286,7 @@ private actor V2RoomSubscriptionLanePump {
             var work: [Work] = []
             var descriptor: V2GatewayRealtimeDescriptor?
             let candidates = min(groupKeys[group]?.count ?? 0, maximumBatchItems)
+            work.reserveCapacity(candidates)
             activePeers.insert(group.gateway)
             for _ in 0..<candidates {
                 guard !closed, builder.count < maximumBatchItems,
@@ -294,16 +298,16 @@ private actor V2RoomSubscriptionLanePump {
                 // Reserve before awaiting the Relay; reentrant bind cannot
                 // replace the identity whose pending prefix we are collecting.
                 activeKeys.insert(key); reservedBindings[key] = entry.id
-                guard let status = await entry.relay.status(for: key.gateway),
+                guard let snapshot = await entry.relay.pendingSnapshot(for: key.gateway, lane: lane),
                       entries[key]?.id == entry.id, !closed else {
                     releaseReservation(key, entryID: entry.id); continue
                 }
+                let status = snapshot.status
                 bindingFences[Binding(key: key, entryID: entry.id)] = status.fence
                 if status.needsBaseline {
                     releaseReservation(key, entryID: entry.id); requireBaseline(key, entry: entry, status: status); continue
                 }
-                let pending = await entry.relay.pending(for: key.gateway, lane: lane)
-                guard entries[key]?.id == entry.id, !closed else { releaseReservation(key, entryID: entry.id); continue }
+                let pending = snapshot.pending
                 var last: V2RoomSubscriptionDelivery?
                 for delivery in pending.prefix(maximumBatchItems - builder.count) {
                     guard (try? builder.append(delivery, maximumBytes: maximumBatchBytes)) == true else { break }
@@ -357,10 +361,8 @@ private actor V2RoomSubscriptionLanePump {
         }
         guard !closed else { return }
         let receipts: [V2RoomSubscriptionFence: V2RoomSubscriptionDeliveryResult]?
-        if case .success(let response) = result,
-           response.receipts.count == work.count,
-           Set(response.receipts.map(\.fence)) == Set(work.map { $0.last.fence }) {
-            receipts = Dictionary(uniqueKeysWithValues: response.receipts.map { ($0.fence, $0.result) })
+        if case .success(let response) = result {
+            receipts = validatedReceipts(response, work: work)
         } else { receipts = nil }
         if case .failure = result {
             // One retry owner per peer/shard batch, rather than one sleeping
@@ -403,6 +405,17 @@ private actor V2RoomSubscriptionLanePump {
                 signal(key)
             }
         }
+    }
+    private func validatedReceipts(_ response: V2RoomSubscriptionBatchResult, work: [Work])
+        -> [V2RoomSubscriptionFence: V2RoomSubscriptionDeliveryResult]? {
+        guard response.receipts.count == work.count else { return nil }
+        var receipts: [V2RoomSubscriptionFence: V2RoomSubscriptionDeliveryResult] = [:]
+        receipts.reserveCapacity(work.count)
+        for receipt in response.receipts {
+            guard receipts.updateValue(receipt.result, forKey: receipt.fence) == nil else { return nil }
+        }
+        guard work.allSatisfy({ receipts[$0.last.fence] != nil }) else { return nil }
+        return receipts
     }
     private func retry(_ group: Group) {
         retrying.removeValue(forKey: group)

@@ -25,8 +25,8 @@ extension RoomSubscriptionCall: V2ActorProtobufMessage {
         wire.sourceShardID = sourceShardID
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotSubscriptionCall(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotSubscriptionCall(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader && wire.hasDelivery); let h = wire.header; try validate(h)
         return try .init(serviceID: .init(h.serviceID), version: Int(h.version), callerIncarnation: V2HotPB.uuid(h.callerIncarnation),
             recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID),
@@ -43,8 +43,8 @@ extension RoomSubscriptionBatchCall: V2ActorProtobufMessage {
         wire.sourceShardID = sourceShardID
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotSubscriptionBatchCall(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotSubscriptionBatchCall(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader && wire.hasBatch); let h = wire.header; try validate(h)
         return try .init(serviceID: .init(h.serviceID), version: Int(h.version), callerIncarnation: V2HotPB.uuid(h.callerIncarnation),
             recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID),
@@ -60,8 +60,8 @@ extension RealtimeCall: V2ActorProtobufMessage {
         wire.batch = Im_Actor_V1_HotRealtimeBatch(batch)
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotRealtimeCall(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotRealtimeCall(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader && wire.hasBatch); let h = wire.header; try validate(h)
         return try .init(serviceID: .init(h.serviceID), version: Int(h.version), callerIncarnation: V2HotPB.uuid(h.callerIncarnation),
             recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID),
@@ -75,8 +75,8 @@ extension RoomSubscriptionReply: V2ActorProtobufMessage {
         wire.result = Im_Actor_V1_HotDeliveryResult(result)
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotSubscriptionReply(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotSubscriptionReply(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader && wire.hasResult); let h = wire.header; try validate(h, reply: true)
         return try .init(recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence,
             attemptID: V2HotPB.uuid(h.attemptID), result: wire.result.model())
@@ -89,8 +89,8 @@ extension RoomSubscriptionBatchReply: V2ActorProtobufMessage {
         wire.result = Im_Actor_V1_HotDeliveryReceipts(result)
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotSubscriptionBatchReply(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotSubscriptionBatchReply(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader && wire.hasResult); let h = wire.header; try validate(h, reply: true)
         return try .init(recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence,
             attemptID: V2HotPB.uuid(h.attemptID), result: wire.result.model())
@@ -103,8 +103,8 @@ extension RealtimeReply: V2ActorProtobufMessage {
         wire.acceptance = acceptance.rawValue
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotRealtimeReply(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotRealtimeReply(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader); let h = wire.header; try validate(h, reply: true)
         guard let acceptance = V2RealtimeAcceptance(rawValue: wire.acceptance) else { throw V2HotPB.Invalid.value }
         return try .init(recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence,
@@ -118,8 +118,8 @@ extension JournalProjectionCall: V2ActorProtobufMessage {
         wire.header = callHeader(service: serviceID, version: version, incarnation: callerIncarnation, recipient: recipient, session: sessionID, sequence: sequence, attempt: attemptID)
         wire.batch = .init(batch); return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotJournalCall(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotJournalCall(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader && wire.hasBatch); let h = wire.header; try validate(h)
         return try .init(serviceID: .init(h.serviceID), version: Int(h.version), callerIncarnation: V2HotPB.uuid(h.callerIncarnation), recipient: h.recipient.model(),
             sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID), batch: wire.batch.model())
@@ -130,8 +130,8 @@ extension JournalProjectionReply: V2ActorProtobufMessage {
         var wire = Im_Actor_V1_HotJournalReply(); wire.header = replyHeader(recipient: recipient, session: sessionID, sequence: sequence, attempt: attemptID)
         wire.result = .init(result); return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotJournalReply(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotJournalReply(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader && wire.hasResult); let h = wire.header; try validate(h, reply: true)
         return try .init(recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID), result: wire.result.model())
     }
@@ -149,8 +149,8 @@ extension ShardCall: V2ActorProtobufMessage {
         }
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotShardCall(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotShardCall(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader); let h = wire.header; try validate(h)
         let operation: ShardOperation
         switch wire.operation {
@@ -170,8 +170,8 @@ extension ShardReply: V2ActorProtobufMessage {
         switch result { case .publish(let value): wire.publish = value.rawValue; case .control(let value): wire.coldControl = try V2ActorProtobuf.encodeValue(value) }
         return try wire.serializedData()
     }
-    package static func fromProtobufBytes(_ bytes: Data) throws -> Self {
-        let wire = try Im_Actor_V1_HotShardReply(serializedBytes: bytes)
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotShardReply(serializedBytes: copy bytes)
         try V2HotPB.check(wire, wire.hasHeader); let h = wire.header; try validate(h, reply: true)
         let result: ShardResult
         switch wire.result {

@@ -24,6 +24,16 @@ struct V2HotProtobufTests {
     private func roundTrip<T: Codable & Equatable>(_ value: T) throws -> Bool {
         try V2ActorProtobuf.decode(T.self, from: V2ActorProtobuf.encode(value)) == value
     }
+    @Test func borrowedSubrangeDecodesHotAndGenericModels() throws {
+        let request = V2RoomRequest.messaging(.sendOperation(try send()))
+        var packet = Data(repeating: 255, count: 16)
+        packet.append(try V2ActorProtobuf.encode(request)); packet.append(255)
+        let body = packet.bytes.extracting(16..<(packet.count - 1))
+        #expect(try V2ActorProtobuf.decode(V2RoomRequest.self, from: body) == request)
+        let generic = try V2ActorProtobuf.encodeValue(["中文😀", ""])
+        #expect(try V2ActorProtobuf.decode([String].self, from: generic.bytes) == ["中文😀", ""])
+        #expect(throws: (any Error).self) { try V2ActorProtobuf.decode(V2RoomRequest.self, from: packet.bytes) }
+    }
     @Test func richSendUsesFixedFieldsAndPreservesFingerprints() throws {
         let command = try send(), request = V2RoomRequest.messaging(.sendOperation(command))
         let bytes = try V2ActorProtobuf.encode(request), wire = try Im_Actor_V1_HotRoomRequest(serializedBytes: bytes)

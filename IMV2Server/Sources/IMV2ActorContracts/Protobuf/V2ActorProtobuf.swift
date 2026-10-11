@@ -5,7 +5,7 @@ import SwiftProtobuf
 /// integers and raw bytes. This codec is never used for local dispatch.
 package protocol V2ActorProtobufMessage {
     func protobufBytes() throws -> Data
-    static func fromProtobufBytes(_ bytes: Data) throws -> Self
+    static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self
 }
 
 public enum V2ActorProtobuf {
@@ -24,14 +24,20 @@ public enum V2ActorProtobuf {
         return try node.message(depth: 0)
     }
     public static func decode<T: Decodable>(_ type: T.Type, from bytes: Data) throws -> T {
-        guard !bytes.isEmpty, bytes.count <= 16_777_216 else { throw PBError.invalid }
+        try decode(type, from: bytes.bytes)
+    }
+    public static func decode<T: Decodable>(_ type: T.Type, from bytes: borrowing RawSpan) throws -> T {
+        guard bytes.byteCount > 0, bytes.byteCount <= 16_777_216 else { throw PBError.invalid }
         if let direct = type as? any V2ActorProtobufMessage.Type,
            let result = try direct.fromProtobufBytes(bytes) as? T { return result }
         return try decodeValue(type, from: bytes)
     }
     package static func decodeValue<T: Decodable>(_ type: T.Type, from bytes: Data) throws -> T {
-        guard !bytes.isEmpty, bytes.count <= 16_777_216 else { throw PBError.invalid }
-        return try model(type, from: Im_Actor_V1_Value(serializedBytes: bytes))
+        try decodeValue(type, from: bytes.bytes)
+    }
+    package static func decodeValue<T: Decodable>(_ type: T.Type, from bytes: borrowing RawSpan) throws -> T {
+        guard bytes.byteCount > 0, bytes.byteCount <= 16_777_216 else { throw PBError.invalid }
+        return try model(type, from: Im_Actor_V1_Value(serializedBytes: copy bytes))
     }
     package static func model<T: Decodable>(_ type: T.Type, from value: Im_Actor_V1_Value) throws -> T {
         try validate(value, depth: 0)

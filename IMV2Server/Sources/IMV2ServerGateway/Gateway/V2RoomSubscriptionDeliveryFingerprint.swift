@@ -25,7 +25,7 @@ struct V2RoomSubscriptionDeliveryFingerprint {
             value.tag(1); value.integer(UInt64(truncatingIfNeeded: index))
             value.integer(UInt64(truncatingIfNeeded: total)); value.members(members)
         case .grant(let member, let sequence):
-            value.tag(2); value.members([member]); value.integer(sequence)
+            value.tag(2); value.integer(1); value.member(member); value.integer(sequence)
         case .broadcast(let event):
             value.tag(3); value.event(event)
         case .event(let event, let members):
@@ -49,7 +49,15 @@ struct V2RoomSubscriptionDeliveryFingerprint {
     private mutating func uuid(_ value: UUID) {
         var bytes = value.uuid; withUnsafeBytes(of: &bytes) { hash.update(bufferPointer: $0) }
     }
-    private mutating func string(_ value: String) { bytes(Data(value.utf8)) }
+    private mutating func string(_ value: String) {
+        integer(UInt64(value.utf8.count))
+        // Borrow contiguous UTF-8; only unusual storage needs a materialized fallback.
+        let updated = value.utf8.withContiguousStorageIfAvailable { bytes in
+            hash.update(bufferPointer: UnsafeRawBufferPointer(bytes))
+            return true
+        } ?? false
+        if !updated { hash.update(data: Data(value.utf8)) }
+    }
     private mutating func bytes(_ value: Data) {
         integer(UInt64(value.count)); hash.update(data: value)
     }
@@ -61,7 +69,10 @@ struct V2RoomSubscriptionDeliveryFingerprint {
     }
     private mutating func members(_ value: [V2RoomSubscriptionMember]) {
         integer(UInt64(value.count))
-        for member in value { string(member.userID.rawValue); integer(member.memberRevision) }
+        for member in value { self.member(member) }
+    }
+    private mutating func member(_ value: V2RoomSubscriptionMember) {
+        string(value.userID.rawValue); integer(value.memberRevision)
     }
     private mutating func event(_ value: V2RealtimeRoomEvent) {
         string(value.roomID.rawValue); integer(value.highWatermark); string(value.sourceEventID.rawValue)

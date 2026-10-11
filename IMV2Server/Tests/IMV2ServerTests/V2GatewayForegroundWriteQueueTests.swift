@@ -109,6 +109,23 @@ struct V2GatewayForegroundWriteQueueTests {
         #expect(try channel.finish().isClean)
     }
 
+    @Test("revoked frames are excluded before coalescing without changing order")
+    func writerSkipsUnauthorizedFrames() throws {
+        let channel = EmbeddedChannel()
+        _ = try channel.connect(to: SocketAddress(ipAddress: "127.0.0.1", port: 1))
+        let writer = V2NIOGatewayForegroundWriter(channel: channel, scheduler: .init(),
+            maximumQueuedBytes: 64, maximumQueuedFrames: 8, maximumDrainBytes: 64, maximumDrainFrames: 8)
+        writer.submit(ByteBuffer(bytes: [9]), isAuthorizedToWrite: { false })
+        writer.submit(ByteBuffer(bytes: [1, 2]))
+        writer.submit(ByteBuffer(bytes: [8]), isAuthorizedToWrite: { false })
+        writer.submit(ByteBuffer(bytes: [3]))
+        channel.embeddedEventLoop.run()
+        let output = try #require(try channel.readOutbound(as: ByteBuffer.self))
+        #expect(Array(output.readableBytesView) == [1, 2, 3])
+        #expect(try channel.readOutbound(as: ByteBuffer.self) == nil)
+        #expect(try channel.finish().isClean)
+    }
+
     @Test("one-frame drain preserves prepared ByteBuffer storage across the channel write")
     func writerReusesPreparedSingleFrameStorage() throws {
         let channel = EmbeddedChannel()

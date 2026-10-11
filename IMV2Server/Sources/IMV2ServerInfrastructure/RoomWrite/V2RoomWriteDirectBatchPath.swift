@@ -100,8 +100,9 @@ struct V2RoomWriteDirectBatchPath: Sendable {
     }
 
     static func supportsSingleStatement(_ prepared: [PreparedDirectRoomLogAppend]) -> Bool {
-        !prepared.isEmpty && Set(prepared.map(\.roomID)).count == 1 && prepared.allSatisfy {
-            $0.input.runtimeGuard != nil && !$0.publishesPolicyHints && !$0.advancesReplyMarker
+        guard let first = prepared.first else { return false }
+        return prepared.allSatisfy {
+            $0.roomID == first.roomID && $0.input.runtimeGuard != nil && !$0.publishesPolicyHints && !$0.advancesReplyMarker
                 && !$0.directContext.requiresStrangerQuota
                 && $0.directContext.senderProfileVisibleToRecipient && $0.directContext.senderCanSend == true
         }
@@ -112,10 +113,23 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         metrics: V2SendOperationBatchMetrics?
     ) async throws -> [OrderedRoomWriteCommit] {
         guard Self.supportsSingleStatement(prepared) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-        let commits = try makeCommits(prepared, projectionChanges: Array(repeating:
-            .init(senderCapabilityInserted: false, recipientProfileInserted: false), count: prepared.count))
-        try await Self.persistMessages(inputs: prepared.enumerated().map { $0.element.input.withOrdinal($0.offset) },
-            sql: connection.sql, operationReceipts: try combinedWrite.receipts(for: prepared),
+        var commits: [OrderedRoomWriteCommit] = []
+        var inputs: [PlainRoomLogMessageInput] = []
+        var receipts: [V2DurableSendBatchPermanentReceipt] = []
+        commits.reserveCapacity(prepared.count)
+        inputs.reserveCapacity(prepared.count)
+        receipts.reserveCapacity(prepared.count)
+        for append in prepared {
+            // Eligibility excludes policy/projection changes. Build only the
+            // ordered result and the two arrays required by persistence.
+            commits.append(.init(originalIndex: append.originalIndex, cacheKey: append.cacheKey,
+                commit: .init(outcome: append.commit.outcome, directPolicyCacheUpdate: nil,
+                    reciprocalDirectReplyCacheUpdate: nil)))
+            inputs.append(append.input.withOrdinal(inputs.count))
+            receipts.append(try combinedWrite.receipt(for: append))
+        }
+        try await Self.persistMessages(inputs: inputs,
+            sql: connection.sql, operationReceipts: receipts,
             prevalidatedDirectMemberships: true, implicitConnection: connection, metrics: metrics)
         return commits
     }

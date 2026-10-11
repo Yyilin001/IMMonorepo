@@ -105,6 +105,23 @@ struct V2PolicyFactsSnapshotCacheTests {
         }
         await cache.shutdown()
     }
+    @Test("hot touches and installs preserve strict LRU eviction")
+    func recentlyUsedEviction() async throws {
+        let cache = V2NodePolicyStateCache(maximumEntries: 2), source = SnapshotCacheSource()
+        let first = V2PolicyAuthorizationScope.account(UUID())
+        let second = V2PolicyAuthorizationScope.account(UUID())
+        let third = V2PolicyAuthorizationScope.account(UUID())
+        for scope in [first, second] { _ = try await cache.loadSnapshots(scopes: [scope], loader: source.read) }
+        for _ in 0..<10 { #expect(try await cache.cachedSnapshots(scopes: [first]) != nil) }
+        try await cache.install(source.snapshot(third, version: 1, active: true))
+        #expect(try await cache.cachedSnapshots(scopes: [second]) == nil)
+        #expect(try await cache.cachedSnapshots(scopes: [third]) != nil)
+        try await cache.install(source.snapshot(first, version: 2, active: false))
+        try await cache.install(source.snapshot(second, version: 1, active: true))
+        #expect(try await cache.cachedSnapshots(scopes: [third]) == nil)
+        #expect(try await cache.cachedSnapshots(scopes: [first])?.first?.version == 2)
+        await cache.shutdown()
+    }
     @Test("eviction causes initialization, time does not")
     func eviction() async throws {
         let cache = V2NodePolicyStateCache(maximumEntries: 1), source = SnapshotCacheSource()

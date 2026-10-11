@@ -51,7 +51,7 @@ package struct V2IndexedFIFO<Key: Hashable & Sendable, Value: Sendable>: Sendabl
     package mutating func append(_ value: Value, key: Key) {
         precondition(nodes[key] == nil)
         nodes[key] = Node(value: value, previous: tail, next: nil)
-        if let tail { nodes[tail]?.next = key } else { head = key }
+        if let tail { setNext(key, for: tail) } else { head = key }
         tail = key
     }
     package mutating func update(_ value: Value, key: Key) {
@@ -62,15 +62,44 @@ package struct V2IndexedFIFO<Key: Hashable & Sendable, Value: Sendable>: Sendabl
     package mutating func prepend(_ value: Value, key: Key) {
         precondition(nodes[key] == nil)
         nodes[key] = Node(value: value, previous: nil, next: head)
-        if let head { nodes[head]?.previous = key } else { tail = key }
+        if let head { setPrevious(key, for: head) } else { tail = key }
         head = key
     }
     @discardableResult
     package mutating func remove(_ key: Key) -> Value? {
         guard let node = nodes.removeValue(forKey: key) else { return nil }
-        if let previous = node.previous { nodes[previous]?.next = node.next } else { head = node.next }
-        if let next = node.next { nodes[next]?.previous = node.previous } else { tail = node.previous }
+        if let previous = node.previous { setNext(node.next, for: previous) } else { head = node.next }
+        if let next = node.next { setPrevious(node.previous, for: next) } else { tail = node.previous }
         return node.value
+    }
+    /// Keep the entry in the dictionary while moving its existing links.
+    /// A tail hit is read-only; no node copies or dictionary writes are needed.
+    @discardableResult
+    package mutating func moveToLast(_ key: Key) -> Bool {
+        if tail == key { return true }
+        guard var node = nodes[key] else { return false }
+        if let previous = node.previous { setNext(node.next, for: previous) }
+        else { head = node.next }
+        if let next = node.next { setPrevious(node.previous, for: next) }
+        if let tail { setNext(key, for: tail) }
+        node.previous = tail
+        node.next = nil
+        nodes[key] = node
+        tail = key
+        return true
+    }
+
+    // Avoid optional chained dictionary _modify accesses: each nested accessor
+    // can allocate a coroutine frame. Read/write back one node explicitly.
+    private mutating func setNext(_ next: Key?, for key: Key) {
+        guard var node = nodes[key] else { preconditionFailure("missing FIFO link") }
+        node.next = next
+        nodes[key] = node
+    }
+    private mutating func setPrevious(_ previous: Key?, for key: Key) {
+        guard var node = nodes[key] else { preconditionFailure("missing FIFO link") }
+        node.previous = previous
+        nodes[key] = node
     }
     @discardableResult
     package mutating func removeFirst() -> Value? {

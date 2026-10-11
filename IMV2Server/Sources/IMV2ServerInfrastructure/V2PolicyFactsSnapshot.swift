@@ -17,7 +17,7 @@ package struct V2PolicyFactsSnapshot: Equatable, Sendable {
         case (.pair, .pair): break
         default: throw V2PolicyAuthorizationLifecycleError.invalidTarget
         }
-        self.scope = try scope.policyWire.policyScope; self.version = version; self.facts = facts
+        self.scope = scope.canonical; self.version = version; self.facts = facts
     }
     package init(wire: V2PolicySnapshotWire) throws {
         try self.init(scope: wire.scope.policyScope, version: wire.version,

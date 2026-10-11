@@ -985,24 +985,29 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
             if result.1 { schedulerLane.enqueue(self) }
             return
         }
-        let frames = batch.entries.filter { $0.isAuthorizedToWrite() }.map(\.bytes)
-        guard !frames.isEmpty else {
-            if result.1 { schedulerLane.enqueue(self) }
-            return
+        // Keep the single-frame shared-storage fast path, and coalesce only
+        // after seeing a second authorized frame. No filter/map snapshots.
+        var buffer: ByteBuffer?
+        var writtenFrames = 0
+        var writtenBytes = 0
+        for entry in batch.entries where entry.isAuthorizedToWrite() {
+            if writtenFrames == 0 {
+                buffer = entry.bytes
+            } else {
+                if writtenFrames == 1 {
+                    var combined = channel.allocator.buffer(capacity: batch.bytes)
+                    combined.writeImmutableBuffer(buffer!)
+                    buffer = combined
+                }
+                buffer!.writeImmutableBuffer(entry.bytes)
+            }
+            writtenFrames += 1
+            writtenBytes += entry.bytes.readableBytes
         }
-        let bytes = frames.reduce(0) { $0 + $1.readableBytes }
-        let buffer: ByteBuffer
-        if frames.count == 1 {
-            // 常规群组广播路径直接写入共享的不可变写时复制存储。
-            // 读索引变化只影响本地值；下游处理器真正修改字节时会自动分离存储。
-            buffer = frames[0]
-        } else {
-            var combined = channel.allocator.buffer(capacity: bytes)
-            for frame in frames { combined.writeImmutableBuffer(frame) }
-            buffer = combined
+        if let buffer {
+            channel.writeAndFlush(buffer, promise: nil)
+            metrics?.foregroundWriteBatch(frames: writtenFrames, bytes: writtenBytes)
         }
-        channel.writeAndFlush(buffer, promise: nil)
-        metrics?.foregroundWriteBatch(frames: frames.count, bytes: bytes)
         if result.1 { schedulerLane.enqueue(self) }
     }
 }

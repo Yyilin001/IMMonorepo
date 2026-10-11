@@ -13,10 +13,10 @@ enum V2CurrentRoomPolicySnapshot: Sendable {
 
     static func direct(pair: V2DirectSendControlPair, snapshots: [V2PolicyFactsSnapshot], recipientReplyConfirmed: Bool = false) throws -> Self {
         guard pair.sender != pair.recipient, (3...4).contains(snapshots.count),
-              Set(snapshots.map { $0.scope.key }).count == snapshots.count,
+              Set(snapshots.map(\.scope)).count == snapshots.count,
               let sender = snapshots.first(where: { $0.scope == .account(pair.sender) }),
               let recipient = snapshots.first(where: { $0.scope == .account(pair.recipient) }),
-              let relationship = snapshots.first(where: { $0.scope.key == V2PolicyAuthorizationScope.pair(pair.sender, pair.recipient).key }),
+              let relationship = snapshots.first(where: { $0.scope == V2PolicyAuthorizationScope.pair(pair.sender, pair.recipient).canonical }),
               case .account(let from) = sender.facts, case .account(let to) = recipient.facts,
               case .pair(let social) = relationship.facts else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
         let allowsStrangers: Bool
@@ -35,7 +35,7 @@ enum V2CurrentRoomPolicySnapshot: Sendable {
         }
         var policy = V2DirectSendControlPolicy(sender: from.controlAccount, recipient: to.controlAccount,
             blocked: social.blocked, isFriend: social.isFriend, allowsStrangers: allowsStrangers)
-        policy.stateVersions = Dictionary(uniqueKeysWithValues: snapshots.map { ($0.scope.key, $0.version) })
+        policy.stateVersions = .init(values: Dictionary(uniqueKeysWithValues: snapshots.map { ($0.scope, $0.version) }))
         return .direct(policy, deadline: V2RoomSQLDeadline.boundedTransactionDeadline())
     }
     static func account(sender: UUID, snapshots: [V2PolicyFactsSnapshot]) throws -> Self {

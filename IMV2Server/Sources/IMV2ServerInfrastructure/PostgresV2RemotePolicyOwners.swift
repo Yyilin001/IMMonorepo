@@ -47,7 +47,7 @@ package struct PostgresV2RemotePolicyOwners: Sendable {
     }
     private func fetchSnapshots(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot] {
         guard !scopes.isEmpty, scopes.count <= 4, scopes.allSatisfy(\.isValid),
-              Set(scopes.map(\.key)).count == scopes.count else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
+              Set(scopes.map(\.canonical)).count == scopes.count else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
         let local = scopes.filter { localOwners?.acceptsScope($0.key) == true }
         let remote = scopes.filter { localOwners?.acceptsScope($0.key) != true }
         if remote.isEmpty, let localOwners { return try await localOwners.registrationSnapshots(scopes: local, requestedAt: .now) }
@@ -85,7 +85,7 @@ package struct PostgresV2RemotePolicyOwners: Sendable {
             }
             var states: [V2PolicyFactsSnapshot] = []
             for try await batch in group { states += batch }
-            guard states.count == scopes.count, Set(states.map { $0.scope.key }) == Set(scopes.map(\.key)) else {
+            guard states.count == scopes.count, Set(states.map(\.scope)) == Set(scopes.map(\.canonical)) else {
                 throw V2PolicyAuthorizationLifecycleError.invalidTarget
             }
             return states.sorted { $0.scope.key < $1.scope.key }
