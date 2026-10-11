@@ -454,7 +454,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             requests += [denied, stale]
             let replies = PullCollectionReplies()
             do {
-                try await executor.pullSnapshots(requests, maximumResponseBytes: 256 * 1024) { id, result in
+                let responseBudget = overflow ? 128 * 1024 : 256 * 1024
+                try await executor.pullSnapshots(requests, maximumResponseBytes: responseBudget) { id, result in
                     await replies.record(id, result)
                 }
                 let values = await replies.snapshot()
@@ -474,36 +475,34 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         afterRoomSequence: UInt64(index), pageSize: 1)
                     let originalWire = try V2ActorRoomLogPageWire(original)
                     #expect(page == originalWire)
-                    encodedWholePages += try JSONEncoder().encode(V2PullBudgetReply(id: request.id,
-                        outcome: .response(.roomLog(result)))).count
+                    encodedWholePages += try page.protobufResponseByteCount() + 64
                 }
                 #expect(try values[denied.id]?.get() == .failure(.actorNotMember))
                 if case .failure(let failure)? = values[stale.id] {
                     #expect(failure as? V2RoomActivationLeaseError == .activationChanged)
                 } else { Issue.record("stale sibling must fail without rejecting healthy viewers") }
                 let first = try #require(observed.loanMetricsSnapshot().observations[.groupEventPull])
-                // Small pages: one metadata + one hydration statement for all
-                // keys. Overflow: four complete committed subgroups, still one
-                // physical loan, with no partial-cursor responses.
-                #expect(first.sqlPhases[.readBody]?.count == (overflow ? 8 : 2))
-                #expect(first.sqlPhases[.fence]?.count == (overflow ? 12 : 3))
-                #expect(first.sqlPhases[.transactionControl]?.count == (overflow ? 8 : 2))
+                // Each subgroup scans once; no row-lock fence or explicit
+                // transaction. Overflow keeps complete pages in two subgroups.
+                #expect(first.sqlPhases[.readBody]?.count == (overflow ? 2 : 1))
+                #expect((first.sqlPhases[.fence]?.count ?? 0) == 0)
+                #expect((first.sqlPhases[.transactionControl]?.count ?? 0) == 0)
                 #expect(first.actualHeldCount == 1)
                 if overflow {
-                    #expect(encodedWholePages > 256 * 1024)
+                    #expect(encodedWholePages > responseBudget)
                     let singleton = try V2GrantedRoomLogPull(token: live.token,
                         query: .init(roomID: roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 4),
                         callDeadline: deadline)
                     let large = PullCollectionReplies()
-                    try await executor.pullSnapshots([singleton], maximumResponseBytes: 256 * 1024) { id, result in
+                    try await executor.pullSnapshots([singleton], maximumResponseBytes: responseBudget) { id, result in
                         await large.record(id, result)
                     }
                     let singleResults = await large.snapshot()
                     let result = try #require(singleResults[singleton.id]).get()
                     guard case .page(let page) = result else { throw V2RoomRecoveryReadError.corruptPersistence }
                     #expect(page.events.count == 4 && page.nextRoomSequence == 4 && !page.hasMore)
-                    let bytes = try JSONEncoder().encode(V2RoomResponse.roomLog(result)).count
-                    #expect(bytes > 256 * 1024 && bytes < 8 * 1024 * 1024)
+                    let bytes = try page.protobufResponseByteCount()
+                    #expect(bytes > responseBudget && bytes < 8 * 1024 * 1024)
                     // The conservative internal bound must not reject this
                     // legal native page or manufacture a smaller partial page.
                     let after = try #require(observed.loanMetricsSnapshot().observations[.groupEventPull])

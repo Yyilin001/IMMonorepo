@@ -140,3 +140,49 @@ extension Im_Actor_V1_HotRoomResponse {
         }
     }
 }
+
+// Count the generated log-page traversal without serializing payload buffers.
+// This visitor is deliberately scoped to HotLogPage's strings, bytes, uint64,
+// bool and repeated messages; it is not a general protobuf encoder.
+extension V2ActorRoomLogPageWire {
+    package func protobufResponseByteCount() throws -> Int {
+        var visitor = V2LogPageSizeVisitor()
+        try Im_Actor_V1_HotLogPage(self).traverse(visitor: &visitor)
+        return 1 + V2LogPageSizeVisitor.varint(UInt64(visitor.count)) + visitor.count
+    }
+}
+private struct V2LogPageSizeVisitor: SwiftProtobuf.Visitor {
+    var count = 0
+    static func varint(_ value: UInt64) -> Int {
+        max(1, (64 - value.leadingZeroBitCount + 6) / 7)
+    }
+    mutating func visitSingularUInt64Field(value: UInt64, fieldNumber: Int) throws {
+        count += Self.varint(UInt64(fieldNumber << 3)) + Self.varint(value)
+    }
+    mutating func visitSingularBoolField(value: Bool, fieldNumber: Int) throws {
+        count += Self.varint(UInt64(fieldNumber << 3)) + 1
+    }
+    private mutating func bytes(_ length: Int, fieldNumber: Int) {
+        count += Self.varint(UInt64(fieldNumber << 3 | 2)) + Self.varint(UInt64(length)) + length
+    }
+    mutating func visitSingularStringField(value: String, fieldNumber: Int) throws {
+        bytes(value.utf8.count, fieldNumber: fieldNumber)
+    }
+    mutating func visitSingularBytesField(value: Data, fieldNumber: Int) throws {
+        bytes(value.count, fieldNumber: fieldNumber)
+    }
+    mutating func visitSingularMessageField<M: SwiftProtobuf.Message>(value: M, fieldNumber: Int) throws {
+        var nested = Self(); try value.traverse(visitor: &nested)
+        bytes(nested.count, fieldNumber: fieldNumber)
+    }
+    mutating func visitMapField<K, V: SwiftProtobuf.MapValueType>(fieldType: SwiftProtobuf._ProtobufMap<K, V>.Type,
+        value: SwiftProtobuf._ProtobufMap<K, V>.BaseType, fieldNumber: Int) throws { throw V2HotPB.Invalid.value }
+    mutating func visitMapField<K, V>(fieldType: SwiftProtobuf._ProtobufEnumMap<K, V>.Type,
+        value: SwiftProtobuf._ProtobufEnumMap<K, V>.BaseType, fieldNumber: Int) throws where V.RawValue == Int { throw V2HotPB.Invalid.value }
+    mutating func visitMapField<K, V>(fieldType: SwiftProtobuf._ProtobufMessageMap<K, V>.Type,
+        value: SwiftProtobuf._ProtobufMessageMap<K, V>.BaseType, fieldNumber: Int) throws { throw V2HotPB.Invalid.value }
+    mutating func visitUnknown(bytes: Data) throws { count += bytes.count }
+    mutating func visitSingularDoubleField(value: Double, fieldNumber: Int) throws { throw V2HotPB.Invalid.value }
+    mutating func visitSingularInt64Field(value: Int64, fieldNumber: Int) throws { throw V2HotPB.Invalid.value }
+    mutating func visitSingularEnumField<E: SwiftProtobuf.Enum>(value: E, fieldNumber: Int) throws { throw V2HotPB.Invalid.value }
+}

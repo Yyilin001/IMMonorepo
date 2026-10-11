@@ -196,136 +196,148 @@ struct V2GroupEventPullBatchInput: Encodable, Sendable {
     }
 }
 
-struct V2GroupEventPullMetadata: Codable, Sendable {
+struct V2GroupEventPullMetadata: Decodable, Sendable {
     let ordinal: Int
     let roomKind: String?
     let active: Bool, complete: Bool
-    let eventCount: Int64, escapedPayloadBound: Int64
+    let eventCount: Int64, payloadBytes: Int64
     let scannedThrough: Int64?, trimmedThrough: Int64?, hasMore: Bool?
     enum CodingKeys: String, CodingKey {
         case ordinal, roomKind = "room_kind", active, complete
-        case eventCount = "event_count", escapedPayloadBound = "escaped_payload_bound"
+        case eventCount = "event_count", payloadBytes = "payload_bytes"
         case scannedThrough = "scanned_through", trimmedThrough = "trimmed_through", hasMore = "has_more"
     }
     func validate() throws {
         guard roomKind == "group" || roomKind == "direct" else { throw V2GroupEventLogError.roomNotFound }
         guard active else { throw V2GroupEventLogError.actorNotMember }
         guard complete, eventCount >= 0, eventCount <= Int64(V2ActorRoomLogPullWire.maximumPageSize),
-              escapedPayloadBound >= 0, let scannedThrough, scannedThrough >= 0,
+              payloadBytes >= 0, let scannedThrough, scannedThrough >= 0,
               let trimmedThrough, trimmedThrough >= 0, hasMore != nil else {
             throw V2GroupEventLogError.corruptPersistenceState
         }
     }
 }
 
-// Bounded scalar metadata per request; no candidate IDs/payload strings cross
-// the connection before whole-page packing. Both phases use the same query.
-func v2GroupEventPullMetadata(_ inputs: [V2GroupEventPullBatchInput], sql: any SQLDatabase)
-    async throws -> [Int: V2GroupEventPullMetadata] {
-    guard !inputs.isEmpty, inputs.count <= 100 else { throw V2GroupEventLogError.invalidRequest }
-    // Every result contains only these fixed scalar fields. Prove the bounded
-    // metadata decode independently of any event/payload count.
-    let maximumRow = V2GroupEventPullMetadata(ordinal: Int.max, roomKind: "direct", active: false,
-        complete: false, eventCount: Int64.max, escapedPayloadBound: Int64.max,
-        scannedThrough: Int64.max, trimmedThrough: Int64.max, hasMore: false)
-    guard try JSONEncoder().encode(Array(repeating: maximumRow, count: inputs.count)).count <= 64 * 1024 else {
-        throw V2GroupEventLogError.corruptPersistenceState
-    }
-    let payload = String(decoding: try JSONEncoder().encode(inputs), as: UTF8.self)
-    let page = v2GroupEventPullQuery(room: "input.room_id", viewer: "input.viewer_id", cursor: "input.cursor",
-        pageLimit: "input.page_size", candidateLimit: "input.page_size + 1")
-    let rows = try await sql.raw("""
-        WITH input AS MATERIALIZED (
-            SELECT * FROM jsonb_to_recordset(\(bind: payload)::jsonb)
-                AS input(ordinal integer,room_id uuid,viewer_id uuid,cursor bigint,page_size integer)
-        )
-        SELECT input.ordinal, facts.* FROM input
-        CROSS JOIN LATERAL (
-            SELECT CASE WHEN max(page.room_kind) IN ('group','direct') THEN max(page.room_kind) END AS room_kind,
-                   COALESCE(bool_or(page.actor_is_active_member),false) AS active,
-                   COALESCE(bool_and(page.payload_is_complete),true) AS complete,
-                   count(page.event_id)::bigint AS event_count,
-                   COALESCE(sum(CASE WHEN page.event_id IS NULL THEN 0 ELSE
-                       8 * ((octet_length(page.payload_json)::bigint + 2) / 3) END),0)::bigint AS escaped_payload_bound,
-                   max(page.scanned_through_room_sequence) AS scanned_through,
-                   max(page.trimmed_through_room_sequence) AS trimmed_through,
-                   bool_or(page.has_more_candidates) AS has_more
-            FROM (\(page)) AS page
-        ) AS facts ORDER BY input.ordinal
-        """).all(decoding: V2GroupEventPullMetadata.self)
-    guard rows.count == inputs.count, Set(rows.map(\.ordinal)) == Set(inputs.map(\.ordinal)) else {
-        throw V2GroupEventLogError.corruptPersistenceState
-    }
-    return Dictionary(uniqueKeysWithValues: rows.map { ($0.ordinal, $0) })
+
+struct V2PackedRoomPull {
+    let metadata: [Int: V2GroupEventPullMetadata]
+    let failures: [Int: any Error]
+    let selected: Set<Int>
+    let rows: [Int: [GroupEventLogRow]]
+    let byteHints: [Int: Int]
 }
 
-func v2HydrateGroupEventPulls(_ inputs: [V2GroupEventPullBatchInput], sql: any SQLDatabase)
-    async throws -> [Int: [GroupEventLogRow]] {
-    guard !inputs.isEmpty, inputs.count <= 100 else { throw V2GroupEventLogError.invalidRequest }
-    let payload = String(decoding: try JSONEncoder().encode(inputs), as: UTF8.self)
-    let page = v2GroupEventPullQuery(room: "input.room_id", viewer: "input.viewer_id", cursor: "input.cursor",
-        pageLimit: "input.page_size", candidateLimit: "input.page_size + 1")
+// Room/lease authority, historical visibility, bounds and hydration share ONE
+// MVCC statement snapshot. Reads do not lock rows or serialize with a writer.
+// Pages are materialized once in PostgreSQL; only whole selected pages cross
+// the connection. No event IDs/payloads are carried into a later transaction.
+func v2PackedGroupEventPulls(_ inputs: [V2GroupEventPullBatchInput],
+    tokens: [RoomID: V2RoomActivationToken], maximumBytes: Int, sql: any SQLDatabase
+) async throws -> V2PackedRoomPull {
+    struct Input: Encodable {
+        let ordinal: Int, room_id: UUID, viewer_id: UUID, cursor: Int64, page_size: Int
+        let owner_shard: String, owner_epoch: Int64, activation_epoch: Int64
+        let host_id: String, incarnation: UUID, header_bytes: Int
+    }
+    guard !inputs.isEmpty, inputs.count <= 100, maximumBytes > 0 else {
+        throw V2GroupEventLogError.invalidRequest
+    }
+    let values = try inputs.map { input -> Input in
+        guard let token = tokens[RoomID(uuid: input.roomID)] else { throw V2RoomActivationLeaseError.activationChanged }
+        let header = try V2ActorRoomLogPageWire(roomID: token.roomID, events: [],
+            nextRoomSequence: UInt64(Int64.max), hasMore: true,
+            logTrimmedThroughRoomSequence: UInt64(Int64.max)).protobufResponseByteCount()
+        return Input(ordinal: input.ordinal, room_id: input.roomID, viewer_id: input.viewerID,
+            cursor: input.cursor, page_size: input.pageSize, owner_shard: token.owner.shardID,
+            owner_epoch: token.owner.epoch, activation_epoch: token.activationEpoch.rawValue,
+            host_id: token.host.hostID.rawValue, incarnation: token.host.incarnationID,
+            header_bytes: header + 64)
+    }
+    let payload = String(decoding: try JSONEncoder().encode(values), as: UTF8.self)
+    let page = v2GroupEventPullQuery(room: "valid.room_id", viewer: "valid.viewer_id", cursor: "valid.cursor",
+        pageLimit: "valid.page_size", candidateLimit: "valid.page_size + 1")
     let rows = try await sql.raw("""
+        /* imv2_room_pull_snapshot */
         WITH input AS MATERIALIZED (
-            SELECT * FROM jsonb_to_recordset(\(bind: payload)::jsonb)
-                AS input(ordinal integer,room_id uuid,viewer_id uuid,cursor bigint,page_size integer)
+            SELECT * FROM jsonb_to_recordset(\(bind: payload)::jsonb) AS input(
+                ordinal integer,room_id uuid,viewer_id uuid,cursor bigint,page_size integer,
+                owner_shard text,owner_epoch bigint,activation_epoch bigint,host_id text,
+                incarnation uuid,header_bytes bigint)
+        ), observed AS MATERIALIZED (SELECT clock_timestamp() AS observed_at),
+        authority AS MATERIALIZED (
+            SELECT input.*, CASE
+                WHEN room.room_id IS NULL THEN 'room_not_found'
+                WHEN room.room_shard_id IS DISTINCT FROM input.owner_shard
+                  OR room.owner_epoch IS DISTINCT FROM input.owner_epoch THEN 'owner_changed'
+                WHEN lease.room_id IS NULL OR lease.activation_epoch IS DISTINCT FROM input.activation_epoch
+                  OR lease.owner_shard_id IS DISTINCT FROM input.owner_shard
+                  OR lease.owner_epoch IS DISTINCT FROM input.owner_epoch
+                  OR lease.host_id IS DISTINCT FROM input.host_id
+                  OR lease.host_incarnation_id IS DISTINCT FROM input.incarnation THEN 'activation_changed'
+                WHEN lease.expires_at IS NULL OR lease.expires_at <= observed.observed_at THEN 'lease_expired'
+            END AS failure
+            FROM input CROSS JOIN observed LEFT JOIN im_v2.rooms room USING(room_id)
+            LEFT JOIN im_v2.room_activation_leases lease USING(room_id)
+        ), valid AS MATERIALIZED (SELECT * FROM authority WHERE failure IS NULL),
+        pages AS MATERIALIZED (
+            SELECT valid.ordinal, page.* FROM valid CROSS JOIN LATERAL (\(page)) page
+        ), facts AS MATERIALIZED (
+            SELECT authority.ordinal,authority.failure,authority.header_bytes,
+                max(pages.room_kind) AS room_kind,
+                COALESCE(bool_or(pages.actor_is_active_member),false) AS active,
+                COALESCE(bool_and(pages.payload_is_complete),true) AS complete,
+                count(pages.event_id)::bigint AS event_count,
+                COALESCE(sum(CASE WHEN pages.event_id IS NULL THEN 0 ELSE
+                    octet_length(pages.payload_json)::bigint END),0)::bigint AS payload_bytes,
+                max(pages.scanned_through_room_sequence) AS scanned_through,
+                max(pages.trimmed_through_room_sequence) AS trimmed_through,
+                bool_or(pages.has_more_candidates) AS has_more
+            FROM authority LEFT JOIN pages USING(ordinal)
+            GROUP BY authority.ordinal,authority.failure,authority.header_bytes
+        ), bounded AS MATERIALIZED (
+            SELECT facts.*, header_bytes + event_count * \(bind: V2PullSizeModel.recordOverhead)::bigint
+                + payload_bytes AS byte_bound FROM facts
+        ), packed AS MATERIALIZED (
+            SELECT bounded.*, sum(byte_bound) OVER(ORDER BY ordinal) <= \(bind: maximumBytes)::bigint AS selected
+            FROM bounded
         )
-        SELECT input.ordinal, page.* FROM input
-        CROSS JOIN LATERAL (\(page)) AS page
-        ORDER BY input.ordinal,page.room_sequence NULLS LAST
+        SELECT packed.*, page.actor_is_active_member,page.scanned_through_room_sequence,
+            page.has_more_candidates,page.trimmed_through_room_sequence,page.event_id,
+            page.room_sequence,page.event_type,page.payload_json,page.payload_is_complete
+        FROM packed LEFT JOIN pages page ON page.ordinal=packed.ordinal AND packed.selected
+        ORDER BY packed.ordinal,page.room_sequence NULLS LAST
         """).all()
-    var results: [Int: [GroupEventLogRow]] = [:]
-    let expected = Set(inputs.map(\.ordinal))
+    let expectedOrdinals = Set(inputs.map(\.ordinal))
+    var metadata: [Int: V2GroupEventPullMetadata] = [:], failures: [Int: any Error] = [:]
+    var selected = Set<Int>(), hydrated: [Int: [GroupEventLogRow]] = [:], hints: [Int: Int] = [:]
     for row in rows {
         let ordinal = try row.decode(column: "ordinal", as: Int.self)
-        guard expected.contains(ordinal) else { throw V2GroupEventLogError.corruptPersistenceState }
-        results[ordinal, default: []].append(try row.decode(model: GroupEventLogRow.self))
+        guard expectedOrdinals.contains(ordinal) else { throw V2GroupEventLogError.corruptPersistenceState }
+        if hints[ordinal] == nil {
+            let included = try row.decode(column: "selected", as: Bool.self)
+            if included { selected.insert(ordinal) }
+            hints[ordinal] = try row.decode(column: "byte_bound", as: Int.self)
+            if let failure = try row.decode(column: "failure", as: String?.self) {
+                failures[ordinal] = switch failure {
+                case "room_not_found": V2RoomActivationLeaseError.roomNotFound
+                case "owner_changed": V2RoomActivationLeaseError.ownerChanged
+                case "activation_changed": V2RoomActivationLeaseError.activationChanged
+                case "lease_expired": V2RoomActivationLeaseError.leaseExpired
+                default: V2GroupEventLogError.corruptPersistenceState
+                }
+            } else { metadata[ordinal] = try row.decode(model: V2GroupEventPullMetadata.self) }
+        }
+        if selected.contains(ordinal), metadata[ordinal]?.roomKind != nil {
+            hydrated[ordinal, default: []].append(try row.decode(model: GroupEventLogRow.self))
+        }
     }
-    return results
-}
-
-struct V2PullBudgetReply: Encodable {
-    let id: UUID
-    let outcome: Outcome
-    enum Outcome: Encodable { case response(V2RoomResponse), failure(V2RoomCallFailure) }
-}
-
-// Data is base64-encoded, whose only possibly escaped character is '/'.
-// SQL reports 2 * 4 * ceil(payloadUTF8Bytes/3), not raw UTF8 as wire size.
-func v2PullReplyUpperBound(id: UUID, query: V2ActorRoomLogPullWire,
-    metadata: V2GroupEventPullMetadata
-) throws -> Int {
-    try metadata.validate()
-    let emptyPage = try V2ActorRoomLogPageWire(roomID: query.roomID, events: [],
-        nextRoomSequence: max(query.afterRoomSequence, UInt64(metadata.scannedThrough!)),
-        hasMore: metadata.hasMore!, logTrimmedThroughRoomSequence: UInt64(metadata.trimmedThrough!))
-    let header = try JSONEncoder().encode(V2PullBudgetReply(id: id,
-        outcome: .response(.roomLog(.page(emptyPage))))).count
-    let recordSize = try V2PullSizeModel.recordSize.get()
-    guard metadata.escapedPayloadBound <= Int64(Int.max) else { throw V2GroupEventLogError.corruptPersistenceState }
-    let entries = Int(metadata.eventCount).multipliedReportingOverflow(by: recordSize)
-    let body = entries.partialValue.addingReportingOverflow(Int(metadata.escapedPayloadBound))
-    let commas = body.partialValue.addingReportingOverflow(max(0, Int(metadata.eventCount) - 1))
-    let total = commas.partialValue.addingReportingOverflow(header)
-    guard !entries.overflow, !body.overflow, !commas.overflow, !total.overflow else {
-        throw V2GroupEventLogError.corruptPersistenceState
-    }
-    return total.partialValue
+    guard hints.count == inputs.count else { throw V2GroupEventLogError.corruptPersistenceState }
+    return .init(metadata: metadata, failures: failures, selected: selected, rows: hydrated, byteHints: hints)
 }
 
 private enum V2PullSizeModel {
-    static let recordSize: Result<Int, any Error> = Result {
-        let kinds = ["room", "membership", "moderation", "message_reaction", "group_capability", "message"]
-        let id = EventID(uuid: UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)))
-        return try kinds.map {
-            try JSONEncoder().encode(V2ActorRoomLogEntryWire(sourceEventID: id,
-                roomSequence: UInt64(Int64.max), projectionKind: $0, payload: Data())).count
-        }.max()!
-    }
-}
-
-func v2PullWireFailure(_ error: any Error) -> V2RoomCallFailure {
-    let completion: V2RoomTransactionCompletion<Void> = v2RoomDomainCompletion(error)
-    if case .rolledBack(let reason) = completion { return .rolledBack(reason) }
-    return .outcomeUnknown
+    // Field tags, UUID, maximum sequence and longest SQL projection kind;
+    // 22 accounts for payload length and repeated-entry length varints (10 each).
+    // Payload bytes are bounded separately before returning any page rows.
+    static let recordOverhead: Int = 38 + 11 + 18 + 22
 }

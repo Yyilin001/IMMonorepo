@@ -10,6 +10,18 @@ struct V2SendSuccessRecordTests {
             firstSubmissionDeadlineMilliseconds: deadline)
     }
 
+    @Test("success metadata keeps the exact lowercase digest bytes")
+    func digestHexRoundTrip() throws {
+        let prepared = try V2SendSuccessMetadata.Prepared(command())
+        #expect(prepared.fingerprintHex.count == 64)
+        let bytes = stride(from: 0, to: prepared.fingerprintHex.count, by: 2).map { offset in
+            let start = prepared.fingerprintHex.index(prepared.fingerprintHex.startIndex, offsetBy: offset)
+            return UInt8(prepared.fingerprintHex[start..<prepared.fingerprintHex.index(start, offsetBy: 2)], radix: 16)!
+        }
+        #expect(Data(bytes) == prepared.fingerprint)
+        #expect(prepared.fingerprintHex == prepared.fingerprintHex.lowercased())
+    }
+
     @Test("Operation recovery requires the original fingerprint and resolution time", arguments: [0, 1, 2])
     func missingMetadataIsRejected(missing: Int) throws {
         let command = try command(), domain = try command.command.fingerprint

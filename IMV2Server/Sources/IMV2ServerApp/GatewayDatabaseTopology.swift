@@ -128,7 +128,7 @@ struct GatewayDatabaseTopology {
                         policy: configuration.databasePolicy,
                         maximumConnectionsPerEventLoop: capacity,
                         sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil,
-                        prepareMessageQueries: role == .messageWrite
+                        prepareRoomQueries: (role == .messageWrite || role == .foreground || role == .sync)
                             && ProcessInfo.processInfo.environment["IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED"] != "false"
                     ),
                     as: identifier
@@ -295,12 +295,12 @@ private func postgresDatabaseConfiguration(
     policy: V2PostgresRuntimePolicy,
     maximumConnectionsPerEventLoop: Int,
     sessionTimeouts: V2RoomActivationSQLTimeouts? = nil,
-    prepareMessageQueries: Bool = false
+    prepareRoomQueries: Bool = false
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
-    if prepareMessageQueries {
+    if prepareRoomQueries {
         configuration.coreConfiguration.options.preparedQueryCacheCapacity = 16
-        configuration.coreConfiguration.options.preparedQuerySQLPrefixes = ["/* imv2_plain_direct_append */"]
+        configuration.coreConfiguration.options.preparedQuerySQLPrefixes = ["/* imv2_plain_direct_append */", "/* imv2_room_pull_snapshot */"]
     }
     configuration.coreConfiguration.options.connectTimeout = .milliseconds(
         Int64(policy.connectTimeoutMilliseconds)

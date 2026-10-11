@@ -13,6 +13,91 @@ import Testing
 
 @Suite("Room actor query and receipt executors on PostgreSQL", .serialized)
 struct V2ActorRoomQueryExecutorIntegrationTests {
+    @Test("packed pull reads each page once and does not wait for a room row lock")
+    func packedPullSnapshot() async throws {
+        try await withActorQueryDatabase { database, sql in
+            let room = UUID(), actor = UUID()
+            try await seedRoom(sql: sql, room: room, actor: actor, sequence: 2)
+            for sequence in 1...2 {
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_events(event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
+                    VALUES (\(bind: UUID()),\(bind: room),\(bind: sequence),'room.created','{}'::jsonb,1,now())
+                    """).run()
+            }
+            let activation = PostgresV2RoomActivationStore(database: database)
+            let token = try await acquire(activation, room: room,
+                owner: .init(shardID: "owner-a", epoch: 0), host: "host-a")
+            let executor = V2ActorRoomQueryExecutor(database: database)
+            let query = try V2ActorRoomLogPullWire(roomID: .init(uuid: room), actorUserID: .init(uuid: actor),
+                afterRoomSequence: 0, pageSize: 1)
+            let input = try V2GroupEventPullBatchInput(ordinal: 0, query: query)
+            let packed = try await v2PackedGroupEventPulls([input], tokens: [token.roomID: token], maximumBytes: 1024, sql: sql)
+            #expect(packed.selected == [0])
+            #expect(packed.rows[0]?.count == 1)
+            #expect(packed.metadata[0]?.hasMore == true)
+            guard case .page(let first) = try await executor.pullSnapshot(query, token: token) else {
+                Issue.record("missing first page"); return
+            }
+            #expect(first.events.count == 1 && first.nextRoomSequence == 1 && first.hasMore)
+            let occupied = ActorQueryGate()
+            let blocker = Task {
+                try await database.transaction { transaction in
+                    let lockedSQL = try #require(transaction as? any SQLDatabase)
+                    try await lockedSQL.raw("SELECT room_id FROM im_v2.rooms WHERE room_id=\(bind: room) FOR UPDATE").run()
+                    await occupied.signal()
+                    try await ContinuousClock().sleep(for: .milliseconds(500))
+                }
+            }
+            await occupied.wait()
+            let start = ContinuousClock.now
+            _ = try await executor.pullSnapshot(query, token: token)
+            #expect(start.duration(to: .now) < .milliseconds(350))
+            try await blocker.value
+            #expect(try await activation.release(token: token))
+            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+                _ = try await executor.pullSnapshot(query, token: token)
+            }
+        }
+    }
+
+    @Test("packed pull bounds whole pages and keeps authority failures separate")
+    func packedPullBounds() async throws {
+        try await withActorQueryDatabase { database, sql in
+            let actor = UUID(), roomA = UUID(), roomB = UUID()
+            let activation = PostgresV2RoomActivationStore(database: database)
+            var tokens: [RoomID: V2RoomActivationToken] = [:]
+            var inputs: [V2GroupEventPullBatchInput] = []
+            for (ordinal, room) in [roomA, roomB].enumerated() {
+                try await seedRoom(sql: sql, room: room, actor: actor, sequence: 1)
+                let payload = "{\"text\":\"" + String(repeating: "x", count: 1000) + "\"}"
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_events(event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
+                    VALUES (\(bind: UUID()),\(bind: room),1,'room.created',\(bind: payload)::jsonb,1,now())
+                    """).run()
+                let token = try await acquire(activation, room: room,
+                    owner: .init(shardID: "owner-a", epoch: 0), host: "host-a")
+                tokens[token.roomID] = token
+                inputs.append(try .init(ordinal: ordinal, query: .init(roomID: token.roomID,
+                    actorUserID: .init(uuid: actor), afterRoomSequence: 0, pageSize: 10)))
+            }
+            let packed = try await v2PackedGroupEventPulls(inputs, tokens: tokens, maximumBytes: 1500, sql: sql)
+            #expect(packed.selected == [0])
+            #expect(packed.rows[0]?.count == 1 && packed.rows[1] == nil)
+            #expect(packed.byteHints.count == 2)
+            let tokenA = try #require(tokens[RoomID(uuid: roomA)])
+            #expect(try await activation.release(token: tokenA))
+            let mixed = try await v2PackedGroupEventPulls(inputs, tokens: tokens, maximumBytes: 4000, sql: sql)
+            #expect(mixed.failures[0] != nil && mixed.rows[0] == nil)
+            #expect(mixed.rows[1]?.count == 1)
+            let stranger = try V2ActorRoomLogPullWire(roomID: .init(uuid: roomB), actorUserID: .init(uuid: UUID()),
+                afterRoomSequence: 0, pageSize: 10)
+            await #expect(throws: V2GroupEventLogError.actorNotMember) {
+                _ = try await V2ActorRoomQueryExecutor(database: database).pullSnapshot(stranger,
+                    token: tokens[RoomID(uuid: roomB)]!)
+            }
+        }
+    }
+
     @Test("receipt replay is fenced before reading the operation record")
     func receiptReplayFence() async throws {
         try await withActorQueryDatabase { database, sql in
@@ -295,15 +380,17 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         #expect(Set(executions[2]) == Set([try token(roomB, epoch: 2), try token(roomC)]))
 
         let byteOccupied = ActorQueryGate(), byteRelease = ActorQueryGate()
-        // Large but individually legal immutable inputs fit one 1KiB batch
-        // envelope each. Two such inputs must execute as separate byte groups.
+        // The envelope budget follows retained memory accounting. One input
+        // fits, while two inputs must execute as separate byte groups.
         let byteOwner = try V2RoomDataOwner(shardID: String(repeating: "b", count: 300), epoch: 0)
         func byteToken() -> V2RoomActivationToken {
             .init(roomID: .init(uuid: UUID()), owner: byteOwner, activationEpoch: try! .init(1), host: host)
         }
         let sample = byteToken(), byteTokens = Mutex<[[V2RoomActivationToken]]>([])
+        let byteLimit = V2ActorPayloadBudget.retainedBytes(of: sample)
+            + V2ActorPayloadBudget.retainedBytes(of: actor) + 96
         let byteBatcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(maximumItems: 3,
-            maximumBytes: 1024, maximumPendingItems: 6,
+            maximumBytes: byteLimit, maximumPendingItems: 6,
             maximumInFlightBatches: 1)) { _, tokens in
             byteTokens.withLock { $0.append(tokens) }
             await byteOccupied.signal()

@@ -16,8 +16,18 @@ enum V2SendSuccessMetadata {
                 throw V2MessageOperationValidationError.invalidReceipt
             }
             self.room = room; self.sender = sender; self.operation = operation
-            fingerprint = try command.fingerprint.digest
-            fingerprintHex = fingerprint.map { String(format: "%02x", $0) }.joined()
+            let digest = try command.fingerprint.digest
+            fingerprint = digest
+            fingerprintHex = String(unsafeUninitializedCapacity: digest.count * 2) { output in
+                let digits: StaticString = "0123456789abcdef"
+                digits.withUTF8Buffer { digits in
+                    for (index, byte) in digest.enumerated() {
+                        output[index * 2] = digits[Int(byte >> 4)]
+                        output[index * 2 + 1] = digits[Int(byte & 15)]
+                    }
+                }
+                return digest.count * 2
+            }
         }
     }
     struct Entry: Sendable {
