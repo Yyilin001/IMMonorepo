@@ -99,6 +99,10 @@ struct V2PolicyFactsSnapshotCacheTests {
         let reverse = try V2PolicyFactsSnapshot(scope: .pair(second, first), version: 2, facts: .pair(.init(blocked: false, isFriend: true)))
         #expect(forward == reverse)
         try await cache.install(forward); try await cache.install(reverse)
+        #expect(try await cache.cachedSnapshots(scopes: [.pair(second, first)]) == [forward])
+        await #expect(throws: V2PolicyAuthorizationLifecycleError.invalidRequest) {
+            try await cache.cachedSnapshots(scopes: [.pair(first, second), .pair(second, first)])
+        }
         await cache.shutdown()
     }
     @Test("eviction causes initialization, time does not")

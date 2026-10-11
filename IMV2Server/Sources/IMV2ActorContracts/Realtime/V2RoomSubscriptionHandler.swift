@@ -14,4 +14,14 @@ public protocol V2RoomSubscriptionHandler: Sendable {
     func applyRoomSubscriptionBatch(_ batch: V2RoomSubscriptionDeliveryBatch,
                                     authenticatedServiceID: String,
                                     sourceShardID: String) async -> V2RoomSubscriptionBatchResult
+    func applyRoomSubscriptionBatch(_ batch: V2ValidatedRoomSubscriptionBatch,
+                                    authenticatedServiceID: String,
+                                    sourceShardID: String) async -> V2RoomSubscriptionBatchResult
+}
+
+extension V2RoomSubscriptionHandler {
+    public func applyRoomSubscriptionBatch(_ batch: V2ValidatedRoomSubscriptionBatch,
+        authenticatedServiceID: String, sourceShardID: String) async -> V2RoomSubscriptionBatchResult {
+        await applyRoomSubscriptionBatch(batch.batch, authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID)
+    }
 }

@@ -18,6 +18,30 @@ struct V2RoomSubscriptionBatchEncodingTests {
                 projectionKind: "中文\"\\/\n", payload: Data(0..<255),
                 recipientUserIDs: [], groupMembershipRevision: 1)))
     }
+    @Test func validatedPartitionsAndExactReceipts() throws {
+        let first = try delivery(), second = try delivery()
+        let next = V2RoomSubscriptionDelivery(fence: first.fence, deliverySequence: 3,
+            authorizationSequence: first.authorizationSequence, payload: first.payload)
+        let validated = try V2RoomSubscriptionDeliveryBatch(deliveries: [first, second, next]).validated()
+        #expect(validated.rooms.map(\.indices) == [[0, 2], [1]])
+        #expect(validated.rooms.map(\.lastSequence) == [3, 2])
+        let a = V2RoomSubscriptionBatchReceipt(fence: first.fence, result: .appliedThrough(3))
+        let b = V2RoomSubscriptionBatchReceipt(fence: second.fence, result: .stale)
+        #expect(validated.accepts(.init(receipts: [b, a])))
+        #expect(!validated.accepts(.init(receipts: [a, a])))
+        #expect(!validated.accepts(.init(receipts: [a])))
+        #expect(!validated.accepts(.init(receipts: [.init(fence: first.fence, result: .appliedThrough(2)), b])))
+        #expect(throws: (any Error).self) {
+            try V2RoomSubscriptionDeliveryBatch(deliveries: [next, first]).validated()
+        }
+        let replacedFence = V2RoomSubscriptionFence(activation: first.fence.activation,
+            subscriptionID: UUID(), generation: first.fence.generation, baselineSequence: first.fence.baselineSequence)
+        let replaced = V2RoomSubscriptionDelivery(fence: replacedFence, deliverySequence: 3,
+            authorizationSequence: first.authorizationSequence, payload: first.payload)
+        #expect(throws: (any Error).self) {
+            try V2RoomSubscriptionDeliveryBatch(deliveries: [first, replaced]).validated()
+        }
+    }
     @Test func retainedLimitAndRejectedAppendDoNotChangeBatch() throws {
         let item = try delivery()
         let original = V2RoomSubscriptionDeliveryBatch(deliveries: [item])

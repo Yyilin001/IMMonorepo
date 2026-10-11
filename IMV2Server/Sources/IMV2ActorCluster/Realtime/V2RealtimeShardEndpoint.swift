@@ -141,7 +141,7 @@ actor V2RealtimeShardInbound {
         let remaining = duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000
         return try signer.sign(RealtimeGrant(hello: hello, sessionID: id, remainingMilliseconds: remaining, agreementKey: sessions[id]!.agreementKey), maximumBytes: 16_384)
     }
-    private func verifySessionPacket<Body: Decodable & V2ActorSessionBoundCall>(_ packet: V2ActorSignedPacket,
+    private func verifySessionPacket<Body: Decodable & V2ActorSessionBoundCall & V2ActorMACBody>(_ packet: V2ActorSignedPacket,
         as type: Body.Type) throws -> (Body, V2ActorTrustedService) {
         if packet.signature.count == 32 {
             let id = try V2ActorSessionMAC.packetSessionID(packet)
@@ -156,7 +156,7 @@ actor V2RealtimeShardInbound {
         guard sessions[body.sessionID]?.mac == nil else { throw V2ActorAuthenticationError.invalidSignature }
         return (body, peer)
     }
-    private func sessionReply<Body: Encodable>(_ body: Body, session: Session, maximumBytes: Int) throws -> V2ActorSignedPacket {
+    private func sessionReply<Body: Encodable & V2ActorMACBody>(_ body: Body, session: Session, maximumBytes: Int) throws -> V2ActorSignedPacket {
         if let mac = session.mac { return try mac.seal(body, reply: true, maximumBytes: maximumBytes) }
         return try signer.sign(body, maximumBytes: maximumBytes)
     }

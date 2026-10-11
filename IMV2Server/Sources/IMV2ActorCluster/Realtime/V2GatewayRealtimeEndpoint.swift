@@ -202,7 +202,7 @@ actor V2GatewayRealtimeInbound {
         let remaining = duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000
         return try signer.sign(RealtimeGrant(hello: hello, sessionID: id, remainingMilliseconds: remaining, agreementKey: sessions[id]!.agreementKey), maximumBytes: 16_384)
     }
-    private func verifySessionPacket<Body: Decodable & V2ActorSessionBoundCall>(_ packet: V2ActorSignedPacket,
+    private func verifySessionPacket<Body: Decodable & V2ActorSessionBoundCall & V2ActorMACBody>(_ packet: V2ActorSignedPacket,
         as type: Body.Type) throws -> (Body, V2ActorTrustedService) {
         if packet.signature.count == 32 {
             let id = try V2ActorSessionMAC.packetSessionID(packet)
@@ -217,7 +217,7 @@ actor V2GatewayRealtimeInbound {
         guard sessions[body.sessionID]?.mac == nil else { throw V2ActorAuthenticationError.invalidSignature }
         return (body, peer)
     }
-    private func sessionReply<Body: Encodable>(_ body: Body, session: Session, maximumBytes: Int) throws -> V2ActorSignedPacket {
+    private func sessionReply<Body: Encodable & V2ActorMACBody>(_ body: Body, session: Session, maximumBytes: Int) throws -> V2ActorSignedPacket {
         if let mac = session.mac { return try mac.seal(body, reply: true, maximumBytes: maximumBytes) }
         return try signer.sign(body, maximumBytes: maximumBytes)
     }
@@ -241,12 +241,12 @@ actor V2GatewayRealtimeInbound {
               session.service == peer.serviceID, session.incarnation == call.callerIncarnation else {
             throw V2ActorAuthenticationError.sessionExpired
         }
-        try validateRoomSubscriptionBatch(call.batch, sourceShardID: call.sourceShardID, limits: limits)
+        let validated = try validateRoomSubscriptionBatch(call.batch, sourceShardID: call.sourceShardID, limits: limits)
         try session.accept(sequence: call.sequence, attemptID: call.attemptID)
-        let result = await roomSubscriptionHandler?.applyRoomSubscriptionBatch(call.batch,
+        let result = await roomSubscriptionHandler?.applyRoomSubscriptionBatch(validated,
             authenticatedServiceID: peer.serviceID.rawValue, sourceShardID: call.sourceShardID)
-            ?? V2RoomSubscriptionBatchResult(receipts: roomSubscriptionBatchFences(call.batch).map { .init(fence: $0, result: .stale) })
-        try validateRoomSubscriptionBatchReceipt(result, batch: call.batch)
+            ?? V2RoomSubscriptionBatchResult(receipts: validated.rooms.map(\.fence).map { .init(fence: $0, result: .stale) })
+        try validateRoomSubscriptionBatchReceipt(result, validated: validated)
         return try sessionReply(RoomSubscriptionBatchReply(recipient: identity, sessionID: call.sessionID,
             sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: limits.maximumPacketBytes)
     }
@@ -444,7 +444,7 @@ public actor V2RealtimeClusterSender {
                                           to target: V2GatewayRealtimeDescriptor) async throws -> V2RoomSubscriptionBatchResult {
         try Task.checkCancellation()
         try target.validate()
-        try validateRoomSubscriptionBatch(batch, sourceShardID: sourceShardID, limits: limits)
+        let validated = try validateRoomSubscriptionBatch(batch, sourceShardID: sourceShardID, limits: limits)
         try trust.validateRealtimeReceiver(target.identity)
         try acquireCallback(to: target.identity)
         defer { releaseCallback(to: target.identity) }
@@ -466,7 +466,7 @@ public actor V2RealtimeClusterSender {
             try validatePeer(peer, target: target)
             guard reply.recipient == target.identity, reply.sessionID == call.sessionID,
                   reply.sequence == call.sequence, reply.attemptID == call.attemptID else { throw V2ActorAuthenticationError.wrongRecipient }
-            try validateRoomSubscriptionBatchReceipt(reply.result, batch: batch)
+            try validateRoomSubscriptionBatchReceipt(reply.result, validated: validated)
             return reply.result
         } catch {
             if let auth = error as? V2ActorAuthenticationError,
@@ -622,26 +622,25 @@ func roomSubscriptionBatchFences(_ batch: V2RoomSubscriptionDeliveryBatch) -> [V
     return batch.deliveries.compactMap { seen.insert($0.fence).inserted ? $0.fence : nil }
 }
 
+@discardableResult
 func validateRoomSubscriptionBatch(_ batch: V2RoomSubscriptionDeliveryBatch, sourceShardID: String,
-                                   limits: V2RealtimeTransportLimits) throws {
-    do { try batch.validate(maximumItems: limits.maximumBatchItems, maximumBytes: limits.maximumPacketBytes) }
+                                   limits: V2RealtimeTransportLimits) throws -> V2ValidatedRoomSubscriptionBatch {
+    guard !sourceShardID.isEmpty, sourceShardID.utf8.count <= 128 else { throw V2ActorAuthenticationError.invalidRequest }
+    let validated: V2ValidatedRoomSubscriptionBatch
+    do { validated = try batch.validated(maximumItems: limits.maximumBatchItems, maximumBytes: limits.maximumPacketBytes) }
     catch { throw V2ActorAuthenticationError.invalidRequest }
-    for delivery in batch.deliveries {
-        try validateRoomSubscriptionDelivery(delivery, sourceShardID: sourceShardID, limits: limits)
+    guard validated.rooms.allSatisfy({ $0.fence.activation.owner.shardID == sourceShardID }) else {
+        throw V2ActorAuthenticationError.invalidRequest
     }
+    return validated
 }
 
 func validateRoomSubscriptionBatchReceipt(_ result: V2RoomSubscriptionBatchResult,
                                           batch: V2RoomSubscriptionDeliveryBatch) throws {
-    let expected = roomSubscriptionBatchFences(batch)
-    guard result.receipts.count == expected.count,
-          Set(result.receipts.map(\.fence)).count == expected.count,
-          Set(result.receipts.map(\.fence)) == Set(expected) else { throw V2ActorAuthenticationError.wrongRecipient }
-    for receipt in result.receipts {
-        if case .appliedThrough(let through) = receipt.result {
-            guard through == batch.deliveries.last(where: { $0.fence == receipt.fence })?.deliverySequence else {
-                throw V2ActorAuthenticationError.wrongRecipient
-            }
-        }
-    }
+    try validateRoomSubscriptionBatchReceipt(result, validated: batch.validated())
+}
+
+private func validateRoomSubscriptionBatchReceipt(_ result: V2RoomSubscriptionBatchResult,
+                                                 validated: V2ValidatedRoomSubscriptionBatch) throws {
+    guard validated.accepts(result) else { throw V2ActorAuthenticationError.wrongRecipient }
 }

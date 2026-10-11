@@ -12,13 +12,13 @@ internal final class BinaryInvocationSerializer: Serializer<InvocationMessage> {
     init(_ allocator: ByteBufferAllocator) { self.allocator = allocator; super.init() }
 
     override func serialize(_ message: InvocationMessage) throws -> Serialization.Buffer {
-        var buffer = allocator.buffer(capacity: 256)
+        var buffer = allocator.buffer(capacity: 28 + message.targetIdentifier.utf8.count + message.genericSubstitutions.reduce(0) { $0 + 4 + $1.utf8.count } + message.arguments.reduce(0) { $0 + 4 + $1.count })
         buffer.writeInteger(Self.magic)
         var uuid = message.callID.uuid
         withUnsafeBytes(of: &uuid) { buffer.writeBytes($0) }
-        try write(Data(message.targetIdentifier.utf8), to: &buffer)
+        try writeString(message.targetIdentifier, to: &buffer)
         try writeCount(message.genericSubstitutions.count, to: &buffer)
-        for type in message.genericSubstitutions { try write(Data(type.utf8), to: &buffer) }
+        for type in message.genericSubstitutions { try writeString(type, to: &buffer) }
         try writeCount(message.arguments.count, to: &buffer)
         for argument in message.arguments { try write(argument, to: &buffer) }
         return .nioByteBuffer(buffer)
@@ -27,9 +27,8 @@ internal final class BinaryInvocationSerializer: Serializer<InvocationMessage> {
     override func deserialize(from source: Serialization.Buffer) throws -> InvocationMessage {
         var buffer = source.asByteBuffer(allocator: allocator)
         guard buffer.readInteger(as: UInt32.self) == Self.magic,
-              let bytes = buffer.readBytes(length: 16) else { throw Failure.invalidFrame }
-        var uuid: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-        withUnsafeMutableBytes(of: &uuid) { $0.copyBytes(from: bytes) }
+              let uuidBytes = buffer.readSlice(length: 16) else { throw Failure.invalidFrame }
+        let uuid = uuidBytes.withUnsafeReadableBytes { $0.loadUnaligned(as: uuid_t.self) }
         let target = try readString(from: &buffer)
         let genericCount = try readCount(from: &buffer)
         var types: [String] = []; types.reserveCapacity(genericCount)
@@ -60,8 +59,13 @@ internal final class BinaryInvocationSerializer: Serializer<InvocationMessage> {
               let bytes = buffer.readData(length: Int(length)) else { throw Failure.invalidFrame }
         return bytes
     }
+    private func writeString(_ text: String, to buffer: inout ByteBuffer) throws {
+        try writeCount(text.utf8.count, to: &buffer); buffer.writeString(text)
+    }
     private func readString(from buffer: inout ByteBuffer) throws -> String {
-        guard let text = String(data: try read(from: &buffer), encoding: .utf8) else { throw Failure.invalidFrame }
+        guard let length = buffer.readInteger(as: UInt32.self), Int(length) <= buffer.readableBytes,
+              let bytes = buffer.readSlice(length: Int(length)),
+              let text = bytes.withUnsafeReadableBytes({ String(bytes: $0, encoding: .utf8) }) else { throw Failure.invalidFrame }
         return text
     }
 }
@@ -93,11 +97,10 @@ internal final class BinaryRemoteCallReplySerializer: Serializer<BinaryRemoteCal
     override func deserialize(from source: Serialization.Buffer) throws -> BinaryRemoteCallReply {
         var buffer = source.asByteBuffer(allocator: allocator)
         guard buffer.readInteger(as: UInt32.self) == Self.magic,
-              let bytes = buffer.readBytes(length: 16), let count = buffer.readInteger(as: UInt32.self),
+              let bytes = buffer.readSlice(length: 16), let count = buffer.readInteger(as: UInt32.self),
               count <= Self.maximumBytes, Int(count) == buffer.readableBytes,
               let value = buffer.readData(length: Int(count)) else { throw Failure.invalidFrame }
-        var id: uuid_t = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
-        withUnsafeMutableBytes(of: &id) { $0.copyBytes(from: bytes) }
+        let id = bytes.withUnsafeReadableBytes { $0.loadUnaligned(as: uuid_t.self) }
         return BinaryRemoteCallReply(callID: UUID(uuid: id), value: value)
     }
 }

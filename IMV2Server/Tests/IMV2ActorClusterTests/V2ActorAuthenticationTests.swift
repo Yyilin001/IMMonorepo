@@ -8,6 +8,20 @@ import Testing
 
 @Suite("Signed actor sessions bind authority and reject replay")
 struct V2ActorAuthenticationTests {
+    @Test func macDomainsPreserveWireBinding() {
+        #expect(V2ActorAuthenticatedCall.macDomain == Data(String(reflecting: V2ActorAuthenticatedCall.self).utf8))
+        #expect(V2ActorAuthenticatedReply.macDomain == Data(String(reflecting: V2ActorAuthenticatedReply.self).utf8))
+        #expect(RoomSubscriptionBatchCall.macDomain == Data(String(reflecting: RoomSubscriptionBatchCall.self).utf8))
+        #expect(RoomSubscriptionBatchReply.macDomain == Data(String(reflecting: RoomSubscriptionBatchReply.self).utf8))
+        #expect(RoomSubscriptionCall.macDomain == Data(String(reflecting: RoomSubscriptionCall.self).utf8))
+        #expect(RoomSubscriptionReply.macDomain == Data(String(reflecting: RoomSubscriptionReply.self).utf8))
+        #expect(JournalProjectionCall.macDomain == Data(String(reflecting: JournalProjectionCall.self).utf8))
+        #expect(JournalProjectionReply.macDomain == Data(String(reflecting: JournalProjectionReply.self).utf8))
+        #expect(RealtimeCall.macDomain == Data(String(reflecting: RealtimeCall.self).utf8))
+        #expect(RealtimeReply.macDomain == Data(String(reflecting: RealtimeReply.self).utf8))
+        #expect(ShardCall.macDomain == Data(String(reflecting: ShardCall.self).utf8))
+        #expect(ShardReply.macDomain == Data(String(reflecting: ShardReply.self).utf8))
+    }
     @Test("signed PB authenticates transmitted bytes independently of field order")
     func signedBodyKeyOrder() throws {
         struct Body: Codable, Equatable { let a: Int; let z: String }

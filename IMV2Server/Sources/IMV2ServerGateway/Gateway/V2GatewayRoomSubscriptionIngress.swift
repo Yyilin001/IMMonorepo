@@ -74,35 +74,42 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
     }
     public func applyRoomSubscriptionBatch(_ batch: V2RoomSubscriptionDeliveryBatch,
         authenticatedServiceID: String, sourceShardID: String) async -> V2RoomSubscriptionBatchResult {
-        do { try batch.validate() } catch {
+        do {
+            return await applyRoomSubscriptionBatch(try batch.validated(),
+                authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID)
+        } catch {
             return .init(receipts: Array(Set(batch.deliveries.map(\.fence))).map { .init(fence: $0, result: .stale) })
         }
-        var order: [V2RoomSubscriptionFence] = []
-        var rooms: [V2RoomSubscriptionFence: [V2RoomSubscriptionDelivery]] = [:]
-        for delivery in batch.deliveries {
-            if rooms[delivery.fence] == nil { order.append(delivery.fence) }
-            rooms[delivery.fence, default: []].append(delivery)
-        }
-        // Preserve each room's packet order; an unrelated room must not wait
-        // for another connection's control projection to be acknowledged.
-        let results = await withTaskGroup(of: V2RoomSubscriptionBatchReceipt.self) { group in
-            for fence in order {
-                let deliveries = rooms[fence]!
-                group.addTask {
-                    var result: V2RoomSubscriptionDeliveryResult = .stale
-                    for delivery in deliveries {
-                        result = await self.applyRoomSubscription(delivery,
-                            authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID)
-                        if case .appliedThrough = result {} else { break }
-                    }
-                    return .init(fence: fence, result: result)
-                }
-            }
-            var results: [V2RoomSubscriptionFence: V2RoomSubscriptionBatchReceipt] = [:]
-            for await receipt in group { results[receipt.fence] = receipt }
-            return results
-        }
-        return .init(receipts: order.map { results[$0]! })
     }
 
+    public func applyRoomSubscriptionBatch(_ batch: V2ValidatedRoomSubscriptionBatch,
+        authenticatedServiceID: String, sourceShardID: String) async -> V2RoomSubscriptionBatchResult {
+        // A single room needs no child task; multi-room controls stay concurrent.
+        if batch.rooms.count == 1 {
+            return .init(receipts: [await applyRoom(batch.rooms[0], in: batch,
+                authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID)])
+        }
+        return await withTaskGroup(of: (Int, V2RoomSubscriptionBatchReceipt).self) { group in
+            for (index, room) in batch.rooms.enumerated() {
+                group.addTask {
+                    (index, await self.applyRoom(room, in: batch,
+                        authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID))
+                }
+            }
+            var receipts = [V2RoomSubscriptionBatchReceipt?](repeating: nil, count: batch.rooms.count)
+            for await (index, receipt) in group { receipts[index] = receipt }
+            return .init(receipts: receipts.map { $0! })
+        }
+    }
+
+    private func applyRoom(_ room: V2ValidatedRoomSubscriptionBatch.Room, in batch: V2ValidatedRoomSubscriptionBatch,
+        authenticatedServiceID: String, sourceShardID: String) async -> V2RoomSubscriptionBatchReceipt {
+        var result: V2RoomSubscriptionDeliveryResult = .stale
+        for index in room.indices {
+            result = await applyRoomSubscription(batch.batch.deliveries[index],
+                authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID)
+            if case .appliedThrough = result {} else { break }
+        }
+        return .init(fence: room.fence, result: result)
+    }
 }
