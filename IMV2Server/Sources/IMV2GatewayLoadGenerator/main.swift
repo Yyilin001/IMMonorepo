@@ -2491,7 +2491,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "145a9f42c570c65270f579c44cce5708bd14e46c03682908ed130ba1690fded5"
+    static let algorithmSourceSHA256 = "fc1f9233f15ae37c7a3c04201bfbd9756b9eb865d2a10791ff591463d090440a"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     static let maximumMessageWireAttempts = 5

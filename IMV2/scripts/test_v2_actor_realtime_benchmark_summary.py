@@ -145,7 +145,7 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                         self.assertIn('policyMutation', service['permissions'])
                         if service['hostIDs']:
                             self.assertIn('policyRegistration', service['permissions'])
-                            self.assertIn('policyRevocation', service['permissions'])
+                            self.assertNotIn('policyRevocation', service['permissions'])
                 self.assertEqual(candidate['hostID'], baseline['hostID'])
                 self.assertEqual(candidate['signingKeyPath'], baseline['signingKeyPath'])
 

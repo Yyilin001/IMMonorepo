@@ -122,7 +122,7 @@ def main() -> None:
             permissions += ["roomMaintenance", "trustedSafety", "specialAccountAudit"]
         permissions += ["policyMutation"]
         if name in host_names:
-            permissions += ["policyRegistration", "policyRevocation"]
+            permissions += ["policyRegistration"]
         services.append(dict(id=name, publicKeyBase64=base64.b64encode(public_der[-32:]).decode(),
                              permissions=permissions, hostIDs=[host_ids[name]] if name in host_names else [],
                              shardIDs=shards, userBucketIDs=user_buckets, gatewayNodeIDs=[name]))

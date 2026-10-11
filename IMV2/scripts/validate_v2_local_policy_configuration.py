@@ -35,7 +35,7 @@ def validate(root: Path) -> None:
         for service in documents:
             required = {"policyMutation"}
             if service == "gateway":
-                required |= {"policyRegistration", "policyRevocation"}
+                required |= {"policyRegistration"}
             if not required.issubset(services.get(service, {}).get("permissions", [])):
                 raise ValueError(f"{name} does not authorize {service}'s policy calls")
 
