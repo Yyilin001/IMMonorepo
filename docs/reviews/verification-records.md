@@ -2698,7 +2698,7 @@ B01 仍有成员/角色收据和其他投影的内部版本比较待核对。
 
 ### 20260920-authorization-gateway-lifecycle
 
-- 范围：D07 实际 IMV2ServerApp 的后台授权恢复与进程生命周期。新增 [可重复探针](../../scripts/test_v2_authorization_gateway_lifecycle.py)，只允许显式确认的本机临时 PostgreSQL 集群，创建独立随机数据库并在结束时清理。生产 Swift、schema 49、协议 30 不变。
+- 范围：D07 实际 IMV2ServerApp 的后台授权恢复与进程生命周期。新增 旧授权生命周期探针（已随旧恢复扫描器移除），只允许显式确认的本机临时 PostgreSQL 集群，创建独立随机数据库并在结束时清理。生产 Swift、schema 49、协议 30 不变。
 - 探针使用当前 canonical schema、临时 TLS 证书和实际 Gateway 可执行文件，控制与 owner 共用物理数据库，运行时按正式配置创建独立角色池。预置三个合法 held 操作，分别验证启动后自动恢复、owner 房间锁等待期间 SIGKILL 后重启按租约恢复、等待期间 SIGTERM 正常停机后再启动恢复。
 - SIGKILL 要求退出码对应信号 9。所有 SIGTERM 要求退出码 0 和服务任务 drained=true；在途等待场景在约 2 秒数据库锁超时后延后授权并完成退出，下次启动在 next_check_at 到期后恢复。最终三个 owner aborted 证明、消息零；未手动调用协调器替代实际后台任务。
 - 真实入口增量构建通过（2.93 秒）；最终仓库脚本全部通过，证据目录 `/tmp/imv2-auth-gateway-abb8e085-ab13-4711-9839-18f49312d37e`，含四次进程日志、schema 日志与 report.json。总日志 `/tmp/imv2-auth-gateway-lifecycle-repository-20260920.log`，源码/日志指纹 `/tmp/imv2-auth-gateway-lifecycle-sources-20260920.json`。没有运行全仓测试。
@@ -3380,3 +3380,119 @@ ACK R5 已退出0：实际App1项、0失败、0跳过；独立PG原消息与成�
 用户明确要求“不验证和apns相关的”。原56项保留编号，EX23标为用户排除，系统Push失败不改为通过；当前55项本机功能验收完成。逐项证据与范围核对见 /tmp/imv2-functional-acceptance-20261008/final-non-apns-acceptance-audit-20261009.json。已核对最新真实HTTPS/TLS扩展套件、各命名App功能阶段的实际xcresult、原消息/工作身份与PG/SQLite事实；后台下载四轮所有实际UI结果再次读取均通过。原聚合失败、注册审计历史及未选择的opt-in跳过保持原样，不视作通过；共用注册/AX及主要UI流程由修复后完整R8、当前账号切换R1和原生下载整轮补足。
 
 主要修复包括首次登出任务所有权、离线原命令重放、私聊拒绝提示与去重、主动退群和群头像、typing订阅ACK、终止订阅ACK与成员入群即时投影、界面无障碍/冷邀请恢复、账号后台下载持久任务接管、缓存重新授权与字节校验、撤回/登出取消排空。本机范围含1000房间跨Gateway恢复及尾通知补偿、真实丢ACK自动重连、两安装多设备同步与权限变更、后台挂起传输及实际SIGKILL后原任务恢复；不扩展为生产容量、真机或APNs送达验证。本轮owned服务/PG测试已关闭；本次收尾只更新验收记录，不自动提交推送。
+
+
+### 2026-10-11 服务端兼容路径清理：转发夹具与回执调度
+
+删除无生产实例的进程级 `V2ReadReceiptBatcher`（298 行），保留其配置为独立 `V2RoomReceiptBatchConfiguration`（38 行）；当前忙碌错误为 `V2RoomReceiptAdmissionError`。旧调度器的 138 行测试删除，现行 Host 测试验证同批成功结果、失效 Owner 与领域错误隔离，以及取消、队列与截止时间。转发测试显式使用真实 Policy Owner、房间 activation 和控制库权威状态；移除消息额度旧场景，保留切换后读取不可变终态回执的验证。
+
+当前回归日志 `/tmp/imv2-compat-current72-forward-and-receipt-current.log`：28 项测试、4 个套件全部通过，136.822 秒；构建通过。独立 PostgreSQL 16 集群 tests=0、cleanup=0，未修改本地服务和数据库。Actor 清单检查（386 个文件、231 个 DTO）与服务端分层检查均通过，`git diff --check` 通过。此记录只证明本轮受影响范围；完整兼容代码清理及全范围回归尚未完成。未运行性能或 APNs 测试，未提交推送。
+
+
+### 2026-10-11 回执兼容服务与空协议收敛
+
+删除无消费方的 `V2ReadReceiptBatchStore`、`V2GroupReadReceiptRecordingStore`、`V2GroupReadReceiptBatchRecordingStore`、`V2GroupReadReceiptReaderCandidateStore`、`V2GroupReadReceiptOwnerStore`、`V2ReadReceiptAdmission` 六组协议，以及无生产实例的 `V2ReadReceiptService`（79 行）和其 Gateway 遵循。当前生产回执仍通过 `V2RoomRefReadReceiptClient` 和 Host activation 执行器。Gateway 单测的领域命令构造位于测试目录 `V2ReadReceiptTestService`；真实数据库的单调已读、幂等重放与非同步 ACK 验证改用 `recordActivationValidated`。保留批量 SQL、身份披露、结果类型和只读指标协议。
+
+日志 `/tmp/imv2-compat-current72-receipt-contract-cleanup.log`：构建通过；服务端 58 项测试、6 个套件通过（26.004 秒）；Actor 回执契约 2 项测试、1 个套件通过。独立 PostgreSQL 16 tests=0、cleanup=0。清单检查（385 个文件、231 个 DTO）、服务端分层及差异检查通过。删除的协议和服务在当前 Sources/Tests 中无引用；历史提案中的旧设计快照不作为当前入口。未运行压测、APNs 或修改本地验收服务，未提交推送。完整兼容代码清理仍需继续审计其余业务入口与回归。
+
+
+### 2026-10-11 名录与个人偏好旧服务包装清理
+
+删除仅剩 Gateway 遵循引用、无生产实例的两个包装：`V2RoomMembershipDirectoryService`（34 行）、`V2ConversationCapabilitiesService`（21 行）；测试适配移入 Tests。当前 RoomRef 名录结果的身份与修订边界检查保留，持久化 Store 与恢复逻辑不变。清单删除退役生产路径。
+
+`/tmp/imv2-compat-current72-directory-preference-cleanup.log`：构建通过，54 项测试、7 个套件全部通过（1.808 秒），涵盖 Gateway 命令、RoomRef 客户端、名录映射和偏好恢复 HTTP 路由。数据库用例实际属于通用 `PostgresV2RoomWriteStoreIntegrationTests`，另以 `/tmp/imv2-compat-current72-personal-preference-current.log` 验证 `personalPreferenceRecovery` 的 false/true 两个场景：1 项参数化测试通过，1.724 秒。两轮独立 PostgreSQL 16 均 tests=0、cleanup=0。清单检查（384 个路径、231 个 DTO）、分层及差异检查通过；Sources/Tests 中无两个旧服务名。未压测、未验证 APNs、未修改本地服务或提交推送。完整兼容路径清理仍在推进。
+
+
+### 2026-10-11 社交提交移除无效调用方时钟
+
+`PostgresV2SocialRelationshipStore.submitSocialOperation` 已由 Policy Owner 提交，并使用数据库权威时钟，原 `now` 参数在实现中未使用。删除该参数，同步 `V2SocialOperationHandling`、HTTP 提交路由与 12 个文件中的 27 处调用，不保留旧签名。`recoverSocialOperation` 的关闭结果仍需要服务端时间，参数保持。显式 Owner 约束与策略广播、投影投递均保留。
+
+`/tmp/imv2-compat-current72-social-submit-clock-cleanup.log`：构建通过，5 项数据库集成测试通过（14.217 秒）。覆盖控制库权限与直接发送/转发联动（含 12 个 stale-owner-policy 场景）、独立房间轮次、关系与拉黑生命周期、Owner 必需性和重复提交。独立 PostgreSQL 16 tests=0、cleanup=0。清单、分层及差异检查通过，当前 Sources/Tests 中无带 `now` 的社交提交旧签名或调用。未压测、APNs 或提交推送。本轮不是完整兼容清理完成证据；旧时钟测试与其他剩余入口仍需迁移和全范围验证。
+
+
+### 2026-10-11 社交与陌生人策略的权威时钟测试迁移
+
+社交提交不再接收调用方时间，因此旧精度组合不能继续通过无效参数覆盖策略写入。将原 50 个组合拆为：direct/user-add 的 10 个持久化精度场景，以及 stranger/request/accept/reject/remove/block/unblock/block-remove 的 8 个真实 Policy Owner 场景。保留全部业务动作、回执与投影时间一致性、不可变回执重放和没有重复效果的断言；删除 32 个对不再使用的调用方时钟的重复组合。社交重放测试绑定真实 Owner，使用当前首提期限；仅仍接收时间的接口测试非法时钟。Owner 必需性测试补充提交前后时间边界与数据库持久回执时间一致性。
+
+`/tmp/imv2-compat-current72-policy-proof-timestamps.log`：构建通过，4 项参数化测试全部通过（19.004 秒），共 24 个场景：10+8+4+2。独立 PostgreSQL 16 tests=0、cleanup=0。清单、分层和差异检查通过。本次未修改生产授权与持久化实现，也未恢复旧默认权限入口；未压测、APNs 或提交推送。剩余旧修订边界和其他兼容夹具仍需继续迁移，完整清理未完成。
+
+
+### 2026-10-11 修订耗尽测试接入当前授权，删除旧社交时钟测试
+
+`directPolicyRevisionBoundary` 的 room-log/stranger/relationship/block 四档改用显式 Policy Owner，消息路径使用真实 activation 和策略执行；首提期限与容量池采用当前时间。保留修订号耗尽后业务快照完全不变、最后合法递增、重放无写入及首次回复后最高修订仍可发送的断言。陌生人版本耗尽匹配当前 `V2AccountPreferenceValidationError.invalidReceipt`。
+
+删除 `personalWriteTimestampBoundaries` 的 57 行旧测试：其非法时间参数已不存在，重复调用无 Owner Store 无法检验时间编码。当前权威时间测试覆盖各动作和投影；额外加入 block-pending 场景，保留“待接受好友请求被拉黑移除”的三个投影及重放稳定性，避免丢失组合行为。
+
+`/tmp/imv2-compat-current72-policy-revision-complete.log`：构建通过，4 项参数化测试、21 个场景（4+6+9+2）全部通过，17.035 秒。独立 PostgreSQL 16 tests=0、cleanup=0。清单、分层及差异检查通过。未修改生产数据库或本地服务，未压测、APNs 或提交推送。完整兼容清理仍需审计剩余入口与当前全范围回归。
+
+
+### 2026-10-11 扩大非 Push/APNs 集成回归：进行中
+
+当前工作区启动完整 `PostgresV2RoomWriteStoreIntegrationTests`，只排除 Push/APNs；此前未纳入部分回归的设备/会话/取消用例此次保留。独立 PostgreSQL 16，runner `/tmp/imv2-compat-current72-integration-current-r2.py`，log `/tmp/imv2-compat-current72-integration-current-r2.log`。本记录为中途观察，不是完成证据，进程/session 状态需再次验证。阶段快照在 `/tmp/imv2-compat-current72-integration-current-r2-state.json`。
+
+已定位并修改两个残留：`routedDirectControlPools` 的同库/跨库场景仍用裸消息 Store，现改显式 Policy Owner、共享的实际 group/direct activation tokens 和当前首提期限；`concurrentIndependentPresenceAdmissionsMaterializeLeases` 的旧固定调用方到期时间断言改为数据库时钟边界、返回/持久化时间集合一致与 256 条租约存在。二者改动发生在本轮测试二进制构建之后，当前回归失败仍反映修改前代码；语法解析、清单、分层和差异检查通过，尚未重新构建和行为验证。
+
+最新阶段观察约 92 个具名测试完成、27 条 issue，除上述旧入口/时钟断言，还发现媒体扫描完成期限测试失败，需要根据当前实现继续定位。不得把已通过的小范围回归代替这一轮完整结果，完整清理未完成。未压测、APNs 或提交推送，不改本地验收服务。
+
+
+### 2026-10-11 当前协议与兼容夹具回归复核
+
+`/tmp/imv2-compat-current72-current-protocol-cleanup-r2.log`：完整测试目标构建通过（148.35 秒），协议帧、握手、配置、页缓存、页边界及房间组合共 92 项测试、8 个 suite 全部通过。此前夹具迁移误用社交辅助函数的参数导致两次编译失败，已改为当前 actor/target/operation/action 签名；没有恢复旧生产接口。
+
+旧广范围审计 `/tmp/imv2-compat-current72-integration-current-r2.log` 已终止：409 项测试、73 条 issue，临时 PostgreSQL 已通过 runner 清理（cleanup=0）。其二进制早于后续夹具迁移，不是当前行为结果。新构建的 `/tmp/imv2-compat-current72-current-fixture-cleanup-r2.log` 完成 26 项测试，20 条 issue 分布在四项测试：拒绝结果旧断言、跨 Owner 转发、旧固定时钟下的社交同步与陌生人策略。runner 和其 PostgreSQL 进程均已退出；后续修复回归在新的独立实例中进行。此结果未通过，不能据此宣称清理完成。
+
+本轮删除主 schema 中三处首次创建触发器之前的无效 DROP，并删除无调用方的 `V2RoomWriteOwnerSelection.selectingRoutes/selectingForwardSource` 后置选择方法。Actor 双房间构造与 activation 校验保留。实时日志扩展有明确的保留来源重复安装契约，幂等 DDL 保留。独立 PostgreSQL 中的 canonical bootstrap、恢复和结构漂移脚本已通过（`/tmp/imv2-compat-current72-bootstrap-r3.log`）；尚待本轮 Swift 回归结束。未修改开发数据库或本地服务，未压测、APNs 或提交推送。
+
+
+构建跟进：删除后置选择方法后，旧 `V2RoomWriteScopeConstructionTests` 仍调用这些方法，r3 构建失败（tests=1、cleanup=0），未运行行为测试。已将测试改为当前 `actorForwardPair` 构造入口，保留双路由、activation 匹配、源代次冲突和缺少路由拒绝断言。r4 已完成独立数据库 bootstrap/restore/drift 检查，Swift 构建仍在进行（runner `/tmp/imv2-compat-current72-current-fixture-repair-r4.py`，log 同名 `.log`，session 27780）；这条进行中记录不构成通过证据。
+
+
+r4 终态：8 项测试、3 个 suite、10 条 issue，tests=1、cleanup=0。当前 schema 与三个房间归属构造用例通过；routedDirectControlPools 两档及 enforcesStrangerDirectMessagePolicy 通过。剩余为转发 Policy Owner 的 ownerChanged 两档，以及社交同步八条断言。同步日志显示：当前持久化偏好记录仍为 stranger_message_permission，stranger_permission 仅是本用例人为写入的目标分片个人效果；之前全量替换名称不正确，已恢复。社交和后续偏好冻结命令时不能使用未来 now+2/+5：首提截止时间因此超过当前数据库时钟允许窗口，改为各次冻结的实际 Date()。r5 仅重跑这两项及当前 schema/归属构造测试，session 7118，runner `/tmp/imv2-compat-current72-current-fixture-repair-r5.py`；结果仍需观察。转发测试临时阶段输出用于精确定位，定位后须移除。
+
+
+r5 终态：6 项测试、2 条 issue，tests=1、cleanup=0。社交同步序列、类型、七条记录与重放断言已通过；schema 与三个归属构造用例通过。转发阶段输出把问题限定在首次成功转发后的下一轮：测试每轮获得新 activation，却复用未退役的 source policy Registry，Registry 精确 token 校验拒绝新 token。已在该测试 pair 回调成功/失败路径调用 policies.retire(token:)，对应生产 Host 的 activation 退役边界；移除全部临时 print。r6 重跑 26 项集成测试和四项结构测试，runner `/tmp/imv2-compat-current72-current-fixture-cleanup-r6.py`，session 54758，当前仍在构建/运行；结果待观察。Owner 后置绑定、其他明确兼容残留及更广范围验证仍未完成，不标记完整目标完成。
+
+
+### 2026-10-11 Owner 构造边界收敛
+
+r6（`/tmp/imv2-compat-current72-current-fixture-cleanup-r6.log`）30 项测试、3 个 suite 全部通过，87.399 秒；tests=0、cleanup=0，真实独立 PostgreSQL 已关闭。这证明此前 26 项旧夹具迁移与四项结构检查通过，二进制先于下面的 Owner 构造拆分，不能据此声称新拆分已验证。
+
+`PostgresV2SocialRelationshipStore` 与 `PostgresV2AccountPreferenceOperationStore` 现在构造时必须提供 Policy Mutation Executor，删除可选 Owner、usingPolicyOwners 及迟至 submit 才检查配置的分支。同文件内包级持久化组件分别为 V2PostgresSocialRelationshipPersistence 与 V2PostgresAccountPreferencePersistence，Policy Dispatcher 只在已校验上下文中调用 applyPolicyOperation。业务 Store 保留查询/恢复入口及已提交效果的投影投递；本地偏好持久化 submit 在事务之前拒绝陌生人策略变更。账号服务直接创建完整、不可变组件。18 处社交和16处偏好构造链迁移为显式依赖；只查询冻结命令或测试本地非策略偏好的夹具使用包内持久化类型，不注入伪 Owner。
+
+旧社交缺少 Owner 的运行时配置错误测试改为验证绑定 Owner 后的唯一持久回执、时间边界和重放；本地偏好路径补足拒绝陌生人变更且没有写入的边界断言。测试专用 snapshot/operation 协议复用冻结逻辑，生产代码不新增协议。
+
+消息投影 isWithdrawn 缺失默认 false 保留：当前编码器仅在撤回时输出 is_withdrawn=true，未撤回记录按当前格式省略该字段，并非旧数据兼容。实时日志 repeatable extension 安装契约、资源存储迁移与批次失败隔离路径继续保留。
+
+r7 独立 PostgreSQL runner `/tmp/imv2-compat-current72-owner-construction-r7.py`，log `/tmp/imv2-compat-current72-current-fixture-owner-construction-r7.log`，session16750，目前仍在编译与行为验证；本条进行中记录不是通过证据。静态边界、清单、语法及差异检查通过。完整目标仍需本轮及广范围回归结果，未压测、APNs 或提交推送，不操作本地验收服务。
+
+
+r7 构建失败（tests=1、cleanup=0），仅发现 TestSupport.swift 的旧社交便利 init 未提供 Owner；所有其他调用方迁移已经参与编译。该辅助 init 没有当前调用方，已直接删除，不恢复缺依赖构造。r8 runner `/tmp/imv2-compat-current72-owner-construction-r8.py`，log `/tmp/imv2-compat-current72-current-fixture-owner-construction-r8.log`，session65744，正在重新构建与运行。此记录仅为状态，不代表通过。
+
+
+r8 终态：36 项测试、4 个 suite 全部通过，96.821 秒；完整编译通过（113.40 秒），tests=0、cleanup=0。涵盖真实 PostgreSQL/TCP 策略快照、社交 Owner 提交两档、包内偏好拒绝策略变更、修订耗尽，以及此前26项数据库夹具和四项结构用例。独立 PostgreSQL 已关闭。它证明本轮构造依赖拆分及这些相关用例，不替代更广范围验证。
+
+已启动最新完整 PostgresV2RoomWriteStoreIntegrationTests，仅跳过 Push/APNs：runner `/tmp/imv2-compat-current72-integration-current-r9.py`，log 同名 `.log`，xunit 同名 `.xml`，session10078。与旧 r2 审计不同，此次会构建最新 Owner 接口和全部修复夹具；当前运行中，结果未定。完整兼容清理目标尚未标记完成。
+
+
+### 2026-10-11 兼容清理完成审计：仍待完整回归
+
+| 要求 | 当前证据 | 状态 |
+| --- | --- | --- |
+| 删除历史数据库升级链，当前新库初始化成为唯一入口 | 两份 migrate-message-send SQL 已删除；当前 schema source 测试、独立 PG canonical bootstrap/restore/drift 通过；启动入口扫描未发现升级调用 | 已验证 |
+| 清除初始化冗余，不破坏仍使用的重复安装 | 三处主 schema DROP TRIGGER 删除并经 PG 验证；journal repeatable installation 契约明确，幂等 DDL 保留 | 已验证 |
+| 删除旧协议分支和过渡配置入口 | 当前协议48；92项协议/配置/缓存/页边界测试通过，所有生产目标也参与最新构建 | 已验证 |
+| 消除 Owner 可选及后置绑定设计 | 生产 usingPolicyOwners 与可选 mutation executor 扫描为空；必需构造、包内事务持久化、账号组合根已迁移；r8 36项相关测试通过 | 已验证相关范围，广范围待定 |
+| 清除旧辅助入口、测试假设与误导命名 | 旧便利 init、后置路由选择已移除；fixture real Owner/activation/DB clock 行为通过；最后三处 legacy 注释已改为当前约束描述 | 已验证相关范围 |
+| 判断可保留路径是否为真实当前业务 | resource_storage_migrations为存储业务；scalar fallback为当前隔离；isWithdrawn=false由当前编码器省略；SQL函数v4/v7后缀只标记当前函数名称，没有并存旧实现或选择分支 | 保留有明确用途的实现 |
+| 本轮生产/测试接口变化的整体回归 | r9全房间数据库集成套件正在运行，只有Push/APNs被排除；当前仍无终态 | 未完成 |
+
+此审计不能替代 r9 的实际结果，也不把历史 r2 失败当作当前结果。三处注释修改发生在 r9 构建后，没有可执行代码变化；最终差异检查与边界校验通过。未压测、APNs 或提交推送。
+
+
+### 2026-10-11 当前兼容清理最终验证
+
+r9 最新工作区完整 PostgresV2RoomWriteStoreIntegrationTests：409 项测试、1 个 suite 全部通过，1412.066 秒，构建3.17秒。仅排除 Push/APNs；数据库时间边界、转发恢复、当前结构校验、Owner 构造及连接归还隔离均参与。runner tests=0、cleanup=0，独立 PostgreSQL 已关闭。日志 `/tmp/imv2-compat-current72-integration-current-r9.log`，终态 `/tmp/imv2-compat-current72-integration-current-r9-result.json`。此前 r2 失败已被本次最新构建结果替代。
+
+客户端当前受影响的消息编码、发送流程、查询恢复、路由发送、资源 journal/recovery 与 protobuf 帧七类套件 r10：39 项测试、7 个 suite 全部通过，1.938 秒，进程退出0。日志 `/tmp/imv2-compat-current72-client-r10.log`。这是本轮当前代码证据，不使用早于修改的旧客户端回归代替。
+
+上表待定的广范围数据库及客户端验证现已完成。清单、服务端边界、环境样例及 git diff --check 通过。历史升级链、旧协议分支、Owner 后置绑定和无调用辅助入口已清理；保留当前资源存储迁移、日志重复安装、当前结构校验与批次隔离。未压测、APNs、提交推送，不改开发数据库与验收服务。

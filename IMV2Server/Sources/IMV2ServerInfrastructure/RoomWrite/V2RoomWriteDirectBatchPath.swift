@@ -61,8 +61,8 @@ struct V2RoomWriteDirectBatchPath: Sendable {
         }
         stageMetrics?.record(.messagePersistence, duration: messageStartedAt.duration(to: .now))
 
-        // Acquire room/admission write locks before pair mutations, matching the
-        // legacy room->pair order. A failure still rolls back the entire append.
+        // Acquire room/admission write locks before pair mutations, preserving
+        // the room-to-pair lock order. Failure rolls back the entire append.
         if usesRuntimeState {
             let startedAt = ContinuousClock.now
             do {

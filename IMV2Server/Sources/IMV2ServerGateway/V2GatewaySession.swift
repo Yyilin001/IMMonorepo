@@ -179,7 +179,6 @@ public actor V2GatewaySession {
     /// 可信的令牌与设备认证边界。
     private let authenticator: any V2GatewayAuthenticator
     /// 允许协商的协议版本集合。
-    private let supportedVersions: Set<UInt8>
     /// 会话固定要求的能力配置。
     private let capabilityProfile: String
     /// 解码 protobuf 嵌套深度上限。
@@ -218,7 +217,6 @@ public actor V2GatewaySession {
     /// - Parameters:
     ///   - limits: 状态机的连接与在途请求限制。
     ///   - authenticator: 令牌与设备认证边界。
-    ///   - supportedVersions: 服务端可协商的协议版本集合。
     ///   - capabilityProfile: 客户端必须支持的能力配置标识。
     ///   - maximumProtobufMessageDepth: protobuf 递归深度上限，必须大于零。
     ///   - supportedFrameCompression: 可提供的压缩算法，默认不提供。
@@ -234,7 +232,6 @@ public actor V2GatewaySession {
     public init(
         limits: V2ConnectionLimits,
         authenticator: any V2GatewayAuthenticator,
-        supportedVersions: Set<UInt8> = [UInt8(IMV2ProtocolVersion.current)],
         capabilityProfile: String,
         maximumProtobufMessageDepth: Int = V2ServerProtobufFrameCodec.defaultMaximumMessageDepth,
         supportedFrameCompression: V2NegotiatedFrameCompression? = nil,
@@ -250,7 +247,6 @@ public actor V2GatewaySession {
     ) {
         self.state = .init(limits: limits)
         self.authenticator = authenticator
-        self.supportedVersions = supportedVersions
         self.capabilityProfile = capabilityProfile
         precondition(maximumProtobufMessageDepth > 0)
         precondition(maximumUncompressedPayloadBytes > 0)
@@ -342,8 +338,8 @@ public actor V2GatewaySession {
                 throw V2GatewaySessionError.invalidClientHello
             }
             helloDeviceID = deviceID
-            let selected = try state.receiveClientHello(frame, clientSupportedVersions: versions, serverSupportedVersions: supportedVersions)
-            negotiatedMessageSendOperations = selected >= 45 && messageSendOperationsEnabled && hello.supportsMessageSendOperations
+            let selected = try state.receiveClientHello(frame, clientSupportedVersions: versions, serverSupportedVersions: IMV2ProtocolVersion.supportedVersions)
+            negotiatedMessageSendOperations = messageSendOperationsEnabled && hello.supportsMessageSendOperations
             if supportedFrameCompression == .zlib,
                hello.supportedFrameCompressions.contains(.zlib) {
                 negotiatedFrameCompression = .zlib
@@ -360,7 +356,7 @@ public actor V2GatewaySession {
             response.serverHello.selectedFrameCompression = negotiatedFrameCompression == .zlib ? .zlib : .unspecified
             response.serverHello.supportsMessageSendOperations = negotiatedMessageSendOperations
             response.serverHello.maximumMessageSendPayloadBytes = negotiatedMessageSendOperations ? UInt32(maximumMessageSendPayloadBytes) : 0
-            if selected >= 31, supportsAuthorPresentationDelta, hello.supportsAuthorPresentationDelta,
+            if supportsAuthorPresentationDelta, hello.supportsAuthorPresentationDelta,
                helloDeviceID?.uuidValue != nil {
                 authorPresentationStreamID = UUID()
                 response.serverHello.authorPresentationStreamID = authorPresentationStreamID!.uuidString
@@ -448,7 +444,7 @@ public actor V2GatewaySession {
     func validateMessageSendDispatch(_ frame: V2Frame) throws {
         guard terminalGate.isActive(),
               case .authenticated(let version, _) = state.phase,
-              version >= 45, frame.version == version,
+              frame.version == version,
               negotiatedMessageSendOperations,
               frame.requestID != 0,
               frame.payload.count <= maximumMessageSendPayloadBytes,
@@ -571,7 +567,7 @@ public actor V2GatewaySession {
             throw V2GatewaySessionError.unsupportedCommand
         }
         if frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
-            guard version >= 45, negotiatedMessageSendOperations,
+            guard negotiatedMessageSendOperations,
                   frame.payload.count <= maximumMessageSendPayloadBytes else {
                 throw V2GatewaySessionError.unsupportedCommand
             }
@@ -619,7 +615,6 @@ public actor V2GatewaySession {
                 }) else { throw V2GatewaySessionError.unsupportedCommand }
                 response.heartbeatAck.roomSubscriptionStates = await roomProgress?(heartbeat) ?? []
             } else if case .groupEventPull(let request) = envelope.body,
-                      version >= 21,
                       let preparedGroupEventPageCache,
                       let preparedHandler = handler as? any V2PreparedGroupEventCommandHandling {
                 guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }

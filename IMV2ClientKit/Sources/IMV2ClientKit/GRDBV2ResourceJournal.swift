@@ -296,7 +296,7 @@ extension GRDBV2LocalSyncStore {
             throw V2ResourceJournalError.conflict
         }
         switch (work.execution, receipt.outcome) {
-        case (.closed, .closed), (.rejected, .rejected): break
+        case (.rejected, .rejected): break
         default: throw V2ResourceJournalError.conflict
         }
         return original

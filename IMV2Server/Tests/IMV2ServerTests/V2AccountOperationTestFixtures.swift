@@ -6,7 +6,13 @@ import IMV2Core
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 
-extension PostgresV2SocialRelationshipStore {
+protocol V2SocialSnapshotTestReading {
+    func socialOperationSnapshot(actorUserID: UserID, targetUserID: UserID) async throws -> V2SocialOperationSnapshot
+}
+extension PostgresV2SocialRelationshipStore: V2SocialSnapshotTestReading {}
+extension V2PostgresSocialRelationshipPersistence: V2SocialSnapshotTestReading {}
+
+extension V2SocialSnapshotTestReading {
     /// Freezes a freshly observed baseline for a new fixture operation. Tests
     /// of replay retain the returned command and call submitSocialOperation.
     func freezeSocialFixture(actorUserID: UserID, targetUserID: UserID,
@@ -20,15 +26,25 @@ extension PostgresV2SocialRelationshipStore {
             action: action, expectedRevision: revision, firstSubmissionDeadlineMilliseconds: milliseconds + window)
     }
 
+}
+
+extension PostgresV2SocialRelationshipStore {
     func executeSocialFixture(actorUserID: UserID, targetUserID: UserID,
         operation: V2OperationReference, action: V2SocialOperationAction, now: Date) async throws -> V2SocialOperationRecoveryResult {
         let command = try await freezeSocialFixture(actorUserID: actorUserID, targetUserID: targetUserID,
             operation: operation, action: action, now: now)
-        return try await submitSocialOperation(command, now: now)
+        return try await submitSocialOperation(command)
     }
 }
 
-extension PostgresV2AccountPreferenceOperationStore {
+protocol V2AccountPreferenceTestOperating {
+    func snapshot(ownerUserID: UserID, kind: V2OperationKind) async throws -> V2AccountPreferenceSnapshot
+    func submit(_ command: V2AccountPreferenceCommand, now: Date) async throws -> V2AccountPreferenceRecoveryResult
+}
+extension PostgresV2AccountPreferenceOperationStore: V2AccountPreferenceTestOperating {}
+extension V2PostgresAccountPreferencePersistence: V2AccountPreferenceTestOperating {}
+
+extension V2AccountPreferenceTestOperating {
     /// Initial authority observation only; replay tests retain this command.
     func freezePreferenceFixture(owner: UserID, operation: V2OperationReference,
         value: V2AccountPreferenceValue, now: Date) async throws -> V2AccountPreferenceCommand {

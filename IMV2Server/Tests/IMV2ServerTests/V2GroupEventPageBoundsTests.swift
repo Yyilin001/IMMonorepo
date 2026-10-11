@@ -44,7 +44,7 @@ struct V2GroupEventPageBoundsTests {
         let service = V2GroupEventLogService(store: store)
         func pull() async throws -> V2GroupEventLogPage {
             if path == "ordinary" { return try await service.pull(roomID: room, actorUserID: user, afterRoomSequence: 10, pageSize: 10) }
-            let context = V2PreparedGroupEventPageEncodingContext(requestID: 1, frameVersion: 21, compression: nil,
+            let context = V2PreparedGroupEventPageEncodingContext(requestID: 1, frameVersion: UInt8(IMV2ProtocolVersion.current), compression: nil,
                 maximumUncompressedPayloadBytes: 65536, compressionThresholdBytes: 1024, maximumExpansionRatio: 64,
                 maximumGroupEventPagePayloadBytes: 60000,
                 cache: .init(configuration: .init(maximumEntries: 1, maximumBytes: 65536, shardCount: 1)))
@@ -72,7 +72,7 @@ struct V2GroupEventPageBoundsTests {
             let service = V2GroupEventLogService(store: store)
             func pull() async throws -> V2GroupEventLogPage {
                 if path == "ordinary" { return try await service.pull(roomID: room, actorUserID: user, afterRoomSequence: 0, pageSize: 10) }
-                let context = V2PreparedGroupEventPageEncodingContext(requestID: 1, frameVersion: 21, compression: nil,
+                let context = V2PreparedGroupEventPageEncodingContext(requestID: 1, frameVersion: UInt8(IMV2ProtocolVersion.current), compression: nil,
                     maximumUncompressedPayloadBytes: 65536, compressionThresholdBytes: 1024, maximumExpansionRatio: 64,
                     maximumGroupEventPagePayloadBytes: 60000,
                     cache: .init(configuration: .init(maximumEntries: 1, maximumBytes: 65536, shardCount: 1)))

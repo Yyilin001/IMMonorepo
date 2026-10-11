@@ -127,7 +127,7 @@ struct V2LiveResourceAuthorTests {
                   try receipt.validates(identity: command.identity, fingerprint: command.fingerprint),
                   case .accepted(let accepted) = receipt.outcome else { throw ResourceLiveFailure.presentation }
             guard case .receipt(let recovered) = try await client.recover(.init(identity: command.identity,
-                fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query)) else { throw ResourceLiveFailure.presentation }
+                fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint)) else { throw ResourceLiveFailure.presentation }
             #expect(recovered == receipt)
             let hint = try await bounded { try await connection.nextGroupEventAvailabilityHint() }
             #expect(hint.roomID == room && hint.highWatermark == accepted.roomSequence)
@@ -952,7 +952,7 @@ extension V2LiveResourceAuthorTests {
             }
             #expect(try await sendClient.submit(send) == submitted)
             #expect(try await sendClient.recover(.init(identity: send.identity, fingerprint: send.fingerprint,
-                domainFingerprint: send.command.fingerprint, action: .query)) == submitted)
+                domainFingerprint: send.command.fingerprint)) == submitted)
             let http = V2URLSessionMediaEdgeHTTPTransport(session: fixture.http)
             let credentials = ResourceLiveCredentials(value: author)
             let mutations = try V2HTTPMessageMutationOperationClient(baseURL: fixture.url(""), credentials: credentials, transport: http)
@@ -1097,7 +1097,7 @@ extension V2LiveResourceAuthorTests {
             #expect(try await store.messages(in: room).first?.text == intent.text)
             // Local history compaction must not erase the server's original outcome.
             #expect(try await sender.recover(.init(identity: command.identity, fingerprint: command.fingerprint,
-                domainFingerprint: command.command.fingerprint, action: .query)) == .receipt(receipt))
+                domainFingerprint: command.command.fingerprint)) == .receipt(receipt))
             try await store.close()
             let reopened = try GRDBV2LocalSyncStore(databaseURL: url, installationBinding: binding, userID: account.userID)
             #expect(try await reopened.messages(in: room).map(\.messageID) == [accepted.messageID])
@@ -1408,7 +1408,6 @@ extension V2LiveResourceAuthorTests {
                 case .rejected(let reason):
                     #expect(!allows)
                     #expect(reason == .directPolicyDenied)
-                case .closed: throw ResourceLiveFailure.presentation
                 }
             }
             await socket.disconnect()

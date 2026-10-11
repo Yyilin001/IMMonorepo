@@ -265,8 +265,6 @@ def gateway_env(args, kind, database, index, actors, manifest):
         values.update(IM_V2_GROUP_WAKE_NATS_URL=f'nats://localhost:{args.nats_port}',
                       IM_V2_GROUP_WAKE_NATS_SUBJECT_PREFIX='imv2.actor.baseline',
                       IM_V2_GROUP_WAKE_ROUTING_KEY_BASE64=base64.b64encode(bytes([9])*32).decode())
-    else:
-        values['IM_V2_REALTIME_ROOM_TRANSPORT'] = 'actor'
     if app_canary_enabled(args):
         values.update(IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(args.app_tls_certificate),
                       IM_V2_TLS_PRIVATE_KEY_PATH=str(args.app_tls_key))
@@ -310,8 +308,7 @@ def prepare(args, manifest):
                '--caller',f'account=localhost:{args.actor_port+NODES}']
     # Exercise the redesigned candidate through the real local benchmark
     # entrypoint. Baseline files below retain their original authorization.
-    if getattr(args, 'candidate_authorization_mode', 'memory') == 'memory':
-        command += ['--policy-partitions', '16']
+    command += ['--policy-partitions', '16']
     for index in range(NODES):
         command += ['--host',f'gateway-{index}=localhost:{args.actor_port+index}']
     run_command(command, args.output_dir/'prepare.log')
@@ -341,8 +338,10 @@ def prepare(args, manifest):
 
 def verify_candidate_authorization_mode(args, kind, query):
     mode = 'legacy' if kind == 'baseline' else getattr(args, 'candidate_authorization_mode', 'memory')
-    if mode != 'memory':
+    if kind == 'baseline':
         return dict(mode=mode, memoryDeploymentChecked=False)
+    if mode != 'memory':
+        raise ValueError('candidate requires memory policy owners')
     observed = json.loads(query("SELECT json_build_object('activeDeployments',count(*),"
         "'revision',max(revision)) FROM im_v2.policy_owner_deployment WHERE deployment_id='active'"))
     if observed.get('activeDeployments') != 1 or observed.get('revision') != 1:
@@ -1972,10 +1971,9 @@ def run_revision(args, kind, actors, counts, manifest):
         initial = json.loads(fault_read_query(args, database,
             "SELECT json_build_object('messages',(SELECT count(*) FROM im_v2.messages),"
             "'receipts',(SELECT count(*) FROM im_v2.message_send_completions),"
-            "'closures',(SELECT count(*) FROM im_v2.message_operation_closures),"
             "'roomSequenceSum',(SELECT coalesce(sum(room_sequence),0) FROM im_v2.rooms))"))
         private_json(directory/'fact-proof-initial.json', initial)
-        initial_facts_empty = all(type(value) is int and value == 0 for value in initial.values()) and len(initial) == 4
+        initial_facts_empty = all(type(value) is int and value == 0 for value in initial.values()) and len(initial) == 3
         if not initial_facts_empty:
             raise RuntimeError('planned_reconnect_fixture_not_empty')
     processes, streams, loaders = [], [], []
@@ -2503,8 +2501,8 @@ def main():
                         help='candidate-only total message connections per node; divided across selected loops (default: 4)')
     parser.add_argument('--candidate-policy-control-connections', type=int, default=4,
                         help='candidate-only policy control connections per node (one control loop); default: 4')
-    parser.add_argument('--candidate-authorization-mode', choices=('memory', 'legacy'), default='memory',
-                        help='candidate uses memory policy owners by default; legacy explicitly reproduces the old path')
+    parser.add_argument('--candidate-authorization-mode', choices=('memory',), default='memory',
+                        help='candidate requires memory policy owners')
     parser.add_argument('--scenario',type=Path,default=ROOT/'IMV2/load-scenarios/high-active-50000-uuid-ab-5000.json')
     parser.add_argument('--preclose-recovery-witness',action='store_true',help='candidate scaled diagnostic: bounded pre-close checkpoints and one read-only DB witness; never changes quality')
     parser.add_argument('--measurement-phase',help='exact measured scenario phase; inferred when there is one message phase')

@@ -9,7 +9,7 @@ import SQLKit
 ///
 /// 先串行化同一发起者的表情操作，再把集合变更与房间派生的传播工作放在同一个事务内提交。
 /// 加锁顺序与其他房间变更一致：操作 → 房间 → 消息 → 准入 → 分片。
-public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerValidatedMessageReactionStore {
+public struct PostgresV2MessageReactionStore: V2MessageReactionStore {
     private let database: any Database
     private var existingOperationTransaction = false
     func usingOperationTransaction() -> Self { var copy = self; copy.existingOperationTransaction = true; return copy }
@@ -35,40 +35,6 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
     /// - Returns: 表情变更结果。
     /// - Throws: 无权限、状态冲突、容量不足或持久化失败时抛出。
     public func change(command: V2ChangeMessageReactionCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
-        try await change(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 按房间归属执行一次表情变更。
-    ///
-    /// - Parameters:
-    ///   - command: 表情变更命令。
-    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 表情变更结果。
-    /// - Throws: 归属已变更、无权限、状态冲突、容量不足或持久化失败时抛出。
-    public func changeOwnerValidated(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
-        try await change(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 在单个事务内完成幂等判定、授权、容量预留与事件写入。
-    ///
-    /// 会依次校验：可选归属、历史操作的幂等一致性、房间容量档位、消息未撤回、
-    /// 发起者在当前与接受修订两个时点都是成员、表情数量上限、房间与分片准入状态一致。
-    /// 通过后推进房间序号、写入或删除表情、更新两级准入用量并追加房间事件，
-    /// 最后登记操作记录以保证重放语义。
-    ///
-    /// - Parameters:
-    ///   - command: 表情变更命令。
-    ///   - ownerRoute: 已选定的房间归属；为 `nil` 时跳过归属校验。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 表情变更结果或不需要变更的结论。
-    /// - Throws: 房间或消息不存在、发起者非成员、已达表情数量上限、
-    ///   房间与分片租约不一致或持久化失败时抛出。
-    private func change(command: V2ChangeMessageReactionCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageReactionOutcome {
         return try await v2WithPostgresTransactionRetry(database: database,
             maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingOperationTransaction) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageReactionStoreError.corruptPersistenceState }
@@ -77,7 +43,6 @@ public struct PostgresV2MessageReactionStore: V2MessageReactionStore, V2OwnerVal
             let operationID = try reactionUUID(command.operationID), messageID = try reactionUUID(command.messageID)
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
-            if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             try await activationScope?.require([roomID], sql: sql)
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageReactionStoreError.corruptPersistenceState }
             guard let room = try await sql.raw("SELECT room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReactionRoomRow.self) else { throw V2MessageReactionStoreError.roomNotFound }

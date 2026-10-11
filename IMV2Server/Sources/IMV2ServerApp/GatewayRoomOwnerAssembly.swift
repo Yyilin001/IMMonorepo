@@ -14,7 +14,6 @@ struct GatewayRoomOwnerAssembly {
     let actorConfiguration: V2RoomActorApplicationConfiguration
     let ownerResources: [String: V2RoomServerOwnerResources]
     let physicalResources: [String: V2RoomServerOwnerResources]
-    let forwardTargetWritesByShard: [String: PostgresV2RoomWriteStore]
     let physicalStoreKeyByShard: [String: String]
     let bootstraps: [String: V2RoomBootstrapDomainExecutor]
     let forwardPairs: [String: V2ActorForwardPairDomainExecutor]
@@ -32,7 +31,7 @@ struct GatewayRoomOwnerAssembly {
         let database = topology.database
         let roomShardDatabases = topology.roomShardDatabases
         let directSendControlPool = topology.directSendControlPool
-        let authorizationControlDatabase = topology.authorizationControlDatabase
+        let roomIdentityControlDatabase = topology.roomIdentityControlDatabase
         let ownerAdmissions = V2PhysicalDatabaseWorkAdmissions(primaryKey: configuration.databaseURL,
             primary: databaseWorkAdmission, keys: topology.physicalDatabaseURLs,
             policy: GatewayFrontdoorAssembly.databaseWorkAdmissionPolicy(configuration),
@@ -45,13 +44,11 @@ struct GatewayRoomOwnerAssembly {
             environment: ProcessRuntimeEnvironment(), hostsRooms: nil,
             configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
             batchWaitMilliseconds: Int64(max(
-                configuration.directRoomLogAppendBatchMaximumDelayMilliseconds,
-                configuration.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds ?? 0,
+                configuration.roomTurnBatchMaximumDelayMilliseconds,
                 configuration.readReceiptBatchMaximumDelayMilliseconds)))
         let durableSchedulingConfiguration = configuration.durableSendSchedulingConfiguration()
         var ownerResources: [String: V2RoomServerOwnerResources] = [:]
         var physicalResources: [String: V2RoomServerOwnerResources] = [:]
-        var forwardTargetWritesByShard: [String: PostgresV2RoomWriteStore] = [:]
         var physicalWrites: [String: PostgresV2RoomWriteStore] = [:]
         var physicalStoreKeyByShard: [String: String] = [:]
         var bootstraps: [String: V2RoomBootstrapDomainExecutor] = [:]
@@ -79,8 +76,7 @@ struct GatewayRoomOwnerAssembly {
                     contentReviewMode: configuration.contentReviewMode,
                     directSendPolicyCache: directSendPolicyCache,
                     appendStageMetrics: directRoomLogAppendStageMetrics)
-                    .usingControlDatabase(directSendControlPool.database,
-                        authorizationResolutionDatabase: authorizationControlDatabase)
+                    .usingControlDatabase(directSendControlPool.database)
                 resourcesForOwner = try .init(database: owner,
                     sendDatabase: topology.databaseForRole(for: .messageWrite, url: storage.databaseURL), writes: write,
                     membershipIdentities: membershipIdentities, invitationIdentities: invitationIdentities,
@@ -96,7 +92,6 @@ struct GatewayRoomOwnerAssembly {
                         maximumPendingRequests: configuration.readReceiptBatchMaximumPendingRequests),
                     databaseWorkAdmission: ownerAdmission,
                     committedMessageObserver: nil,
-                    combineOwnerSendPreflight: true,
                     maximumActiveRooms: actorConfiguration.runtime.maximumActiveRooms,
                     maximumRoomSubscriptionBindings: actorConfiguration.runtime.maximumActiveRooms * actorConfiguration.realtimePeers.count,
                     durableSendSchedulingConfiguration: durableSchedulingConfiguration)
@@ -104,9 +99,8 @@ struct GatewayRoomOwnerAssembly {
                 physicalWrites[physicalKey] = write
             }
             ownerResources[storage.shardID] = resourcesForOwner
-            forwardTargetWritesByShard[storage.shardID] = write
             bootstraps[storage.shardID] = try .init(shardID: storage.shardID,
-                direct: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: authorizationControlDatabase), projectionDelivery: userShardProjectionDelivery),
+                direct: PostgresV2DirectMessagingStore(database: owner, identityReader: PostgresV2DirectRoomIdentityReader(database: roomIdentityControlDatabase), projectionDelivery: userShardProjectionDelivery),
                 group: PostgresV2GroupMessagingStore(database: owner), capacityProfile: configuration.capacityProfile)
             forwardPairs[storage.shardID] = .init(database: owner, write: write,
                 capacityProfile: configuration.capacityProfile, limits: configuration.messageLimits,
@@ -117,7 +111,6 @@ struct GatewayRoomOwnerAssembly {
             actorConfiguration: actorConfiguration,
             ownerResources: ownerResources,
             physicalResources: physicalResources,
-            forwardTargetWritesByShard: forwardTargetWritesByShard,
             physicalStoreKeyByShard: physicalStoreKeyByShard,
             bootstraps: bootstraps,
             forwardPairs: forwardPairs

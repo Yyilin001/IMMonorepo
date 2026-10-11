@@ -26,11 +26,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let observer = BatchIsolationMessageObserver()
             let metrics = V2SendOperationBatchMetrics()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let writes = PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                contentReviewMode: .disabled).usingControlDatabase(database)
+                contentReviewMode: .disabled).usingControlDatabase(database).usingPolicyAuthorizations(policies)
             let store = PostgresV2MessageSendOperationStore(database: database, writes: writes,
-                clock: { now }, committedMessageObserver: observer, sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                clock: { now }, committedMessageObserver: observer, sendOperationMetrics: metrics)
             func valid(_ text: String) throws -> V2MessageSendOperationCommand {
                 try .init(command: .init(roomID: operationRoom, senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: text, limits: .init(maxUTF8Bytes: 64)),
@@ -48,9 +49,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await withRoomActivation(database: database, roomID: operationRoom) { token in
                 let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
-                    now: { now }, sendOperations: store)
-                let original = try await store.send(replay, token: token, capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())))
+                    now: { now }, sendOperations: store,
+                    directSendPreparation: policies.fixtureSendPreparation(store: store, now: { now }))
+                #expect(throws: V2ActorContractError.invalidConfiguration("message policy preparation required")) {
+                    try V2RoomMessagingExecutor(token: token, capacityProfile: profile,
+                        limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64, now: { now }, sendOperations: store)
+                }
+                guard case .sendOperation(let original) = try await executor.execute(.sendOperation(replay)) else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
                 let batch = [replay, before, invalid, after, invalid]
                 let results = try await executor.executeSendOperationBatch(batch)
                 #expect(results.count == batch.count)
@@ -72,22 +79,22 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(rejection.outcome == .rejected(invalidKind == "mention" ? .permissionDenied : .invalidContent))
                 #expect(rejection.validates(identity: try invalid.identity, fingerprint: try invalid.fingerprint))
                 #expect(results[4] == results[2])
-                #expect(try await store.send(invalid, token: token, capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID()))) == .receipt(rejection))
+                #expect(try await executor.execute(.sendOperation(invalid)) == .sendOperation(.receipt(rejection)))
                 let recovery = try V2MessageSendOperationRecoveryRequest(identity: invalid.identity,
-                    fingerprint: invalid.fingerprint, domainFingerprint: invalid.command.fingerprint, action: .closeIfAbsent)
+                    fingerprint: invalid.fingerprint, domainFingerprint: invalid.command.fingerprint)
                 #expect(try await store.recover(recovery, token: token) == .unresolved)
                 #expect(try await executor.executeSendOperationBatch(batch) == results)
             }
             #expect(try await count("im_v2.messages", on: sql) == 3)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 3)
-            #expect(try await count("im_v2.message_operation_closures", on: sql) == 0)
             #expect(observer.operations == [replay.command.clientMessageID, before.command.clientMessageID, after.command.clientMessageID])
             let stages = metrics.sendOperationBatchMetricsSnapshot().stages
             #expect(stages.values.allSatisfy { $0.inFlight == 0 })
-            #expect(stages[.receiptPreflight, default: .init()].count > 0)
-            #expect(stages[.authorizationRoute, default: .init()].count > 0)
-            #expect((stages[.authorizationControl, default: .init()].count > 0) == direct)
+            #expect(stages[.receiptPreflight, default: .init()].count == 0)
+            #expect(stages[.authorizationRoute, default: .init()].count == 0)
+            #expect(stages[.authorizationControl, default: .init()].count == 0)
+            #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')", on: sql) == 0)
+            #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')", on: sql) == 0)
             #expect(stages[.ownerCommit, default: .init()].count > 0)
             let used = try #require(try await sql.raw("""
                 SELECT command_window_used AS used FROM im_v2.shard_admission_pools
@@ -102,7 +109,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func durableSendBatchContentFailureRecovery(receiptWriteFails: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
-            let store = PostgresV2MessageSendOperationStore(database: database,
+            let store = v2FixtureMessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database), clock: { now })
             let invalid = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "missing reply",
@@ -133,12 +140,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                 }
                 let query = try V2MessageSendOperationRecoveryRequest(identity: invalid.identity,
-                    fingerprint: invalid.fingerprint, domainFingerprint: invalid.command.fingerprint, action: .query)
+                    fingerprint: invalid.fingerprint, domainFingerprint: invalid.command.fingerprint)
                 #expect(try await store.recover(query, token: token) == .unresolved)
             }
             #expect(try await count("im_v2.messages", on: sql) == (receiptWriteFails ? 0 : 1))
             #expect(try await count("im_v2.message_send_completions", on: sql) == (receiptWriteFails ? 0 : 1))
-            #expect(try await count("im_v2.message_operation_closures", on: sql) == 0)
         }
     }
 
@@ -164,24 +170,25 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id = \(bind: roomUUID)
                 """).first(decoding: CountRow.self)).value
             let observer = BatchIsolationMessageObserver()
-            let writes = PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled)
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
+            let writes = PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled).usingPolicyAuthorizations(policies)
                 .usingControlDatabase(database)
             let store = PostgresV2MessageSendOperationStore(database: database, writes: writes,
-                clock: { now }, committedMessageObserver: observer, combineOwnerPreflight: true)
+                clock: { now }, committedMessageObserver: observer)
             let command = try V2MessageSendOperationCommand(command: .init(roomID: directRoom,
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "must reject third member",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             try await withRoomActivation(database: database, roomID: directRoom) { token in
                 let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
-                    now: { now }, sendOperations: store)
+                    now: { now }, sendOperations: store,
+                    directSendPreparation: policies.fixtureSendPreparation(store: store, now: { now }))
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
                     _ = try await executor.executeSendOperationBatch([command])
                 }
             }
             #expect(try await count("im_v2.messages", on: sql) == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
-            #expect(try await count("im_v2.message_operation_closures", on: sql) == 0)
             #expect(observer.operations.isEmpty)
             #expect(try await sql.raw("""
                 SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id = \(bind: roomUUID)
@@ -194,28 +201,29 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let writes = PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled)
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
+            let writes = PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled).usingPolicyAuthorizations(policies)
             let metrics = V2SendOperationBatchMetrics()
             let store = PostgresV2MessageSendOperationStore(database: database, writes: writes, clock: { now },
-                sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                sendOperationMetrics: metrics)
             let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "valid",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             try await withRoomActivation(database: database, roomID: roomID) { token in
                 let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: .init(id: "wrong-deployment-profile", limits: profile.limits),
-                    limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64, now: { now }, sendOperations: store)
+                    limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64, now: { now }, sendOperations: store,
+                    directSendPreparation: policies.fixtureSendPreparation(store: store, now: { now }))
                 await #expect(throws: V2RoomWriteStoreError.capacityProfileMismatch) {
                     _ = try await executor.executeSendOperationBatch([command, command])
                 }
             }
             let stages = metrics.sendOperationBatchMetricsSnapshot().stages
             #expect(stages.values.allSatisfy { $0.inFlight == 0 })
-            #expect(stages[.receiptPreflight, default: .init()].count == 1)
+            #expect(stages[.receiptPreflight, default: .init()].count == 0)
             #expect(stages[.ownerRollback, default: .init()].count == 1)
             #expect(stages[.ownerCommit, default: .init()].count == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
-            #expect(try await count("im_v2.message_operation_closures", on: sql) == 0)
             #expect(try await count("im_v2.messages", on: sql) == 0)
         }
     }

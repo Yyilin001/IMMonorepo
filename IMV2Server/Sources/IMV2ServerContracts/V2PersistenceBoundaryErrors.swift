@@ -1,13 +1,5 @@
 import Foundation
 
-package enum V2DirectAuthorizationIntentError: Error, Equatable, Sendable {
-    case invalidRequest, identityConflict, generationExhausted, corruptPersistence
-}
-
-package enum V2DirectAuthorizationReceiptError: Error, Equatable, Sendable {
-    case invalidAttempt, transactionRequired, identityConflict, ownerChanged, missingCompletion, attemptAborted
-}
-
 /// 私聊存储错误。
 public enum V2DirectMessagingStoreError: Error, Equatable, Sendable {
     /// 持久化记录缺失或字段无法解码。
@@ -58,19 +50,11 @@ public enum V2RoomShardStorageRegistryError: Error, Equatable, Sendable {
 public enum V2RoomOwnerFenceError: Error, Equatable, Sendable { case ownerChanged }
 
 /// 已读回执批处理错误。
-public enum V2ReadReceiptBatcherError: Error, Equatable, Sendable {
+public enum V2RoomReceiptAdmissionError: Error, Equatable, Sendable {
     case serverBusy
 }
 
 /// Invalid fixed placement or corrupt persisted bootstrap state.
 public enum V2GroupRoomCreationIntentStoreError: Error, Equatable, Sendable {
     case invalidIntent, routeConflict, corruptPersistenceState
-}
-
-package enum V2DirectAuthorizationCoordinationError: Error, Equatable, Sendable {
-    case ownerUnavailable, revocationIncomplete, invalidLimit
-}
-
-package enum V2DirectSendControlPolicyError: Error {
-    case invalidPair, invalidBatch, nonSQLDatabase, corruptPersistence
 }

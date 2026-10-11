@@ -459,7 +459,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = \(bind: base.addingTimeInterval(2000))").run()
-            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base })
+            let sender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "review clock boundary")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let store = PostgresV2ContentReviewStore(database: database)
             let finding = try V2ContentReviewFinding(category: "clock_policy", severity: 2, confidence: 0.8)
@@ -577,7 +578,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sourceSQL.raw("INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at) VALUES (\(bind: media.uuidValue!), \(bind: senderUUID), 'text/plain', \(bind: Int64(bytes.count)), 'available', \(bind: UUID()), \(bind: base.addingTimeInterval(600)), \(bind: base), \(bind: base))").run()
             try await resource.seedPlacement(mediaID: media.uuidValue!, roomID: roomID, bytes: bytes, sql: sourceSQL, now: base)
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
-            let sender = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB), capacityProfile: profile, limits: limits, now: { base })
+            let sender = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: sourceDB, controlDatabase: sourceDB,
+                store: PostgresV2RoomWriteStore(database: sourceDB), shardID: "room-a", epoch: 0), capacityProfile: profile, limits: limits, now: { base })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "forward clocks", media: [.init(mediaID: media)])) else { throw V2ForwardInboxError.corruptPersistenceState }
             let exporter = PostgresV2ForwardExportStore(database: sourceDB)
             let operation = MessageForwardOperationID(uuid: UUID())
@@ -736,14 +738,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await targetSQL.raw("SELECT state = 'available' AND expires_at = \(bind: base.addingTimeInterval(610)) AS exists FROM im_v2.media_objects WHERE media_id = \(bind: nextImport.targetMediaID.uuidValue!)").first(decoding: ExistsRow.self)?.exists == true)
                 let ready = try await snapshot(targetSQL)
                 for invalid in badDates {
-                    await #expect(throws: V2ForwardInboxError.corruptPersistenceState) {
-                        try await PostgresV2RoomWriteStore(database: targetDB).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: base), now: invalid)
+                    // Receipt reception is already durable; a failed activated
+                    // import round must report uncertainty and recover its result.
+                    await #expect(throws: V2RoomTransactionOutcomeUnknown.self) {
+                        try await V2PolicyAuthorizedTestWriteStore(database: targetDB, controlDatabase: sourceDB,
+                store: PostgresV2RoomWriteStore(database: targetDB), shardID: "room-b", epoch: 0).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: base), now: invalid)
                     }
                     #expect(try await snapshot(targetSQL) == ready)
                     #expect(try await count("im_v2.messages", on: targetSQL) == 0)
                 }
             }
-            let outcome = try await PostgresV2RoomWriteStore(database: targetDB).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: base.addingTimeInterval(50)), now: base.addingTimeInterval(50))
+            let outcome = try await V2PolicyAuthorizedTestWriteStore(database: targetDB, controlDatabase: sourceDB,
+                store: PostgresV2RoomWriteStore(database: targetDB), shardID: "room-b", epoch: 0).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: base.addingTimeInterval(50)), now: base.addingTimeInterval(50))
             if passed { guard case .accepted = outcome else { throw V2ForwardInboxError.corruptPersistenceState } }
             else { #expect(outcome == .rejected(code: "MEDIA_UNAVAILABLE")) }
             let terminal = try #require(try await inbox.terminalReceipt(exportID: export.intent.exportID))
@@ -757,7 +763,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             for invalid in badDates {
                 try await receipts.record(terminal, now: invalid)
                 #expect(try await prepare(invalid) == export)
-                #expect(try await PostgresV2RoomWriteStore(database: targetDB).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: base), now: invalid) == outcome)
+                #expect(try await V2PolicyAuthorizedTestWriteStore(database: targetDB, controlDatabase: sourceDB,
+                store: PostgresV2RoomWriteStore(database: targetDB), shardID: "room-b", epoch: 0).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: base), now: invalid) == outcome)
                 #expect(try await importer.claim(exportID: export.intent.exportID, now: invalid, leaseDuration: 30) == nil)
                 #expect(try await importer.reject(nextImport, now: invalid) == false)
             }
@@ -859,7 +866,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await scans.complete(lease, result: passed ? .failed : .passed, now: completedAt.addingTimeInterval(1))
             #expect(try await snapshot() == scanned)
             if !passed { return }
-            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { [completedAt] in completedAt.addingTimeInterval(1) })
+            let sender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { [completedAt] in completedAt.addingTimeInterval(1) })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "media lifecycle", media: [.init(mediaID: mediaID)])) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
             let beforeDownload = try await snapshot()
@@ -904,7 +912,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let scans = PostgresV2MediaScanStore(database: database)
             let scan = try #require(try await scans.claimPending(now: base, leaseDuration: 30, limit: 1).first)
             try await scans.complete(scan, result: .passed, now: base)
-            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base })
+            let sender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "media session clock", media: [.init(mediaID: downloadMedia)])) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
             let download = try await media.requestDownload(requesterUserID: senderID, deviceID: device, mediaID: downloadMedia, expiresAt: base.addingTimeInterval(600), now: base)
@@ -989,7 +998,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let scanID = UUID(), purgeID = UUID(), unreferencedID = UUID(), referencedID = UUID()
-            for (id, state, expiry) in [(scanID, "scanning", base.addingTimeInterval(scenario == "expired" ? 1 : 1000)), (purgeID, "expired", base), (unreferencedID, "available", base.addingTimeInterval(-1))] {
+            for (id, state, expiry) in [(scanID, "scanning", base.addingTimeInterval(1000)), (purgeID, "expired", base), (unreferencedID, "available", base.addingTimeInterval(-1))] {
                 try await sql.raw("""
                     INSERT INTO im_v2.media_objects (media_id, owner_user_id, content_type, byte_count, state, upload_session_id, expires_at, state_updated_at, created_at)
                     VALUES (\(bind: id), \(bind: senderUUID), 'image/png', 42, \(bind: state), \(bind: UUID()), \(bind: expiry), \(bind: base), \(bind: base))
@@ -1085,8 +1094,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 func scan(mediaID: MediaID) async throws -> V2MediaScanResult { result }
             }
             struct Purger: V2MediaPurgeProvider { func purge(mediaID: MediaID) async throws {} }
+            if scenario == "expired" {
+                // Expire only after claim fencing and operator replay have been exercised.
+                // Current scanning never invokes a provider for an already expired object.
+                try await sql.raw("UPDATE im_v2.media_objects SET expires_at=\(bind: base.addingTimeInterval(33)) WHERE media_id=\(bind: scanID)").run()
+            }
             let scanner = try V2MediaScanWorker(store: scan, provider: Scanner(result: scenario == "failed" ? .failed : .passed), maximumConcurrency: 1, now: { base.addingTimeInterval(33) })
-            #expect(try await scanner.runOnce(limit: 1) == .init(claimedCount: 1, completedCount: 1, releasedCount: 0))
+            #expect(try await scanner.runOnce(limit: 1) == .init(claimedCount: scenario == "expired" ? 0 : 1, completedCount: scenario == "expired" ? 0 : 1, releasedCount: 0))
             let expectedState = scenario == "expired" ? "scanning" : (scenario == "passed" ? "available" : "failed")
             #expect(try await sql.raw("SELECT state = \(bind: expectedState) AS exists FROM im_v2.media_objects WHERE media_id = \(bind: scanID)").first(decoding: ExistsRow.self)?.exists == true)
             let purger = try V2MediaPurgeWorker(store: purge, provider: Purger(), maximumConcurrency: 1, now: { base.addingTimeInterval(33) })
@@ -1205,10 +1219,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func pushWakeClockBounds(outcome: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let messages = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: try forwardImportTestProfile(), limits: try .init(maxUTF8Bytes: 64), now: { base })
-            guard case .accepted = try await messages.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "push clock")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            struct Event: Decodable { let event_id: UUID }
-            let event = try #require(try await sql.raw("SELECT event_id FROM im_v2.room_events WHERE room_id = \(bind: roomUUID) AND room_sequence = 1").first(decoding: Event.self)).event_id
+            let event = UUID()
+            // This regression exercises push admission clocks, independently of message-send setup.
+            try await sql.raw("""
+                INSERT INTO im_v2.room_events
+                    (event_id,room_id,room_sequence,event_type,actor_user_id,payload,committed_membership_revision,created_at)
+                VALUES (\(bind: event),\(bind: roomUUID),1,'message.accepted',\(bind: senderUUID),'{}',0,\(bind: base))
+                """).run()
             let device = UUID(), mutedDevice = UUID(), dispatch = UUID(), mutedDispatch = UUID()
             try await sql.raw("INSERT INTO im_v2.push_campaigns (campaign_id, state, updated_at) VALUES ('wake', 'enabled', \(bind: base))").run()
             try await sql.raw("""
@@ -1216,9 +1233,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 VALUES (\(bind: device), 'wake', \(bind: base), 1, 1), (\(bind: mutedDevice), 'wake', \(bind: base), 1, 1)
                 """).run()
             try await sql.raw("""
-                INSERT INTO im_v2.push_wake_outbox (dispatch_id, source_event_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, requires_new_key_operation, created_at)
-                VALUES (\(bind: dispatch), \(bind: event), \(bind: memberTwoUUID), \(bind: device), 'wake', \(bind: base), TRUE, \(bind: base)),
-                       (\(bind: mutedDispatch), \(bind: event), \(bind: memberThreeUUID), \(bind: mutedDevice), 'wake', \(bind: base), TRUE, \(bind: base))
+                INSERT INTO im_v2.push_wake_outbox (dispatch_id, source_event_id, source_room_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, requires_new_key_operation, created_at)
+                VALUES (\(bind: dispatch), \(bind: event), (SELECT room_id FROM im_v2.room_events WHERE event_id=\(bind: event)), \(bind: memberTwoUUID), \(bind: device), 'wake', \(bind: base), TRUE, \(bind: base)),
+                       (\(bind: mutedDispatch), \(bind: event), \(bind: roomUUID), \(bind: memberThreeUUID), \(bind: mutedDevice), 'wake', \(bind: base), TRUE, \(bind: base))
                 """).run()
             try await sql.raw("INSERT INTO im_v2.user_room_preferences (revision, user_id, room_id, mute_until, updated_at) VALUES (1, \(bind: memberThreeUUID), \(bind: roomUUID), \(bind: base.addingTimeInterval(3600)), \(bind: base))").run()
             func snapshot() async throws -> String {
@@ -1230,7 +1247,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     )::text AS value
                     """).first(decoding: State.self)).value
             }
-            let store = PostgresV2PushWakeStore(database: database)
+            let store = v2FixturePushWakeStore(database: database)
             let initial = try await snapshot()
             let badSeconds: [Double] = [.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12]
             for seconds in badSeconds {
@@ -1294,7 +1311,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await sql.raw("SELECT used_work_units = 1 AND used_new_key_operations = 1 AS exists FROM im_v2.push_device_budgets WHERE device_id = \(bind: device)").first(decoding: ExistsRow.self)?.exists == true)
             #expect(try await sql.raw("SELECT used_work_units = 0 AND used_new_key_operations = 0 AS exists FROM im_v2.push_device_budgets WHERE device_id = \(bind: mutedDevice)").first(decoding: ExistsRow.self)?.exists == true)
             #expect(try await sql.raw("SELECT state = 'suppressed' AND suppression_reason = 'conversation_muted' AND admitted_at IS NULL AS exists FROM im_v2.push_wake_outbox WHERE dispatch_id = \(bind: mutedDispatch)").first(decoding: ExistsRow.self)?.exists == true)
-            #expect(try await count("im_v2.messages", on: sql) == 1)
+            #expect(try await count("im_v2.messages", on: sql) == 0)
         }
     }
 
@@ -1307,7 +1324,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 capacityProfile: forwardImportTestProfile(), roomShardID: "room-a", now: { now })
             let room = try await direct.openedIdentity(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID), firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let messages = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let messages = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "propagation sequence")) else { throw CancellationError() }
@@ -1319,7 +1337,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     policy: try .init(maximumQueries: 10, window: 60), makeUUID: { operation }, now: { now })
                 _ = try await directory.updateDisplayName(for: senderID, displayName: "Sequence profile")
             } else {
-                _ = try await PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: ["room-a": database]))
+                _ = try await V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                     .executePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: operation)), value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
             }
             if path != "profile" {
@@ -1445,7 +1463,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 capacityProfile: forwardImportTestProfile(), roomShardID: "room-a", now: { now })
             let room = try await direct.openedIdentity(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID), firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let messages = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let messages = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "propagation clock")) else { throw CancellationError() }
@@ -1469,7 +1488,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let projector = try V2RoutedUserStateEventProjector(routeFence: Fence(database: database),
                 registry: V2StaticUserShardStorageRegistry(locations: [.init(bucket: "user", database: userDatabase, schema: "im_v2")]))
-            let preferences = PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let preferences = V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             let offsets: [Int64] = [-1, 1, 803_315_200_123_457, -211_813_487_999_999_999, 9_223_371_331_199_999_999]
             for (index, offset) in offsets.enumerated() {
                 var buffer = ByteBuffer()
@@ -1544,7 +1563,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             if hasTargets {
                 let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: forwardImportTestProfile(), roomShardID: "room-a", now: { base })
-                let messages = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database, strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400)), capacityProfile: try forwardImportTestProfile(), limits: try .init(maxUTF8Bytes: 64), now: { base })
+                let messages = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database,
+                        strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400)),
+                    shardID: "room-a", epoch: 0), capacityProfile: try forwardImportTestProfile(), limits: try .init(maxUTF8Bytes: 64), now: { base })
                 for peer in [memberTwoUUID, memberThreeUUID] {
                     let room = try await direct.openedIdentity(actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: peer), firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(base))
                     guard case .accepted = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "existing conversation")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -1667,7 +1689,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             try await sql.raw("CREATE TRIGGER test_receipt_finalize BEFORE UPDATE ON im_v2.read_receipt_preference_propagation_outbox FOR EACH ROW EXECUTE FUNCTION im_v2.test_reject_receipt_finalize()").run()
             let operation = UUID()
-            let preferences = PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let preferences = V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             guard case .receipt(let proof) = try await preferences.executePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: operation)), value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: base), case .applied = proof.outcome else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let clock = TestSequenceClock([base])
             let policy = V2DurableRetryPolicy(initialDelay: 2, maximumDelay: 2, maximumAttempts: path == "pause" ? 1 : 3, jitterFraction: 0)

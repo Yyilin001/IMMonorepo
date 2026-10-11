@@ -52,8 +52,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             await #expect(throws: V2GroupEventLogError.actorNotMember) {
                 try await reader.pull(roomID: roomID, actorUserID: .init(uuid: UUID()), afterRoomSequence: 0, pageSize: pageSize)
             }
-            // A later incomplete mutation must fail its own window, not be consumed as invisible.
+            // Inject corrupt persisted data explicitly; current writes reject this payload.
+            try await sql.raw("ALTER TABLE im_v2.room_events DISABLE TRIGGER room_events_capture_message_edit_visibility").run()
             try await sql.raw("INSERT INTO im_v2.room_events(event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at) VALUES(gen_random_uuid(),\(bind: roomUUID),26,'message.edited',jsonb_build_object('message_id',gen_random_uuid()::text),2,clock_timestamp())").run()
+            try await sql.raw("ALTER TABLE im_v2.room_events ENABLE TRIGGER room_events_capture_message_edit_visibility").run()
             try await sql.raw("UPDATE im_v2.rooms SET room_sequence=26 WHERE room_id=\(bind: roomUUID)").run()
             let beforeCorruption = try await reader.pull(roomID: roomID, actorUserID: senderID, afterRoomSequence: 19, pageSize: 1)
             #expect(beforeCorruption.events.map(\.roomSequence) == [20])
@@ -114,7 +116,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let queries = V2ActorRoomQueryExecutor(database: database)
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let writes = try PostgresV2RoomWriteStore(database: database).usingActivationScope(.init(tokens: [lease.token]))
+            let writes = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0,
+                activationToken: lease.token)
             let sender = try V2SendMessageService(store: writes, capacityProfile: forwardImportTestProfile(),
                 limits: .init(maxUTF8Bytes: 64), now: { base })
             let config = try V2RoomRuntimeConfiguration()

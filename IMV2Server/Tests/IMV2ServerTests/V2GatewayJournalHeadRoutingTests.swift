@@ -40,7 +40,7 @@ struct V2GatewayJournalHeadRoutingTests {
                 authenticator: JournalHeadAuthenticator(user: user), capabilityProfile: "base",
                 commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: JournalHeadHandler(), connectionID: connection, registry: registry)
-        let attached = await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        let attached = await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { _ in true }, scopedNotificationWriter: { await writer.write($0) })
         try #require(attached)
         do {
@@ -50,7 +50,7 @@ struct V2GatewayJournalHeadRoutingTests {
             var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
             auth.authenticate.accessToken = "fixture"; auth.authenticate.deviceID = device.rawValue
             _ = try await stream.receive(V2FrameCodec.encode(V2ServerProtobufFrameCodec.encode(auth, frameVersion: version), limits: limits))
-            await registry.subscribeForegroundGroup(stream, connectionID: connection, roomID: room, membershipRevision: 55)
+            _ = try await registry.subscribeForegroundRoom(stream, connectionID: connection, roomID: room)
             await registry.applySharedRealtimeDelivery(.init(topic: .init(kind: .roomEvents, id: room.rawValue, owner: owner),
                 partitionID: source.partitionID, partitionEpoch: 1, sessionID: journalFence.sessionID,
                 interestGeneration: 1, gatewayIncarnation: journalFence.gatewayIncarnationID,

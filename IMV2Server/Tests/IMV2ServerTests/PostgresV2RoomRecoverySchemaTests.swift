@@ -25,8 +25,8 @@ struct PostgresV2RoomRecoverySchemaTests {
                     SELECT current_setting('search_path') AS path,
                            pg_get_constraintdef(oid) AS definition
                     FROM pg_constraint
-                    WHERE conrelid = to_regclass(\(bind: schema + ".direct_authorization_receipts"))
-                      AND conname = 'direct_authorization_receipts_room_fkey'
+                    WHERE conrelid = to_regclass(\(bind: schema + ".room_memberships"))
+                      AND conname = 'room_memberships_room_id_fkey'
                     """).first(decoding: SearchPathReadinessRow.self))
                 #expect(before.path == schema)
                 #expect(before.definition == "FOREIGN KEY (room_id) REFERENCES rooms(room_id)")
@@ -37,8 +37,8 @@ struct PostgresV2RoomRecoverySchemaTests {
                     SELECT current_setting('search_path') AS path,
                            pg_get_constraintdef(oid) AS definition
                     FROM pg_constraint
-                    WHERE conrelid = to_regclass(\(bind: schema + ".direct_authorization_receipts"))
-                      AND conname = 'direct_authorization_receipts_room_fkey'
+                    WHERE conrelid = to_regclass(\(bind: schema + ".room_memberships"))
+                      AND conname = 'room_memberships_room_id_fkey'
                     """).first(decoding: SearchPathReadinessRow.self))
                 #expect(after.path == schema)
                 #expect(after.definition == before.definition)
@@ -47,7 +47,7 @@ struct PostgresV2RoomRecoverySchemaTests {
                     #expect(pinned.inTransaction)
                     let pinnedSQL = try #require(pinned as? any SQLDatabase)
                     try await V2SchemaReadiness.verify(database: pinned, schema: schema)
-                    await #expect(throws: V2SchemaReadinessError.unavailableTable(schema + "_missing.direct_authorization_intents")) {
+                    await #expect(throws: V2SchemaReadinessError.unavailableTable(schema + "_missing.schema_contract")) {
                         try await V2SchemaReadiness.verify(database: pinned, schema: schema + "_missing")
                     }
                     let path = try #require(try await pinnedSQL.raw("SELECT current_setting('search_path') AS path")
@@ -58,6 +58,24 @@ struct PostgresV2RoomRecoverySchemaTests {
             } catch {
                 try? await resources.shutdown()
                 throw error
+            }
+        }
+    }
+
+    @Test("readiness rejects retired authorization schema instead of accepting a mixed deployment",
+          arguments: ["direct_authorization_intents", "direct_authorization_receipts",
+                      "policy_authorization_holders", "policy_authorization_revocations",
+                      "policy_authorization_holder_generation", "room_policy_authorization_leases"])
+    func rejectsRetiredAuthorizationSchema(name: String) async throws {
+        try await withUserEventDatabase { database, sql, schema in
+            try await V2SchemaReadiness.verify(database: database, schema: schema)
+            if name == "policy_authorization_holder_generation" {
+                try await sql.raw("CREATE SEQUENCE \(unsafeRaw: schema).\(unsafeRaw: name)").run()
+            } else {
+                try await sql.raw("CREATE TABLE \(unsafeRaw: schema).\(unsafeRaw: name) (marker boolean)").run()
+            }
+            await #expect(throws: V2SchemaReadinessError.unavailableTable(schema + "." + name + ".retired")) {
+                try await V2SchemaReadiness.verify(database: database, schema: schema)
             }
         }
     }

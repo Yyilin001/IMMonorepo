@@ -6,21 +6,32 @@ import IMV2Core
 import Testing
 
 struct V2RoomWriteScopeConstructionTests {
-    @Test("Forward owner selection retains its source route and rejects conflicts")
+    @Test("Forward pair construction requires both routes and matching activations")
     func forwardSourceSelection() throws {
         let source = UUID(), target = UUID()
         let route = try V2RoomShardRoute(shardID: "room-a", epoch: 1)
-        let stale = try V2RoomShardRoute(shardID: "room-a", epoch: 2)
-        let targetOnly = try V2RoomWriteOwnerSelection().selectingRoutes([target: route])
-        #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-            try targetOnly.selectingForwardSource(source, route: stale)
-                .selectingRoutes([target: route])
+        let host = V2ActorHostIdentity(hostID: try .init("room-writer"), incarnationID: UUID())
+        let tokens = try [source, target].map {
+            V2RoomActivationToken(roomID: .init(uuid: $0),
+                owner: try .init(shardID: "room-a", epoch: 1),
+                activationEpoch: try .init(1), host: host)
         }
-        let pair = try targetOnly.selectingForwardSource(source, route: route)
+        let activation = try V2RoomActivationWriteScope(tokens: tokens)
+        let pair = try V2RoomWriteOwnerSelection.actorForwardPair(
+            activation: activation, routes: [source: route, target: route],
+            source: source, target: target)
         #expect(pair.forwardSource == source)
         #expect(pair.routes?[source] == route)
+        #expect(pair.routes?[target] == route)
         #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
-            try pair.selectingForwardSource(source, route: stale)
+            try V2RoomWriteOwnerSelection.actorForwardPair(
+                activation: activation, routes: [target: route], source: source, target: target)
+        }
+        #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
+            try V2RoomWriteOwnerSelection.actorForwardPair(
+                activation: activation,
+                routes: [source: try .init(shardID: "room-a", epoch: 2), target: route],
+                source: source, target: target)
         }
     }
 
@@ -60,15 +71,4 @@ struct V2RoomWriteScopeConstructionTests {
         }
     }
 
-    @Test("Prepared control state with no grants does not reserve again")
-    func emptyPreparedControl() {
-        let room = UUID()
-        let unresolved = V2RoomWriteControlResolution.unresolved
-        let prepared = V2RoomWriteControlResolution.preparedWithoutGrants(roomKinds: [room: "group"])
-        #expect(unresolved.needsPreparation)
-        #expect(!prepared.needsPreparation)
-        #expect(prepared.roomKinds?[room] == "group")
-        #expect(prepared.policies?.isEmpty == true)
-        #expect(prepared.authorization == nil)
-    }
 }

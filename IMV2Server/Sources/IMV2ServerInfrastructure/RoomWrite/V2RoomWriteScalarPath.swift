@@ -66,13 +66,6 @@ enum V2RoomWriteScalarPath {
             }
             return .replay(.init(outcome: fingerprint == context.command.fingerprint
                 ? .idempotent(receipt) : .idempotencyConflict))
-        case .denied(let denial, let fingerprint):
-            if fingerprint == context.command.fingerprint,
-               !v2PostgresTimestampCanEncode(denial.createdAt) {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            return .replay(.init(outcome: fingerprint == context.command.fingerprint
-                ? .denied(denial) : .idempotencyConflict))
         case nil:
             break
         }

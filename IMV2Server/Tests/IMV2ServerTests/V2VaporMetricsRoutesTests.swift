@@ -126,7 +126,7 @@ struct V2VaporMetricsRoutesTests {
             resultReadyToValidated: .milliseconds(2), validatedToCommitDispatch: .milliseconds(3))
         operations.recordOwnerCohortStarted(handleCount: 2, commandCount: 3)
         operations.recordOwnerCohortCommitted(acceptedCommandCount: 2, replayedCommandCount: 1)
-        operations.recordOwnerScalarFallback(handleCount: 1, commandCount: 2, reason: .multiCommand)
+        operations.recordOwnerScalarFallback(handleCount: 1, commandCount: 2, reason: .optimizationNotApplicable)
         operations.recordOwnerCohortIsolation()
         operations.begin(commandCount: 3)
         operations.finish(commandCount: 3, outcome: .committed, duration: .milliseconds(12))
@@ -170,34 +170,6 @@ struct V2VaporMetricsRoutesTests {
                 pendingUsers: 6, inFlightUsers: 2,
                 coalescedNotifications: 7, deliveredNotifications: 9,
                 droppedNotifications: 8
-            ),
-            directRoomLogAppendBatching: .init(
-                pendingRequests: 7,
-                inFlightBatches: 3,
-                activeRooms: 5,
-                dequeuedRequests: 151,
-                queueWaitMillisecondsTotal: 701,
-                queueWaitMillisecondsMax: 19,
-                completedBatches: 17,
-                batchExecutionMillisecondsTotal: 901,
-                batchExecutionMillisecondsMax: 73,
-                stagingQueueFullRejections: 2,
-                cancelledPendingRequests: 1,
-                baseDelayFlushes: 11,
-                highActivityDelayFlushes: 13,
-                highActivityDelayScheduled: true,
-                atomicBatchAttempts: 17,
-                atomicBatchCommitted: 12,
-                atomicBatchFallbacks: 4,
-                atomicBatchCommittedRequests: 141,
-                atomicBatchFallbackRequests: 29,
-                atomicBatchFallbackReasons: [
-                    .requestShape: 3,
-                    .preflightMismatch: 1,
-                ],
-                sameRoomDeferredRequests: 23,
-                atomicPreclassifiedIndividualRequests: 37,
-                singletonDispatches: 6
             ),
             readReceiptBatching: .init(
                 pendingRequests: 5,
@@ -419,10 +391,10 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_send_operation_store_cohort_accepted_commands_total 2"))
             #expect(body.contains("im_v2_send_operation_store_cohort_replayed_commands_total 1"))
             #expect(body.contains("im_v2_send_operation_store_cohort_isolations_total 1"))
-            #expect(body.contains("im_v2_send_operation_store_scalar_fallback_handles_total{reason=\"multi_command\"} 1"))
-            #expect(body.contains("im_v2_send_operation_store_scalar_fallback_commands_total{reason=\"multi_command\"} 2"))
+            #expect(body.contains("im_v2_send_operation_store_scalar_fallback_handles_total{reason=\"optimization_not_applicable\"} 1"))
+            #expect(body.contains("im_v2_send_operation_store_scalar_fallback_commands_total{reason=\"optimization_not_applicable\"} 2"))
             #expect(body.contains("im_v2_send_operation_store_scalar_fallback_commands_total{reason=\"complex_payload\"} 0"))
-            #expect(body.components(separatedBy: "\n").filter { $0.hasPrefix("im_v2_send_operation_store_scalar_fallback_handles_total{") }.count == 4)
+            #expect(body.components(separatedBy: "\n").filter { $0.hasPrefix("im_v2_send_operation_store_scalar_fallback_handles_total{") }.count == V2SendOperationOwnerScalarFallbackReason.allCases.count)
             #expect(body.contains("im_v2_send_operation_stage_completed_total{stage=\"owner_body\"} 1"))
             #expect(body.contains("im_v2_send_operation_stage_in_flight{stage=\"owner_commit\"} 1"))
             #expect(body.contains("im_v2_send_operation_stage_started_total{stage=\"owner_commit\"} 1"))
@@ -435,26 +407,11 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_database_work_interactive_read_admissions_total{purpose=\"coverage_authorization\"} 4"))
             #expect(body.contains("im_v2_database_work_interactive_read_in_flight{purpose=\"coverage_authorization\"} 0"))
             #expect(body.contains("im_v2_database_work_interactive_read_admissions_total{purpose=\"ordinary\"} 8"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_lanes 1"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_pending_requests 7"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_busiest_lane_pending_requests 7"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_busiest_lane_in_flight 3"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_dequeued_requests_total 151"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_queue_wait_milliseconds_total 701"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_execution_milliseconds_max 73"))
             #expect(body.contains("im_v2_direct_send_policy_cache_entries 49999"))
             #expect(body.contains("im_v2_direct_send_policy_cache_lookups_total{outcome=\"hit\"} 211"))
             #expect(body.contains("im_v2_direct_send_policy_cache_removals_total{reason=\"capacity\"} 11001"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_delayed_flushes_total{mode=\"high_activity\"} 13"))
-            #expect(body.contains("im_v2_direct_room_log_append_atomic_batches_total{outcome=\"committed\"} 12"))
-            #expect(body.contains("im_v2_direct_room_log_append_atomic_batches_total{outcome=\"shape_fallback\"} 4"))
-            #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"committed\"} 141"))
-            #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"preclassified_individual\"} 37"))
-            #expect(body.contains("im_v2_direct_room_log_append_atomic_requests_total{outcome=\"singleton_dispatch\"} 6"))
-            #expect(body.contains("im_v2_direct_room_log_append_atomic_fallback_reasons_total{reason=\"request_shape\"} 3"))
-            #expect(body.contains("im_v2_direct_room_log_append_atomic_fallback_reasons_total{reason=\"preflight_mismatch\"} 1"))
-            #expect(body.contains("im_v2_direct_room_log_append_same_room_deferred_requests_total 23"))
-            #expect(body.contains("im_v2_direct_room_log_append_batch_rejections_total{reason=\"queue_full\"} 2"))
+            #expect(!body.contains("im_v2_direct_room_log_append_batch_"))
+            #expect(!body.contains("im_v2_direct_room_log_append_atomic_"))
             #expect(body.contains("im_v2_read_receipt_batch_pending_requests 5"))
             #expect(body.contains("im_v2_read_receipt_batch_in_flight 2"))
             #expect(body.contains("im_v2_read_receipt_batches_completed_total 43"))

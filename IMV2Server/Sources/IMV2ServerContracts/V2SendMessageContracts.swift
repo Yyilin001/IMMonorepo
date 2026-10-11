@@ -148,98 +148,6 @@ public struct V2RoomWriteRequest: Sendable {
     }
 }
 
-/// 支持将兼容的有序请求子集放入同一事务持久化的存储能力。
-///
-/// 批次分类属于优化提示，不是授权判断；不兼容请求仍通过普通单命令路径执行。
-/// 每个请求必须保留独立结果，共享事务不得削弱锁、幂等或持久化合同。
-public protocol V2AtomicRoomWriteBatchStore: V2RoomWriteStore {
-    /// 返回各请求能否尝试共享事务的进程内提示。
-    ///
-    /// - Parameter requests: 保持原始输入顺序的待处理请求。
-    /// - Returns: 与输入一一对应的布尔值；`false` 只要求走普通路径，不是权限拒绝。
-    ///
-    /// 真正执行时仍需获取权威锁并重新检查持久化状态，分类后状态变化可以使原子尝试回退。
-    func atomicBatchEligibility(
-        requests: [V2RoomWriteRequest]
-    ) async -> [Bool]
-
-    /// 按共享事务兼容类别为请求分组。
-    ///
-    /// - Parameter requests: 待分类的有序请求。
-    /// - Returns: 对应每项输入的兼容类别；相同非空类别可尝试共用事务，`nil` 使用单命令路径。
-    func atomicBatchPartitions(
-        requests: [V2RoomWriteRequest]
-    ) async -> [V2AtomicRoomWriteBatchPartition?]
-
-    /// 查询同一兼容类别能否在有序事务内多次推进同一房间。
-    ///
-    /// - Parameter partition: 待查询的存储兼容类别。
-    /// - Returns: 仅当实现能保存所有中间消息并正确归并最终房间状态时返回 `true`，默认 `false`。
-    func atomicBatchSupportsRepeatedRooms(
-        in partition: V2AtomicRoomWriteBatchPartition
-    ) async -> Bool
-
-    /// 在共享事务内持久化一组兼容的有序请求。
-    ///
-    /// - Parameter requests: 保持处理顺序、时间和标识稳定的输入。
-    /// - Returns: 与每个输入对应的接受结果。
-    /// - Throws: 无法保持单命令语义时抛出批次回退错误，或传播存储执行错误。
-    ///
-    /// 返回成功前必须完成整个共享事务；回退不能携带已部分提交的成功承诺。
-    func acceptAtomically(
-        requests: [V2RoomWriteRequest]
-    ) async throws -> [V2SendMessageOutcome]
-}
-
-public extension V2AtomicRoomWriteBatchStore {
-    /// 默认将所有输入标记为可尝试，由实际原子事务决定能否处理。
-    ///
-    /// - Parameter requests: 待分类输入。
-    /// - Returns: 与输入等长、全部为 `true` 的数组；此默认值不证明权限或兼容性。
-    func atomicBatchEligibility(
-        requests: [V2RoomWriteRequest]
-    ) async -> [Bool] {
-        Array(repeating: true, count: requests.count)
-    }
-
-    /// 将默认资格判断转换为普通批次类别。
-    ///
-    /// - Parameter requests: 待分类输入。
-    /// - Returns: 可尝试项对应普通类别，其余为 `nil`；资格数组长度不匹配时全部回退单命令路径。
-    func atomicBatchPartitions(
-        requests: [V2RoomWriteRequest]
-    ) async -> [V2AtomicRoomWriteBatchPartition?] {
-        let eligibility = await atomicBatchEligibility(requests: requests)
-        guard eligibility.count == requests.count else {
-            return Array(repeating: nil, count: requests.count)
-        }
-        return eligibility.map { $0 ? .standard : nil }
-    }
-
-    /// 默认不支持同一原子批次重复推进同一房间，具体存储可在保证语义后覆盖。
-    func atomicBatchSupportsRepeatedRooms(
-        in partition: V2AtomicRoomWriteBatchPartition
-    ) async -> Bool {
-        false
-    }
-}
-
-/// 存储定义的批次兼容类别；类别相同只表示可以尝试共用事务，不代表已通过授权或容量检查。
-public struct V2AtomicRoomWriteBatchPartition: Hashable, Sendable {
-    /// 普通原子批次类别。
-    public static let standard = Self(rawValue: 0)
-    /// 存储实现提供的加速批次类别。
-    public static let accelerated = Self(rawValue: 1)
-    /// 采用房间日志的大群纯文本、无提及消息类别，避免与私聊策略事务图混合。
-    public static let large = Self(rawValue: 2)
-
-    /// 进程内兼容类别值，由存储实现解释。
-    public let rawValue: UInt8
-
-    /// 保存存储自定义的兼容类别值，不限制为预定义的三个类别。
-    public init(rawValue: UInt8) { self.rawValue = rawValue }
-}
-
 /// 共享事务无法保持普通命令语义时返回的内部回退信号。
 ///
 /// 批处理器使用原始不可变请求重试普通路径，不把此错误直接返回客户端，也不能确认部分批次已成功。
@@ -295,8 +203,6 @@ public struct V2AtomicRoomWriteBatchError: Error, Equatable, Sendable {
 
 /// 消息接受存储的领域与持久化一致性错误，由传输边缘映射为协议响应。
 public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
-    /// 原操作已被 owner 永久关闭，迟到重试不得被接受。
-    case messageOperationClosed
     /// 目标房间不存在。
     case roomNotFound
     /// 发送者不具备当前房间写入资格。
@@ -317,12 +223,6 @@ public enum V2RoomWriteStoreError: Error, Equatable, Sendable {
     case strangerMessageLimitReached
     /// 回复目标不存在或不能作为有效引用。
     case replyTargetNotFound
-}
-
-/// 只暴露准入指标；消费方不能据此接受消息。
-public protocol V2SendMessageBatchMetricsReading: Sendable {
-    /// 读取准入队列与处理状态的观测快照，不构成持久化提交证明。
-    func snapshot() async -> V2SendMessageBatchMetricsSnapshot
 }
 
 /// 生成消息接受标识时发现的输入错误。

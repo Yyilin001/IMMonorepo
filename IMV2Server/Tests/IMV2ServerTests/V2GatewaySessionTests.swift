@@ -162,7 +162,7 @@ struct V2GatewaySessionTests {
         #expect(cache.snapshot().misses == 1)
     }
 
-    @Test("protocol v21 dispatches authorized prepared pages without rebuilding the ordinary envelope")
+    @Test("current protocol dispatches authorized prepared pages without rebuilding the ordinary envelope")
     func dispatchesPreparedGroupPageHandler() async throws {
         let cache = V2PreparedGroupEventPageCache(configuration: .init(
             maximumEntries: 8,

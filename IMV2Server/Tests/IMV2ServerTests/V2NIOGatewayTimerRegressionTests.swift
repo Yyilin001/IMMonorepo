@@ -14,7 +14,7 @@ import Testing
 struct V2NIOGatewayTimerRegressionTests {
     @Test("authenticated suspended requests neither expire nor retain a disconnected registration", arguments: [false, true], [1, 256])
     func authenticatedBatchDoesNotExpireDuringSlowCommand(closeBeforeRelease: Bool, frameBatchLimit: Int) async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let command = SuspendedGatewayCommand()
         let stream = try makeStream(registry: registry, handler: command, frameBatchLimit: frameBatchLimit)
         let channel = NIOAsyncTestingChannel()
@@ -77,7 +77,7 @@ struct V2NIOGatewayTimerRegressionTests {
     @Test("idle check reschedules only the remaining time")
     func idleCheckUsesRemainingDeadline() async throws {
         let clock = Mutex<UInt64>(0)
-        let stream = try makeStream(registry: V2DeviceConnectionRegistry(), handler: ImmediateGatewayCommand())
+        let stream = try makeStream(registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), handler: ImmediateGatewayCommand())
         let channel = NIOAsyncTestingChannel()
         let metrics = V2GatewayTransportMetrics()
         try await channel.testingEventLoop.executeInContext {
@@ -115,7 +115,7 @@ struct V2NIOGatewayTimerRegressionTests {
 
     @Test("transport keeps fragmented frames until complete and diagnoses partial EOF")
     func fragmentedFrameAndPartialEOF() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let stream = try makeStream(registry: registry, handler: ImmediateGatewayCommand(), frameBatchLimit: 1)
         let channel = NIOAsyncTestingChannel()
         let metrics = V2GatewayTransportMetrics()
@@ -167,7 +167,7 @@ struct V2NIOGatewayTimerRegressionTests {
             session: .init(limits: try .init(maximumInFlightRequests: 4),
                 authenticator: GatewayTimerAuthenticator(), capabilityProfile: "base",
                 commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: command, registry: V2DeviceConnectionRegistry())
+            handler: command, registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
         let channel = NIOAsyncTestingChannel()
         let metrics = V2GatewayTransportMetrics()
         try await channel.testingEventLoop.executeInContext {

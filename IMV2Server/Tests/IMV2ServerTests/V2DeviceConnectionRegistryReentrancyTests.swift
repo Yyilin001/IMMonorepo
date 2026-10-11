@@ -13,7 +13,7 @@ import Testing
 struct V2DeviceConnectionRegistryReentrancyTests {
     @Test("unregister during presence refresh removes the late database lease")
     func compensatesLatePresenceRefresh() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = SuspendedPresenceLeases()
         await registry.configureLivePresenceLeases(leases)
         let identity = try identityFixture()
@@ -34,7 +34,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("privacy publication cannot hold a successful local authentication")
     func privacyPublicationDoesNotBlockRegistration() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = SuspendedPreferencePresenceLeases()
         await registry.configureLivePresenceLeases(leases)
         let identity = try identityFixture()
@@ -60,7 +60,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("unregister while broker activation is suspended leaves no phantom subscription")
     func compensatesLateSubscriptionActivation() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let broker = SuspendedLiveActivityBroker()
         await registry.configureLiveActivityBroker(broker)
         let identity = try identityFixture()
@@ -91,7 +91,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("connection churn does not retain transient mutation generations")
     func connectionChurnClearsMutationTokens() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let identity = try identityFixture()
         let stream = try streamFixture()
 
@@ -110,7 +110,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
     @Test("authentication replies own bounded recovery and shutdown drains submitted interest work")
     func authenticationRecoveryIsBoundedAndDrained() async throws {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
-            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8))
+            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let probe = GatedAccountSyncInterests()
         let shared = V2SharedGroupEventWakeInterests(underlying: probe)
         await registry.configureUserSyncInterests(shared)
@@ -151,7 +151,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("unchanged heartbeat leases do not perform cross-node presence publication")
     func heartbeatDoesNotPublishUnchangedPresence() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = SuspendedPresenceLeases(), broker = SuspendedLiveActivityBroker()
         await registry.configureLivePresenceLeases(leases)
         await registry.configureLiveActivityBroker(broker)
@@ -174,7 +174,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("heartbeats acknowledge local liveness while an actual renewal remains blocked")
     func heartbeatDoesNotWaitForAuthority() async throws {
-        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero))
+        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = GatedHeartbeatLeases(leaseSeconds: 0.9)
         await registry.configureLivePresenceLeases(leases)
         let identity = try identityFixture(), connection = UUID(), stream = try streamFixture()
@@ -201,7 +201,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("online projection expiry preserves a live connection and unknown SQL cannot revoke it")
     func presenceExpiryDoesNotRevokeAuthenticatedConnection() async throws {
-        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero))
+        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = GatedHeartbeatLeases(leaseSeconds: 0.5, unknown: true)
         await registry.configureLivePresenceLeases(leases)
         let identity = try identityFixture(), connection = UUID(), stream = try streamFixture()
@@ -229,7 +229,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("successful renewal covers its submission without chasing heartbeats received during SQL")
     func heartbeatRenewalWaitsForNextConfirmedWindow() async throws {
-        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero))
+        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = GatedHeartbeatLeases(leaseSeconds: 0.9)
         await registry.configureLivePresenceLeases(leases)
         let identity = try identityFixture(), connection = UUID(), stream = try streamFixture()
@@ -260,7 +260,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("an idle online projection expires without renewing or owning connection timeout")
     func idleProjectionDoesNotRenewOrCloseConnection() async throws {
-        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero))
+        let registry = V2DeviceConnectionRegistry(livePresenceRenewalConfiguration: .init(maximumBatchSize: 1, maximumDelay: .zero), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = GatedHeartbeatLeases(leaseSeconds: 0.03)
         await registry.configureLivePresenceLeases(leases)
         let identity = try identityFixture(), connection = UUID(), stream = try streamFixture()
@@ -277,7 +277,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
     @Test("presence batch shares same authorization key, rejects stale scope and isolates denied viewer")
     func presenceBatchSharesKeyAndFencesScopes() async throws {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
-            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8))
+            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let viewer = try identityFixture().userID
         let deniedViewer = UserID(uuid: UUID()), target = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
         let reader = GatedRegistryPresenceReader(deniedViewer: deniedViewer)
@@ -295,7 +295,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
             let limits = try V2FrameLimits(maximumPayloadBytes: 4096, acceptedVersions: [0, version])
             let stream = V2GatewayByteStream(frameLimits: limits,
                 session: session, handler: RegistryReentrancyCommandHandler(), connectionID: connection, registry: registry)
-            #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { await recorder.record($0) },
+            #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { await recorder.record($0) },
                 scopedNotificationWriter: { await recorder.recordScoped($0) }))
             var hello = IMV2Envelope(); hello.requestID = 1
             hello.clientHello.deviceID = identity.deviceID.rawValue
@@ -338,7 +338,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
     @Test(arguments: [false, true])
     func shutdownRevokesLateReadyEnqueue(retireConnection: Bool) async throws {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
-            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8))
+            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let user = try identityFixture().userID, room = RoomID(uuid: UUID())
         let owner = try V2RoomDataOwner(shardID: "rooms", epoch: 1), target = UserID(uuid: UUID())
         let topic = V2RealtimeTopic(kind: .userPresence, id: target.rawValue, owner: owner)
@@ -366,7 +366,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
                 commandAdmission: V2AllowingGatewayCommandAdmission())
             let stream = V2GatewayByteStream(frameLimits: try .init(maximumPayloadBytes: 4096, acceptedVersions: [0, version]),
                 session: session, handler: RegistryReentrancyCommandHandler(), connectionID: connection, registry: registry)
-            #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
                 scopedNotificationWriter: { await recorder.record($0) }))
             var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello.deviceID = device.rawValue
             hello.clientHello.supportedProtocolVersions = [UInt32(version)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
@@ -414,7 +414,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("five suspended connection writers cannot consume the four presence query slots")
     func recoveryAuthorizationDoesNotWaitForSocket() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let user = try identityFixture().userID
         let rooms = (0..<6).map { _ in RoomID(uuid: UUID()) }
         let owner = try V2RoomDataOwner(shardID: "rooms", epoch: 1)
@@ -470,7 +470,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
 
     @Test("a refused presence Ready reuses its still-valid observation proof")
     func refusedReadyReusesOriginalProof() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let user = try identityFixture().userID, room = RoomID(uuid: UUID())
         let owner = try V2RoomDataOwner(shardID: "rooms", epoch: 1)
         let target = UserID(uuid: UUID())
@@ -511,7 +511,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
     @Test("one blocked recovery writer cannot block another connection Ready or revive an ended scope")
     func recoveryRetentionIsPerConnection() async throws {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
-            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8))
+            maximumConnectionsPerDevice: 8, maximumConnectionsPerUser: 8), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let user = try identityFixture().userID, room = RoomID(uuid: UUID())
         let owner = try V2RoomDataOwner(shardID: "rooms", epoch: 1), target = UserID(uuid: UUID())
         let topic = V2RealtimeTopic(kind: .userPresence,
@@ -545,7 +545,7 @@ struct V2DeviceConnectionRegistryReentrancyTests {
                 commandAdmission: V2AllowingGatewayCommandAdmission())
             let stream = V2GatewayByteStream(frameLimits: try .init(maximumPayloadBytes: 4096, acceptedVersions: [0, version]),
                 session: session, handler: RegistryReentrancyCommandHandler(), connectionID: connection, registry: registry)
-           #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+           #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
                 scopedNotificationWriter: { await recorder.record($0) }))
             var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello.deviceID = device.rawValue
             hello.clientHello.supportedProtocolVersions = [UInt32(version)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
@@ -666,12 +666,21 @@ struct V2DeviceConnectionRegistryReentrancyTests {
                 commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
             handler: RegistryReentrancyCommandHandler(),
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
     }
 }
 
 private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
+    func admitConnectionRefresh(identity: V2AuthenticatedConnection, connectionID: UUID,
+        publicationSuppressed: Bool, policy: V2AuthenticatedConnectionAdmissionPolicy, now: Date) async throws -> V2LivePresenceLeaseRefresh {
+        try await v2FixtureAdmitConnectionRefresh(store: self, identity: identity, connectionID: connectionID,
+            publicationSuppressed: publicationSuppressed, policy: policy, now: now)
+    }
+    func renewConnections(_ requests: [V2LivePresenceLeaseRenewalRequest]) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+        try await v2FixtureRenewConnections(store: self, requests)
+    }
+
     private var active: Set<UUID> = []
     private var identities: [UUID: V2AuthenticatedConnection] = [:]
     private var suppressed: [UUID: Bool] = [:]
@@ -738,6 +747,10 @@ private actor SuspendedPresenceLeases: V2LivePresenceLeaseManaging {
 }
 
 private actor SuspendedPreferencePresenceLeases: V2LivePresenceLeaseManaging {
+    func renewConnections(_ requests: [V2LivePresenceLeaseRenewalRequest]) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+        try await v2FixtureRenewConnections(store: self, requests)
+    }
+
     private var active: Set<UUID> = []
     private var identities: [UUID: V2AuthenticatedConnection] = [:]
     private var suppressed: [UUID: Bool] = [:]
@@ -1108,7 +1121,7 @@ private func makeScopedRegistryTestStream(registry: V2DeviceConnectionRegistry,
         commandAdmission: V2AllowingGatewayCommandAdmission())
     let stream = V2GatewayByteStream(frameLimits: try .init(maximumPayloadBytes: 4096, acceptedVersions: [0, version]),
         session: session, handler: RegistryReentrancyCommandHandler(), connectionID: connection, registry: registry)
-    #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+    #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
         scopedNotificationWriter: { await recorder.record($0) }))
     var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello.deviceID = device.rawValue
     hello.clientHello.supportedProtocolVersions = [UInt32(version)]; hello.clientHello.supportedCapabilityProfiles = ["base"]

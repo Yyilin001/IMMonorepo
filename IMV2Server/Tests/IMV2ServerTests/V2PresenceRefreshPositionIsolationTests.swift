@@ -9,7 +9,7 @@ struct V2PresenceRefreshPositionIsolationTests {
     @Test("old socket responsibility cannot block or release a same-key successor query")
     func oldOutputDoesNotOwnSuccessorQueryKey() async throws {
         let recovery = V2RealtimeRecoveryCoordinator()
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let reader = PositionIsolationReader(), writer = PositionIsolationWriter()
         let request = V2PresenceObservationRequest(roomID: .init(uuid: UUID()),
             viewerUserID: .init(uuid: UUID()), targetUserID: .init(uuid: UUID()))
@@ -63,7 +63,7 @@ struct V2PresenceRefreshPositionIsolationTests {
                 authenticator: PositionIsolationAuthenticator(user: request.viewerUserID), capabilityProfile: "base",
                 commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: PositionIsolationHandler(), connectionID: connection, registry: registry)
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             scopedNotificationWriter: { write in
                 if let writer { return await writer.record(write) }
                 return write.enqueueIfCurrent {}

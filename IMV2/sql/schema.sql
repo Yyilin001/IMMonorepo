@@ -428,19 +428,6 @@ CREATE TABLE im_v2.device_sync_cursors (
     CONSTRAINT device_sync_cursors_state_check CHECK ((state = ANY (ARRAY['ready'::text, 'reset_preparing'::text, 'reset_pending'::text])))
 );
 
-CREATE TABLE im_v2.direct_message_denials (
-    sender_user_id uuid NOT NULL,
-    client_message_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    source_event_id uuid NOT NULL,
-    timeline_sequence bigint NOT NULL,
-    created_at timestamp with time zone NOT NULL,
-    fingerprint_version smallint NOT NULL CHECK (fingerprint_version = 3),
-    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
-    reason text DEFAULT 'generic'::text NOT NULL,
-    CONSTRAINT direct_message_denials_reason_check CHECK ((reason = ANY (ARRAY['generic'::text, 'system_account_read_only'::text]))),
-    CONSTRAINT direct_message_denials_timeline_sequence_check CHECK ((timeline_sequence > 0))
-);
 
 
 CREATE TABLE im_v2.direct_room_pairs (
@@ -702,6 +689,15 @@ CREATE TABLE im_v2.media_download_grants (
     retry_count bigint DEFAULT 0 NOT NULL,
     redeemed_at timestamp with time zone,
     created_at timestamp with time zone NOT NULL,
+    message_room_id uuid,
+    message_id uuid,
+    owner_shard_id text,
+    owner_epoch bigint,
+    CONSTRAINT media_download_grants_scope_check CHECK (
+        (message_room_id IS NULL AND message_id IS NULL AND owner_shard_id IS NULL AND owner_epoch IS NULL)
+        OR (message_room_id IS NOT NULL AND message_id IS NOT NULL AND owner_shard_id IS NOT NULL
+            AND length(btrim(owner_shard_id)) > 0 AND owner_epoch IS NOT NULL AND owner_epoch >= 0)
+    ),
     CONSTRAINT media_download_grants_check CHECK ((expires_at > created_at)),
     CONSTRAINT media_download_grants_check1 CHECK (((state = 'claimed'::text) = (claim_token IS NOT NULL))),
     CONSTRAINT media_download_grants_check2 CHECK (((state = 'claimed'::text) = (lease_expires_at IS NOT NULL))),
@@ -1270,107 +1266,6 @@ CREATE TRIGGER message_send_completions_immutable
     BEFORE UPDATE OR DELETE ON im_v2.message_send_completions
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_send_completion_mutation();
 
--- Control authorization and its recovery obligation are one durable row.
-CREATE TABLE im_v2.direct_authorization_intents (
-    room_id uuid NOT NULL,
-    sender_user_id uuid NOT NULL,
-    client_message_id uuid NOT NULL,
-    recipient_user_id uuid NOT NULL CHECK (recipient_user_id <> sender_user_id),
-    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
-    generation bigint NOT NULL CHECK (generation > 0),
-    owner_shard_id text NOT NULL CHECK (octet_length(owner_shard_id) > 0),
-    owner_epoch bigint NOT NULL CHECK (owner_epoch >= 0),
-    policy jsonb NOT NULL CHECK (jsonb_typeof(policy) = 'object'),
-    disposition text,
-    event_id uuid,
-    created_at timestamptz NOT NULL CHECK (isfinite(created_at)),
-    attempt_created_at timestamptz NOT NULL CHECK (isfinite(attempt_created_at)),
-    updated_at timestamptz NOT NULL CHECK (isfinite(updated_at)),
-    next_check_at timestamptz NOT NULL CHECK (isfinite(next_check_at)),
-    lease_token uuid,
-    lease_until timestamptz,
-    attempt_count bigint DEFAULT 0 NOT NULL CHECK (attempt_count >= 0),
-    PRIMARY KEY (room_id, sender_user_id, client_message_id),
-    CONSTRAINT direct_authorization_intent_times_check CHECK (created_at <= attempt_created_at AND attempt_created_at <= updated_at),
-    CONSTRAINT direct_authorization_intent_result_check CHECK (
-        ((disposition IS NULL OR disposition = 'aborted') AND event_id IS NULL)
-        OR (disposition IS NOT NULL AND disposition IN ('accepted', 'denied') AND event_id IS NOT NULL)),
-    CONSTRAINT direct_authorization_intent_lease_check CHECK (
-        (lease_token IS NULL AND lease_until IS NULL)
-        OR (lease_token IS NOT NULL AND lease_until IS NOT NULL AND isfinite(lease_until) AND disposition IS NULL))
-);
-CREATE INDEX direct_authorization_held_sender_idx ON im_v2.direct_authorization_intents
-    (sender_user_id, recipient_user_id, room_id, client_message_id) WHERE disposition IS NULL;
-CREATE INDEX direct_authorization_held_recipient_idx ON im_v2.direct_authorization_intents
-    (recipient_user_id, sender_user_id, room_id, client_message_id) WHERE disposition IS NULL;
-CREATE INDEX direct_authorization_recovery_idx ON im_v2.direct_authorization_intents
-    (next_check_at, room_id, sender_user_id, client_message_id) WHERE disposition IS NULL;
-
-CREATE FUNCTION im_v2.guard_direct_authorization_intent() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    IF TG_OP = 'DELETE' THEN
-        RAISE EXCEPTION 'authorization obligation cannot be deleted' USING ERRCODE = '23514';
-    END IF;
-    IF ROW(NEW.room_id, NEW.sender_user_id, NEW.client_message_id, NEW.recipient_user_id, NEW.request_fingerprint, NEW.created_at)
-        IS DISTINCT FROM ROW(OLD.room_id, OLD.sender_user_id, OLD.client_message_id, OLD.recipient_user_id, OLD.request_fingerprint, OLD.created_at)
-        OR NEW.updated_at < OLD.updated_at THEN
-        RAISE EXCEPTION 'authorization operation identity cannot change' USING ERRCODE = '23514';
-    END IF;
-    IF OLD.disposition IS NULL THEN
-        IF ROW(NEW.generation, NEW.owner_shard_id, NEW.owner_epoch, NEW.policy, NEW.attempt_created_at)
-            IS DISTINCT FROM ROW(OLD.generation, OLD.owner_shard_id, OLD.owner_epoch, OLD.policy, OLD.attempt_created_at) THEN
-            RAISE EXCEPTION 'held authorization identity cannot change' USING ERRCODE = '23514';
-        END IF;
-    ELSIF OLD.disposition = 'aborted' AND NEW.disposition IS NULL THEN
-        IF NEW.generation - 1 <> OLD.generation OR NEW.attempt_created_at < OLD.updated_at
-            OR NEW.lease_token IS NOT NULL OR NEW.lease_until IS NOT NULL OR NEW.attempt_count <> 0 THEN
-            RAISE EXCEPTION 'authorization renewal requires a fresh generation' USING ERRCODE = '23514';
-        END IF;
-    ELSIF NEW IS DISTINCT FROM OLD THEN
-        RAISE EXCEPTION 'authorization terminal result cannot change' USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-CREATE TRIGGER direct_authorization_intents_guard
-    BEFORE UPDATE OR DELETE ON im_v2.direct_authorization_intents
-    FOR EACH ROW EXECUTE FUNCTION im_v2.guard_direct_authorization_intent();
-
--- Owner-local authorization terminal proof, retained until a proven retry/GC
--- contract exists. An aborted generation must reject every late callback.
-CREATE TABLE im_v2.direct_authorization_receipts (
-    room_id uuid NOT NULL,
-    sender_user_id uuid NOT NULL,
-    client_message_id uuid NOT NULL,
-    generation bigint NOT NULL CHECK (generation > 0),
-    recipient_user_id uuid NOT NULL CHECK (recipient_user_id <> sender_user_id),
-    owner_shard_id text NOT NULL CHECK (octet_length(owner_shard_id) > 0),
-    owner_epoch bigint NOT NULL CHECK (owner_epoch >= 0),
-    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
-    disposition text NOT NULL,
-    event_id uuid,
-    recorded_at timestamptz NOT NULL CHECK (isfinite(recorded_at)),
-    PRIMARY KEY (room_id, sender_user_id, client_message_id, generation),
-    CONSTRAINT direct_authorization_receipt_result_check CHECK (
-        (disposition = 'aborted' AND event_id IS NULL)
-        OR (disposition IN ('accepted', 'denied') AND event_id IS NOT NULL))
-);
-
-CREATE FUNCTION im_v2.reject_direct_authorization_receipt_mutation() RETURNS trigger
-    LANGUAGE plpgsql
-    AS $$
-BEGIN
-    RAISE EXCEPTION 'authorization terminal proof cannot be updated or deleted'
-        USING ERRCODE = '23514';
-END;
-$$;
-
-CREATE TRIGGER direct_authorization_receipts_immutable
-    BEFORE UPDATE OR DELETE ON im_v2.direct_authorization_receipts
-    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_direct_authorization_receipt_mutation();
-
 -- Accepted room-log events may reference this immutable snapshot after a
 -- message is revised. The trigger below captures the prior revision inside
 -- the same transaction as the mutation, so historical event pulls never
@@ -1432,22 +1327,23 @@ DECLARE
     edited_message_id uuid;
     edited_revision bigint;
 BEGIN
-    -- Bad legacy/test event payloads remain available to strict log decoders,
-    -- but cannot authorize a revision. Never depend on a mutable message row.
+    -- Every committed edit must establish its immutable audience evidence.
     IF NEW.payload->>'message_id' IS NULL
        OR NEW.payload->>'message_id' !~ '^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$'
        OR NEW.payload->>'message_revision' IS NULL
        OR NEW.payload->>'message_revision' !~ '^[0-9]+$'
        OR lower(NEW.payload->>'room_id') IS DISTINCT FROM NEW.room_id::text THEN
-        RETURN NEW;
+        RAISE EXCEPTION 'invalid message edit visibility payload' USING ERRCODE='23514';
     END IF;
     BEGIN
         edited_message_id := (NEW.payload->>'message_id')::uuid;
         edited_revision := (NEW.payload->>'message_revision')::bigint;
     EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
-        RETURN NEW;
+        RAISE EXCEPTION 'invalid message edit visibility payload' USING ERRCODE='23514';
     END;
-    IF edited_revision <= 1 THEN RETURN NEW; END IF;
+    IF edited_revision <= 1 THEN
+        RAISE EXCEPTION 'invalid message edit revision' USING ERRCODE='23514';
+    END IF;
 
     INSERT INTO im_v2.message_edit_visibility
         (message_id, message_revision, room_id, room_sequence, committed_membership_revision)
@@ -1663,7 +1559,7 @@ CREATE TABLE im_v2.mention_push_wake_receipts (
 CREATE TABLE im_v2.push_wake_outbox (
     dispatch_id uuid NOT NULL,
     source_event_id uuid NOT NULL,
-    source_room_id uuid,
+    source_room_id uuid NOT NULL,
     target_user_id uuid NOT NULL,
     target_device_id uuid NOT NULL,
     campaign_id text NOT NULL,
@@ -2003,14 +1899,14 @@ CREATE TABLE im_v2.control_housekeeping_cursor (
 INSERT INTO im_v2.control_housekeeping_cursor (singleton, rotation) VALUES (true, 0);
 
 CREATE TABLE im_v2.schema_contract (
-    schema_id text DEFAULT 'im-v2-current-69'::text NOT NULL,
-    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-69'::text))
+    schema_id text DEFAULT 'im-v2-current-72'::text NOT NULL,
+    CONSTRAINT schema_contract_schema_id_check CHECK ((schema_id = 'im-v2-current-72'::text))
 );
 
 -- Readiness verification requires one canonical contract row. A DEFAULT only
 -- applies when callers insert; it does not populate a freshly initialized
 -- table, so seed it as part of the authoritative schema bootstrap.
-INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-69');
+INSERT INTO im_v2.schema_contract (schema_id) VALUES ('im-v2-current-72');
 
 CREATE TABLE im_v2.shard_admission_pools (
     room_shard_id text NOT NULL,
@@ -2474,14 +2370,8 @@ ALTER TABLE ONLY im_v2.device_snapshot_resets
 ALTER TABLE ONLY im_v2.device_sync_cursors
     ADD CONSTRAINT device_sync_cursors_pkey PRIMARY KEY (user_id, device_id);
 
-ALTER TABLE ONLY im_v2.direct_message_denials
-    ADD CONSTRAINT direct_message_denials_pkey PRIMARY KEY (room_id, sender_user_id, client_message_id);
 
-ALTER TABLE ONLY im_v2.direct_message_denials
-    ADD CONSTRAINT direct_message_denials_room_id_timeline_sequence_key UNIQUE (room_id, timeline_sequence);
 
-ALTER TABLE ONLY im_v2.direct_message_denials
-    ADD CONSTRAINT direct_message_denials_source_event_id_key UNIQUE (source_event_id);
 
 
 ALTER TABLE ONLY im_v2.direct_room_pairs
@@ -3080,11 +2970,7 @@ ALTER TABLE ONLY im_v2.device_revocation_events
 ALTER TABLE ONLY im_v2.device_snapshot_resets
     ADD CONSTRAINT device_snapshot_resets_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES im_v2.sync_snapshot_artifacts(snapshot_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.direct_message_denials
-    ADD CONSTRAINT direct_message_denials_room_id_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT;
 
-ALTER TABLE ONLY im_v2.direct_message_denials
-    ADD CONSTRAINT direct_message_denials_source_event_id_fkey FOREIGN KEY (source_event_id) REFERENCES im_v2.room_timeline_activities(source_event_id) ON DELETE RESTRICT;
 
 
 ALTER TABLE ONLY im_v2.direct_room_pairs
@@ -3123,16 +3009,6 @@ ALTER TABLE ONLY im_v2.group_join_requests
 ALTER TABLE ONLY im_v2.media_download_grants
     ADD CONSTRAINT media_download_grants_media_id_fkey FOREIGN KEY (media_id) REFERENCES im_v2.media_objects(media_id);
 
-ALTER TABLE im_v2.media_download_grants
-    ADD COLUMN message_room_id uuid,
-    ADD COLUMN message_id uuid,
-    ADD COLUMN owner_shard_id text,
-    ADD COLUMN owner_epoch bigint,
-    ADD CONSTRAINT media_download_grants_scope_check CHECK (
-        (message_room_id IS NULL AND message_id IS NULL AND owner_shard_id IS NULL AND owner_epoch IS NULL)
-        OR (message_room_id IS NOT NULL AND message_id IS NOT NULL AND owner_shard_id IS NOT NULL
-            AND length(btrim(owner_shard_id)) > 0 AND owner_epoch IS NOT NULL AND owner_epoch >= 0)
-    );
 CREATE FUNCTION im_v2.reject_media_download_grant_identity_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF ROW(NEW.download_session_id, NEW.media_id, NEW.user_id, NEW.device_id, NEW.expires_at, NEW.created_at,
@@ -3447,9 +3323,6 @@ CREATE UNIQUE INDEX registration_cancellation_issued_device_idx ON im_v2.device_
 CREATE INDEX registration_cancellation_pending_expiry_idx ON im_v2.device_registration_cancellations (issue_before) WHERE user_id IS NULL;
 
 
-ALTER TABLE ONLY im_v2.direct_authorization_receipts
-    ADD CONSTRAINT direct_authorization_receipts_room_fkey FOREIGN KEY (room_id) REFERENCES im_v2.rooms(room_id);
-
 -- Resource subsystem additive schema.
 -- Apply on every physical owner database before enabling resource routes.
 -- Additive and replay-safe. Rollback: disable routes/workers; retain rows until uploads drain.
@@ -3642,28 +3515,6 @@ CREATE INDEX resource_storage_migrations_retained_idx ON im_v2.resource_storage_
 -- Message-operation permanent recovery fence.
 -- Apply to every room owner before enabling message-operation recovery.
 -- Permanent negative receipts have no cascading room/message FK or retention cleanup.
-CREATE TABLE im_v2.message_operation_closures (
-    room_id uuid NOT NULL,
-    sender_user_id uuid NOT NULL,
-    client_message_id uuid NOT NULL,
-    fingerprint_version smallint NOT NULL CHECK (fingerprint_version = 3),
-    request_fingerprint bytea NOT NULL CHECK (octet_length(request_fingerprint) = 32),
-    closed_at timestamptz NOT NULL CHECK (isfinite(closed_at)),
-    PRIMARY KEY (room_id, sender_user_id, client_message_id)
-);
-
--- Historical closure rows remain readable for compatibility. New sends use
--- unique message identity; recovery queries never close absent operations.
-
-CREATE FUNCTION im_v2.reject_message_operation_closure_mutation() RETURNS trigger
-LANGUAGE plpgsql AS $$
-BEGIN
-    RAISE EXCEPTION 'message operation closure is permanent' USING ERRCODE = '23514';
-END;
-$$;
-CREATE TRIGGER message_operation_closures_immutable BEFORE UPDATE OR DELETE ON im_v2.message_operation_closures
-    FOR EACH ROW EXECUTE FUNCTION im_v2.reject_message_operation_closure_mutation();
-
 -- Permanent group-avatar operation closure is part of the canonical owner schema.
 -- Permanent closure has no cascading FK or retention deletion.
 CREATE TABLE im_v2.resource_group_avatar_closures (
@@ -3696,13 +3547,10 @@ BEGIN
     RETURN NEW;
 END;
 $$;
-DROP TRIGGER IF EXISTS resource_group_avatar_operations_close_fence ON im_v2.resource_group_avatar_operations;
 CREATE TRIGGER resource_group_avatar_operations_close_fence BEFORE INSERT ON im_v2.resource_group_avatar_operations
     FOR EACH ROW EXECUTE FUNCTION im_v2.fence_group_avatar_terminal_result();
-DROP TRIGGER IF EXISTS resource_group_avatar_closures_commit_fence ON im_v2.resource_group_avatar_closures;
 CREATE TRIGGER resource_group_avatar_closures_commit_fence BEFORE INSERT ON im_v2.resource_group_avatar_closures
     FOR EACH ROW EXECUTE FUNCTION im_v2.fence_group_avatar_terminal_result();
-DROP TRIGGER IF EXISTS resource_group_avatar_closures_immutable ON im_v2.resource_group_avatar_closures;
 CREATE TRIGGER resource_group_avatar_closures_immutable BEFORE UPDATE OR DELETE ON im_v2.resource_group_avatar_closures
     FOR EACH ROW EXECUTE FUNCTION im_v2.reject_group_avatar_operation_mutation();
 
@@ -4106,26 +3954,6 @@ CREATE TABLE im_v2.policy_authorization_scopes (
         OR (owner_id IS NOT NULL AND owner_valid_until IS NOT NULL AND owner_epoch > 0))
 );
 
-CREATE SEQUENCE im_v2.policy_authorization_holder_generation AS bigint MINVALUE 1 NO CYCLE;
-CREATE TABLE im_v2.policy_authorization_holders (
-    scope_key text NOT NULL REFERENCES im_v2.policy_authorization_scopes(scope_key),
-    registration_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    activation_id uuid NOT NULL,
-    room_owner_epoch bigint NOT NULL CHECK (room_owner_epoch >= 0),
-    generation bigint NOT NULL CHECK (generation > 0),
-    endpoint text NOT NULL CHECK (char_length(endpoint) BETWEEN 1 AND 512),
-    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
-    policy_owner_epoch bigint NOT NULL CHECK (policy_owner_epoch > 0),
-    valid_until timestamptz NOT NULL,
-    revoked boolean NOT NULL DEFAULT false,
-    PRIMARY KEY (scope_key, registration_id)
-);
-CREATE INDEX policy_authorization_holders_active_idx
-    ON im_v2.policy_authorization_holders(scope_key) WHERE NOT revoked;
-CREATE INDEX policy_authorization_holders_registration_idx
-    ON im_v2.policy_authorization_holders(registration_id);
-
 CREATE TABLE im_v2.policy_authorization_changes (
     operation_key text PRIMARY KEY CHECK (char_length(operation_key) BETWEEN 1 AND 512),
     scope_key text NOT NULL REFERENCES im_v2.policy_authorization_scopes(scope_key),
@@ -4145,19 +3973,6 @@ CREATE INDEX policy_authorization_changes_pending_idx
 CREATE INDEX policy_authorization_changes_scope_pending_idx
     ON im_v2.policy_authorization_changes(scope_key, created_at, operation_key) WHERE NOT committed;
 
-CREATE TABLE im_v2.policy_authorization_revocations (
-    operation_key text NOT NULL REFERENCES im_v2.policy_authorization_changes(operation_key),
-    registration_id uuid NOT NULL,
-    room_id uuid NOT NULL,
-    activation_id uuid NOT NULL,
-    room_owner_epoch bigint NOT NULL CHECK (room_owner_epoch >= 0),
-    generation bigint NOT NULL CHECK (generation > 0),
-    endpoint text NOT NULL CHECK (char_length(endpoint) BETWEEN 1 AND 512),
-    valid_until timestamptz NOT NULL,
-    resolved_at timestamptz,
-    PRIMARY KEY (operation_key, registration_id)
-);
-
 CREATE TABLE im_v2.policy_authorization_outbox (
     operation_key text PRIMARY KEY REFERENCES im_v2.policy_authorization_changes(operation_key),
     scope_key text NOT NULL REFERENCES im_v2.policy_authorization_scopes(scope_key),
@@ -4169,17 +3984,5 @@ CREATE INDEX policy_authorization_outbox_pending_idx
     ON im_v2.policy_authorization_outbox(created_at, operation_key) WHERE published_at IS NULL;
 CREATE INDEX policy_authorization_outbox_scope_pending_idx
     ON im_v2.policy_authorization_outbox(scope_key, revision) WHERE published_at IS NULL;
-
--- Room-side tombstones prevent a delayed install from resurrecting a revoked
--- registration, even when revocation arrives before the initial installation.
-CREATE TABLE im_v2.room_policy_authorization_leases (
-    registration_id uuid PRIMARY KEY,
-    room_id uuid NOT NULL,
-    activation_id uuid NOT NULL,
-    room_owner_epoch bigint NOT NULL CHECK (room_owner_epoch >= 0),
-    generation bigint NOT NULL CHECK (generation > 0),
-    valid_until timestamptz NOT NULL,
-    revoked boolean NOT NULL DEFAULT false
-);
 
 COMMIT;

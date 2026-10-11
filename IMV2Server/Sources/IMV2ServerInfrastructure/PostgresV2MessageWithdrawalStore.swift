@@ -10,7 +10,7 @@ import SQLKit
 /// 消息墓碑与其投递工作在同一个事务内持久化。加锁顺序为
 /// 操作咨询锁 → 房间 → 消息 → 房间准入 → 分片池，
 /// 因此一次被接受的撤回不会留下部分可见的墓碑。
-public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2OwnerValidatedMessageWithdrawalStore {
+public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore {
     private let database: any Database
     private var existingOperationTransaction = false
     func usingOperationTransaction() -> Self { var copy=self;copy.existingOperationTransaction=true;return copy }
@@ -37,34 +37,6 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
     /// - Returns: 撤回结果。
     /// - Throws: 无权限、修订冲突或持久化失败时抛出。
     public func withdraw(command: V2WithdrawMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome {
-        try await withdraw(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 按房间归属执行一次消息撤回。
-    ///
-    /// - Parameters:
-    ///   - command: 撤回命令。
-    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 撤回结果。
-    /// - Throws: 归属已变更、无权限、修订冲突或持久化失败时抛出。
-    public func withdrawOwnerValidated(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome {
-        try await withdraw(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 在单个事务内完成归属校验、幂等判定、作者校验、墓碑写入与投递登记。
-    ///
-    /// - Parameters:
-    ///   - command: 撤回命令。
-    ///   - ownerRoute: 已选定的房间归属；为 `nil` 时跳过归属校验。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 撤回结果或不需要变更的结论。
-    /// - Throws: 房间或消息不存在、发起者非作者、状态冲突或持久化失败时抛出。
-    private func withdraw(command: V2WithdrawMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageWithdrawalOutcome {
         return try await v2WithPostgresTransactionRetry(database: database,
             maximumRetryCount: 0, classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil,existingTransaction:existingOperationTransaction) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }
@@ -75,7 +47,6 @@ public struct PostgresV2MessageWithdrawalStore: V2MessageWithdrawalStore, V2Owne
             let messageID = try withdrawalUUID(command.messageID)
             let lockKey = actorID.uuidString + ":" + operationID.uuidString
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
-            if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             try await activationScope?.require([roomID], sql: sql)
 
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageWithdrawalStoreError.corruptPersistenceState }

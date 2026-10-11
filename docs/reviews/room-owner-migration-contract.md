@@ -1,44 +1,38 @@
-# 静态房间归属与持久发送授权
+# 静态房间归属与当前发送权限
 
-项目尚未上线，首版不提供在线数据迁移。房间迁移准备/冻结、用户分片复制/双写/切换/回滚/源清理及其运维入口已删除。数据库直接使用当前 `im-v2-current-55` 全新建库合同，无历史升级脚本。
+首版不提供房间或用户分片的在线搬迁，也不支持历史数据库结构升级。新环境执行当前 [schema.sql](../../IMV2/sql/schema.sql)，启动时由 Schema readiness 检查当前合同；旧库须重建。具体 schema 版本以建库脚本和合同校验为准。
 
-[删除前设计与实现记录](https://github.com/Yyilin001/IMMonorepo/blob/f0aa8699/docs/reviews/room-owner-migration-contract.md)仅供追溯，不再作为 B27 或 D07 的关闭条件。保留此文档路径以承接已有授权证据链接。
+[历史设计与实现记录](https://github.com/Yyilin001/IMMonorepo/blob/f0aa8699/docs/reviews/room-owner-migration-contract.md)仅供追溯。保留本文件路径和下方写者清点锚点，以承接已有链接；历史授权预留、SQL 持锁回调及排空流程不再是部署要求。
 
 ## 当前归属
 
-部署前配置房间和用户逻辑分片到物理存储的映射。房间请求保留 owner/epoch，并在实际存储事务中校验，拒绝错库或失效的路由。用户同步、个人事件和设备撤销只使用当前归属，不读取迁移回退桶或写入第二个迁移目标。
+部署前配置逻辑分片到物理存储的映射。房间执行绑定 owner/epoch 和 activation，并在实际写入中校验执行边界。用户同步、个人事件和设备撤销只使用当前归属。
 
-当前 control 来源的关系、拉黑、偏好与资料通知仍须投递到用户存储；这是普通业务投递，保留来源身份去重。房间消息接受、成员资格、容量和幂等事实继续由 owner 事务提交。
+控制侧关系、拉黑、偏好与资料通知仍须投递到用户存储。这是当前业务投递，保留来源身份去重，与历史分片搬迁无关。媒体存储位置的迁移也是独立业务能力，不属于数据库结构兼容。
 
-## 持久发送授权
+## 当前发送权限
 
-跨库控制连接断开后，owner 事务可能仍在执行。因此保留已复现故障所需的持久授权，不以删除迁移功能为由删除授权保护。
+消息准备通过当前 Policy Owner 获取权限事实，形成与房间 activation 绑定的执行上下文。消息写入没有该上下文时拒绝执行，不再通过旧 SQL 授权预留补齐权限。
 
-1. 控制库按房间、发送者、client message ID 固定授权身份，绑定请求摘要、接收者、owner/epoch、代次及控制事实。单条、批量、转发均先登记并提交授权。
-2. owner 在消息事务内检查授权身份和代次，原子写入消息结果与不可变回执。接受、业务拒绝和代次中止有明确终态；重试不重复扣额度或生成效果。
-3. 撤权入口在相应排他锁内停止新授权并排空已有授权，再提交拉黑、关系移除、陌生人权限或账号停用。临时内存权限快照不能替代持久授权。
-4. 控制库只依据 owner 的确定回执释放 held；连接失败、超时或进程退出不能当作未提交。Gateway 有界恢复任务可重启、重复执行并拒绝旧代次结果。
-5. 媒体尚未就绪时不登记转发授权；实际接受时重新检查媒体状态及有效期。迟到请求必须仍经过原身份和代次判断。
-6. 接受事实、授权回执和拒绝标记继续保留。B11 的容量/保留策略单独评估，不增加未经要求的迁移状态机，也不直接按任意期限删除幂等依据。
+旧授权 intent、receipt、holder、revocation 和房间权限租约已从当前 schema 移除。对应扫描器、持锁跨库回调和专用恢复连接不再属于运行组装。策略版本、策略变更记录、发布 outbox 与当前 Policy Owner 恢复仍保留，见[权限运行说明](../../IMV2/docs/10-operations/direct-send-policy-cache-runbook.md)。
+
+成功发送的持久结果与消息完成记录一起写入。消息操作恢复使用原操作指纹和原结果时间；缺失这些字段的记录不能依靠调用参数或消息创建时间生成成功回执。其他领域的完成记录格式需按各自写入与恢复合同处理。
 
 ### 当前控制权限写者清点（2026-09-20）
 
-本次按 V2DirectSendControlPolicyFence 实际读取的六张控制表核对应用写者、修改字段及运行组装；范围为当前 IMV2Server/Sources，不把测试夹具或管理员直接 SQL 视为已接入的应用接口。
+此锚点承接历史写者清点链接。下面列出当前入口，不再声称旧 SQL 排空机制仍在使用。
 
-| 控制事实 | 当前应用写者 | 锁与持久排空 |
-| --- | --- | --- |
-| 拉黑、好友关系 | [PostgresV2SocialRelationshipStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2SocialRelationshipStore.swift) 的 changeUserBlock / changeRelationship | 用户对排他锁内 drain(pair)，再变更关系/拉黑；Gateway 注入协调器 |
-| 陌生人权限 | [PostgresV2DirectMessagingStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2DirectMessagingStore.swift) 的 setStrangerMessagePermission | 偏好排他锁内 drain(user)，再写偏好；分片路由交 controlStore，不交 owner store |
-| 账号停用与 profile.state | [V2AccountDisableService](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2AccountDisableService.swift) | account-state 排他锁内 drain(user)，再写停用记录、暂停资料及吊销凭据；Operator 注入协调器 |
-| 新账号资料 | [V2PasswordAccountStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2PasswordAccountStore.swift) | 服务端生成新 UUID 并插入资料；不是既有账号权限撤销入口 |
-| 展示资料更新 | [PostgresV2ProfileUpdateStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ProfileUpdateStore.swift)、[V2PublicIdentityAccountStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2PublicIdentityAccountStore.swift) | 修改名字/头像/资料修订，不修改 state、special 状态或收发权限，无需为展示变更撤销发送授权 |
-| 特殊账号类型、状态及收发开关 | 当前应用无写入 special_accounts 的入口；[V2SpecialAccountMessagingService](../../IMV2Server/Sources/IMV2ServerInfrastructure/V2SpecialAccountMessagingService.swift) 读取设置、写消息操作与审计 | 不能把“当前没有应用写者”解释成该表不可变或支持管理员在线直接修改 |
+| 控制事实 | 当前入口 |
+| --- | --- |
+| 拉黑、好友关系 | `PostgresV2SocialRelationshipStore` 的当前策略操作入口，需要 Policy Owner |
+| 陌生人权限 | `PostgresV2AccountPreferenceOperationStore` 的陌生人偏好操作，需要 Policy Owner |
+| 账号停用 | `V2AccountDisableService`，需要 Policy Owner |
+| 新账号与展示资料 | 各自的账号／资料事务；展示字段变化不能直接等同于发送权限变化 |
 
-上述应用撤权入口的实际排空/缺失协调器/owner 不可达测试见[写者证据](verification-records.md#20260920-direct-authorization-policy-writers)。特权 SQL、外部部署系统对特殊账号设置的修改不在这批证据内；若增加在线管理入口，必须先阻止对应账号的新授权登记、排空 held，再修改控制事实。当前部署的进程故障与恢复组合仍单独验收，不因写者清点完成而关闭 D07。
-
+增加控制事实写入入口时，必须接入当前策略变更与内存更新流程。管理员直接 SQL 不能作为已受此流程保护的应用接口。
 
 ## 验证与剩余范围
 
-既有证据包括[普通发送](verification-records.md#20260920-direct-automatic-authorization)、[转发](verification-records.md#20260920-forward-automatic-authorization)、[进程强杀恢复](verification-records.md#20260920-direct-authorization-process-crash)、[撤权先完成](verification-records.md#20260920-forward-revocation-first)、[媒体窗口](verification-records.md#20260920-forward-media-window)和[Gateway 生命周期](verification-records.md#20260920-authorization-gateway-lifecycle)。历史记录中的迁移场景已取消；其余证据仍需按代码版本和部署范围解释。
+旧授权协议的[验证记录](verification-records.md)是历史证据，不能证明当前 Policy Owner 路径的正确性。历史测试中仍有直接调用旧发送夹具的构造，必须迁移到当前执行上下文；不得恢复生产兼容路径来满足旧夹具。
 
-当前剩余问题以[治理清单](status.md)为准。原邀请路由、授权/幂等/准入、终态保留及生产部署证据分别验收，不要求完成在线搬迁。
+当前部署、跨库转发、策略变更与提交恢复的验证以对应版本的实际测试结果和[治理清单](status.md)为准。删除旧协议不表示这些验证已经全部完成。

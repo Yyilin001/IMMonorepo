@@ -39,7 +39,7 @@ struct V2GatewayRoomActorCompositionTests {
             afterRoomSequence: 7, pageSize: 10) == page)
         #expect(try await client.subscribe(roomID: room, actorUserID: user) == subscription)
         let context = V2PreparedGroupEventPageEncodingContext(requestID: 1,
-            frameVersion: 21, compression: nil, maximumUncompressedPayloadBytes: 65_536,
+            frameVersion: UInt8(IMV2ProtocolVersion.current), compression: nil, maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1_024, maximumExpansionRatio: 64,
             maximumGroupEventPagePayloadBytes: 60_000,
             cache: .init(configuration: .init(maximumEntries: 1,

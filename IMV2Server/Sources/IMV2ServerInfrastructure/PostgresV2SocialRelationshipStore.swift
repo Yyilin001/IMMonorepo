@@ -1,3 +1,4 @@
+import IMV2ActorContracts
 import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
@@ -5,14 +6,46 @@ import Foundation
 import IMV2Core
 import SQLKit
 
+/// Social operation entrypoint. Policy mutations always execute through the bound Owner.
+public struct PostgresV2SocialRelationshipStore: Sendable {
+    private let persistence: V2PostgresSocialRelationshipPersistence
+    private let policyOwners: any V2PolicyMutationExecuting
+
+    package init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
+                 policyOwners: any V2PolicyMutationExecuting) {
+        persistence = .init(database: database, projectionDelivery: projectionDelivery)
+        self.policyOwners = policyOwners
+    }
+
+    public func socialOperationSnapshot(actorUserID: UserID, targetUserID: UserID) async throws -> V2SocialOperationSnapshot {
+        try await persistence.socialOperationSnapshot(actorUserID: actorUserID, targetUserID: targetUserID)
+    }
+
+    public func recoverSocialOperation(_ request: V2SocialOperationRecoveryRequest, now: Date) async throws -> V2SocialOperationRecoveryResult {
+        try await persistence.recoverSocialOperation(request, now: now)
+    }
+
+    public func submitSocialOperation(_ command:V2SocialOperationCommand) async throws -> V2SocialOperationRecoveryResult {
+        let result: V2SocialOperationRecoveryResult
+        do {
+            guard case .social(let value) = try await policyOwners.change(.social(command)) else {
+                throw V2SocialRelationshipStoreError.corruptPersistenceState
+            }
+            result = value
+        } catch V2PolicyAuthorizationLifecycleError.identityConflict { result = .fingerprintConflict }
+        if case .receipt(let receipt)=result,case .applied=receipt.outcome {
+            try await persistence.deliverProjection(users:[command.actorUserID,command.targetUserID],operationID:command.identity.operation.rawOperationID,kinds:["relationship","user_block"])
+        }
+        return result
+    }
+}
+
 /// 好友关系与拉黑状态的 PostgreSQL 权威实现。
 ///
 /// 同一用户对的所有变更都会获取与私聊房间创建相同的咨询锁，
 /// 因此拉黑、关系跃迁与私聊准入观察到的是同一份有序状态，而不是一组尽力而为的读取结果。
-public struct PostgresV2SocialRelationshipStore: Sendable {
+package struct V2PostgresSocialRelationshipPersistence: Sendable {
     private let database: any Database
-    private var policyOwners: (any V2PolicyMutationExecuting)?
-    private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
     private let projectionDelivery: any V2UserShardProjectionDelivering
 
     /// 组合数据库与当前用户分片投影投递器。
@@ -20,17 +53,11 @@ public struct PostgresV2SocialRelationshipStore: Sendable {
     /// - Parameters:
     ///   - database: 存放关系、拉黑与偏好设置的数据库。
     ///   - projectionDelivery: 用于把控制面投影投递到当前用户分片的实现。
-    public init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
-        authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
+    package init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering) {
         self.database = database
-        self.policyOwners = nil
-        self.authorizationCoordinator = authorizationCoordinator
         self.projectionDelivery = projectionDelivery
     }
 
-    package func usingPolicyOwners(_ owners: any V2PolicyMutationExecuting) -> Self {
-        var copy = self; copy.policyOwners = owners; return copy
-    }
 
     /// 应用一次关系变更。
     ///
@@ -45,7 +72,7 @@ public struct PostgresV2SocialRelationshipStore: Sendable {
     /// - Throws: 标识非法、时刻不可编码或连接不支持 SQL 时抛出
     ///   ``V2SocialRelationshipStoreError/corruptPersistenceState``；
     ///   发起者账号无效时抛出 ``V2SocialRelationshipStoreError/actorInactive``。
-    private func applyRelationship(_ command:V2ChangeRelationshipCommand,transaction:any Database,now:Date,policyMutation:V2PolicyMutationContext? = nil) async throws -> V2RelationshipOutcome {
+    private func applyRelationship(_ command:V2ChangeRelationshipCommand,transaction:any Database,now:Date) async throws -> V2RelationshipOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let actorID = try socialUUID(command.actorUserID)
             let targetID = try socialUUID(command.targetUserID)
@@ -71,22 +98,18 @@ public struct PostgresV2SocialRelationshipStore: Sendable {
             switch command.action {
             case .request:
                 guard existing == nil else { return .invalidState }
-                try await drainBeforeMutation(.pair(actorID, targetID), policyMutation: policyMutation, transaction: transaction, now: now)
                 try await sql.raw("INSERT INTO im_v2.user_relationships (lower_user_id, higher_user_id, state, requested_by_user_id, updated_at) VALUES (\(bind: pair.lower), \(bind: pair.higher), 'pending', \(bind: actorID), \(bind: now))").run()
                 result = (.pending, actorID)
             case .accept:
                 guard let existing, existing.state == "pending", existing.requestedByUserID == targetID else { return .invalidState }
-                try await drainBeforeMutation(.pair(actorID, targetID), policyMutation: policyMutation, transaction: transaction, now: now)
                 try await sql.raw("UPDATE im_v2.user_relationships SET state = 'accepted', updated_at = \(bind: now) WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
                 result = (.accepted, nil)
             case .reject:
                 guard let existing, existing.state == "pending", existing.requestedByUserID == targetID else { return .invalidState }
-                try await drainBeforeMutation(.pair(actorID, targetID), policyMutation: policyMutation, transaction: transaction, now: now)
                 try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
                 result = (.none, nil)
             case .remove:
                 guard existing != nil else { return .invalidState }
-                try await drainBeforeMutation(.pair(actorID, targetID), policyMutation: policyMutation, transaction: transaction, now: now)
                 try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher)").run()
                 result = (.none, nil)
             }
@@ -115,7 +138,7 @@ public struct PostgresV2SocialRelationshipStore: Sendable {
     /// - Throws: 标识非法、时刻不可编码或连接不支持 SQL 时抛出
     ///   ``V2SocialRelationshipStoreError/corruptPersistenceState``；
     ///   发起者账号无效时抛出 ``V2SocialRelationshipStoreError/actorInactive``。
-    private func applyUserBlock(_ command:V2ChangeUserBlockCommand,transaction:any Database,now:Date,policyMutation:V2PolicyMutationContext? = nil) async throws -> V2UserBlockOutcome {
+    private func applyUserBlock(_ command:V2ChangeUserBlockCommand,transaction:any Database,now:Date) async throws -> V2UserBlockOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             let actorID = try socialUUID(command.actorUserID)
             let targetID = try socialUUID(command.targetUserID)
@@ -126,7 +149,6 @@ public struct PostgresV2SocialRelationshipStore: Sendable {
             guard try await socialUserIsActive(actorID, sql: sql) else {
                 throw V2SocialRelationshipStoreError.actorInactive
             }
-            try await drainBeforeMutation(.pair(actorID, targetID), policyMutation: policyMutation, transaction: transaction, now: now)
             var relationshipWasRemoved = false
             if command.action == .block {
                 relationshipWasRemoved = try await sql.raw("DELETE FROM im_v2.user_relationships WHERE lower_user_id = \(bind: pair.lower) AND higher_user_id = \(bind: pair.higher) RETURNING lower_user_id").first(decoding: DeletedRelationshipRow.self) != nil
@@ -255,7 +277,7 @@ public struct PostgresV2SocialRelationshipStore: Sendable {
         return Dictionary(uniqueKeysWithValues: rows.map { ($0.userID, $0) })
     }
 
-    private func deliverProjection(users: [UserID], operationID: String, kinds: Set<String>) async throws {
+    fileprivate func deliverProjection(users: [UserID], operationID: String, kinds: Set<String>) async throws {
         let eventID = try EventID(operationID)
         for userID in Set(users) {
             _ = try await projectionDelivery.deliverToCurrentShard(userID: userID, sourceEventID: eventID, projectionKinds: kinds)
@@ -294,7 +316,7 @@ private func socialUUID<Tag>(_ identifier: V2Identifier<Tag>) throws -> UUID whe
 private func socialPair(_ lhs: UUID, _ rhs: UUID) -> (lower: UUID, higher: UUID, lockKey: String) { let left = lhs.uuidString.lowercased(); let right = rhs.uuidString.lowercased(); return left < right ? (lhs, rhs, "\(left)|\(right)") : (rhs, lhs, "\(right)|\(left)") }
 private func socialUserAddPreferenceLockKey(_ userID: UUID) -> String { "v2-user-add-preference:\(userID.uuidString.lowercased())" }
 
-extension PostgresV2SocialRelationshipStore {
+extension V2PostgresSocialRelationshipPersistence {
     public func socialOperationSnapshot(actorUserID:UserID,targetUserID:UserID) async throws -> V2SocialOperationSnapshot {
         guard actorUserID != targetUserID else { throw V2SocialOperationValidationError.invalidSnapshot }
         return try await v2WithPostgresTransactionRetry(database:database) { transaction in
@@ -309,36 +331,16 @@ extension PostgresV2SocialRelationshipStore {
             return try await V2SocialOperationSnapshot(actorUserID:actorUserID,targetUserID:targetUserID,relationshipState:state,requestedByUserID:state == .pending ? relation.map{UserID(uuid:$0.requestedByUserID)}:nil,relationshipRevision:revision(kind:.relationship,actor:actor,target:target,sql:sql),isBlocked:blocked,blockRevision:revision(kind:.userBlock,actor:actor,target:target,sql:sql))
         }
     }
-    public func submitSocialOperation(_ command:V2SocialOperationCommand,now:Date) async throws -> V2SocialOperationRecoveryResult {
-        let result: V2SocialOperationRecoveryResult
-        if let policyOwners {
-            do {
-                guard case .social(let value) = try await policyOwners.change(.social(command)) else {
-                    throw V2SocialRelationshipStoreError.corruptPersistenceState
-                }
-                result = value
-            } catch V2PolicyAuthorizationLifecycleError.identityConflict { result = .fingerprintConflict }
-        } else {
-            let started = ContinuousClock.now
-            result = try await v2WithPostgresTransactionRetry(database: database) { transaction in
-                try await applySocialOperation(command, now: now, started: started, transaction: transaction, policyMutation: nil)
-            }
-        }
-        if case .receipt(let receipt)=result,case .applied=receipt.outcome {
-            try await deliverProjection(users:[command.actorUserID,command.targetUserID],operationID:command.identity.operation.rawOperationID,kinds:["relationship","user_block"])
-        }
-        return result
-    }
     package func applyPolicyOperation(_ command: V2SocialOperationCommand, now: Date,
                                       context: V2PolicyMutationContext) async throws -> V2SocialOperationRecoveryResult {
         let mutation = V2DurablePolicyMutation.social(command)
         try context.require(scope: mutation.scope, operationKey: mutation.operationKey, fingerprint: mutation.fingerprint)
         return try await applySocialOperation(command, now: now, started: .now,
-            transaction: context.transaction, policyMutation: context)
+            transaction: context.transaction)
     }
 
     private func applySocialOperation(_ command: V2SocialOperationCommand, now: Date, started: ContinuousClock.Instant,
-        transaction: any Database, policyMutation: V2PolicyMutationContext?) async throws -> V2SocialOperationRecoveryResult {
+        transaction: any Database) async throws -> V2SocialOperationRecoveryResult {
             guard let sql=transaction as? any SQLDatabase else { throw V2SocialRelationshipStoreError.corruptPersistenceState }
             try await lockSocialOperation(command.identity,sql:sql)
             if let prior=try await socialOriginal(command.identity,fingerprint:command.fingerprint,sql:sql) { return prior }
@@ -362,14 +364,14 @@ extension PostgresV2SocialRelationshipStore {
             let outcome:V2SocialOperationTerminalOutcome
             switch command.action {
             case .relationship(let action):
-                switch try await applyRelationship(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock,policyMutation:policyMutation) {
+                switch try await applyRelationship(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock) {
                 case .changed(let value):outcome = .applied(.relationship(state:value.resultingState,revision:observed+1))
                 case .invalidState:outcome = .rejected(.invalidState)
                 case .forbidden:outcome = .rejected(.permissionDenied)
                 case .idempotent,.idempotencyConflict:throw V2SocialRelationshipStoreError.corruptPersistenceState
                 }
             case .userBlock(let action):
-                switch try await applyUserBlock(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock,policyMutation:policyMutation) {
+                switch try await applyUserBlock(.init(actorUserID:command.actorUserID,operationID:.init(command.identity.operation.rawOperationID),targetUserID:command.targetUserID,action:action),transaction:transaction,now:clock) {
                 case .changed(let value):outcome = .applied(.userBlock(isBlocked:value.isBlocked,revision:observed+1))
                 case .idempotent,.idempotencyConflict:throw V2SocialRelationshipStoreError.corruptPersistenceState
                 }
@@ -377,20 +379,6 @@ extension PostgresV2SocialRelationshipStore {
             let receipt=try await socialPersist(command.identity,command.fingerprint,outcome,at:UInt64(ms),sql:sql)
             guard receipt.validates(command:command) else { throw V2SocialOperationValidationError.invalidReceipt }
             return .receipt(receipt)
-    }
-
-    private func drainBeforeMutation(_ scope: V2DirectAuthorizationRevocationScope, policyMutation: V2PolicyMutationContext?,
-                                    transaction: any Database, now: Date) async throws {
-        if policyMutation != nil {
-            // Cutover must retire old intents. Never wait on remote work while
-            // holding this transaction, or silently permit mixed authorities.
-            guard try await PostgresV2DirectAuthorizationIntentStore(database: transaction)
-                .held(in: scope, limit: 1, transaction: transaction).isEmpty else {
-                throw V2DirectAuthorizationCoordinationError.revocationIncomplete
-            }
-        } else {
-            try await v2DrainDirectAuthorizations(scope, coordinator: authorizationCoordinator, transaction: transaction, now: now)
-        }
     }
 
     public func recoverSocialOperation(_ request:V2SocialOperationRecoveryRequest,now:Date) async throws -> V2SocialOperationRecoveryResult {

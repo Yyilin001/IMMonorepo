@@ -37,7 +37,7 @@ struct PostgresV2PolicyOwnerStateReader: Sendable {
         }
         switch scope {
         case .account(let user):
-            try await v2AcquireOrderedDirectAuthorizationLocks(["account-state:" + user.uuidString], shared: true, sql: sql)
+            try await v2AcquireOrderedPolicyStateLocks(["account-state:" + user.uuidString], shared: true, sql: sql)
             // One round trip acquires both row-lock sets in the established
             // profile -> special-account order. Consume both CTEs, including
             // an empty special-account set. Facts are deliberately read by
@@ -67,14 +67,14 @@ struct PostgresV2PolicyOwnerStateReader: Sendable {
             return .account(.init(userID: user, isActive: row.active, specialKind: row.kind, specialStatus: row.status,
                 allowsServiceMessages: row.service, allowsCustomerMessages: row.customer))
         case .stranger(let user):
-            try await v2AcquireOrderedDirectAuthorizationLocks(["v2-stranger-message-preference:" + user.uuidString.lowercased()], shared: true, sql: sql)
+            try await v2AcquireOrderedPolicyStateLocks(["v2-stranger-message-preference:" + user.uuidString.lowercased()], shared: true, sql: sql)
             guard let row = try await sql.raw("SELECT COALESCE((SELECT allows_stranger_messages FROM \(unsafeRaw: schema).user_stranger_message_preferences WHERE user_id=\(bind: user)),true) AS strangers").first(decoding: StrangerRow.self) else {
                 throw V2PolicyAuthorizationLifecycleError.corruptPersistence
             }
             return .stranger(.init(userID: user, allowsStrangers: row.strangers))
         case .pair(let first, let second):
             let key = [first, second].map { $0.uuidString.lowercased() }.sorted().joined(separator: "|")
-            try await v2AcquireOrderedDirectAuthorizationLocks([key], shared: true, sql: sql)
+            try await v2AcquireOrderedPolicyStateLocks([key], shared: true, sql: sql)
             guard let row = try await sql.raw("""
                 SELECT EXISTS(SELECT 1 FROM \(unsafeRaw: schema).user_blocks
                     WHERE (blocker_user_id=\(bind: first) AND blocked_user_id=\(bind: second))

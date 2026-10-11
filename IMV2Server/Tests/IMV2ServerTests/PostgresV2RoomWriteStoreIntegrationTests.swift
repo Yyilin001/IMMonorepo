@@ -147,6 +147,42 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    func assertRetiredDirectAuthorizationSchemaAbsent(on sql: any SQLDatabase) async throws {
+        for name in ["direct_authorization_intents", "direct_authorization_receipts",
+                     "direct_authorization_intents_pkey", "direct_authorization_receipts_pkey",
+                     "direct_authorization_held_sender_idx", "direct_authorization_held_recipient_idx"] {
+            #expect(try await count("pg_catalog.pg_class WHERE oid = to_regclass('im_v2." + name + "')", on: sql) == 0)
+        }
+        #expect(try await count("pg_catalog.pg_proc WHERE pronamespace=to_regnamespace('im_v2') AND proname IN ('guard_direct_authorization_intent','reject_direct_authorization_receipt_mutation')", on: sql) == 0)
+    }
+
+    @Test("startup rejects a recreated retired message rejection ledger")
+    func schemaReadinessRejectsRetiredDirectDenials() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
+            try await V2SchemaReadiness.verify(database: database)
+            try await assertSQLSchemaGate(true, on: sql)
+            try await sql.raw("CREATE TABLE im_v2.direct_message_denials (obsolete integer)").run()
+            try await assertSQLSchemaGate(false, on: sql)
+            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.direct_message_denials.retired")) {
+                try await V2SchemaReadiness.verify(database: database)
+            }
+        }
+    }
+
+    @Test("current startup requires room state without requiring retired authorization tables")
+    func schemaReadinessDoesNotRequireRetiredAuthorizationTables() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            try await V2SchemaReadiness.verify(database: database)
+            try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+            try await V2SchemaReadiness.verify(database: database)
+            try await sql.raw("ALTER TABLE im_v2.rooms RENAME TO missing_required_rooms").run()
+            await #expect(throws: V2SchemaReadinessError.unavailableTable("im_v2.rooms")) {
+                try await V2SchemaReadiness.verify(database: database)
+            }
+        }
+    }
+
     @Test("startup rejects obsolete room and completion delivery selectors", arguments: ["rooms", "message_send_completions"])
     func schemaReadinessRejectsDeliverySelectors(_ table: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
@@ -190,8 +226,9 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                         firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 destination = room.roomID
             }
-            let service = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled), capacityProfile: profile, limits: .init(maxUTF8Bytes: 128), now: { now })
+            let service = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database,
+                strangerMessagePolicy: .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled), shardID: "room-a", epoch: 0), capacityProfile: profile, limits: .init(maxUTF8Bytes: 128), now: { now })
             // A first direct send may publish a private capability change;
             // public content must never add a personal message copy.
             let initialUserRows = try await count("im_v2.user_sync_log WHERE projection_kind NOT IN ('direct_sending_capability', 'direct_room_profile')", on: sql)
@@ -266,7 +303,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
             let service = V2SendMessageService(
-                store: PostgresV2RoomWriteStore(database: database),
+                store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 128),
                 now: { base }
@@ -1217,16 +1255,16 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 let direct = try V2DirectRoomOperationTestFixture(store: PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery()), capacityProfile: profile, roomShardID: "room-a", now: { time })
                 let room = try await direct.openedIdentity(actorUserID: .init(uuid: actor), operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID), firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(time))
                 if offset == 0 { primaryRoom = try #require(room.roomID.uuidValue) }
-                let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { time })
+                let sender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { time })
                 guard case .accepted = try await sender.send(.init(roomID: room.roomID, actorUserID: .init(uuid: actor), clientMessageID: .init(uuid: UUID()), text: "propagation retry")) else { throw CancellationError() }
                 let operation = offset == 0 ? primary : healthy
                 if path == "profile" {
                     let directory = V2PostgresPublicIdentityDirectory(database: database, policy: try .init(maximumQueries: 10, window: 60), makeUUID: { operation }, now: { time })
                     _ = try await directory.updateDisplayName(for: .init(uuid: actor), displayName: "Retry profile \(offset)")
                 } else {
-                    let preferences = PostgresV2AccountPreferenceOperationStore(database: database,
-                        projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator:
-                            V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: ["room-a": database]))
+                    let preferences = V2PostgresAccountPreferencePersistence(database: database,
+                        projectionDelivery: SuccessfulProjectionDelivery())
                     guard case .receipt(let proof) = try await preferences.executePreferenceFixture(owner: .init(uuid: actor),
                         operation: .readReceiptPreference(.init(uuid: operation)),
                         value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: time),
@@ -1481,7 +1519,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             try await resource.seedPlacement(mediaID: media.uuidValue!, roomID: roomID,
                 bytes: Data(repeating: 7, count: 42), sql: sourceSQL, now: base)
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
-            let sender = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB), capacityProfile: profile, limits: limits, now: { base })
+            let sender = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: sourceDB, controlDatabase: sourceDB,
+                store: PostgresV2RoomWriteStore(database: sourceDB), shardID: "room-a", epoch: 0), capacityProfile: profile, limits: limits, now: { base })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "forward deadline", media: [.init(mediaID: media)])) else { throw CancellationError() }
             let exporter = PostgresV2ForwardExportStore(database: sourceDB)
             let operation = MessageForwardOperationID(uuid: UUID())
@@ -1576,7 +1615,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
             let ready = try await snapshot()
             #expect(try await importer.complete(old, receipt: receipt, result: .passed, now: Date(timeIntervalSince1970: .nan)) == false)
             #expect(try await snapshot() == ready)
-            let accepted = try await PostgresV2RoomWriteStore(database: targetDB).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: recoveredAt), now: recoveredAt)
+            let accepted = try await V2PolicyAuthorizedTestWriteStore(database: targetDB, controlDatabase: sourceDB,
+                store: PostgresV2RoomWriteStore(database: targetDB), shardID: "room-b", epoch: 0).importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: recoveredAt), now: recoveredAt)
             guard case .accepted = accepted else { throw CancellationError() }
             #expect(try await count("im_v2.messages", on: targetSQL) == 1)
             #expect(try await count("im_v2.message_media_references", on: targetSQL) == 1)

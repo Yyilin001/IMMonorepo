@@ -25,7 +25,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writes = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                 .usingControlDatabase(control)
-            let seed = try V2SendMessageService(store: writes, capacityProfile: profile, limits: .init(maxUTF8Bytes: 64))
+            let seed = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: owner,
+                controlDatabase: control, store: writes, shardID: "room-b", epoch: 0), capacityProfile: profile, limits: .init(maxUTF8Bytes: 64))
             for user in [senderID, UserID(uuid: memberTwoUUID)] {
                 guard case .accepted = try await seed.send(.init(roomID: opened.roomID, actorUserID: user,
                     clientMessageID: .init(uuid: UUID()), text: "establish conversation")) else {
@@ -33,9 +34,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             try await controlSQL.raw("INSERT INTO im_v2.user_stranger_message_preferences VALUES (\(bind: memberTwoUUID),false,clock_timestamp())").run()
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
                 policyOwners: owners, endpoint: "room-b", maximumRooms: 1)
             let sendDatabase = try V2EventLoopBalancedDatabase(databases: [owner],
@@ -73,11 +73,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count == 2)
                 try await controlSQL.raw("ALTER TABLE im_v2.stranger_reply_hidden RENAME TO user_stranger_message_preferences").run()
                 hidden = false
-                let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
-                    authorizationCoordinator: legacy).usingPolicyOwners(owners)
+                let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
                 let block = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                     operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: Date())
-                _ = try await social.submitSocialOperation(block, now: Date())
+                _ = try await social.submitSocialOperation(block)
                 let response = try await host.invoke(token: token, encodedRequest: repliedRequest(room: opened.roomID), deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let receipt))) = response else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 #expect(receipt.outcome == .rejected(.directPolicyDenied))

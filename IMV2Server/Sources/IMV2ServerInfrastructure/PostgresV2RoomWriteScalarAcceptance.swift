@@ -49,10 +49,10 @@ struct V2RoomWriteScalarAcceptancePath {
             } else {
                 forwardSourceRoomID = nil
             }
-            if ownerGuard.forwardOwnerSourceRoomID == nil || ownerGuard.authorizationGrants != nil {
+            if ownerGuard.forwardOwnerSourceRoomID == nil {
                 if let fenceContext, let activationScope = ownerGuard.activationScope,
                    command.forwardedFrom == nil, importedForward == nil,
-                   ownerGuard.forwardOwnerSourceRoomID == nil, ownerGuard.authorizationGrants == nil {
+                   ownerGuard.forwardOwnerSourceRoomID == nil {
                     try await fenceContext.requireSelectedOwnersAndActivations(
                         roomIDs: [roomID], expectedRoutes: ownerGuard.ownerRoutes,
                         expectedKinds: ownerGuard.controlScopeRoomKinds, scope: activationScope)
@@ -86,33 +86,16 @@ struct V2RoomWriteScalarAcceptancePath {
                 let context = try policyContext.directMessageContext(from: loadedContext.directPolicySnapshot(), roomID: roomID, senderID: senderID)
                 directContext = context
                 if let restriction = context.restriction {
-                    if V2SendSuccessMetadata.current.contains(where: {
-                        $0.room == roomID && $0.sender == senderID && $0.operation == clientMessageID
-                    }) {
-                        // The rejected operation has no durable result. Its
-                        // sender-only room hint is a separate presentation fact.
-                        try await persistDirectRestrictionHint(
-                            roomUUID: roomID, senderID: senderID,
-                            clientMessageID: clientMessageID,
-                            nextTimelineSequence: try roomWriteNextSequence(room.timelineSequence),
-                            createdAt: now, reason: restriction,
-                            currentCanSend: context.senderCanSend, sql: sql)
-                        throw V2SendOperationResponseError.directPolicyDenied
-                    }
-                    let denied = try await persistDirectMessageDenied(
-                        fingerprint: command.fingerprint,
-                        roomID: command.roomID,
-                        roomUUID: roomID,
-                        senderID: senderID,
+                    // Only the sender's presentation hint is persisted. The
+                    // sendOperation caller converts this error to an ephemeral
+                    // rejection and commits its surrounding transaction.
+                    try await persistDirectRestrictionHint(
+                        roomUUID: roomID, senderID: senderID,
                         clientMessageID: clientMessageID,
-                        sourceEventID: try scalarAcceptanceUUID(identifiers.eventID),
                         nextTimelineSequence: try roomWriteNextSequence(room.timelineSequence),
-                        createdAt: now,
-                        reason: restriction,
-                        currentCanSend: context.senderCanSend,
-                        sql: sql
-                    )
-                    return .init(outcome: .denied(denied))
+                        createdAt: now, reason: restriction,
+                        currentCanSend: context.senderCanSend, sql: sql)
+                    throw V2SendOperationResponseError.directPolicyDenied
                 }
             } else {
                 directContext = nil
@@ -351,47 +334,6 @@ extension V2RoomWriteScalarAcceptancePath {
             createdAtMilliseconds: milliseconds, timelineSequence: timelineSequence, sql: sql)
     }
 
-    /// Legacy scalar sends retain their original per-command denial identity.
-    func persistDirectMessageDenied(
-        fingerprint: V2SendMessageFingerprint,
-        roomID: RoomID,
-        roomUUID: UUID,
-        senderID: UUID,
-        clientMessageID: UUID,
-        sourceEventID: UUID,
-        nextTimelineSequence: UInt64,
-        createdAt: Date,
-        reason: V2DirectMessageDenied.Reason,
-        currentCanSend: Bool?,
-        sql: any SQLDatabase
-    ) async throws -> V2DirectMessageDenied {
-        // 保留下方原生 Date 绑定，但对外返回未来重放时会解码出的确切时间。
-        // 重新绑定已解码的 Date 可能再次损失一微秒，因此响应规范化不能改动持久化值。
-        let persistedCreatedAt = try roomWritePersistedDate(createdAt)
-        let createdAtMilliseconds = try v2GatewayMilliseconds(persistedCreatedAt)
-        let timelineSequence = try scalarAcceptanceSigned(nextTimelineSequence)
-        let activityType = directMessageTimelineActivityType(for: reason)
-        try await sql.raw("UPDATE im_v2.rooms SET timeline_sequence = \(bind: timelineSequence) WHERE room_id = \(bind: roomUUID)").run()
-        // 拒绝记录引用其私有时间线活动。先插入被引用的事实；
-        // 两条记录仍在外围消息事务中原子提交。
-        try await sql.raw("INSERT INTO im_v2.room_timeline_activities (source_event_id, room_id, timeline_sequence, activity_type, recipient_user_id, created_at) VALUES (\(bind: sourceEventID), \(bind: roomUUID), \(bind: timelineSequence), \(bind: activityType), \(bind: senderID), \(bind: createdAt))").run()
-        try await sql.raw("INSERT INTO im_v2.direct_message_denials (sender_user_id, client_message_id, room_id, source_event_id, timeline_sequence, created_at, reason, fingerprint_version, request_fingerprint) VALUES (\(bind: senderID), \(bind: clientMessageID), \(bind: roomUUID), \(bind: sourceEventID), \(bind: timelineSequence), \(bind: createdAt), \(bind: reason.rawValue), \(bind: Int16(fingerprint.version)), \(bind: fingerprint.digest))").run()
-        let activityPayload = try JSONSerialization.data(withJSONObject: ["event_type": activityType, "room_id": roomUUID.uuidString, "timeline_sequence": timelineSequence, "server_created_at_ms": createdAtMilliseconds])
-        try await enqueuePrivateStateEvent(sourceRoomID: roomUUID, userID: senderID, sourceEventID: sourceEventID, projectionKind: "timeline_activity", payload: activityPayload, createdAt: createdAt, sql: sql)
-        try await appendDirectSendingCapabilityIfChanged(
-            roomID: roomUUID,
-            recipientID: senderID,
-            sourceEventID: sourceEventID,
-            canSend: false,
-            currentCanSend: currentCanSend,
-            createdAt: createdAt,
-            createdAtMilliseconds: createdAtMilliseconds,
-            timelineSequence: timelineSequence,
-            sql: sql
-        )
-        return .init(roomID: roomID, sourceEventID: .init(uuid: sourceEventID), timelineSequence: nextTimelineSequence, createdAt: persistedCreatedAt, reason: reason)
-    }
-
     /// 公开的拒绝原因刻意隐藏了究竟是拉黑、陌生人偏好还是失活的特殊账号导致了拒绝。
     ///
     /// 私有时间线仍使用 SQLite 消费、PostgreSQL 约束的稳定投影词汇表。
@@ -560,7 +502,6 @@ struct V2RoomWriteSelectedOwnerGuard {
     var ownerRoutes: [UUID: V2RoomShardRoute]? { ownerSelection.routes }
     var activationScope: V2RoomActivationWriteScope? { ownerSelection.activation }
     var forwardOwnerSourceRoomID: UUID? { ownerSelection.forwardSource }
-    var authorizationGrants: [String: V2DirectAuthorizationGrant]? { controlResolution.authorization?.grants }
     var controlScopeRoomKinds: [UUID: String]? { controlResolution.roomKinds }
 
     func acquireMessageOperationLock(roomID: UUID, senderID: UUID, clientMessageID: UUID,
@@ -574,21 +515,13 @@ struct V2RoomWriteSelectedOwnerGuard {
     }
 
     func prepareAuthorization(roomID: UUID, senderID: UUID, clientMessageID: UUID, sql: any SQLDatabase) async throws {
-        if let execution = controlResolution.policyExecution {
-            guard let activationScope, try activationScope.token(for: roomID) == execution.activation else {
-                throw V2RoomActivationLeaseError.activationChanged
-            }
-            try await execution.requireActive(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID, sql: sql)
-            return
+        guard let execution = controlResolution.policyExecution else {
+            throw V2ActorContractError.invalidConfiguration("message policy execution required")
         }
-        guard let grants = authorizationGrants else { return }
-        if controlScopeRoomKinds?[roomID] == "group" { return }
-        let key = scalarAuthorizationOperationKey(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID)
-        guard let grant = grants[key], let transaction = sql as? any Database else {
-            throw V2DirectAuthorizationIntentError.identityConflict
+        guard let activationScope, try activationScope.token(for: roomID) == execution.activation else {
+            throw V2RoomActivationLeaseError.activationChanged
         }
-        let prior = try await PostgresV2DirectAuthorizationReceiptStore().checkAttempt(grant.attempt, transaction: transaction)
-        guard prior?.disposition != .aborted else { throw V2DirectAuthorizationReceiptError.attemptAborted }
+        try await execution.requireActive(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID, sql: sql)
     }
 
     /// 校验给定房间的归属路由均已选定。
@@ -638,21 +571,9 @@ struct V2RoomWriteSelectedOwnerGuard {
                 throw V2RoomOwnerFenceError.ownerChanged
             }
         }
-        if let grants = authorizationGrants {
-            guard let transaction = sql as? any Database else { throw V2DirectAuthorizationIntentError.corruptPersistence }
-            for key in grants.keys.sorted() {
-                guard let grant = grants[key], rooms.contains(grant.attempt.roomID) else { continue }
-                let prior = try await PostgresV2DirectAuthorizationReceiptStore().prepare(grant.attempt, transaction: transaction)
-                guard prior?.disposition != .aborted else { throw V2DirectAuthorizationReceiptError.attemptAborted }
-            }
-        }
         // 没有选定路由时，缺失房间沿用接受路径的普通领域错误。
     }
 
-}
-
-private func scalarAuthorizationOperationKey(roomID: UUID, senderID: UUID, clientMessageID: UUID) -> String {
-    [roomID, senderID, clientMessageID].map { $0.uuidString.lowercased() }.joined(separator: ":")
 }
 
 private func scalarAcceptanceSigned(_ value: UInt64) throws -> Int64 {

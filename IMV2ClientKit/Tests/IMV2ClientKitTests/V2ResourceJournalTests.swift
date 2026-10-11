@@ -57,7 +57,7 @@ struct V2ResourceJournalTests {
 
 @Suite("Durable resource recovery")
 struct V2ResourceRecoveryTests {
-    @Test(arguments:[false,true]) func onlyPermanentClosureAllowsOneFrozenReplacementAndKeepsItsSourceFile(mixedImports:Bool) async throws {
+    @Test(arguments:[false,true]) func onlyConfirmedRejectionAllowsOneFrozenReplacementAndKeepsItsSourceFile(mixedImports:Bool) async throws {
         let directory=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:directory,withIntermediateDirectories:true)
         defer { try? FileManager.default.removeItem(at:directory) }
@@ -91,8 +91,8 @@ struct V2ResourceRecoveryTests {
         try await store.claimResourceSendForRecovery(intent.clientMessageID,now:Date())
         await #expect(throws:V2ResourceJournalError.conflict) { _ = try await store.replaceProvenUnsentSendIntent(intent.id) }
         #expect(try await store.preparingSendIntents().isEmpty)
-        try await store.completeResourceSendFixture(intent.clientMessageID,result:.closed)
-        #expect(try await store.submittedSendIntents(in:room).first?.status == .closed)
+        try await store.completeResourceSendFixture(intent.clientMessageID,result:.rejected(.permissionDenied))
+        #expect(try await store.submittedSendIntents(in:room).first?.status == .rejected)
         if mixedImports {
             var fillers: [(UUID, V2ResourceImportRequest)] = []
             for _ in 0..<31 {
@@ -105,7 +105,7 @@ struct V2ResourceRecoveryTests {
                 _ = try await store.replaceProvenUnsentSendIntent(intent.id)
             }
             #expect(try await store.preparingSendIntents().isEmpty)
-            #expect(try await store.submittedSendIntents(in: room).first?.status == .closed)
+            #expect(try await store.submittedSendIntents(in: room).first?.status == .rejected)
             // A failed multi-resource replacement preserves the original and
             // rolls back the new intent and every partially inserted job.
             for (id, filler) in fillers {

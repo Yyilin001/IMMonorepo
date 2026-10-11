@@ -46,7 +46,7 @@ struct V2GatewayConnectionTimeoutsTests {
         .init(frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]),
               session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: TimeoutTestAuthenticator(),
                              capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
-              handler: TimeoutTestCommandHandler(), registry: V2DeviceConnectionRegistry())
+              handler: TimeoutTestCommandHandler(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
     }
 }
 

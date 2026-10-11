@@ -29,14 +29,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let operation = ClientMessageID(uuid: UUID())
             let first = try command(room: roomIDs[0], operation: operation, text: "room A same UUID")
             let second = try command(room: roomIDs[1], operation: operation, text: "room B same UUID")
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now }, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(database).usingPolicyAuthorizations(policies), clock: { now })
             try await withRoomActivation(database: database, roomID: roomIDs[0]) { firstToken in
                 try await withRoomActivation(database: database, roomID: roomIDs[1]) { secondToken in
                     let deadline = ContinuousClock.now + .seconds(30)
-                    let prepared = try await store.prepareOwnerBatches([
+                    let prepared = try await policies.prepareOwnerBatches(store: store, requests: [
                         .init(commands: [first], token: firstToken, deadline: deadline),
                         .init(commands: [second], token: secondToken, deadline: deadline)
                     ], now: { now })
@@ -48,14 +49,22 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                               case .accepted = receipt.outcome else { Issue.record("both room-scoped UUIDs must accept"); return }
                     }
                     let conflictOperation = ClientMessageID(uuid: UUID())
-                    let original = try command(room: roomIDs[1], operation: conflictOperation, text: "reserved immutable original")
-                    // Reserve a genuine control obligation without owner execution.
-                    // Changed content must isolate to this operation, not the
-                    // other room's replay or the neighbouring healthy fresh send.
-                    _ = try await store.prepareSendBatch([original], token: secondToken, deadline: deadline, now: { now })
+                    let original = try command(room: roomIDs[1], operation: conflictOperation, text: "committed immutable original")
+                    // The durable success identity is authoritative across rooms.
+                    // Preparation itself must not persist an authorization obligation.
+                    let originalPrepared = try await policies.prepareOwnerBatches(store: store, requests: [
+                        .init(commands: [original], token: secondToken, deadline: deadline)
+                    ], now: { now })
+                    let originalResults = try await store.executeIndependentRoomTurns(
+                        try originalPrepared.map { try $0.get() }, capacityProfile: profile,
+                        identifiers: .init(), now: { now })
+                    guard case .sendOperation(.receipt(let originalReceipt))? = try originalResults[0].get().first,
+                          case .accepted = originalReceipt.outcome else {
+                        Issue.record("original identity must commit before conflicting replay"); return
+                    }
                     let changed = try command(room: roomIDs[1], operation: conflictOperation, text: "conflicting immutable content")
                     let healthy = try command(room: roomIDs[1], operation: .init(uuid: UUID()), text: "healthy fresh neighbour")
-                    let mixed = try await store.prepareOwnerBatches([
+                    let mixed = try await policies.prepareOwnerBatches(store: store, requests: [
                         .init(commands: [first], token: firstToken, deadline: deadline),
                         .init(commands: [healthy], token: secondToken, deadline: deadline),
                         .init(commands: [changed], token: secondToken, deadline: deadline),
@@ -74,12 +83,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                               case .accepted = receipt.outcome else { Issue.record("replay and healthy item must survive conflict"); return }
                     }
                     guard case .sendOperation(.fingerprintConflict)? = try results[2].get().first else {
-                        Issue.record("the reserved control fingerprint must remain authoritative"); return
+                        Issue.record("the committed success fingerprint must remain authoritative"); return
                     }
                     let facts = try #require(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.messages").first(decoding: OwnerPreparationCount.self))
-                    #expect(facts.value == 3)
-                    let obligations = try #require(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.direct_authorization_intents").first(decoding: OwnerPreparationCount.self))
-                    #expect(obligations.value == 4)
+                    #expect(facts.value == 4)
+                    let obligations = try #require(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')").first(decoding: OwnerPreparationCount.self))
+                    #expect(obligations.value == 0)
                 }
             }
         }

@@ -81,7 +81,7 @@ struct V2RoomSubscriptionNetworkTests {
                 generation: 1, baselineSequence: 0)
             let authority = V2GatewayRoomSubscriptionAuthority()
             let connection = UUID(), lifecycle = UUID()
-            #expect(authority.registerConnection(connection, userID: user, lifecycle: lifecycle))
+            #expect(await authority.registerFixtureConnection(connection, userID: user, lifecycle: lifecycle))
             #expect(await authority.registerRoomInterest(connectionID: connection, lifecycle: lifecycle,
                 roomID: room, scopeGeneration: 1))
             let offered = Mutex<[V2GatewayRoomSubscriptionAuthority.Permit]>([])
@@ -130,7 +130,7 @@ struct V2RoomSubscriptionNetworkTests {
                 reports: [(largeRoom, 0)]).count == 1)
             let permit = try #require(offered.withLock { $0.first })
             #expect(permit.connectionID == connection && permit.lifecycle == lifecycle)
-            let initiallyAuthorized = authority.enqueueIfCurrent(permit, enqueue: {})
+            let initiallyAuthorized = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
             #expect(initiallyAuthorized)
             // New signed attempt after a lost ACK returns the actual checkpoint
             // without offering the body again.
@@ -142,7 +142,7 @@ struct V2RoomSubscriptionNetworkTests {
             let revoke = V2RoomSubscriptionDelivery(fence: fence, deliverySequence: 3, authorizationSequence: 2,
                 payload: .revoke(userID: user, memberRevision: 2))
             #expect(try await caller.sendRoomSubscription(revoke, sourceShardID: "rooms", to: first.descriptor) == .appliedThrough(3))
-            let authorizedAfterRevoke = authority.enqueueIfCurrent(permit, enqueue: {})
+            let authorizedAfterRevoke = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
             #expect(!authorizedAfterRevoke)
 
             // The business lease moves while the data owner remains epoch 0.
@@ -253,7 +253,7 @@ struct V2RoomSubscriptionNetworkTests {
             #expect(__isRemoteActor(remote))
             #expect(endpointID.node != callerSystem.cluster.node)
             callerSystem.cluster.join(host: "127.0.0.1", port: peerPort)
-            #expect(authority.registerConnection(UUID(), userID: user, lifecycle: UUID()))
+            #expect(await authority.registerFixtureConnection(UUID(), userID: user, lifecycle: UUID()))
             let owner = try V2RoomDataOwner(shardID: "rooms", epoch: 0)
             let rooms = (0..<3).map { _ in RoomID(uuid: UUID()) }
             let tokens = try Dictionary(uniqueKeysWithValues: rooms.map { room in

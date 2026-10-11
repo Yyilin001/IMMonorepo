@@ -42,9 +42,10 @@ struct GatewayJournalSourceCatalogTests {
                 endpointReference: Data([1]), address: "127.0.0.1", port: 9000), transport: transport,
                 readHeads: { Dictionary(uniqueKeysWithValues: $0.map { ($0, .available(0)) }) },
                 recovered: { Set($0.keys) }, coverageLost: { _, _ in })
-            let registry = V2DeviceConnectionRegistry()
-            let stream = V2GatewayByteStream(frameLimits: try .init(maximumPayloadBytes: 4096,
-                acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)]),
+            let frameLimits = try V2FrameLimits(maximumPayloadBytes: 4096,
+                acceptedVersions: [0, UInt8(IMV2ProtocolVersion.current)])
+            let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: frameLimits)
+            let stream = V2GatewayByteStream(frameLimits: frameLimits,
                 session: .init(limits: try .init(maximumInFlightRequests: 1),
                     authenticator: CatalogRecoveryAuthenticator(), capabilityProfile: "base",
                     commandAdmission: CatalogRecoveryAdmission()),

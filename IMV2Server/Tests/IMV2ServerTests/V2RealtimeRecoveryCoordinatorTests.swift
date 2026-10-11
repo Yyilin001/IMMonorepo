@@ -530,7 +530,7 @@ struct V2RealtimeRecoveryCoordinatorTests {
         writer: @escaping @Sendable (V2GatewayScopedNotificationWrite) async -> Bool
     ) async throws -> (V2RealtimeRecoveryConnectionContext, V2DeviceConnectionRegistry) {
         let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID()), connection = UUID()
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let version = UInt8(IMV2ProtocolVersion.current)
         let limits = try V2FrameLimits(maximumPayloadBytes: 4096, acceptedVersions: [0, version])
         let stream = V2GatewayByteStream(frameLimits: limits,
@@ -539,7 +539,7 @@ struct V2RealtimeRecoveryCoordinatorTests {
                 commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: RecoveryBoundaryHandler(), connectionID: connection, registry: registry)
         do {
-            try #require(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            try #require(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
                 scopedNotificationWriter: writer))
             var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello.deviceID = device.rawValue
             hello.clientHello.supportedProtocolVersions = [UInt32(version)]
@@ -560,7 +560,7 @@ struct V2RealtimeRecoveryCoordinatorTests {
 
     private func makeContext(lifecycle: UInt64) throws -> V2RealtimeRecoveryConnectionContext {
         let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID()), connection = UUID()
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 4096, acceptedVersions: [0, 1]),
             session: .init(limits: try .init(maximumInFlightRequests: 1),

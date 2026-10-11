@@ -33,7 +33,7 @@ struct V2RoomRefMessagingClientTests {
             text: "lost response", limits: .init(maxUTF8Bytes: 64)),
             firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
         let request = try V2MessageSendOperationRecoveryRequest(identity: command.identity,
-            fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query)
+            fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint)
         let receipt = try V2MessageSendOperationReceipt(identity: request.identity,
             fingerprint: request.fingerprint,
             outcome: .accepted(.init(messageID: .init(uuid: UUID()), roomSequence: 1)),

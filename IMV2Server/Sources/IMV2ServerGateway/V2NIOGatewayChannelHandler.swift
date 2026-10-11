@@ -785,6 +785,7 @@ struct V2GatewayForegroundWriteQueue: Sendable {
 /// 并只执行一次 flush，使解码器可以消费这些合并帧，
 /// 同时摊薄事件循环、系统调用与 TLS 记录的开销。
 final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
+    var eventLoop: any EventLoop { channel.eventLoop }
     /// Read from the actual EventLoop before optional author bytes are written.
     /// Body drain writes synchronously on that same loop, so an extracted body
     /// batch cannot be overtaken between this check and the optional write.

@@ -11,7 +11,7 @@ import Testing
 struct V2DeviceConnectionRegistryRevocationTests {
     @Test("all device sockets begin closing before a slow close can finish", .timeLimit(.minutes(1)))
     func closesDeviceSocketsConcurrently() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let device = try DeviceID("00000000-0000-0000-0000-000000000e01")
         let identity = V2AuthenticatedConnection(
             userID: try UserID("00000000-0000-0000-0000-000000000e02"),

@@ -126,8 +126,6 @@ def fact_sql(identity):
         AND sender_user_id='{values['accountID']}'::uuid AND client_message_id='{values['clientMessageID']}'::uuid
     ) SELECT json_build_object('databaseNow',extract(epoch FROM clock_timestamp()),
       'messages',(SELECT count(*) FROM m),'receipts',(SELECT count(*) FROM c),'completions',(SELECT count(*) FROM c),
-      'closures',(SELECT count(*) FROM im_v2.message_operation_closures WHERE room_id='{values['roomID']}'::uuid
-        AND sender_user_id='{values['accountID']}'::uuid AND client_message_id='{values['clientMessageID']}'::uuid),
       'exactAccepted',coalesce((SELECT c.operation_fingerprint=decode('{digest}','hex')
         AND c.operation_resolved_at_ms>0 AND c.fingerprint_version=3
         AND c.message_id=m.message_id AND c.room_sequence=m.room_sequence
@@ -139,7 +137,7 @@ def fact_sql(identity):
 
 def accepted_fact(value):
     return (all(type(value.get(key)) is int and value[key] == 1 for key in ('messages','receipts','completions'))
-            and value.get('closures') == 0 and value.get('exactAccepted') is True)
+            and value.get('exactAccepted') is True)
 
 
 def proof_matches(armed, fact, proof):

@@ -42,15 +42,15 @@ enum IMV2OperatorServerApp {
     private static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
         let configuration: V2OperatorReplayRuntimeConfiguration
-        let policyConfiguration: V2RoomActorApplicationConfiguration?
+        let policyConfiguration: V2RoomActorApplicationConfiguration
         do {
             let environment = ProcessRuntimeEnvironment()
             configuration = try V2OperatorReplayRuntimeConfiguration(environment: environment)
-            if environment.value(for: "IMV2_ROOM_ACTOR_CONFIGURATION_FILE") != nil {
-                let actor = try V2RoomActorApplicationConfiguration(environment: environment, hostsRooms: false,
-                    configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)))
-                policyConfiguration = actor.policyPlacement == nil ? nil : actor
-            } else { policyConfiguration = nil }
+            policyConfiguration = try V2RoomActorApplicationConfiguration(environment: environment, hostsRooms: false,
+                configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)))
+            guard policyConfiguration.policyPlacement != nil else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
         } catch {
             throw V2StagedOperationalError(stage: "operator_configuration", error: error)
         }
@@ -95,35 +95,10 @@ enum IMV2OperatorServerApp {
             let database: any Database = controlPool.database
             try await V2SchemaReadiness.verify(database: database)
             let deployment = PostgresV2PolicyDeploymentPlacementStore(database: database)
-            if let placement = policyConfiguration?.policyPlacement {
-                try await deployment.require(V2PolicyOwnerPlacement(placement))
-            } else { try await deployment.requireLegacy() }
-            // 解析操作不借用预留连接池或策略写入连接池。
-            // 控制回执与归属方中止操作可共用此专用物理连接池：
-            // 每笔事务结束后才开始下一笔。
-            var authorizationResolutionDatabases: [String: any Database] = [:]
-            for (index, url) in configuration.directAuthorizationResolutionDatabaseURLs.enumerated() {
-                let id = DatabaseID(string: "operator-authorization-resolution-\(index)")
-                resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
-                    maximumConnectionsPerEventLoop: 1), as: id)
-                let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: id, eventLoops: databaseEventLoops)
-                for member in pool.eventLoopDatabases {
-                    try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
-                }
-                authorizationResolutionDatabases[url] = pool.database
+            guard let placement = policyConfiguration.policyPlacement else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
-            guard let authorizationControlDatabase = authorizationResolutionDatabases[configuration.databaseURL] else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            let authorizationOwners = try Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map { storage in
-                guard let owner = authorizationResolutionDatabases[storage.databaseURL] else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
-                }
-                return (storage.shardID, owner)
-            })
-            let directAuthorizationCoordinator = V2DirectAuthorizationCoordinator(
-                controlDatabase: authorizationControlDatabase, ownerDatabases: authorizationOwners)
-
+            try await deployment.require(V2PolicyOwnerPlacement(placement))
             var shardDatabasesByURL: [String: any Database] = [
                 configuration.databaseURL: database
             ]
@@ -183,11 +158,10 @@ enum IMV2OperatorServerApp {
             }
             // Queue replay remains local; policy changes use the authenticated
             // caller only when owner authorization is configured.
-            if let policyConfiguration {
-                stage = "operator_policy_caller"
-                policyCaller = try await V2RoomActorApplication.start(configuration: policyConfiguration,
-                    ownerRouter: V2PostgresRoomShardRouter(database: database), roomDatabases: roomDatabases)
-            }
+            stage = "operator_policy_caller"
+            let caller = try await V2RoomActorApplication.start(configuration: policyConfiguration,
+                ownerRouter: V2PostgresRoomShardRouter(database: database), roomDatabases: roomDatabases)
+            policyCaller = caller
             let forwardReplay = try V2ForwardWorkOperatorReplayService(stores: forwardReplayStores,
                 operatorPrincipal: configuration.operatorPrincipal)
             let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
@@ -204,12 +178,9 @@ enum IMV2OperatorServerApp {
                 )
             ).register(on: app)
             V2VaporForwardWorkOperatorReplayRoutes(authenticator: configuration.authenticator, service: forwardReplay).register(on: app)
-            var disableService = try V2PostgresAccountDisableService(database: database,
+            let disableService = try V2PostgresAccountDisableService(
                 operatorPrincipal: configuration.accountDisableOperatorPrincipal,
-                authorizationCoordinator: directAuthorizationCoordinator)
-            if let policyCaller {
-                disableService = disableService.usingPolicyOwners(try await policyCaller.policyMutationExecutor())
-            }
+                policyOwners: try await caller.policyMutationExecutor())
             V2VaporAccountDisableOperatorRoutes(authenticator: configuration.accountDisableAuthenticator,
                 service: disableService).register(on: app)
             V2VaporDeviceSnapshotResetOperatorRoutes(

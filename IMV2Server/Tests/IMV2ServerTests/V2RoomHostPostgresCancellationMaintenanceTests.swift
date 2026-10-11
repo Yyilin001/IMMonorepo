@@ -54,8 +54,8 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     deadline: .now + .seconds(15)) }
                 try await cancelMaintenanceWaitUntil {
                     let waiting = try await cancelMaintenanceAdvisoryWait(sql: sql)
-                    let snapshot = await admission.snapshot()
-                    return waiting && snapshot.foregroundWrite.inFlight == 1
+                    let snapshot = await hosted.resources.sendOperationOwnerMetricsSnapshot()
+                    return waiting && snapshot.inFlightBatches == 1
                 }
                 let queued = Task { try await host.invoke(token: token,
                     encodedRequest: queuedRequest,
@@ -67,7 +67,8 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 first.cancel()
                 await cancelMaintenanceExpectFailure(.outcomeUnknown, first)
                 #expect(await hosted.budget.snapshot().commandCount == 1)
-                #expect((await admission.snapshot()).foregroundWrite.inFlight == 1)
+                #expect((await admission.snapshot()).foregroundWrite.inFlight == 0)
+                #expect((await hosted.resources.sendOperationOwnerMetricsSnapshot()).inFlightBatches == 1)
                 #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == token.activationEpoch.rawValue)
                 #expect(!(await host.drain(deadline: .now + .milliseconds(40))).completed)
                 #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == token.activationEpoch.rawValue)
@@ -76,8 +77,8 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 try await locker.value
                 try await cancelMaintenanceWaitUntil {
                     let budget = await hosted.budget.snapshot()
-                    let snapshot = await admission.snapshot()
-                    return budget.commandCount == 0 && snapshot.foregroundWrite.inFlight == 0
+                    let snapshot = await hosted.resources.sendOperationOwnerMetricsSnapshot()
+                    return budget.commandCount == 0 && snapshot.inFlightBatches == 0
                 }
                 #expect(try await cancelMaintenanceOperationCount(sql: sql, operation: firstID) == 1)
                 #expect(try await cancelMaintenanceOperationCount(sql: sql, operation: queuedID) == 0)
@@ -509,6 +510,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
 private struct CancelMaintenanceHosted: Sendable {
     let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
     let budget: V2RoomCommandBudget
+    let resources: V2RoomServerOwnerResources
 }
 
 private func cancelMaintenanceHost(database: any Database,
@@ -520,7 +522,7 @@ private func cancelMaintenanceHost(database: any Database,
         maximumCommandsPerTurn: 1, maximumConcurrentReservations: 2)
     let budget = V2RoomCommandBudget(configuration: configuration)
     let writes = PostgresV2RoomWriteStore(database: database)
-    let resources = try V2RoomServerOwnerResources(database: database, writes: writes,
+    let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -529,13 +531,13 @@ private func cancelMaintenanceHost(database: any Database,
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init(),
         databaseWorkAdmission: admission)
-    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources],
+    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
         safetyActorUserID: senderID, now: now).runtimeFactory()
     let identity = V2ActorHostIdentity(hostID: try .init(name), incarnationID: UUID())
     return .init(host: .init(identity: identity, leaseStore: leases,
         configuration: configuration, budget: budget,
         classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
-        budget: budget)
+        budget: budget, resources: resources)
 }
 
 private func cancelMaintenanceAdmission() -> V2DatabaseWorkAdmissionController {

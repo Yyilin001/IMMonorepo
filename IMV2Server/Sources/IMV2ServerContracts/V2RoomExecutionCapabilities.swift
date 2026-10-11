@@ -26,12 +26,6 @@ package protocol V2RoomMessagingExecuting: Sendable {
                                    deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch
 }
 
-package extension V2RoomMessagingExecuting {
-    func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
-                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
-        .init { try await self.executeSendOperationBatch(commands) }
-    }
-}
 
 package protocol V2RoomAdministrationExecuting: Sendable {
     func executeUser(_ command: V2RoomAdministrationCommand) async throws -> V2RoomAdministrationResult
@@ -62,12 +56,6 @@ package protocol V2RoomMessagingPersisting: Sendable {
                                    deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch
 }
 
-package extension V2RoomMessagingPersisting {
-    func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
-                                   deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
-        .init { try await self.executeSendOperationBatch(commands) }
-    }
-}
 
 package protocol V2RoomAdministrationStoring: Sendable {
     func executeUser(_ command: V2RoomAdministrationCommand) async throws -> V2RoomAdministrationResult

@@ -198,6 +198,22 @@ struct V2RoomSubscriptionAuthenticationTests {
             applied.withLock { $0 += 1 }
             return result.withLock { $0 }
         }
+
+        func applyRoomSubscriptionBatch(_ batch: V2RoomSubscriptionDeliveryBatch,
+                                        authenticatedServiceID: String,
+                                        sourceShardID: String) async -> V2RoomSubscriptionBatchResult {
+            var order: [V2RoomSubscriptionFence] = []
+            var results: [V2RoomSubscriptionFence: V2RoomSubscriptionDeliveryResult] = [:]
+            for delivery in batch.deliveries {
+                if results[delivery.fence] == nil { order.append(delivery.fence) }
+                if let previous = results[delivery.fence] {
+                    switch previous { case .snapshotRequired, .stale: continue; case .appliedThrough: break }
+                }
+                results[delivery.fence] = await applyRoomSubscription(delivery,
+                    authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID)
+            }
+            return .init(receipts: order.map { .init(fence: $0, result: results[$0]!) })
+        }
     }
     private final class Ingress: V2RealtimeIngress {
         let offered = Mutex(0)

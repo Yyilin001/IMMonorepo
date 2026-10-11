@@ -207,7 +207,7 @@ public actor V2LocalFilesystemMediaProvider: V2LocalMediaByteServing, V2MediaObj
         let checksum = try V2ResourceChecksum(value: digest.map { String(format: "%02x", $0) }.joined())
         _ = try validatedExpiryMilliseconds(expiresAt)
         let instant = now()
-        // Legacy long-lived/empty foreground targets do not delegate persistence to the OS.
+        // Only bounded, nonempty, short-lived downloads receive OS background authorization.
         let grant: V2ResourceBackgroundDownloadAuthorization?
         if byteCount > 0, byteCount <= 512 * 1_024 * 1_024,
            instant.timeIntervalSince1970 > 0, expiresAt > instant, expiresAt.timeIntervalSince(instant) <= 900 {

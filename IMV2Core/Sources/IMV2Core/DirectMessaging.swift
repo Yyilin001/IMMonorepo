@@ -43,30 +43,6 @@ public struct V2OpenDirectRoomCommand: Equatable, Sendable {
     }
 }
 
-/// 修改当前用户的账户级陌生消息策略，与具体房间或设备分离。
-public struct V2SetStrangerMessagePermissionCommand: Equatable, Sendable {
-    /// 被修改策略的认证用户。
-    public let actorUserID: UserID
-    /// 稳定偏好变更身份。
-    public let operationID: StrangerMessagePreferenceOperationID
-    /// 期望的陌生消息策略。
-    public let permission: V2StrangerMessagePermission
-
-    /// 构造命令。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 被修改策略的认证用户。
-    ///   - operationID: 稳定偏好变更身份。
-    ///   - permission: 期望的陌生消息策略。
-    ///
-    /// 保存偏好变更意图，不执行身份验证或更新存储。
-    public init(actorUserID: UserID, operationID: StrangerMessagePreferenceOperationID, permission: V2StrangerMessagePermission) {
-        self.actorUserID = actorUserID
-        self.operationID = operationID
-        self.permission = permission
-    }
-}
-
 /// 修改当前用户的账户级关系请求隐私策略，不改变现有关系或请求。
 public struct V2SetUserAddPermissionCommand: Equatable, Sendable {
     /// 策略所属认证用户。

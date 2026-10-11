@@ -28,7 +28,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE user_id=\(bind: senderUUID)").run()
             try await ownerSQL.raw("UPDATE im_v2.rooms SET membership_revision=1, group_permission_revision=1 WHERE room_id=\(bind: room.uuidValue!)").run()
             let profile = try forwardImportTestProfile()
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: owner), capacityProfile: profile,
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+                database: owner, controlDatabase: control,
+                store: PostgresV2RoomWriteStore(database: owner), shardID: "room-b", epoch: 0), capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await send.send(.init(roomID: room, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "original")) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -139,7 +141,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: owner), capacityProfile: profile,
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+                database: owner, controlDatabase: control,
+                store: PostgresV2RoomWriteStore(database: owner), shardID: "room-b", epoch: 0), capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await send.send(.init(roomID: room, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "original")) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
@@ -313,7 +317,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("owner-first creation retry publishes its original binding and preserves terminal state", arguments: [V2GroupCapacityClass.standard, .large])
-    func legacyInviteCreationRetryPreservesOwnerBinding(_ mode: V2GroupCapacityClass) async throws {
+    func inviteCreationRetryPreservesOwnerBinding(_ mode: V2GroupCapacityClass) async throws {
         try await withForwardOwnerDatabases(mode: mode) { control, owner, sql, ownerSQL, room in
             let now = Date(timeIntervalSince1970: 1_750_000_000.123456)
             let actor = UserID(uuid: senderUUID)
@@ -380,7 +384,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("owner-first creation retry recovers publication failure but never rewrites contradictory bindings")
-    func legacyInviteCreationRetryFencesAndRecovery() async throws {
+    func inviteCreationRetryFencesAndRecovery() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, sql, ownerSQL, room in
             let now = Date(timeIntervalSince1970: 1_750_000_000), actor = UserID(uuid: senderUUID)
             try await ownerSQL.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE user_id=\(bind: senderUUID)").run()
@@ -909,84 +913,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("plain hybrid group rooms receive their own atomic batch partition")
-    func preclassifiesPlainHybridGroupRoomsForAtomicWrite() async throws {
-        guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
-              Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
-        else { return }
-
-        let resources = makeV2DatabaseTestResources()
-        do {
-            resources.databases.use(
-                try .postgres(url: databaseURL, maxConnectionsPerEventLoop: 1),
-                as: .psql,
-                isDefault: true
-            )
-            guard let sql = resources.database(.psql) as? any SQLDatabase else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            guard (try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists")
-                .first(decoding: ExistsRow.self))?.exists == false
-            else { throw TestConfigurationError.schemaAlreadyExists }
-            try await installSchema(on: sql)
-            try await seedRoom(capacityClass: .large, on: sql)
-
-            let profile = try V2CapacityProfile(id: "standard", limits: .init(
-                maxEligibleMembers: 10,
-                maxCommandsPerWindow: 10,
-
-                retryAfterSeconds: 1
-            ))
-            let writer = PostgresV2RoomWriteStore(
-                database: resources.database(.psql),
-                strangerMessagePolicy: try .init(
-                    maximumMessagesPerWindow: 10,
-                    window: 86_400
-                ),
-                contentReviewMode: .disabled)
-            let requests = try (1...2).map { ordinal in
-                V2RoomWriteRequest(
-                    command: try .init(
-                        roomID: roomID,
-                        senderUserID: senderID,
-                        clientMessageID: .init(
-                            String(format: "00000000-0000-0000-0003-%012x", ordinal)
-                        ),
-                        text: "群聊路径预分类 \(ordinal)",
-                        limits: .init(maxUTF8Bytes: 128)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init(UUID().uuidString),
-                        eventID: .init(UUID().uuidString)
-                    ),
-                    now: Date(timeIntervalSince1970: 1_750_000_001)
-                )
-            }
-
-            #expect(
-                await writer.atomicBatchPartitions(requests: requests) ==
-                    [.large, .large]
-            )
-            #expect(
-                await writer.atomicBatchPartitions(requests: requests) ==
-                    [.large, .large]
-            )
-            #expect(try await count("im_v2.messages", on: sql) == 0)
-
-            try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
-            try await resources.shutdown()
-        } catch {
-            if let sql = resources.database(.psql) as? any SQLDatabase {
-                try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
-            }
-            try? await resources.shutdown()
-            throw error
-        }
-    }
-
-    @Test("plain hybrid group messages for distinct rooms commit as one atomic batch")
-    func atomicallyPersistsPlainHybridGroupMessagesAcrossRooms() async throws {
+    @Test("authorized group writes scope identity, replay and history to each room")
+    func authorizedGroupWritesKeepRoomIdentityAndHistoryIndependent() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
         else { return }
@@ -1017,6 +945,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                      \(bind: V2GroupCapacityClass.large.rawValue))
                 """).run()
             try await sql.raw("""
+                INSERT INTO im_v2.room_owner_routes(room_id,room_shard_id,route_epoch,created_at,updated_at)
+                VALUES (\(bind: secondRoom),'room-a',0,\(bind: createdAt),\(bind: createdAt))
+                """).run()
+            try await sql.raw("""
                 INSERT INTO im_v2.group_rooms
                     (room_id, owner_user_id, title, created_at)
                 VALUES (\(bind: secondRoom), \(bind: senderUUID),
@@ -1042,13 +974,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
                 retryAfterSeconds: 1
             ))
-            let writer = PostgresV2RoomWriteStore(
+            let rawWriter = PostgresV2RoomWriteStore(
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(
                     maximumMessagesPerWindow: 10,
                     window: 86_400
                 ),
                 contentReviewMode: .disabled)
+            let writer = V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql),
+                controlDatabase: resources.database(.psql), store: rawWriter, shardID: "room-a", epoch: 0)
             let roomIDs = [roomUUID, secondRoom]
             let requests = try roomIDs.enumerated().map { index, room in
                 V2RoomWriteRequest(
@@ -1070,7 +1004,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 )
             }
 
-            let outcomes = try await writer.acceptAtomically(requests: requests)
+            var outcomes: [V2SendMessageOutcome] = []
+            for request in requests {
+                outcomes.append(try await writer.accept(command: request.command,
+                    capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
+            }
             #expect(outcomes.count == 2)
             for (index, outcome) in outcomes.enumerated() {
                 guard case .accepted(let message) = outcome else {
@@ -1093,24 +1031,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                      WHERE event_type = 'message.accepted')::bigint AS events,
                     (SELECT count(*) FROM im_v2.message_projection_states)::bigint
                         AS message_states,
-                    (SELECT command_window_used FROM im_v2.shard_admission_pools
-                     WHERE room_shard_id = 'room-a'
-                       AND capacity_profile_id = 'standard')::bigint
-                        AS shard_commands,
-                    (SELECT sum(command_window_used) FROM im_v2.room_admission)::bigint
-                        AS room_commands,
                     (SELECT count(*) FROM im_v2.message_projection_state_values)::bigint
                         AS readable_message_states
                 """).first(decoding: PlainHybridGroupBatchArtifacts.self))
             #expect(artifacts.messages == 2)
-            // A plain hybrid-group accept is one canonical message row. Its
-            // accepted event is derived by the room-log reader, while the
-            // zero-target plan and revision-one projection state are omitted.
-            #expect(artifacts.events == 0)
-            #expect(artifacts.messageStates == 0)
-            #expect(artifacts.shardCommands == 4)
-            #expect(artifacts.roomCommands == 2)
-            #expect(artifacts.readableMessageStates == 0)
+            #expect(artifacts.events == 2)
+            #expect(artifacts.messageStates == 2)
+            #expect(artifacts.readableMessageStates == 2)
 
             let roomLogCache = V2DirectRoomLogEventCache(configuration: .init(
                 maximumEvents: 16,
@@ -1140,13 +1067,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(!page.hasMore)
             }
 
-            do {
-                _ = try await writer.acceptAtomically(requests: requests)
-                Issue.record("expected replay batch to fall back to scalar idempotency")
-            } catch let error as V2AtomicRoomWriteBatchError {
-                #expect(error.reason == .authorizationState)
-                #expect(error.isolatedRequestIndices == [0, 1])
-            }
             for request in requests {
                 let replay = try await writer.accept(
                     command: request.command,
@@ -1155,7 +1075,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     now: request.now
                 )
                 guard case .idempotent = replay else {
-                    Issue.record("expected scalar fallback to replay committed group message")
+                    Issue.record("expected exact replay of the committed room message")
                     continue
                 }
             }
@@ -1220,7 +1140,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         clientMessageID: .init(
                             String(format: "00000000-0000-0000-0005-%012x", index + 1)
                         ),
-                        text: "必须整批回滚 \(index + 1)",
+                        text: "独立房间的权限边界 \(index + 1)",
                         limits: .init(maxUTF8Bytes: 128)
                     ),
                     capacityProfile: profile,
@@ -1231,30 +1151,33 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     now: Date(timeIntervalSince1970: 1_750_000_002)
                 )
             }
-            do {
-                _ = try await writer.acceptAtomically(requests: rejectedRequests)
-                Issue.record("expected one unauthorized room to reject the atomic batch")
-            } catch let error as V2AtomicRoomWriteBatchError {
-                #expect(error.reason == .authorizationState)
-                #expect(error.isolatedRequestIndices == [1])
+            // A removed member in one room cannot roll back another room's
+            // accepted message. Both requests retain their own identities.
+            let independent = rejectedRequests[0]
+            guard case .accepted(let independentlyAccepted) = try await writer.accept(
+                command: independent.command, capacityProfile: independent.capacityProfile,
+                identifiers: independent.identifiers, now: independent.now) else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
             }
+            #expect(independentlyAccepted.roomSequence == 3)
+            let rejected = rejectedRequests[1]
+            await #expect(throws: V2RoomWriteStoreError.actorNotEligible) {
+                try await writer.accept(command: rejected.command, capacityProfile: rejected.capacityProfile,
+                    identifiers: rejected.identifiers, now: rejected.now)
+            }
+            #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.messages WHERE message_id=\(bind: rejected.identifiers.messageID.uuidValue!)")
+                .first(decoding: CountRow.self)?.value == 0)
+            #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.message_send_completions WHERE room_id=\(bind: secondRoom) AND client_message_id=\(bind: rejected.command.clientMessageID.uuidValue!)")
+                .first(decoding: CountRow.self)?.value == 0)
             let rollback = try #require(try await sql.raw("""
                 SELECT
                     (SELECT count(*) FROM im_v2.messages)::bigint AS messages,
                     (SELECT sum(room_sequence) FROM im_v2.rooms
                      WHERE room_id IN (\(bind: roomUUID), \(bind: secondRoom)))::bigint
-                        AS sequence_sum,
-                    (SELECT command_window_used FROM im_v2.shard_admission_pools
-                     WHERE room_shard_id = 'room-a'
-                       AND capacity_profile_id = 'standard')::bigint
-                        AS shard_commands
-                """).first(decoding: PlainHybridGroupRollbackArtifacts.self))
-            #expect(rollback.messages == 3)
-            #expect(rollback.sequenceSum == 3)
-            // Replays and the rejected authorization batch return their
-            // process-local tokens. The original four-credit durable charge
-            // is conservative and does not grow on either rollback.
-            #expect(rollback.shardCommands == 5)
+                        AS sequence_sum
+                """).first(decoding: IndependentGroupRoomArtifacts.self))
+            #expect(rollback.messages == 4)
+            #expect(rollback.sequenceSum == 4)
 
             try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
@@ -1268,8 +1191,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("plain hybrid group messages for one hot room advance in one atomic batch")
-    func atomicallyPersistsRepeatedPlainHybridGroupRoomMessages() async throws {
+    @Test("current durable group turns preserve sequence, completion and readable projection")
+    func authorizedHybridGroupRoomMessagesPreserveSequence() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
         else { return }
@@ -1296,15 +1219,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
                 retryAfterSeconds: 1
             ))
-            let writer = PostgresV2RoomWriteStore(
+            let rawWriter = PostgresV2RoomWriteStore(
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(
                     maximumMessagesPerWindow: 10,
                     window: 86_400
                 ),
                 contentReviewMode: .disabled)
-            #expect(await writer.atomicBatchSupportsRepeatedRooms(in: .large))
-            #expect(!(await writer.atomicBatchSupportsRepeatedRooms(in: .standard)))
 
             let requests = try (1 ... 3).map { ordinal in
                 V2RoomWriteRequest(
@@ -1326,7 +1247,58 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 )
             }
 
-            let outcomes = try await writer.acceptAtomically(requests: requests)
+            // Exercise the current durable room turn, rather than the retired
+            // cross-room atomic append entrypoint. Keep actual generated IDs and
+            // post-commit messages observable for the existing log assertions.
+            let database = resources.database(.psql)
+            let acceptedAt = requests[0].now
+            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '10 minutes'").run()
+            let identifiers = Mutex(try requests.flatMap {
+                [try #require($0.identifiers.messageID.uuidValue), try #require($0.identifiers.eventID.uuidValue)]
+            })
+            let factory = V2AcceptanceIDFactory(makeUUID: {
+                identifiers.withLock { values in
+                    guard !values.isEmpty else { return UUID() }
+                    return values.removeFirst()
+                }
+            })
+            let observer = RepeatedGroupCommittedMessages()
+            let outcomes = try await withFixturePolicyOwners(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
+                    policyOwners: owners, endpoint: "room-a", maximumRooms: 1)
+                let store = PostgresV2MessageSendOperationStore(database: database,
+                    writes: rawWriter.usingControlDatabase(database).usingPolicyAuthorizations(policies),
+                    clock: { acceptedAt }, committedMessageObserver: observer)
+                do {
+                    try await withRoomActivation(database: database, roomID: roomID) { token in
+                        let commands = try requests.map {
+                            try V2MessageSendOperationCommand(command: $0.command,
+                                firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+                        }
+                        let prepared = try await policies.prepareOwnerBatches(store: store,
+                            requests: [.init(commands: commands, token: token, deadline: .now + .seconds(30))],
+                            now: { acceptedAt })[0].get()
+                        let results = try await store.executePreparedRoomSend(prepared,
+                            capacityProfile: profile, identifiers: factory, now: { acceptedAt })
+                        try #require(results.count == commands.count)
+                        for (command, result) in zip(commands, results) {
+                            guard case .sendOperation(.receipt(let receipt)) = result,
+                                  case .accepted = receipt.outcome else {
+                                throw V2RoomWriteStoreError.corruptPersistenceState
+                            }
+                            #expect(receipt.validates(identity: try command.identity,
+                                fingerprint: try command.fingerprint))
+                        }
+                    }
+                    await policies.shutdown()
+                    return observer.outcomes
+                } catch {
+                    await policies.shutdown()
+                    throw error
+                }
+            }
+            #expect(identifiers.withLock { $0.isEmpty })
             #expect(outcomes.count == 3)
             for (index, outcome) in outcomes.enumerated() {
                 guard case .accepted(let message) = outcome else {
@@ -1348,14 +1320,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(messageRows.map(\.timelineSequence) == [1, 2, 3])
             let state = try #require(try await sql.raw("""
                 SELECT room_sequence, timeline_sequence,
-                       (SELECT command_window_used
-                        FROM im_v2.room_admission
-                        WHERE room_id = \(bind: roomUUID))::bigint AS room_commands,
-                       (SELECT command_window_used
-                        FROM im_v2.shard_admission_pools
-                        WHERE room_shard_id = 'room-a'
-                          AND capacity_profile_id = 'standard')::bigint
-                           AS shard_commands,
                        (SELECT count(*) FROM im_v2.room_events
                         WHERE room_id = \(bind: roomUUID)
                           AND event_type = 'message.accepted')::bigint AS events,
@@ -1365,13 +1329,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: RepeatedHybridGroupStateRow.self))
             #expect(state.roomSequence == 3)
             #expect(state.timelineSequence == 3)
-            #expect(state.roomCommands == 3)
-            // The shard row is charged once for a four-credit durable batch;
-            // three committed messages consume tokens locally and the fourth
-            // remains safely precharged for the next append.
-            #expect(state.shardCommands == 4)
-            #expect(state.events == 0)
-            #expect(state.messageStates == 0)
+            // The current group path persists complete events and projection
+            // states. Omission was a retired append optimization; the current
+            // compact single-statement path applies to direct rooms.
+            #expect(state.events == 3)
+            #expect(state.messageStates == 3)
             let page = try await PostgresV2GroupEventLogStore(database: resources.database(.psql)).pull(
                 roomID: roomID,
                 actorUserID: senderID,
@@ -1381,9 +1343,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(page.events.map(\.roomSequence) == [1, 2, 3])
             #expect(page.events.map(\.sourceEventID) == requests.map(\.identifiers.eventID))
 
-            // A later mutation can materialize the omitted revision-one state
-            // directly from the canonical message row. This is the edit and
-            // withdrawal compatibility fence for the compact representation.
+            // A later edit/withdrawal reads the canonical revision-one state
+            // with the original source event and accepted sequence.
             let firstMessageID = try #require(
                 UUID(uuidString: requests[0].identifiers.messageID.rawValue)
             )
@@ -1413,27 +1374,21 @@ private struct PlainHybridGroupBatchArtifacts: Decodable {
     let messages: Int64
     let events: Int64
     let messageStates: Int64
-    let shardCommands: Int64
-    let roomCommands: Int64
     let readableMessageStates: Int64
 
     enum CodingKeys: String, CodingKey {
         case messages, events
         case messageStates = "message_states"
-        case shardCommands = "shard_commands"
-        case roomCommands = "room_commands"
         case readableMessageStates = "readable_message_states"
     }
 }
-private struct PlainHybridGroupRollbackArtifacts: Decodable {
+private struct IndependentGroupRoomArtifacts: Decodable {
     let messages: Int64
     let sequenceSum: Int64
-    let shardCommands: Int64
 
     enum CodingKeys: String, CodingKey {
         case messages
         case sequenceSum = "sequence_sum"
-        case shardCommands = "shard_commands"
     }
 }
 private struct HybridGroupSequenceRow: Decodable {
@@ -1445,19 +1400,23 @@ private struct HybridGroupSequenceRow: Decodable {
         case timelineSequence = "timeline_sequence"
     }
 }
+private final class RepeatedGroupCommittedMessages: V2CommittedMessageBatchObserving, Sendable {
+    private let messages = Mutex<[V2SendMessageOutcome]>([])
+    var outcomes: [V2SendMessageOutcome] { messages.withLock { $0 } }
+    func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome], activation: V2RoomActivationToken) {
+        messages.withLock { $0.append(contentsOf: outcomes) }
+    }
+}
+
 private struct RepeatedHybridGroupStateRow: Decodable {
     let roomSequence: Int64
     let timelineSequence: Int64
-    let roomCommands: Int64
-    let shardCommands: Int64
     let events: Int64
     let messageStates: Int64
 
     enum CodingKeys: String, CodingKey {
         case roomSequence = "room_sequence"
         case timelineSequence = "timeline_sequence"
-        case roomCommands = "room_commands"
-        case shardCommands = "shard_commands"
         case events
         case messageStates = "message_states"
     }

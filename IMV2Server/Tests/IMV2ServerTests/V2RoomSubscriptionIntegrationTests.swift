@@ -21,7 +21,7 @@ struct V2RoomSubscriptionIntegrationTests {
             let authority = V2GatewayRoomSubscriptionAuthority()
             for _ in 0..<(index + 1) {
                 let connection = UUID(); expected.insert(connection)
-                #expect(authority.registerConnection(connection, userID: user, lifecycle: UUID()))
+                #expect(await authority.registerFixtureConnection(connection, userID: user, lifecycle: UUID()))
             }
             try await relay.offer(.init(ownerEpoch: 1, inputSequence: UInt64(index + 1),
                 operation: .subscribe(gateway: gateway, userID: user, memberRevision: 1,
@@ -44,7 +44,7 @@ struct V2RoomSubscriptionIntegrationTests {
                 }
                 recipients.formUnion(permits.map(\.connectionID))
                 for permit in permits {
-                    let accepted = authorities[index].enqueueIfCurrent(permit, enqueue: {})
+                    let accepted = await authorities[index].enqueueFixtureIfCurrent(permit, enqueue: {})
                     #expect(accepted)
                 }
             }
@@ -85,7 +85,7 @@ struct V2RoomSubscriptionIntegrationTests {
         let installed = await ingress.install(fence: fence, sourceShardID: "room-shard", serviceID: "owner", deadline: .now + .seconds(30))
         #expect(installed)
         let connection = UUID(), lifecycle = UUID()
-        authority.registerConnection(connection, userID: user, lifecycle: lifecycle)
+        await authority.registerFixtureConnection(connection, userID: user, lifecycle: lifecycle)
         #expect(await authority.registerRoomInterest(connectionID: connection, lifecycle: lifecycle, roomID: room, scopeGeneration: 1))
         let member = V2RoomSubscriptionMember(userID: user, memberRevision: 1)
         let baseline = V2RoomSubscriptionDelivery(fence: fence, deliverySequence: 1, authorizationSequence: 1, payload: .baseline(members: [member]))
@@ -109,7 +109,7 @@ struct V2RoomSubscriptionIntegrationTests {
         let first = UUID(), second = UUID(), other = UUID(), subscription = UUID()
         for (connection, user) in [(first, alice), (second, alice), (other, bob)] {
             let lifecycle = UUID()
-            local.registerConnection(connection, userID: user, lifecycle: lifecycle)
+            await local.registerFixtureConnection(connection, userID: user, lifecycle: lifecycle)
         }
         try await relay.offer(.init(ownerEpoch: 1, inputSequence: 1,
             operation: .subscribe(gateway: gateway, userID: alice, memberRevision: 1, subscriptionID: subscription, generation: 1)))
@@ -139,7 +139,7 @@ struct V2RoomSubscriptionIntegrationTests {
         let revoke = try #require(await relay.pending(for: gateway).first)
         #expect(await local.apply(revoke, authenticatedServiceID: "owner") == .applied(permits: []))
         for permit in permits {
-            let accepted = local.enqueueIfCurrent(permit, enqueue: {})
+            let accepted = await local.enqueueFixtureIfCurrent(permit, enqueue: {})
             #expect(accepted == (permit.userID == bob))
         }
     }

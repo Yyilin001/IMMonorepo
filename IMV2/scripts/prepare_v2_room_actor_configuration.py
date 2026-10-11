@@ -50,8 +50,8 @@ def main() -> None:
     parser.add_argument("--shards", required=True, help="Comma separated configured shard IDs")
     parser.add_argument("--user-buckets", default="users-primary", help="Comma separated authorized user owner buckets")
     parser.add_argument("--mount-root", help="Path of this node's own directory inside its container")
-    parser.add_argument("--policy-partitions", type=int,
-                        help="Opt in to memory policy owners with a power-of-two partition count (1..4096)")
+    parser.add_argument("--policy-partitions", type=int, default=16,
+                        help="Memory policy owner partition count: power of two (1..4096); default 16")
     parser.add_argument("--policy-endpoint", help="Configured shard alias used for the policy control RPC")
     args = parser.parse_args()
     nodes = args.hosts + args.callers
@@ -67,14 +67,11 @@ def main() -> None:
         parser.error("node identities/endpoints and shard IDs must be unique, nonempty and bounded")
     if not set(args.worker_caller).issubset({n[0] for n in args.callers}):
         parser.error("worker-caller must name an explicitly configured caller")
-    if args.policy_partitions is not None:
-        count = args.policy_partitions
-        if count < 1 or count > 4096 or count & (count - 1) or len(args.hosts) > count:
-            parser.error("policy partitions must be a power of two (1..4096), with at least one per host")
-        if args.policy_endpoint is not None and args.policy_endpoint not in shards:
-            parser.error("policy endpoint must be a configured shard alias")
-    elif args.policy_endpoint is not None:
-        parser.error("policy endpoint requires policy partitions")
+    count = args.policy_partitions
+    if count < 1 or count > 4096 or count & (count - 1) or len(args.hosts) > count:
+        parser.error("policy partitions must be a power of two (1..4096), with at least one per host")
+    if args.policy_endpoint is not None and args.policy_endpoint not in shards:
+        parser.error("policy endpoint must be a configured shard alias")
     # An explicit new output directory prevents accidental rotation of a live
     # host's signing identity or modification of an existing private CA.
     root = args.output_dir.resolve()
@@ -123,10 +120,9 @@ def main() -> None:
         permissions = ["userRoomCalls", "roomCoordination", "realtimePublish", "realtimeReceive"]
         if name in host_names or name in args.worker_caller:
             permissions += ["roomMaintenance", "trustedSafety", "specialAccountAudit"]
-        if args.policy_partitions is not None:
-            permissions += ["policyMutation"]
-            if name in host_names:
-                permissions += ["policyRegistration", "policyRevocation"]
+        permissions += ["policyMutation"]
+        if name in host_names:
+            permissions += ["policyRegistration", "policyRevocation"]
         services.append(dict(id=name, publicKeyBase64=base64.b64encode(public_der[-32:]).decode(),
                              permissions=permissions, hostIDs=[host_ids[name]] if name in host_names else [],
                              shardIDs=shards, userBucketIDs=user_buckets, gatewayNodeIDs=[name]))
@@ -136,13 +132,11 @@ def main() -> None:
     # remains trusted for RPC, but must not create an unreachable quorum vote.
     realtime_peers = [dict(nodeID=name, serviceID=name, address=address, port=port)
                       for name, address, port in sorted(args.hosts)]
-    placement = None
-    if args.policy_partitions is not None:
-        ordered_hosts = sorted(host_names)
-        placement = dict(revision=1, partitionCount=args.policy_partitions, owners=[
-            dict(hostID=host_ids[name], endpoint=args.policy_endpoint or shards[0],
-                 partitions=list(range(index, args.policy_partitions, len(ordered_hosts))))
-            for index, name in enumerate(ordered_hosts)])
+    ordered_hosts = sorted(host_names)
+    placement = dict(revision=1, partitionCount=args.policy_partitions, owners=[
+        dict(hostID=host_ids[name], endpoint=args.policy_endpoint or shards[0],
+             partitions=list(range(index, args.policy_partitions, len(ordered_hosts))))
+        for index, name in enumerate(ordered_hosts)])
     for name, address, port in nodes:
         directory = root / name
         visible = Path(args.mount_root) if args.mount_root else directory
@@ -155,8 +149,7 @@ def main() -> None:
             signingKeyPath=str(visible / "signing.key"), certificatePath=str(visible / "tls.pem"),
             privateKeyPath=str(visible / "tls.key"), trustRootPath=str(visible / "ca.pem"),
             services=services, peers=peers, realtimePeers=local_realtime_peers)
-        if placement is not None:
-            document["policyPlacement"] = placement
+        document["policyPlacement"] = placement
         write_json(directory / "configuration.json", document)
     write_json(root / "topology.json", dict(hosts=args.hosts, callers=args.callers, shards=shards, hostIDs=host_ids, policyPlacement=placement))
     print(f"Created {len(nodes)} local/test node configurations in {root}")

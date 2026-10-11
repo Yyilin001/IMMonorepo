@@ -1,6 +1,7 @@
 import Foundation
 import Synchronization
 import Testing
+import NIOCore
 import IMV2Core
 import IMV2ActorContracts
 import IMV2ServerContracts
@@ -464,12 +465,14 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
         #expect(await ingress.applyRoomSubscription(f.delivery(1, .baseline(members: [f.member])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))
-        await f.registry.subscribeForegroundGroup(requested.stream, connectionID: requested.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(requested.stream, connectionID: requested.connectionID, roomID: f.room)
         let event = V2RealtimeRoomEvent(roomID: f.room, highWatermark: 11, sourceEventID: EventID(uuid: UUID()),
             roomSequence: 11, projectionKind: "message", payload: Data([1]), recipientUserIDs: [], groupMembershipRevision: 0)
         #expect(await ingress.applyRoomSubscription(f.delivery(2, .broadcast(event)),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
+        try await waitUntil { requested.writer.bodySequences == [11] }
         #expect(requested.writer.bodySequences == [11])
+        try await waitUntil { unrelated.writer.bodySequences == [11] }
         #expect(unrelated.writer.bodySequences == [11])
         #expect(await ingress.applyRoomSubscription(f.delivery(3, authorization: 2, .revoke(userID: f.user, memberRevision: 0)),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(3))
@@ -477,6 +480,7 @@ struct V2GatewayRoomSubscriptionRegistryTests {
             roomSequence: 12, projectionKind: "message", payload: Data([1]), recipientUserIDs: [], groupMembershipRevision: 1)
         #expect(await ingress.applyRoomSubscription(f.delivery(4, authorization: 2, .broadcast(after)),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(4))
+        try await waitUntil { requested.writer.bodySequences == [11] }
         #expect(requested.writer.bodySequences == [11])
         try await requested.stream.finish(); try await unrelated.stream.finish()
         await f.registry.shutdownRealtimeRecovery()
@@ -492,7 +496,7 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
         #expect(await ingress.applyRoomSubscription(f.delivery(1, .baseline(members: [f.member])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))
-        await f.registry.subscribeForegroundGroup(socket.stream, connectionID: socket.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(socket.stream, connectionID: socket.connectionID, roomID: f.room)
         try await waitUntil { socket.writer.readyHeads == [10] }
         await f.registry.applySharedRealtimeDelivery(.init(topic: .init(kind: .roomEvents, id: f.room.rawValue,
             owner: f.fence.activation.owner), partitionID: 1, partitionEpoch: 1, sessionID: UUID(),
@@ -500,10 +504,11 @@ struct V2GatewayRoomSubscriptionRegistryTests {
             isCurrent: { true })
         #expect(await ingress.applyRoomSubscription(f.delivery(2, .event(f.event(11), members: [f.member])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
+        try await waitUntil { socket.writer.bodySequences == [11] }
         #expect(socket.writer.bodySequences == [11])
         let permit = try #require(await f.authority.capturePermits(roomID: f.room).first)
         socket.stream.invalidateForegroundAuthorization()
-        let accepted = f.authority.enqueueIfCurrent(permit, enqueue: {})
+        let accepted = await f.authority.enqueueFixtureIfCurrent(permit, enqueue: {})
         #expect(!accepted)
         try await socket.stream.finish(); await f.registry.shutdownRealtimeRecovery()
     }
@@ -741,15 +746,17 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         let ingress = try await f.registry.configureRoomSubscriptionIngress(authority: f.authority)
         let socket = try await f.socket()
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
-        await f.registry.subscribeForegroundGroup(socket.stream, connectionID: socket.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(socket.stream, connectionID: socket.connectionID, roomID: f.room)
         let batch = V2RoomSubscriptionDeliveryBatch(deliveries: [
             f.delivery(1, .baseline(members: [f.member])),
             f.delivery(2, .event(f.event(11), members: [f.member])),
             f.delivery(3, .event(f.event(12), members: [f.member]))])
         let expected = V2RoomSubscriptionBatchResult(receipts: [.init(fence: f.fence, result: .appliedThrough(3))])
         #expect(await ingress.applyRoomSubscriptionBatch(batch, authenticatedServiceID: "owner", sourceShardID: "rooms") == expected)
+        try await waitUntil { socket.writer.bodySequences == [11, 12] }
         #expect(socket.writer.bodySequences == [11, 12])
         #expect(await ingress.applyRoomSubscriptionBatch(batch, authenticatedServiceID: "owner", sourceShardID: "rooms") == expected)
+        try await waitUntil { socket.writer.bodySequences == [11, 12] }
         #expect(socket.writer.bodySequences == [11, 12])
         let conflict = V2RoomSubscriptionDeliveryBatch(deliveries: [f.delivery(2, .revoke(userID: f.user, memberRevision: 0))])
         #expect(await ingress.applyRoomSubscriptionBatch(conflict, authenticatedServiceID: "owner", sourceShardID: "rooms").receipts.first?.result == .stale)
@@ -794,8 +801,8 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         }
         #expect(counts.withLock { $0.subscribes } == 0)
         let first = try await f.socket(), second = try await f.socket()
-        await f.registry.subscribeForegroundGroup(first.stream, connectionID: first.connectionID, roomID: f.room)
-        await f.registry.subscribeForegroundGroup(second.stream, connectionID: second.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(first.stream, connectionID: first.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(second.stream, connectionID: second.connectionID, roomID: f.room)
         try await waitUntil { first.writer.readyHeads == [10] && second.writer.readyHeads == [10] }
         #expect(counts.withLock { $0.subscribes } == 1)
         #expect(counts.withLock { $0.activates } == 1)
@@ -825,20 +832,24 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         let first = try await f.socket(), second = try await f.socket()
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
         #expect(await ingress.applyRoomSubscription(f.delivery(1, .baseline(members: [f.member])), authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))
-        await f.registry.subscribeForegroundGroup(first.stream, connectionID: first.connectionID, roomID: f.room, membershipRevision: 77)
+        _ = try await f.registry.subscribeForegroundRoom(first.stream, connectionID: first.connectionID, roomID: f.room)
         try await waitUntil { first.writer.readyHeads == [10] }
         #expect(second.writer.readyHeads.isEmpty)
         #expect(await ingress.applyRoomSubscription(f.delivery(2, .event(f.event(11), members: [f.member])), authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
+        try await waitUntil { first.writer.bodySequences == [11] }
         #expect(first.writer.bodySequences == [11])
+        try await waitUntil { second.writer.bodySequences == [11] }
         #expect(second.writer.bodySequences == [11])
         #expect(await ingress.applyRoomSubscription(f.delivery(3, .head(highWatermark: 60)), authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(3))
         try await waitUntil { first.writer.hints.contains(60) }
         #expect(first.writer.readyHeads == [10])
         // Adding a second requesting device does not replace the first gate.
-        await f.registry.subscribeForegroundGroup(second.stream, connectionID: second.connectionID, roomID: f.room, membershipRevision: 77)
+        _ = try await f.registry.subscribeForegroundRoom(second.stream, connectionID: second.connectionID, roomID: f.room)
         try await waitUntil { second.writer.readyHeads == [10] }
         #expect(await ingress.applyRoomSubscription(f.delivery(4, .event(f.event(12), members: [f.member])), authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(4))
+        try await waitUntil { first.writer.bodySequences == [11, 12] }
         #expect(first.writer.bodySequences == [11, 12])
+        try await waitUntil { second.writer.bodySequences == [11, 12] }
         #expect(second.writer.bodySequences == [11, 12])
         #expect(first.writer.readyHeads == [10])
         try await first.stream.finish(); try await second.stream.finish()
@@ -852,8 +863,8 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         let first = try await f.socket(holdReady: true), second = try await f.socket(), unopened = try await f.socket()
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
         #expect(await ingress.applyRoomSubscription(f.delivery(1, .baseline(members: [f.member])), authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))
-        await f.registry.subscribeForegroundGroup(first.stream, connectionID: first.connectionID, roomID: f.room)
-        await f.registry.subscribeForegroundGroup(second.stream, connectionID: second.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(first.stream, connectionID: first.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(second.stream, connectionID: second.connectionID, roomID: f.room)
         try await waitUntil {
             let holding = await first.writer.isHoldingReady
             return holding && second.writer.readyHeads == [10]
@@ -876,7 +887,7 @@ struct V2GatewayRoomSubscriptionRegistryTests {
     func retainedHeadWaitsForFreshPermit() async throws {
         let f = try RegistryFixture(), socket = try await f.socket(holdReady: true)
         let lifecycle = UUID()
-        f.authority.registerConnection(socket.connectionID, userID: f.user, lifecycle: lifecycle)
+        await f.authority.registerFixtureConnection(socket.connectionID, userID: f.user, lifecycle: lifecycle, eventLoop: socket.writer.eventLoop)
         try #require(await f.authority.registerRoomInterest(connectionID: socket.connectionID,
             lifecycle: lifecycle, roomID: f.room, scopeGeneration: 1))
         try #require(await f.authority.install(fence: f.fence, serviceID: "owner", deadline: .now + .seconds(20)))
@@ -921,8 +932,8 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
         _ = await ingress.applyRoomSubscription(f.delivery(1, .baseline(members: [f.member])),
             authenticatedServiceID: "owner", sourceShardID: "rooms")
-        await f.registry.subscribeForegroundGroup(first.stream, connectionID: first.connectionID, roomID: f.room)
-        await f.registry.subscribeForegroundGroup(second.stream, connectionID: second.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(first.stream, connectionID: first.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(second.stream, connectionID: second.connectionID, roomID: f.room)
         _ = await ingress.applyRoomSubscription(f.delivery(2, .head(highWatermark: 24)),
             authenticatedServiceID: "owner", sourceShardID: "rooms")
         try await waitUntil { first.writer.readyHeads == [10] && second.writer.readyHeads == [10] }
@@ -991,7 +1002,7 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
         _ = await ingress.applyRoomSubscription(f.delivery(1, .baseline(members: [f.member])),
             authenticatedServiceID: "owner", sourceShardID: "rooms")
-        await f.registry.subscribeForegroundGroup(socket.stream, connectionID: socket.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(socket.stream, connectionID: socket.connectionID, roomID: f.room)
         try await waitUntil { await socket.writer.isHoldingReady }
         let terminal = f.delivery(2, .authorizationInvalidated)
         #expect(await ingress.applyRoomSubscription(terminal, authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
@@ -1017,22 +1028,24 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         let first = try await f.socket(), second = try await f.socket()
         try #require(await ingress.install(fence: f.fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
         #expect(await ingress.applyRoomSubscription(f.delivery(1, .baseline(members: [f.member])), authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))
-        await f.registry.subscribeForegroundGroup(first.stream, connectionID: first.connectionID, roomID: f.room)
-        await f.registry.subscribeForegroundGroup(second.stream, connectionID: second.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(first.stream, connectionID: first.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(second.stream, connectionID: second.connectionID, roomID: f.room)
         let old = try #require(await f.authority.capturePermits(roomID: f.room).first { $0.connectionID == first.connectionID })
         await f.registry.unsubscribeForegroundGroup(connectionID: first.connectionID, roomID: f.room)
-        let stillCurrent = f.authority.enqueueIfCurrent(old, enqueue: {})
+        let stillCurrent = await f.authority.enqueueFixtureIfCurrent(old, enqueue: {})
         #expect(!stillCurrent)
         #expect(await ingress.applyRoomSubscription(f.delivery(2, .event(f.event(11), members: [f.member])), authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
+        try await waitUntil { first.writer.bodySequences == [11] }
         #expect(first.writer.bodySequences == [11])
+        try await waitUntil { second.writer.bodySequences == [11] }
         #expect(second.writer.bodySequences == [11])
-        await f.registry.subscribeForegroundGroup(first.stream, connectionID: first.connectionID, roomID: f.room)
+        _ = try await f.registry.subscribeForegroundRoom(first.stream, connectionID: first.connectionID, roomID: f.room)
         let fresh = try #require(await f.authority.capturePermits(roomID: f.room).first { $0.connectionID == first.connectionID })
-        let resurrected = f.authority.enqueueIfCurrent(old, enqueue: {})
+        let resurrected = await f.authority.enqueueFixtureIfCurrent(old, enqueue: {})
         #expect(!resurrected)
         // This is the same immediate path used before any transport close await.
         first.stream.revokeRecoveryWorkImmediately()
-        let closedPermit = f.authority.enqueueIfCurrent(fresh, enqueue: {})
+        let closedPermit = await f.authority.enqueueFixtureIfCurrent(fresh, enqueue: {})
         #expect(!closedPermit)
         #expect(await f.authority.capturePermits(roomID: f.room).allSatisfy { $0.connectionID == second.connectionID })
         try await first.stream.finish(); try await second.stream.finish()
@@ -1080,9 +1093,11 @@ private struct RegistryFixture: Sendable {
                 authenticator: RegistrySocketAuthenticator(user: user), capabilityProfile: "base",
                 commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: RegistrySocketHandler(), connectionID: connection, registry: registry)
-        let attached = await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        let transport = try await V2GatewayForegroundChannelFixture(record: { [weak writer] in writer?.record($0) })
+        writer.installForeground(transport)
+        let attached = await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { _ in true }, scopedNotificationWriter: { await writer.write($0) },
-            foregroundWriter: { writer.record($0) })
+            foregroundWriter: transport.writer)
         try #require(attached)
         let version = UInt8(IMV2ProtocolVersion.current)
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello.deviceID = device.rawValue
@@ -1117,7 +1132,16 @@ private actor RegistrySocketWriter {
     private nonisolated let output = Mutex(Output())
     nonisolated var readyHeads: [UInt64] { output.withLock { $0.ready } }
     nonisolated var hints: [UInt64] { output.withLock { $0.hints } }
-    nonisolated var bodySequences: [UInt64] { output.withLock { $0.bodies } }
+    private nonisolated let foreground = Mutex<V2GatewayForegroundChannelFixture?>(nil)
+    nonisolated var eventLoop: any EventLoop { foreground.withLock { $0!.channel.eventLoop } }
+    nonisolated func installForeground(_ transport: V2GatewayForegroundChannelFixture) {
+        foreground.withLock { $0 = transport }
+    }
+    nonisolated var bodySequences: [UInt64] {
+        let transport = foreground.withLock { $0 }
+        transport?.drain()
+        return output.withLock { $0.bodies }
+    }
     private let holdReady: Bool
     private var released = false
     private var continuation: CheckedContinuation<Void, Never>?

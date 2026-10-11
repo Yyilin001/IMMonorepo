@@ -108,11 +108,11 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
         self.assertFalse(benchmark.verify_candidate_authorization_mode(args, 'baseline',
             unexpected_query)['memoryDeploymentChecked'])
         args.candidate_authorization_mode = 'legacy'
-        self.assertFalse(benchmark.verify_candidate_authorization_mode(args, 'candidate',
-            unexpected_query)['memoryDeploymentChecked'])
+        with self.assertRaises(ValueError):
+            benchmark.verify_candidate_authorization_mode(args, 'candidate', unexpected_query)
 
     def test_real_generated_configs_enable_memory_only_for_candidate(self):
-        for mode in (None, 'legacy'):
+        for mode in (None, 'memory'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 fixture = root / 'fixture'
@@ -134,23 +134,20 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                     self.assertNotIn('policyPlacement', baseline)
                     self.assertFalse(any(permission.startswith(('policy', 'realtime'))
                         for service in baseline['services'] for permission in service['permissions']))
-                    if mode == 'legacy':
-                        self.assertNotIn('policyPlacement', candidate)
-                    else:
-                        current = candidate['policyPlacement']
-                        if placement is None:
-                            placement = current
-                        self.assertEqual(current, placement)
-                        self.assertEqual(current['partitionCount'], 16)
-                        self.assertEqual(sorted(partition for owner in current['owners']
-                            for partition in owner['partitions']), list(range(16)))
-                        for service in candidate['services']:
-                            self.assertIn('policyMutation', service['permissions'])
-                            if service['hostIDs']:
-                                self.assertIn('policyRegistration', service['permissions'])
-                                self.assertIn('policyRevocation', service['permissions'])
-                    self.assertEqual(candidate['hostID'], baseline['hostID'])
-                    self.assertEqual(candidate['signingKeyPath'], baseline['signingKeyPath'])
+                    current = candidate['policyPlacement']
+                    if placement is None:
+                        placement = current
+                    self.assertEqual(current, placement)
+                    self.assertEqual(current['partitionCount'], 16)
+                    self.assertEqual(sorted(partition for owner in current['owners']
+                        for partition in owner['partitions']), list(range(16)))
+                    for service in candidate['services']:
+                        self.assertIn('policyMutation', service['permissions'])
+                        if service['hostIDs']:
+                            self.assertIn('policyRegistration', service['permissions'])
+                            self.assertIn('policyRevocation', service['permissions'])
+                self.assertEqual(candidate['hostID'], baseline['hostID'])
+                self.assertEqual(candidate['signingKeyPath'], baseline['signingKeyPath'])
 
 
 class NotificationLossProofTests(unittest.TestCase):

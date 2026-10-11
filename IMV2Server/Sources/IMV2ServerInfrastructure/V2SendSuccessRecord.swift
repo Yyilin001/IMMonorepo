@@ -69,12 +69,10 @@ struct V2SendSuccessRow: Decodable, Sendable {
     let fingerprintVersion: Int16
     let operationFingerprint: Data?
     let resolvedAt: Int64?
-    let createdAt: Date
     enum CodingKeys: String, CodingKey {
         case messageID = "message_id", roomSequence = "room_sequence"
         case domainFingerprint = "domain_fingerprint", fingerprintVersion = "fingerprint_version"
         case operationFingerprint = "operation_fingerprint", resolvedAt = "operation_resolved_at_ms"
-        case createdAt = "created_at"
     }
     static func decodeIfPresent(from decoder: any Decoder) throws -> Self? {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -86,21 +84,10 @@ struct V2SendSuccessRow: Decodable, Sendable {
         guard fingerprintVersion == Int16(domain.version), domainFingerprint == domain.digest else {
             return .fingerprintConflict
         }
-        guard (operationFingerprint == nil) == (resolvedAt == nil) else {
+        guard let operationFingerprint, let milliseconds = resolvedAt else {
             throw V2MessageOperationValidationError.invalidReceipt
         }
-        if let operationFingerprint {
-            guard operationFingerprint == fingerprint.digest else { return .fingerprintConflict }
-        }
-        let milliseconds: Int64
-        if let resolvedAt { milliseconds = resolvedAt }
-        else {
-            let value = createdAt.timeIntervalSince1970 * 1000
-            guard value.isFinite, value > 0, value < Double(Int64.max) else {
-                throw V2MessageOperationValidationError.invalidReceipt
-            }
-            milliseconds = Int64(value)
-        }
+        guard operationFingerprint == fingerprint.digest else { return .fingerprintConflict }
         guard roomSequence > 0, milliseconds > 0 else { throw V2MessageOperationValidationError.invalidReceipt }
         return .receipt(try .init(identity: identity, fingerprint: fingerprint,
             outcome: .accepted(.init(messageID: .init(uuid: messageID), roomSequence: UInt64(roomSequence))),

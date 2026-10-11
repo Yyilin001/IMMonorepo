@@ -714,7 +714,6 @@ def main():
                         IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(metrics_port),
                         IM_V2_METRICS_MINIMUM_REFRESH_INTERVAL_MS='4000')
                     gateway_config.update(IM_V2_GATEWAY_NODE_ID='gateway',
-                        IM_V2_REALTIME_ROOM_TRANSPORT='actor',
                         IM_V2_GATEWAY_REPLICA_COUNT='2' if args.multi_gateway else '1')
                     gateway_log = (output / 'gateway.log').open('w')
                     gateway = subprocess.Popen([str(binary_directory / 'IMV2ServerApp')],

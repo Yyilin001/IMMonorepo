@@ -148,7 +148,7 @@ public enum V2ActorRoomReceiptDomainFailure: Error, Equatable, Sendable {
 
 public extension V2ActorRoomReceiptFailureWire {
     init(_ value: V2ReadReceiptStoreError) { self = .store(.init(value)) }
-    init(_ value: V2ReadReceiptBatcherError) { self = .serverBusy }
+    init(_ value: V2RoomReceiptAdmissionError) { self = .serverBusy }
     func domainValue() -> V2ActorRoomReceiptDomainFailure {
         switch self {
         case .store(let error): .store(error.domainValue())

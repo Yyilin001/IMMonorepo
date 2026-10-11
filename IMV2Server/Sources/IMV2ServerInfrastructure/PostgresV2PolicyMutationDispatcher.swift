@@ -107,11 +107,9 @@ package struct V2PolicyAccountDisableReceipt: Codable, Sendable {
 package struct PostgresV2PolicyMutationDispatcher: Sendable {
     private let database: any Database
     private let delivery: any V2UserShardProjectionDelivering
-    private let legacyAuthorization: V2DirectAuthorizationCoordinator
 
-    package init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
-                 legacyAuthorization: V2DirectAuthorizationCoordinator) {
-        self.database = database; delivery = projectionDelivery; self.legacyAuthorization = legacyAuthorization
+    package init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering) {
+        self.database = database; delivery = projectionDelivery
     }
 
     package func apply(context: V2PolicyMutationContext, change: V2PolicyAuthorizationChange) async throws -> Data {
@@ -125,16 +123,13 @@ package struct PostgresV2PolicyMutationDispatcher: Sendable {
         let result: V2PolicyMutationResult
         switch mutation {
         case .social(let command):
-            let store = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: delivery,
-                authorizationCoordinator: legacyAuthorization)
+            let store = V2PostgresSocialRelationshipPersistence(database: database, projectionDelivery: delivery)
             result = .social(try await store.applyPolicyOperation(command, now: clock.value, context: context))
         case .strangerPreference(let command):
-            let store = PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: delivery,
-                authorizationCoordinator: legacyAuthorization)
+            let store = V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: delivery)
             result = .preference(try await store.applyPolicyOperation(command, now: clock.value, context: context))
         case .disable(let frozen):
-            let store = try V2PostgresAccountDisableService(database: database, operatorPrincipal: frozen.operatorPrincipal,
-                authorizationCoordinator: legacyAuthorization)
+            let store = try V2PostgresAccountDisableMutation(operatorPrincipal: frozen.operatorPrincipal)
             result = .disable(.init(try await store.applyPolicyOperation(frozen.validatedCommand(), occurredAt: clock.value, context: context)))
         }
         return try JSONEncoder().encode(result)

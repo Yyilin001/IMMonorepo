@@ -9,25 +9,31 @@ import Testing
 struct PostgresV2PolicyOwnerTests {
     private let fingerprint = Data(repeating: 9, count: 32)
 
-    @Test("current-state mutations reject an existing legacy room holder without applying facts or sealing the scope")
-    func currentStateRejectsLegacyHolder() async throws {
+    @Test("current-state mutations commit and replay without retired room-holder schema")
+    func currentStateWithoutRetiredHolderSchema() async throws {
         try await withUserEventDatabase { database, sql, schema in
+            for name in ["policy_authorization_holders", "policy_authorization_revocations",
+                         "policy_authorization_holder_generation"] {
+                #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass(\(bind: schema + "." + name))")
+                    .first(decoding: Count.self)?.value == 0)
+            }
             let scope = V2PolicyAuthorizationScope.account(UUID())
             let current = PostgresV2PolicyAuthorizationJournal(database: database, schema: schema)
-            let lease = try await current.acquireOwner(scope: scope, ownerID: UUID(), durationSeconds: 30)
-            try await v2SeedLegacyPolicyHolder(sql: sql, schema: schema, owner: lease)
-            await #expect(throws: V2PolicyAuthorizationLifecycleError.notDrained) {
-                try await current.changeCurrentPolicy(scope: scope, ownerID: lease.ownerID,
-                    durationSeconds: 30, operationKey: "current-atomic", fingerprint: fingerprint,
-                    commandJSON: "{}", apply: { _, _ in
-                        Issue.record("Current mutation must reject a legacy holder before applying facts")
-                        return Data()
-                    })
-            }
+            let ownerID = UUID()
+            let first = try await current.changeCurrentPolicy(scope: scope, ownerID: ownerID,
+                durationSeconds: 30, operationKey: "current-atomic", fingerprint: fingerprint,
+                commandJSON: "{}", apply: { _, _ in Data([1]) })
+            #expect(first.receipt == Data([1]))
+            #expect(!first.replayed)
+            let replay = try await current.changeCurrentPolicy(scope: scope, ownerID: ownerID,
+                durationSeconds: 30, operationKey: "current-atomic", fingerprint: fingerprint,
+                commandJSON: "{}", apply: { _, _ in
+                    Issue.record("Replay must not apply the mutation twice")
+                    return Data()
+                })
+            #expect(replay.receipt == first.receipt)
+            #expect(replay.replayed)
             #expect(try await current.pendingChanges(scope: scope).isEmpty)
-            #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM \(unsafeRaw: schema).policy_authorization_scopes WHERE scope_key=\(bind: scope.key) AND pending_change_key IS NULL AND revision=\(bind: lease.revision)")
-                .first(decoding: Count.self)?.value == 1)
-
         }
     }
 

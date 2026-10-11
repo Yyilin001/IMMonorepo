@@ -31,9 +31,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let placement = try V2PolicyOwnerPlacement(document)
             try await PostgresV2PolicyDeploymentPlacementStore(database: database).require(placement)
             let binding = V2PolicyClusterClientBinding()
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: [:])
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
-                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy),
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()),
                 ownerID: identity.incarnationID, ownsScope: { placement.owns($0, hostID: hostID) })
             let remote = PostgresV2RemotePolicyOwners(clientProvider: { try await binding.client() }, localOwners: owners, resolve: { key in
                 try await PostgresV2PolicyDeploymentRoutes(placement: placement, client: binding.client()).resolveScope(key)
@@ -41,7 +40,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
                 policyOwners: remote, locator: try .init(hostID: hostID, shardID: "room-a"), maximumRooms: 4)
             let writes = PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled)
-            let resources = try V2RoomServerOwnerResources(database: database, writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
+            let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: SuccessfulProjectionDelivery(), capacityProfile: profile,
@@ -89,11 +88,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(forwarded.messageID != nil && forwarded.errorCode == nil)
                 #expect(try await callerApp.forwardPair(pair, deadline: .now + .seconds(10)) == forwarded)
                 phase = "application policy mutation and snapshot publication"
-                let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
-                    .usingPolicyOwners(try await callerApp.policyMutationExecutor())
+                let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: try await callerApp.policyMutationExecutor())
                 let block = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                     operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: Date())
-                _ = try await social.submitSocialOperation(block, now: Date())
+                _ = try await social.submitSocialOperation(block)
                 let rejectedPair = V2ActorForwardPairWire(actorUserID: senderID, operationID: .init(uuid: UUID()), source: pair.source, targetRoomID: target.roomID)
                 #expect(try await callerApp.forwardPair(rejectedPair, deadline: .now + .seconds(10)).errorCode == "DIRECT_MESSAGE_RESTRICTED")
                 let unaffected = try await callerApp.directory.room(sourceRoom).call(policyApplicationRequest(room: sourceRoom, text: "unrelated group"),

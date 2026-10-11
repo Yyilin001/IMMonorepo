@@ -20,7 +20,6 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
         let authorizationID: UUID
         var requiresRoomInterest = true
         var socketGate: V2RoomSubscriptionSocketGate? = nil
-        var fallbackGate: V2RoomSubscriptionFallbackGate? = nil
         public static func == (lhs: Self, rhs: Self) -> Bool {
             lhs.fence == rhs.fence && lhs.userID == rhs.userID && lhs.memberRevision == rhs.memberRevision
                 && lhs.connectionID == rhs.connectionID && lhs.lifecycle == rhs.lifecycle
@@ -171,45 +170,18 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
                         generation: UInt64) -> @Sendable (@Sendable () -> Void) -> Bool {
         let gate = connections.snapshot().connections[connectionID]?.socketGate
         return { enqueue in
-            if let gate, gate.eventLoop.inEventLoop {
-                return gate.enqueueInterest(lifecycle: lifecycle, roomID: roomID, generation: generation, body: enqueue)
-            }
-            return self.connections.enqueueInterest(connectionID: connectionID, lifecycle: lifecycle,
-                roomID: roomID, generation: generation, body: enqueue)
+            guard let gate, gate.eventLoop.inEventLoop else { return false }
+            return gate.enqueueInterest(lifecycle: lifecycle, roomID: roomID, generation: generation, body: enqueue)
         }
-    }
-    public func enqueueInterestIfCurrent(connectionID: UUID, lifecycle: UUID, roomID: RoomID,
-                                         scopeGeneration: UInt64, enqueue: @Sendable () -> Void) -> Bool {
-        if let gate = connections.snapshot().connections[connectionID]?.socketGate, gate.eventLoop.inEventLoop {
-            return gate.enqueueInterest(lifecycle: lifecycle, roomID: roomID, generation: scopeGeneration, body: enqueue)
-        }
-        return connections.enqueueInterest(connectionID: connectionID, lifecycle: lifecycle, roomID: roomID,
-            generation: scopeGeneration, body: enqueue)
     }
     public func enqueueIfCurrent(_ permit: Permit, enqueue: @Sendable () -> Void) -> Bool {
-        if let gate = permit.socketGate, gate.eventLoop.inEventLoop { return gate.enqueue(permit, now: now(), body: enqueue) }
-        return permit.fallbackGate?.enqueue(permit, now: now(), connections: connections, body: enqueue) ?? false
+        guard let gate = permit.socketGate, gate.eventLoop.inEventLoop else { return false }
+        return gate.enqueue(permit, now: now(), body: enqueue)
     }
     public func shutdown() async {
         let cells = catalog.withLock { value in let cells = Array(value.rooms.values); value = Catalog(); value.closed = true; return cells }
         connections.shutdown()
         for cell in cells { await cell.mutate { $0.shutdown() } }
-    }
-}
-
-/// The transport-independent test/inspection boundary is per room, never node-wide.
-/// Actual NIO enqueue uses V2RoomSubscriptionSocketGate instead.
-final class V2RoomSubscriptionFallbackGate: Sendable {
-    private let permissions = Mutex<[UserID: V2RoomSubscriptionSocketGate.RoomPermission]>([:])
-    func update(_ value: [UserID: V2RoomSubscriptionSocketGate.RoomPermission]) { permissions.withLock { $0 = value } }
-    fileprivate func enqueue(_ permit: V2GatewayRoomSubscriptionAuthority.Permit, now: ContinuousClock.Instant,
-        connections: V2RoomSubscriptionConnections, body: @Sendable () -> Void) -> Bool {
-        permissions.withLock { values in
-            guard let room = values[permit.userID], room.fence == permit.fence,
-                  room.deadline.map({ $0 > now }) == true, room.authorizationID == permit.authorizationID,
-                  room.memberRevision == permit.memberRevision else { return false }
-            return connections.enqueue(permit, body: body)
-        }
     }
 }
 
@@ -227,7 +199,6 @@ fileprivate actor V2RoomSubscriptionActor {
     private let roomID: RoomID
     private let machine: V2RoomSubscriptionStateMachine
     private let connections: V2RoomSubscriptionConnections
-    private let fallback = V2RoomSubscriptionFallbackGate()
     private var projectionDirty = false
     private var users: Set<UserID> = []
     private var publicationBarrier: [UUID: EventLoopFuture<Void>] = [:]
@@ -297,7 +268,6 @@ fileprivate actor V2RoomSubscriptionActor {
         permits.map { original in
             var permit = original
             if users.insert(permit.userID).inserted { projectionDirty = true }
-            permit.fallbackGate = fallback
             if let gate = connections.snapshot().connections[permit.connectionID]?.socketGate {
                 permit.socketGate = gate
                 if projected[permit.connectionID]?.1 !== gate || projected[permit.connectionID]?.0 != permit.userID {
@@ -318,7 +288,6 @@ fileprivate actor V2RoomSubscriptionActor {
         guard projectionDirty else { return Array(publicationBarrier.values) }
         projectionDirty = false
         let permissions = Dictionary(uniqueKeysWithValues: users.map { ($0, machine.permission(roomID: roomID, userID: $0)) })
-        fallback.update(permissions)
         let liveConnections = connections.snapshot().connections
         for (id, (user, gate, previous)) in projected {
             let permission = permissions[user] ?? .denied
@@ -891,26 +860,6 @@ fileprivate final class V2RoomSubscriptionConnections: Sendable {
             let installed = gate.interest(lifecycle: lifecycle, roomID: interest?.roomID, generation: interest?.scopeGeneration ?? 0)
             connection.publication = registered.and(installed).map { _ in () }
             value.connections[id] = connection; return true
-        }
-    }
-    func enqueue(_ permit: V2GatewayRoomSubscriptionAuthority.Permit, body: @Sendable () -> Void) -> Bool {
-        state.withLock { value in
-            guard !value.closed, let connection = value.connections[permit.connectionID],
-                  connection.userID == permit.userID, connection.lifecycle == permit.lifecycle else { return false }
-            if permit.requiresRoomInterest {
-                guard let interest = connection.interest, interest.roomID == permit.fence.roomID,
-                      interest.scopeGeneration == permit.scopeGeneration, interest.id == permit.roomInterestID else { return false }
-            }
-            body(); return true
-        }
-    }
-    func enqueueInterest(connectionID: UUID, lifecycle: UUID, roomID: RoomID, generation: UInt64,
-                         body: @Sendable () -> Void) -> Bool {
-        state.withLock { value in
-            guard !value.closed, let connection = value.connections[connectionID], connection.lifecycle == lifecycle,
-                  let interest = connection.interest, interest.roomID == roomID,
-                  interest.scopeGeneration == generation else { return false }
-            body(); return true
         }
     }
     func shutdown() {

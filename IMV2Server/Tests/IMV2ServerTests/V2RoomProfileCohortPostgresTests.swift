@@ -53,7 +53,7 @@ struct V2RoomProfileCohortPostgresTests {
                 maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
                 maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1, timeout: .seconds(1)))
-            let owner = try V2RoomServerOwnerResources(database: database, writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
+            let owner = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: CohortProjectionDelivery(),
@@ -61,7 +61,7 @@ struct V2RoomProfileCohortPostgresTests {
                     maxCommandsPerWindow: 100, retryAfterSeconds: 3)),
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(), databaseWorkAdmission: admission)
-            let factory = try V2RoomServerActivationFactory(owners: [token.owner.shardID: owner], safetyActorUserID: nil)
+            let factory = try V2RoomServerActivationFactory(owners: [token.owner.shardID: owner.usingFixturePolicyAuthorizations(endpoint: token.owner.shardID)], safetyActorUserID: nil)
             let executor = factory.runtimeFactory().make(token)
             try await executor.restore(.now + .seconds(10))
             let configuration = try V2RoomRuntimeConfiguration()

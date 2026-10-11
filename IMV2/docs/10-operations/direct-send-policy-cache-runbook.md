@@ -1,88 +1,42 @@
-# Direct-send policy cache operations
+# 发送权限内存状态运维说明
 
-This change reduces repeated direct-message authorization reads without making
-cache state authoritative. PostgreSQL remains the source of truth for every
-accepted message.
+## 当前启动方式
 
-## Deploy order
+1. 使用 `IMV2/sql/schema.sql` 初始化空数据库，安装实时 Journal，并检查当前 SQL 契约与服务端 readiness。
+2. 为 Gateway 的每个物理房间 Owner 绑定 Policy Owner 服务，再创建房间工厂。工厂拒绝缺少权限服务的资源；同一物理 Owner 的逻辑分片别名必须共享同一个服务。
+3. Account 的好友关系、拉黑及陌生人设置变更，以及 Operator 的封禁入口，使用当前 Policy Owner 策略变更执行器。
+4. 观察权限冷加载、内存命中、房间队列和写连接等待指标。首次加载无需历史回填或预热任务。
 
-1. Initialize an empty database with `IMV2/sql/schema.sql` and verify the current
-   SQL contract and server readiness.
-2. Start the current gateway. A cold cache uses complete authorization queries;
-   no historical backfill or warm-up job is required.
-3. Observe cache hit/miss and authorization rejection metrics before raising
-   load. Keep the database revision checks enabled.
+房间轮次收集等待使用 `IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS`，默认 2 ms，允许 1–25 ms。部署配置使用当前变量，不保留历史批处理参数入口。
 
-## Safety invariants
+项目尚未部署，历史数据库结构升级和回滚到旧授权代码均不受支持。当前版本重启保留持久化业务事实，按需重建内存状态。
 
-- Gateway binds every room writer to an independent control-policy pool, including
-  the writers retained by foreground and background forward delivery.
-- Ordinary, atomic-batch and ready forward direct sends read account, block/friendship,
-  recipient preference and special-account facts under shared control locks,
-  and commit a durable grant before entering any owner transaction. The full
-  batch user/pair lock set is acquired in stable order during reservation.
-- Owner pair/user revisions still fence the cached owner snapshot. They cannot
-  certify freshness of a different database's control policy.
-- Persisted control facts may leave the control transaction only bound to the
-  exact command fingerprint, recipient, owner and generation. Owner transactions
-  reject aborted grants and save their immutable proof with the message or
-  business denial. Shared caches retain owner facts and cannot override control.
-- Owner membership, mute, reply markers and admission remain checked by the
-  existing owner transaction. Group-only writes use their existing owner rules.
-- \`has_replied\` changes only from false to true and is updated atomically with
-  the first accepted message from that user.
-- Control and owner pools must be distinct even for one physical database.
-  The direct-control pool is included in the process connection ceiling and
-  exposed under the fixed metric class \`direct_send_control\`.
+## 普通发送路径
 
-Social changes lock the local room before advancing its pair revision. A frozen
-source copy is left unchanged; the configured destination uses fresh control
-facts instead. Active colocated rooms retain their existing revision fence.
+房间恢复时读取房间类型、参与者及已提交序号，将同一份初始化信息安装到房间权限服务和发送状态。恢复读取使用读／控制连接预算。
 
-Automatic authorization now covers forward import as well. Complete process
-failure, policy-writer coverage and room migration remain open. Normal
-connection tests do not prove a distributed commit guarantee; see the
-[governance contract](../../../docs/reviews/room-owner-migration-contract.md).
+首次使用所需策略 scope 时，权限服务从 Policy Owner 取得状态；后续使用内存状态。策略变化通过当前策略变更及撤销机制推进。普通消息不再经过缺省的数据库权限准备路径，也不为每条消息预留旧持久化授权 intent。
 
-## Durable authorization runtime wiring
+房间 Actor 负责顺序与权限判断，节点写连接调度器分配实际写连接，消息持久化保持房间独立提交。数据库提交确认后归还连接，再推进房间内存状态并返回 ACK；同房间在此期间仍保持执行占用。
 
-Gateway and Operator register separate authorization-resolution pools for each
-unique control/room-owner database URL, with one connection per event loop.
-Logical room aliases reuse that physical pool. These connections are included
-in the process ceiling and never borrowed from policy-writer or reservation
-pools. Owner abort commits before control acknowledgement starts, allowing both
-to share a resolution pool when colocated.
+Policy Owner 和持久化数据库承担不同职责：前者管理当前授权状态，后者记录业务事实和已接受的发送结果。数据库中的历史策略快照不能替代当前授权状态。
 
-Gateway wires the coordinator into social and stranger-policy writers; Operator
-wires it into account disable. Gateway recovers at most eight due grants per
-iteration, using the configured worker poll interval, and includes task cancellation in
-the existing bounded shutdown drain before closing its databases. The fixed Gateway metric class is
-`direct_authorization_resolution`.
+## 旧授权清理状态
 
-Ordinary, atomic-batch and forward sends reserve and bind grants automatically.
-Acknowledgement happens after owner commit and local admission-credit finalization;
-a failure returns retryable UNAVAILABLE and leaves the durable grant for recovery.
-No owner proof means no acknowledgement; absence never implies abort. Forward
-import first completes a short inbox/media preflight transaction; media pending
-returns without a grant. Reservation uses the stable ready-media command digest,
-and acceptance revalidates that command and the owner in its own transaction.
-Terminal replay returns the existing outcome and can acknowledge an existing
-owner proof without payload decoding or a new authorization generation. Rejections
-without a message proof retain their obligation for the bounded abort/recovery
-worker. The old `withControlPolicies` callback has been removed from the room
-writer. Full process lifecycle, concurrency faults and migration validation remain
-open. Configuration
-boundaries and coordinator drain/recovery with occupied single-connection
-foreground pools passed for colocated and separate databases; see the
-[verification record](../../../docs/reviews/verification-records.md#20260920-direct-authorization-runtime-pools).
+当前 Schema 已移除旧授权预留表及回执表，对应 Store、Coordinator 和消息写入证明路径也已删除。消息写入要求当前 Policy Owner 执行上下文；好友关系、拉黑、陌生人设置与封禁入口缺少 Policy Owner 时拒绝执行，不再回退到旧 SQL 授权路径。
 
-## Deployment boundary
+旧控制侧 holder、revocation 表、登记序列及房间侧权限租约表也已移除，策略变更不再查询历史房间登记。当前策略版本、变更记录和发布 outbox 继续保留。
 
-Historical schema upgrades and rollback to old authorization code are not supported.
-Current-version restarts retain the database facts and rebuild the cache on demand.
+部分历史测试构造仍需迁移到当前 Policy Owner。不得为迁就这些构造恢复生产兼容路径；测试通过范围以实际验证记录为准。
 
+旧后台授权恢复扫描器、恢复租约、重试计数和专用恢复索引已经移除。Gateway、Account 和 Operator 不再启动该扫描器，也不再为其建立授权解析连接池。`room_identity_control` 连接预算用于当前房间身份控制读取。
 
-Forward-specific verification covers ready and pending media, real file copying,
-permission rejection, invalid text, admission retry, finalization and ACK failure,
-and compacted terminal replay; see the
-[forward authorization evidence](../../../docs/reviews/verification-records.md#20260920-forward-automatic-authorization).
+当前 Policy Owner 的恢复流程仍保留。相关实现和验证应以当前代码为准，旧授权扫描器的历史验证记录仅用于追溯，不能作为当前部署步骤。
+
+## 验证边界
+
+权限缓存测试需要覆盖首次初始化、热发送、策略变化、房间退役和重建。消息提交结果不确定时，通过原消息身份查询已接受结果；连接中断不能视为消息未提交。
+
+跨库转发还需要验证媒体待就绪、策略拒绝、Owner 选择、提交及最终化失败、压缩后的终态重放。运行这些测试须使用明确授权的隔离临时数据库；普通连接测试不能证明所有分布式故障场景。
+
+历史故障实验见[验证记录](../../../docs/reviews/verification-records.md)。房间归属迁移的边界见[治理契约](../../../docs/reviews/room-owner-migration-contract.md)。

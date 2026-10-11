@@ -15,7 +15,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let request = try activationWriteRequest(text: "notice", now: now)
-            let outcome = try await PostgresV2RoomWriteStore(database: database).accept(
+            let outcome = try await V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0).accept(
                 command: request.command, capacityProfile: request.capacityProfile,
                 identifiers: request.identifiers, now: now)
             try await sql.raw("""
@@ -61,7 +62,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let request = try activationWriteRequest(text: "before", now: now)
-            let seed = try await PostgresV2RoomWriteStore(database: database).accept(command: request.command,
+            let seed = try await V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0).accept(command: request.command,
                 capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: now)
             guard case .accepted(let message) = seed else { Issue.record("seed"); return }
             let leases = PostgresV2RoomActivationStore(database: database)
@@ -118,7 +120,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 Issue.record("initial activation unavailable"); return
             }
             let base = PostgresV2RoomWriteStore(database: database)
-            let old = base.usingActivationScope(try .init(tokens: [first.token]))
+            let old = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: base, shardID: "room-a", epoch: 0, activationToken: first.token)
             let request = try activationWriteRequest(text: "first", now: now)
             let accepted = try await old.accept(command: request.command, capacityProfile: request.capacityProfile,
                 identifiers: request.identifiers, now: now)
@@ -135,7 +138,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         identifiers: input.identifiers, now: now)
                 }
             }
-            let successor = base.usingActivationScope(try .init(tokens: [next.token]))
+            let successor = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: base, shardID: "room-a", epoch: 0, activationToken: next.token)
             let replay = try await successor.accept(command: request.command, capacityProfile: request.capacityProfile,
                 identifiers: request.identifiers, now: now)
             guard case .idempotent(let recovered) = replay else { Issue.record("replay not recovered"); return }

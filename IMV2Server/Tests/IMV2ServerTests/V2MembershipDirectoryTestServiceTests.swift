@@ -6,11 +6,11 @@ import IMV2Core
 import Testing
 
 @Suite("V2 room membership directory")
-struct V2RoomMembershipDirectoryServiceTests {
+struct V2MembershipDirectoryTestServiceTests {
     @Test("forwards a bounded request without allowing UI to construct an unbounded page")
     func forwardsBoundedRequest() async throws {
         let store = DirectoryStoreSpy()
-        let service = V2RoomMembershipDirectoryService(store: store)
+        let service = V2MembershipDirectoryTestService(store: store)
         let roomID = try RoomID("00000000-0000-0000-0000-000000000801")
         let actor = try UserID("00000000-0000-0000-0000-000000000802")
         let page = try await service.list(.init(roomID: roomID, actorUserID: actor, cursor: nil, pageSize: 2))
@@ -27,7 +27,7 @@ struct V2RoomMembershipDirectoryServiceTests {
     @Test("returned membership revisions fit persistence", arguments: [UInt64(0), 1, UInt64(Int64.max), UInt64(Int64.max) + 1, UInt64.max])
     func returnedRevisionBounds(revision: UInt64) async throws {
         let request = try V2RoomMembershipDirectoryRequest(roomID: .init("room"), actorUserID: .init("user"), cursor: nil, pageSize: 1)
-        let service = V2RoomMembershipDirectoryService(store: DirectoryRevisionStore(revision: revision))
+        let service = V2MembershipDirectoryTestService(store: DirectoryRevisionStore(revision: revision))
         if revision > UInt64(Int64.max) {
             await #expect(throws: V2RoomMembershipDirectoryError.corruptPersistenceState) { try await service.list(request) }
         } else {

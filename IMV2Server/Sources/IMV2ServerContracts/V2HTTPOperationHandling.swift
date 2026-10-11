@@ -8,7 +8,7 @@ public enum V2HTTPOperationError: Error {
 
 public protocol V2SocialOperationHandling: Sendable {
     func loadSocialOperationSnapshot(actorUserID: UserID, targetUserID: UserID) async throws -> V2SocialOperationSnapshot
-    func submitSocialOperation(_ command: V2SocialOperationCommand, now: Date) async throws -> V2SocialOperationRecoveryResult
+    func submitSocialOperation(_ command: V2SocialOperationCommand) async throws -> V2SocialOperationRecoveryResult
     func recoverSocialOperation(_ request: V2SocialOperationRecoveryRequest, now: Date) async throws -> V2SocialOperationRecoveryResult
 }
 

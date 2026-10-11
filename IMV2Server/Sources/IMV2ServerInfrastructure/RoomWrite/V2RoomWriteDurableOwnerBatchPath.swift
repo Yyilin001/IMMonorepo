@@ -5,8 +5,7 @@ import IMV2ServerContracts
 import SQLKit
 
 /// A complete fresh cohort reduced in each room's runtime-owned turn order.
-/// Accepted ordinary sends reuse room authorization; legacy workflows retain
-/// their control preparation and database policy mapping.
+/// Policy execution supplies control facts; preflight checks room-local state.
 struct V2RoomWriteDurableOwnerBatchPath: Sendable {
     let strangerMessagePolicy: V2StrangerMessagePolicy
 

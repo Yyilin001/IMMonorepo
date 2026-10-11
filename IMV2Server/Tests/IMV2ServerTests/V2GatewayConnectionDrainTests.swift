@@ -21,7 +21,7 @@ struct V2GatewayConnectionDrainTests {
             session: .init(limits: try .init(maximumInFlightRequests: 1),
                            authenticator: DrainAuthenticator(), capabilityProfile: "base",
                            commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: command, registry: V2DeviceConnectionRegistry()
+            handler: command, registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
         let channel = NIOAsyncTestingChannel()
         let completion = V2GatewayConnectionDrainCompletion(eventLoop: channel.eventLoop)

@@ -11,7 +11,7 @@ struct V2RecoverySchedulerOwnershipTests {
     @Test("unrepresented scopes refill after actual query return and successful Ready position release", arguments: [false, true])
     func tailScopeBeyondCapacityProgresses(successfulOutput: Bool) async throws {
         let coordinator = V2RealtimeRecoveryCoordinator(maximumConnections: 2_000)
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let queries = SchedulerOwnershipQueries()
         let confirmation = makeConfirmation()
         let writes = SchedulerSuccessfulWrites()
@@ -105,7 +105,7 @@ struct V2RecoverySchedulerOwnershipTests {
     @Test("a future retry wakes without new input and shutdown joins its real query")
     func retryWakeAndActualShutdownOwnership() async throws {
         let coordinator = V2RealtimeRecoveryCoordinator()
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let queries = SchedulerOwnershipQueries(failFirst: true)
         let confirmation = makeConfirmation()
         do {
@@ -180,7 +180,7 @@ struct V2RecoverySchedulerOwnershipTests {
         let stream = context.handle.stream, device = context.handle.identity.deviceID
         let version = UInt8(IMV2ProtocolVersion.current)
         let limits = try V2FrameLimits(maximumPayloadBytes: 4096, acceptedVersions: [0, version])
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             scopedNotificationWriter: { writes.record($0) }))
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello.deviceID = device.rawValue
         hello.clientHello.supportedProtocolVersions = [UInt32(version)]

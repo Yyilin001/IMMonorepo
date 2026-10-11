@@ -102,7 +102,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
             .grant(member: f.member, baselineSequence: 11)), authenticatedServiceID: "owner") == .stale)
         #expect(await authority.apply(f.delivery(1, .baseline(members: [f.member])),
             authenticatedServiceID: "owner") == .stale)
-        let oldAccepted = authority.enqueueIfCurrent(oldWrite, enqueue: {})
+        let oldAccepted = await authority.enqueueFixtureIfCurrent(oldWrite, enqueue: {})
         #expect(!oldAccepted)
         #expect(await authority.captureOnlinePermits(roomID: f.room).isEmpty)
         let member = V2RoomSubscriptionMember(userID: f.user, memberRevision: 2)
@@ -116,14 +116,14 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         }
         let fresh = try #require(permits.first)
         #expect(fresh.fence.activation == replacement.activation)
-        let freshAccepted = authority.enqueueIfCurrent(fresh, enqueue: {})
+        let freshAccepted = await authority.enqueueFixtureIfCurrent(fresh, enqueue: {})
         #expect(freshAccepted)
     }
 
     @Test("baseline gaps and repeated members never authorize a device", arguments: [false, true])
     func malformedBaselinePage(gap: Bool) async throws {
         let f = Fixture(), authority = f.authority()
-        try #require(authority.registerConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
+        try #require(await authority.registerFixtureConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
         try #require(await authority.install(fence: f.fence(), serviceID: "owner", deadline: .now + .seconds(100)))
         let first = [f.member] + (1..<512).map { _ in V2RoomSubscriptionMember(userID: .init(uuid: UUID()), memberRevision: 1) }
         #expect(await authority.apply(f.delivery(1, .baselinePage(index: 0, totalMembers: 1_025, members: first)),
@@ -138,7 +138,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
     @Test("segmented group authorization stays closed until the final page", arguments: [513, 5_000, 100_000])
     func segmentedBaseline(total: Int) async throws {
         let f = Fixture(), authority = f.authority()
-        try #require(authority.registerConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
+        try #require(await authority.registerFixtureConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
         try #require(await authority.install(fence: f.fence(), serviceID: "owner", deadline: .now + .seconds(100)))
         let members = [f.member] + (1..<total).map { _ in V2RoomSubscriptionMember(userID: .init(uuid: UUID()), memberRevision: 1) }
         let size = V2RoomSubscriptionPayload.maximumBaselinePageMembers
@@ -166,9 +166,9 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
     func onlineMemberDevicesReceiveWithoutOpeningRoom() async throws {
         let f = Fixture(), authority = f.authority()
         let sibling = UUID(), siblingLifecycle = UUID(), outsider = UUID()
-        try #require(authority.registerConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
-        try #require(authority.registerConnection(sibling, userID: f.user, lifecycle: siblingLifecycle))
-        try #require(authority.registerConnection(outsider, userID: .init(uuid: UUID()), lifecycle: UUID()))
+        try #require(await authority.registerFixtureConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
+        try #require(await authority.registerFixtureConnection(sibling, userID: f.user, lifecycle: siblingLifecycle))
+        try #require(await authority.registerFixtureConnection(outsider, userID: .init(uuid: UUID()), lifecycle: UUID()))
         try await f.baseline(authority)
         let permits = await f.event(authority, control: 2)
         #expect(Set(permits.map(\.connectionID)) == [f.connection, sibling])
@@ -178,7 +178,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
             try await authority.validateDeviceProgress(connectionID: f.connection, userID: f.user, reports: [(f.room, 12)])
         }
         for permit in permits {
-            let accepted = authority.enqueueIfCurrent(permit, enqueue: {})
+            let accepted = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
             #expect(accepted)
         }
         authority.removeConnection(sibling, lifecycle: siblingLifecycle)
@@ -186,7 +186,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
             try await authority.validateDeviceProgress(connectionID: sibling, userID: f.user, reports: [(f.room, 11)])
         }
         let siblingPermit = try #require(permits.first { $0.connectionID == sibling })
-        let disconnectedAccepted = authority.enqueueIfCurrent(siblingPermit, enqueue: {})
+        let disconnectedAccepted = await authority.enqueueFixtureIfCurrent(siblingPermit, enqueue: {})
         #expect(!disconnectedAccepted)
         #expect(await authority.apply(f.delivery(3, authorization: 2, .revoke(userID: f.user, memberRevision: 1)),
             authenticatedServiceID: "owner") == .applied(permits: []))
@@ -194,7 +194,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
             try await authority.validateDeviceProgress(connectionID: f.connection, userID: f.user, reports: [(f.room, 11)])
         }
         let firstPermit = try #require(permits.first { $0.connectionID == f.connection })
-        let revokedAccepted = authority.enqueueIfCurrent(firstPermit, enqueue: {})
+        let revokedAccepted = await authority.enqueueFixtureIfCurrent(firstPermit, enqueue: {})
         #expect(!revokedAccepted)
     }
 
@@ -202,7 +202,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
     func accountHeadPermitFences(reason: Int) async throws {
         let f = Fixture(), clock = Mutex(ContinuousClock.now)
         let authority = V2GatewayRoomSubscriptionAuthority(now: { clock.withLock { $0 } })
-        try #require(authority.registerConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
+        try #require(await authority.registerFixtureConnection(f.connection, userID: f.user, lifecycle: f.lifecycle))
         try #require(await authority.install(fence: f.fence(), serviceID: "owner", deadline: clock.withLock { $0 } + .seconds(5)))
         #expect(await authority.apply(f.delivery(1, .baseline(members: [f.member])), authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(await authority.capturePermits(roomID: f.room).isEmpty)
@@ -217,7 +217,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         }
         #expect(await authority.captureOnlinePermits(roomID: f.room).isEmpty)
         let writes = Mutex(0)
-        let direct = authority.enqueueIfCurrent(permit) { writes.withLock { $0 += 1 } }
+        let direct = await authority.enqueueFixtureIfCurrent(permit) { writes.withLock { $0 += 1 } }
         #expect(!direct)
         #expect(writes.withLock { $0 } == 0)
     }
@@ -333,7 +333,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         #expect(await authority.apply(terminal, authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(await authority.apply(terminal, authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(await authority.captureOnlinePermits(roomID: f.room).isEmpty)
-        let submitted = authority.enqueueIfCurrent(permit, enqueue: { Issue.record("terminal restored a permit") })
+        let submitted = await authority.enqueueFixtureIfCurrent(permit, enqueue: { Issue.record("terminal restored a permit") })
         #expect(!submitted)
         #expect(!(await authority.renew(fence: f.fence(), serviceID: "owner", appliedControlSequence: 2,
             deadline: clock.withLock { $0 } + .seconds(100))))
@@ -357,9 +357,9 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         #expect(await authority.progressSnapshot(connectionID: f.connection) == nil)
         #expect(await authority.requiresBaseline(fence: f.fence()))
         #expect(await authority.renewalCheckpoint(fence: f.fence(), serviceID: "owner") == nil)
-        let committed = authority.enqueueIfCurrent(permit, enqueue: { Issue.record("retired payload submitted") })
+        let committed = await authority.enqueueFixtureIfCurrent(permit, enqueue: { Issue.record("retired payload submitted") })
         #expect(!committed)
-        let submitted = authority.enqueueIfCurrent(permit, enqueue: { Issue.record("retired permit submitted") })
+        let submitted = await authority.enqueueFixtureIfCurrent(permit, enqueue: { Issue.record("retired permit submitted") })
         #expect(!submitted)
         #expect(await authority.apply(terminal, authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(await authority.apply(f.delivery(2, .head(highWatermark: 10)), authenticatedServiceID: "owner") == .stale)
@@ -376,11 +376,11 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         let old = try #require(await f.event(authority, control: 2).first)
         let secondDevice = UUID()
         let secondLifecycle = UUID()
-        authority.registerConnection(secondDevice, userID: f.user, lifecycle: secondLifecycle)
+        await authority.registerFixtureConnection(secondDevice, userID: f.user, lifecycle: secondLifecycle)
         #expect(await authority.registerRoomInterest(connectionID: secondDevice, lifecycle: secondLifecycle, roomID: f.room, scopeGeneration: 1))
         let other = UserID(uuid: UUID())
         #expect(await authority.apply(f.delivery(3, authorization: 2, .grant(member: .init(userID: other, memberRevision: 1), baselineSequence: 10)), authenticatedServiceID: "owner") == .applied(permits: []))
-        let oldSubmitted = authority.enqueueIfCurrent(old, enqueue: {})
+        let oldSubmitted = await authority.enqueueFixtureIfCurrent(old, enqueue: {})
         #expect(oldSubmitted)
         let current = await f.event(authority, control: 4, authorization: 2, roomSequence: 12)
         #expect(current.count == 2)
@@ -400,8 +400,8 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         } else {
             await authority.removeRoomInterest(connectionID: f.connection, lifecycle: f.lifecycle, roomID: f.room)
         }
-        let detailCommitted = authority.enqueueIfCurrent(detailPermit, enqueue: { Issue.record("retired detail submitted") })
-        let accountCommitted = authority.enqueueIfCurrent(accountPermit, enqueue: {})
+        let detailCommitted = await authority.enqueueFixtureIfCurrent(detailPermit, enqueue: { Issue.record("retired detail submitted") })
+        let accountCommitted = await authority.enqueueFixtureIfCurrent(accountPermit, enqueue: {})
         #expect(!detailCommitted)
         #expect(accountCommitted)
     }
@@ -419,7 +419,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         } else {
             authority.removeConnection(f.connection, lifecycle: f.lifecycle)
         }
-        let submitted = authority.enqueueIfCurrent(permit, enqueue: { Issue.record("retired account permit submitted") })
+        let submitted = await authority.enqueueFixtureIfCurrent(permit, enqueue: { Issue.record("retired account permit submitted") })
         #expect(!submitted)
     }
 
@@ -429,18 +429,18 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         await f.connect(authority)
         let other = UserID(uuid: UUID()), otherConnection = UUID()
         let otherLifecycle = UUID()
-        authority.registerConnection(otherConnection, userID: other, lifecycle: otherLifecycle)
+        await authority.registerFixtureConnection(otherConnection, userID: other, lifecycle: otherLifecycle)
         #expect(await authority.registerRoomInterest(connectionID: otherConnection, lifecycle: otherLifecycle, roomID: f.room, scopeGeneration: 1))
         try await f.baseline(authority, extra: [.init(userID: other, memberRevision: 1)])
         let permits = await f.event(authority, control: 2, extra: [other])
         let old = try #require(permits.first { $0.userID == f.user })
         let unrelated = try #require(permits.first { $0.userID == other })
         #expect(await authority.apply(f.delivery(3, authorization: 2, .revoke(userID: f.user, memberRevision: 2)), authenticatedServiceID: "owner") == .applied(permits: []))
-        let pendingCommitted = authority.enqueueIfCurrent(old, enqueue: { Issue.record("revoked bytes submitted") })
+        let pendingCommitted = await authority.enqueueFixtureIfCurrent(old, enqueue: { Issue.record("revoked bytes submitted") })
         #expect(!pendingCommitted)
-        let survivingCommitted = authority.enqueueIfCurrent(unrelated, enqueue: {})
+        let survivingCommitted = await authority.enqueueFixtureIfCurrent(unrelated, enqueue: {})
         #expect(survivingCommitted)
-        let oldSubmitted = authority.enqueueIfCurrent(old, enqueue: {})
+        let oldSubmitted = await authority.enqueueFixtureIfCurrent(old, enqueue: {})
         #expect(!oldSubmitted)
         #expect(await authority.apply(f.delivery(4, authorization: 3, .grant(member: .init(userID: f.user, memberRevision: 1), baselineSequence: 10)), authenticatedServiceID: "owner") == .invalid)
     }
@@ -451,7 +451,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         await f.connect(authority); try await f.baseline(authority)
         let old = try #require(await f.event(authority, control: 2).first)
         #expect(await authority.apply(f.delivery(4, .revoke(userID: f.user, memberRevision: 2)), authenticatedServiceID: "owner") == .snapshotRequired)
-        let oldSubmitted = authority.enqueueIfCurrent(old, enqueue: {})
+        let oldSubmitted = await authority.enqueueFixtureIfCurrent(old, enqueue: {})
         #expect(!oldSubmitted)
         #expect(await authority.apply(f.delivery(3, authorization: 2, .grant(member: .init(userID: f.user, memberRevision: 3), baselineSequence: 10)), authenticatedServiceID: "owner") == .snapshotRequired)
         let fresh = f.fence(generation: 2)
@@ -474,17 +474,17 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         #expect(await authority.apply(f.delivery(1, .baseline(members: [f.member])), authenticatedServiceID: "owner") == .applied(permits: []))
         let old = try #require(await f.event(authority, control: 2).first)
         let replacement = UUID()
-        authority.registerConnection(f.connection, userID: f.user, lifecycle: replacement)
+        await authority.registerFixtureConnection(f.connection, userID: f.user, lifecycle: replacement)
         #expect(await authority.registerRoomInterest(connectionID: f.connection, lifecycle: replacement, roomID: f.room, scopeGeneration: 1))
         authority.removeConnection(f.connection, lifecycle: f.lifecycle)
-        let pendingCommitted = authority.enqueueIfCurrent(old, enqueue: { })
+        let pendingCommitted = await authority.enqueueFixtureIfCurrent(old, enqueue: { })
         #expect(!pendingCommitted)
-        let oldSubmitted = authority.enqueueIfCurrent(old, enqueue: {})
+        let oldSubmitted = await authority.enqueueFixtureIfCurrent(old, enqueue: {})
         #expect(!oldSubmitted)
         let fresh = try #require(await f.event(authority, control: 3, roomSequence: 12).first)
         #expect(fresh.lifecycle == replacement)
         clock.withLock { $0 = initial + .seconds(10) }
-        let freshSubmitted = authority.enqueueIfCurrent(fresh, enqueue: {})
+        let freshSubmitted = await authority.enqueueFixtureIfCurrent(fresh, enqueue: {})
         #expect(!freshSubmitted)
         #expect(!(await authority.install(fence: f.fence(), serviceID: "owner", deadline: initial + .seconds(20))))
     }
@@ -496,12 +496,12 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         let permit = try #require(await f.event(authority, control: 2).first)
         #expect(await authority.apply(f.delivery(2, .revoke(userID: f.user, memberRevision: 2)), authenticatedServiceID: "owner") == .stale)
         #expect(await authority.apply(f.delivery(3, authorization: 2, .revoke(userID: f.user, memberRevision: 2)), authenticatedServiceID: "imposter") == .stale)
-        let permitSubmitted = authority.enqueueIfCurrent(permit, enqueue: {})
+        let permitSubmitted = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
         #expect(permitSubmitted)
         let moved = f.fence(ownerEpoch: 2, generation: 1)
         #expect(await authority.install(fence: moved, serviceID: "new-owner", deadline: .now + .seconds(100)))
         #expect(!(await authority.install(fence: f.fence(generation: 100), serviceID: "owner", deadline: .now + .seconds(100))))
-        let permitSubmitted2 = authority.enqueueIfCurrent(permit, enqueue: {})
+        let permitSubmitted2 = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
         #expect(!permitSubmitted2)
         #expect(await authority.apply(f.delivery(3, authorization: 2, .revoke(userID: f.user, memberRevision: 2)), authenticatedServiceID: "owner") == .stale)
     }
@@ -514,14 +514,14 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         #expect(await authority.apply(f.delivery(3, authorization: 2, .revoke(userID: f.user, memberRevision: 1)), authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(await authority.apply(f.delivery(4, authorization: 3, .grant(member: f.member, baselineSequence: 11)), authenticatedServiceID: "owner") == .applied(permits: []))
         let fresh = try #require(await f.event(authority, control: 5, authorization: 3, roomSequence: 12).first)
-        let oldSubmitted = authority.enqueueIfCurrent(old, enqueue: {})
+        let oldSubmitted = await authority.enqueueFixtureIfCurrent(old, enqueue: {})
         #expect(!oldSubmitted)
-        let freshSubmitted = authority.enqueueIfCurrent(fresh, enqueue: {})
+        let freshSubmitted = await authority.enqueueFixtureIfCurrent(fresh, enqueue: {})
         #expect(freshSubmitted)
         #expect(await authority.apply(f.delivery(6, authorization: 4, .revoke(userID: f.user, memberRevision: 2)), authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(await authority.apply(f.delivery(7, authorization: 5, .grant(member: f.member, baselineSequence: 12)), authenticatedServiceID: "owner") == .invalid)
         #expect(await authority.apply(f.delivery(7, authorization: 5, .grant(member: .init(userID: f.user, memberRevision: 2), baselineSequence: 12)), authenticatedServiceID: "owner") == .applied(permits: []))
-        let freshSubmitted2 = authority.enqueueIfCurrent(fresh, enqueue: {})
+        let freshSubmitted2 = await authority.enqueueFixtureIfCurrent(fresh, enqueue: {})
         #expect(!freshSubmitted2)
     }
 
@@ -530,10 +530,10 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         let f = Fixture(), authority = f.authority()
         await f.connect(authority)
         let second = UUID(), secondLifecycle = UUID(), unrelated = UserID(uuid: UUID())
-        #expect(authority.registerConnection(second, userID: f.user, lifecycle: secondLifecycle))
+        #expect(await authority.registerFixtureConnection(second, userID: f.user, lifecycle: secondLifecycle))
         #expect(await authority.registerRoomInterest(connectionID: second, lifecycle: secondLifecycle, roomID: f.room, scopeGeneration: 1))
         let unrelatedConnection = UUID(), unrelatedLifecycle = UUID()
-        #expect(authority.registerConnection(unrelatedConnection, userID: unrelated, lifecycle: unrelatedLifecycle))
+        #expect(await authority.registerFixtureConnection(unrelatedConnection, userID: unrelated, lifecycle: unrelatedLifecycle))
         #expect(await authority.registerRoomInterest(connectionID: unrelatedConnection, lifecycle: unrelatedLifecycle, roomID: f.room, scopeGeneration: 1))
         try await f.baseline(authority, extra: [.init(userID: unrelated, memberRevision: 2)])
         let event = V2RealtimeRoomEvent(roomID: f.room, highWatermark: 11, sourceEventID: EventID(uuid: UUID()),
@@ -565,7 +565,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         #expect(await authority.apply(f.delivery(2, .revoke(userID: f.user, memberRevision: 1)), authenticatedServiceID: "owner") == .stale)
         #expect(await authority.apply(baseline, authenticatedServiceID: "owner") == .applied(permits: []))
         let permit = try #require(permits.first)
-        let permitSubmitted = authority.enqueueIfCurrent(permit, enqueue: {})
+        let permitSubmitted = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
         #expect(permitSubmitted)
     }
 
@@ -575,7 +575,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         await f.connect(authority)
         let other = UserID(uuid: UUID()), otherConnection = UUID()
         let otherLifecycle = UUID()
-        #expect(authority.registerConnection(otherConnection, userID: other, lifecycle: otherLifecycle))
+        #expect(await authority.registerFixtureConnection(otherConnection, userID: other, lifecycle: otherLifecycle))
         #expect(await authority.registerRoomInterest(connectionID: otherConnection, lifecycle: otherLifecycle, roomID: f.room, scopeGeneration: 1))
         try await f.baseline(authority, extra: [.init(userID: other, memberRevision: 1)])
         let permits = await f.event(authority, control: 2, extra: [other])
@@ -583,18 +583,18 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
         let second = try #require(permits.first { $0.userID == other })
         // Moving the connection replaces its identity without changing a sibling permit.
         let replacementLifecycle = UUID()
-        #expect(authority.registerConnection(f.connection, userID: other, lifecycle: replacementLifecycle))
+        #expect(await authority.registerFixtureConnection(f.connection, userID: other, lifecycle: replacementLifecycle))
         #expect(await authority.registerRoomInterest(connectionID: f.connection, lifecycle: replacementLifecycle, roomID: f.room, scopeGeneration: 1))
-        let replacedAccepted = authority.enqueueIfCurrent(first, enqueue: {})
+        let replacedAccepted = await authority.enqueueFixtureIfCurrent(first, enqueue: {})
         #expect(!replacedAccepted)
         let routed = await f.event(authority, control: 3, roomSequence: 12, extra: [other])
         #expect(routed.count == 2)
         #expect(routed.allSatisfy { $0.userID == other })
-        let secondPendingCommitted = authority.enqueueIfCurrent(second, enqueue: { })
+        let secondPendingCommitted = await authority.enqueueFixtureIfCurrent(second, enqueue: { })
         #expect(secondPendingCommitted)
         let routedPermit = try #require(routed.first)
         await authority.retire(fence: f.fence())
-        let retiredAccepted = authority.enqueueIfCurrent(routedPermit, enqueue: {})
+        let retiredAccepted = await authority.enqueueFixtureIfCurrent(routedPermit, enqueue: {})
         #expect(!retiredAccepted)
     }
 
@@ -602,7 +602,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
     func boundedAuthorityState() async throws {
         let f = Fixture(), authority = V2GatewayRoomSubscriptionAuthority(maximumRooms: 1, maximumConnections: 1, maximumMembersPerRoom: 1)
         await f.connect(authority); try await f.baseline(authority)
-        #expect(!authority.registerConnection(UUID(), userID: f.user, lifecycle: UUID()))
+        #expect(!(await authority.registerFixtureConnection(UUID(), userID: f.user, lifecycle: UUID())))
         let otherRoom = V2RoomSubscriptionFence(activation: f.activation(roomID: RoomID(uuid: UUID())),
             subscriptionID: UUID(), generation: 1, baselineSequence: 0)
         #expect(!(await authority.install(fence: otherRoom, serviceID: "owner", deadline: .now + .seconds(100))))
@@ -646,13 +646,13 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
             Issue.record("zero revision event rejected"); return
         }
         let permit = try #require(permits.first)
-        let accepted = authority.enqueueIfCurrent(permit, enqueue: {})
+        let accepted = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
         #expect(accepted)
         #expect(await authority.apply(.init(fence: fence, deliverySequence: 3, authorizationSequence: 2, payload: .revoke(userID: f.user, memberRevision: 0)), authenticatedServiceID: "owner") == .applied(permits: []))
-        let revoked = authority.enqueueIfCurrent(permit, enqueue: {})
+        let revoked = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
         #expect(!revoked)
         #expect(await authority.apply(.init(fence: fence, deliverySequence: 4, authorizationSequence: 3, payload: .grant(member: member, baselineSequence: 11)), authenticatedServiceID: "owner") == .applied(permits: []))
-        let resurrected = authority.enqueueIfCurrent(permit, enqueue: {})
+        let resurrected = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
         #expect(!resurrected)
         // A new user at revision zero has no existing floor or incarnation.
         let newMember = V2RoomSubscriptionMember(userID: UserID(uuid: UUID()), memberRevision: 0)
@@ -669,7 +669,7 @@ struct V2GatewayRoomSubscriptionAuthorityTests {
             hostIncarnation: UUID(uuidString: "00000000-0000-0000-0000-00000000ac02")!)
         let restored = V2RoomSubscriptionFence(activation: newerActivation, subscriptionID: UUID(), generation: 1, baselineSequence: 11)
         #expect(await authority.install(fence: restored, serviceID: "owner", deadline: .now + .seconds(100)))
-        let oldSubmitted = authority.enqueueIfCurrent(oldPermit, enqueue: {})
+        let oldSubmitted = await authority.enqueueFixtureIfCurrent(oldPermit, enqueue: {})
         #expect(!oldSubmitted)
         #expect(await authority.apply(.init(fence: restored, deliverySequence: 1, authorizationSequence: 1, payload: .baseline(members: [f.member])), authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(!(await authority.install(fence: f.fence(generation: 100), serviceID: "owner", deadline: .now + .seconds(100))))
@@ -699,7 +699,7 @@ private struct Fixture {
     }
     func authority() -> V2GatewayRoomSubscriptionAuthority { .init() }
     func connect(_ authority: V2GatewayRoomSubscriptionAuthority) async {
-        authority.registerConnection(connection, userID: user, lifecycle: lifecycle)
+        await authority.registerFixtureConnection(connection, userID: user, lifecycle: lifecycle)
         #expect(await authority.registerRoomInterest(connectionID: connection, lifecycle: lifecycle, roomID: room, scopeGeneration: 1))
     }
     func delivery(_ control: UInt64, authorization: UInt64? = nil, _ payload: V2RoomSubscriptionPayload) -> V2RoomSubscriptionDelivery {

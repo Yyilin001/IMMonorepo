@@ -372,37 +372,6 @@ public final class V2DirectRoomLogEventCache: V2CommittedRoomLogObserving {
         return page
     }
 
-    /// 面向已持有持久栅栏调用方的兼容/测试便捷入口。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间标识。
-    ///   - actorJoinedRevision: 请求发起者的加入修订。
-    ///   - actorLeftRevision: 请求发起者的离开修订，仍在房间内时为空。
-    ///   - currentHighWatermark: 当前持久高水位。
-    ///   - afterRoomSequence: 分页起点之后的位置。
-    ///   - pageSize: 请求的分页条数。
-    /// - Returns: 通过栅栏校验的分页；不可见或不连续时返回 `nil`。
-    public func page(
-        roomID: RoomID,
-        actorJoinedRevision: UInt64,
-        actorLeftRevision: UInt64?,
-        currentHighWatermark: UInt64,
-        afterRoomSequence: UInt64,
-        pageSize: Int
-    ) async -> V2GroupEventLogPage? {
-        guard let candidate = await candidate(
-            roomID: roomID,
-            afterRoomSequence: afterRoomSequence,
-            pageSize: pageSize
-        ) else { return nil }
-        return await page(
-            candidate: candidate,
-            actorJoinedRevision: actorJoinedRevision,
-            actorLeftRevision: actorLeftRevision,
-            currentHighWatermark: currentHighWatermark
-        )
-    }
-
     func recordMiss(roomID: RoomID) async {
         await lane(for: roomID).cache.recordLookup(hit: false)
     }

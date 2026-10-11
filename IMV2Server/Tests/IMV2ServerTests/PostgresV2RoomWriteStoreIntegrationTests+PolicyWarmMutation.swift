@@ -34,18 +34,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 rooms.append(opened.roomID)
             }
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
             let coldMetrics = V2SendOperationBatchMetrics()
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control,
                 stateMetrics: coldMetrics),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
                 policyOwners: owners, endpoint: "room-b", maximumRooms: 2,
                 sendOperationMetrics: coldMetrics)
-            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
-                authorizationCoordinator: legacy).usingPolicyOwners(owners)
+            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
             let preferences = PostgresV2AccountPreferenceOperationStore(database: control,
-                projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: legacy).usingPolicyOwners(owners)
+                projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
             let deniedPreference = try await preferences.freezePreferenceFixture(owner: .init(uuid: memberTwoUUID),
                 operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: now)
             if kind == "remove" {
@@ -130,11 +128,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         let command = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                             operation: kind == "block" ? .userBlock(.init(uuid: UUID())) : .relationship(.init(uuid: UUID())),
                             action: kind == "block" ? .userBlock(.block) : .relationship(.remove), now: Date())
-                        _ = try await social.submitSocialOperation(command, now: Date())
+                        _ = try await social.submitSocialOperation(command)
                     case "stranger": _ = try await preferences.submit(deniedPreference, now: Date())
                     default:
-                        _ = try await V2PostgresAccountDisableService(database: control, operatorPrincipal: "operator:test",
-                            authorizationCoordinator: legacy).usingPolicyOwners(owners)
+                        _ = try await V2PostgresAccountDisableService(operatorPrincipal: "operator:test", policyOwners: owners)
                             .disable(.init(userID: .init(uuid: memberTwoUUID), operationID: UUID(), reason: .policyEnforcement))
                     }
                 }
@@ -219,16 +216,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         let command = try await social.freezeSocialFixture(actorUserID: senderID,
                             targetUserID: .init(uuid: memberTwoUUID), operation: .userBlock(.init(uuid: UUID())),
                             action: .userBlock(.unblock), now: Date())
-                        _ = try await social.submitSocialOperation(command, now: Date())
+                        _ = try await social.submitSocialOperation(command)
                     case "remove":
                         let request = try await social.freezeSocialFixture(actorUserID: senderID,
                             targetUserID: .init(uuid: memberTwoUUID), operation: .relationship(.init(uuid: UUID())),
                             action: .relationship(.request), now: Date())
-                        _ = try await social.submitSocialOperation(request, now: Date())
+                        _ = try await social.submitSocialOperation(request)
                         let accept = try await social.freezeSocialFixture(actorUserID: .init(uuid: memberTwoUUID),
                             targetUserID: senderID, operation: .relationship(.init(uuid: UUID())),
                             action: .relationship(.accept), now: Date())
-                        _ = try await social.submitSocialOperation(accept, now: Date())
+                        _ = try await social.submitSocialOperation(accept)
                     default:
                         let command = try await preferences.freezePreferenceFixture(owner: .init(uuid: memberTwoUUID),
                             operation: .strangerMessagePreference(.init(uuid: UUID())),

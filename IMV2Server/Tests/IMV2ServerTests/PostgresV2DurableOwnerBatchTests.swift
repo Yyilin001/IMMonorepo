@@ -24,24 +24,26 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sql.raw("UPDATE im_v2.room_admission SET shard_lease_id=\(bind: otherLease) WHERE room_id=\(bind: rooms[1].uuidValue!)").run()
             }
             let observer = DurableOwnerBatchObserver(), metrics = V2SendOperationBatchMetrics()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(database),
-                clock: { now }, committedMessageObserver: observer, sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(database).usingPolicyAuthorizations(policies),
+                clock: { now }, committedMessageObserver: observer, sendOperationMetrics: metrics)
+            let prepare = policies.fixtureSendPreparation(store: store, now: { now })
             let commands = try rooms.map { room in try ownerBatchCommand(room: room, text: "first stranger", now: now) }
             // Statement triggers distinguish a real set-wise write from a
             // transaction containing one scalar insert per room.
-            try await sql.raw("CREATE TABLE im_v2.fixture_durable_statements (table_name text NOT NULL, combined_statement boolean NOT NULL)").run()
+            try await sql.raw("CREATE TABLE im_v2.fixture_durable_statements (table_name text NOT NULL)").run()
             try await sql.raw("""
                 CREATE FUNCTION im_v2.fixture_count_durable_statements() RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN
-                    INSERT INTO im_v2.fixture_durable_statements VALUES (TG_TABLE_NAME, position('INSERT INTO im_v2.direct_authorization_receipts' in current_query()) > 0);
+                    INSERT INTO im_v2.fixture_durable_statements VALUES (TG_TABLE_NAME);
                     RETURN NULL;
                 END
                 $$
                 """).run()
-            for table in ["messages", "message_send_completions", "direct_authorization_receipts"] {
+            for table in ["messages", "message_send_completions"] {
                 try await sql.raw("""
                     CREATE TRIGGER fixture_durable_statement AFTER INSERT ON im_v2.\(unsafeRaw: table)
                     FOR EACH STATEMENT EXECUTE FUNCTION im_v2.fixture_count_durable_statements()
@@ -50,8 +52,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("CREATE TRIGGER fixture_durable_admission_statement AFTER UPDATE ON im_v2.shard_admission_pools FOR EACH STATEMENT EXECUTE FUNCTION im_v2.fixture_count_durable_statements()").run()
             try await withRoomActivation(database: database, roomID: rooms[0]) { firstToken in
                 try await withRoomActivation(database: database, roomID: rooms[1], shardID: multipleShards ? "room-local-b" : "room-a") { secondToken in
-                    let first = try await store.prepareSendBatch([commands[0]], token: firstToken, now: { now })
-                    let second = try await store.prepareSendBatch([commands[1]], token: secondToken, now: { now })
+                    let first = try await prepare([commands[0]], firstToken, .now + .seconds(30))
+                    let second = try await prepare([commands[1]], secondToken, .now + .seconds(30))
                     let results = try await store.executeIndependentRoomTurns([first, second], capacityProfile: profile,
                         identifiers: .init(), now: { now })
                     #expect(results.count == 2)
@@ -63,15 +65,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                     #expect(try await count("im_v2.messages", on: sql) == 2)
                     #expect(try await count("im_v2.message_send_completions", on: sql) == 2)
-                    #expect(try await count("im_v2.direct_authorization_receipts", on: sql) == 2)
-                    for table in ["messages", "message_send_completions", "direct_authorization_receipts"] {
+                    #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')", on: sql) == 0)
+                    for table in ["messages", "message_send_completions"] {
                         let row = try await sql.raw("SELECT count(*) AS value FROM im_v2.fixture_durable_statements WHERE table_name=\(bind: table)").first(decoding: DurableOwnerBatchCount.self)
                         #expect(row?.value == 2)
                     }
                     #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.fixture_durable_statements WHERE table_name='shard_admission_pools'").first(decoding: DurableOwnerBatchCount.self)?.value == 0)
-                    // Success is part of the message statement; only legacy
-                    // authorization obligations have a separate proof write.
-                    #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.fixture_durable_statements WHERE table_name='direct_authorization_receipts' AND combined_statement").first(decoding: DurableOwnerBatchCount.self)?.value == 2)
+                    // Current sends persist success with the message and never
+                    // write a separate legacy authorization proof.
                     #expect(observer.count == 2)
                     let admissionPath: V2SendOperationAdmissionPath = multipleShards ? .multiGroup : .singleSuccess
                     #expect(metrics.sendOperationBatchMetricsSnapshot().ownerAdmissionHandoffs[admissionPath]?.count == 0)
@@ -81,22 +82,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(metrics.sendOperationBatchMetricsSnapshot().ownerAdmissionHandoffs[admissionPath]?.count == 0)
                     let conflictCommand = try ownerBatchCommand(room: rooms[0], operationID: commands[0].command.clientMessageID,
                         text: "different immutable body", now: now)
-                    let conflict = try await store.prepareSendBatch([conflictCommand], token: firstToken, now: { now })
+                    let conflict = try await prepare([conflictCommand], firstToken, .now + .seconds(30))
                     let conflicts = try await store.executeIndependentRoomTurns([conflict, second], capacityProfile: profile,
                         identifiers: .init(), now: { now })
                     #expect(try conflicts[0].get() == [.sendOperation(.fingerprintConflict)])
                     #expect(try conflicts[1].get() == committed[1])
-                    #expect(try await count("im_v2.fixture_durable_statements", on: sql) == 6)
+                    #expect(try await count("im_v2.fixture_durable_statements", on: sql) == 4)
                     #expect(observer.count == 2)
-                    let closedCommand = try ownerBatchCommand(room: rooms[0], text: "legacy closed operation", now: now)
-                    try await sql.raw("INSERT INTO im_v2.message_operation_closures (room_id,sender_user_id,client_message_id,fingerprint_version,request_fingerprint,closed_at) VALUES (\(bind: rooms[0].uuidValue!),\(bind: senderUUID),\(bind: closedCommand.command.clientMessageID.uuidValue!),3,\(bind: closedCommand.command.fingerprint.digest),\(bind: now))").run()
-                    let closed = try await store.prepareSendBatch([closedCommand], token: firstToken, now: { now })
-                    let closedResults = try await store.executeIndependentRoomTurns([closed, second], capacityProfile: profile,
+                    let freshCommand = try ownerBatchCommand(room: rooms[0], text: "new operation after replay", now: now)
+                    let fresh = try await prepare([freshCommand], firstToken, .now + .seconds(30))
+                    let freshResults = try await store.executeIndependentRoomTurns([fresh, second], capacityProfile: profile,
                         identifiers: .init(), now: { now })
-                    guard case .success(let values) = closedResults[0], case .sendOperation(.receipt(let receipt)) = values[0], case .accepted = receipt.outcome else {
+                    guard case .success(let values) = freshResults[0], case .sendOperation(.receipt(let receipt)) = values[0], case .accepted = receipt.outcome else {
                         throw V2MessageOperationValidationError.invalidReceipt
                     }
-                    #expect(try closedResults[1].get() == committed[1])
+                    #expect(try freshResults[1].get() == committed[1])
                     #expect(try await count("im_v2.messages", on: sql) == 3)
                     #expect(observer.count == 3)
                 }
@@ -111,19 +111,22 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             let rooms = try await ownerBatchRooms(database: database, profile: profile, now: now)
             let metrics = V2SendOperationBatchMetrics()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now }, sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(database).usingPolicyAuthorizations(policies), clock: { now }, sendOperationMetrics: metrics)
+            let prepare = policies.fixtureSendPreparation(store: store, now: { now })
             let commands = try rooms.map { try ownerBatchCommand(room: $0, text: "authority recheck", now: now) }
             try await withRoomActivation(database: database, roomID: rooms[0]) { firstToken in
                 try await withRoomActivation(database: database, roomID: rooms[1]) { secondToken in
                     if scenario == "denial" {
                         try await sql.raw("INSERT INTO im_v2.user_blocks (blocker_user_id,blocked_user_id,created_at) VALUES (\(bind: memberTwoUUID),\(bind: senderUUID),\(bind: now))").run()
                     }
-                    let first = try await store.prepareSendBatch([commands[0]], token: firstToken, now: { now })
-                    let second = try await store.prepareSendBatch([commands[1]], token: secondToken, now: { now })
+                    let first = try await prepare([commands[0]], firstToken, .now + .seconds(30))
+                    let second = try await prepare([commands[1]], secondToken, .now + .seconds(30))
                     if scenario == "stale" {
+                        await policies.retire(token: firstToken)
                         _ = try await PostgresV2RoomActivationStore(database: database).release(token: firstToken)
                     } else if scenario == "constraint" || scenario == "receipt_constraint" {
                         try await sql.raw("CREATE TABLE im_v2.fixture_failed_room (room_id uuid NOT NULL)").run()
@@ -183,24 +186,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             throw V2RoomWriteStoreError.corruptPersistenceState
                         }
                         #expect(try await count("im_v2.message_send_completions", on: sql) == 2)
-                        #expect(try await count("im_v2.direct_authorization_receipts", on: sql) == 2)
+                        #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')", on: sql) == 0)
                     } else {
                         let result = try results[0].get()
                         guard result.count == 1, case .sendOperation(.receipt(let receipt)) = result[0],
                               case .rejected = receipt.outcome else { throw V2RoomWriteStoreError.corruptPersistenceState }
                         #expect(try await sql.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: DurableOwnerBatchCount.self)?.value == 0)
-                        #expect(try await count("im_v2.direct_message_denials", on: sql) == 0)
+                        #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
                     }
                     let healthy = try results[1].get()
                     guard healthy.count == 1, case .sendOperation(.receipt(let receipt)) = healthy[0],
                           case .accepted = receipt.outcome else { throw V2RoomWriteStoreError.corruptPersistenceState }
                     #expect(try await count("im_v2.messages", on: sql) == (scenario == "late_quota" ? 2 : 1))
                     if scenario == "constraint" || scenario == "receipt_constraint" {
-                        // The failed envelope cannot leave its domain fact or
-                        // authorization proof behind, even when its proof was
-                        // inserted earlier within the combined statement.
+                        // The failing room leaves neither a message nor a success
+                        // record; the healthy room commits independently.
                         #expect(try await count("im_v2.message_send_completions", on: sql) == 1)
-                        #expect(try await count("im_v2.direct_authorization_receipts", on: sql) == 1)
+                        #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')", on: sql) == 0)
                         let failedTable = scenario == "receipt_constraint" ? "message_send_completions" : "messages"
                         try await sql.raw("DROP TRIGGER fixture_failed_room ON im_v2.\(unsafeRaw: failedTable)").run()
                         let retry = try await store.executeIndependentRoomTurns([first], capacityProfile: profile,
@@ -234,16 +236,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let revision = try #require(try await sql.raw("SELECT direct_policy_revision AS value FROM im_v2.direct_room_pairs WHERE room_id=\(bind: room.uuidValue!)").first(decoding: DurableOwnerBatchCount.self)).value
             let before = try #require(try await sql.raw("SELECT command_window_used AS value FROM im_v2.shard_admission_pools WHERE room_shard_id='room-a' AND capacity_profile_id='standard'").first(decoding: DurableOwnerBatchCount.self)).value
             let metrics = V2SendOperationBatchMetrics(), observer = DurableOwnerBatchObserver()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: quotaBoundary ? 1 : 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now },
-                committedMessageObserver: observer, sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(database).usingPolicyAuthorizations(policies), clock: { now },
+                committedMessageObserver: observer, sendOperationMetrics: metrics)
+            let prepare = policies.fixtureSendPreparation(store: store, now: { now })
             let commands = try [ownerBatchCommand(room: room, text: "singleton first", now: now),
                                 ownerBatchCommand(room: room, text: "singleton second", now: now)]
             try await withRoomActivation(database: database, roomID: room) { token in
-                let handle = try await store.prepareSendBatch(commands, token: token,
-                    deadline: .now + .seconds(30), now: { now })
+                let handle = try await prepare(commands, token, .now + .seconds(30))
                 let results = try await store.executeIndependentRoomTurns([handle], capacityProfile: profile,
                     identifiers: .init(), now: { now })
                 try #require(results.count == 1)
@@ -274,7 +277,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(snapshot.stages[.ownerRollback]?.count ?? 0 == (quotaBoundary ? 1 : 0))
                 #expect(snapshot.stages[.ownerCommit]?.count == 1)
                 #expect(snapshot.ownerAdmissionHandoffs[.singleSuccess]?.count == 0)
-                for table in ["messages", "message_send_completions", "direct_authorization_receipts"] {
+                for table in ["messages", "message_send_completions"] {
                     #expect(try await count("im_v2.\(table)", on: sql) == Int64(acceptedCount))
                 }
                 #expect(try await sql.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)").first(decoding: DurableOwnerBatchCount.self)?.value == Int64(acceptedCount))
@@ -311,11 +314,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             let rooms = try await ownerBatchRooms(database: database, profile: profile, now: now)
             let metrics = V2SendOperationBatchMetrics(), observer = DurableOwnerBatchObserver()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(database), clock: { now },
-                committedMessageObserver: observer, sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(database).usingPolicyAuthorizations(policies), clock: { now },
+                committedMessageObserver: observer, sendOperationMetrics: metrics)
+            let prepare = policies.fixtureSendPreparation(store: store, now: { now })
             try await sql.raw("""
                 CREATE FUNCTION im_v2.fixture_durable_commit_wait() RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN
@@ -331,8 +336,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let commands = try rooms.map { try ownerBatchCommand(room: $0, text: "uncertain cohort", now: now) }
             try await withRoomActivation(database: database, roomID: rooms[0]) { firstToken in
                 try await withRoomActivation(database: database, roomID: rooms[1]) { secondToken in
-                    let first = try await store.prepareSendBatch([commands[0]], token: firstToken, now: { now })
-                    let second = try await store.prepareSendBatch([commands[1]], token: secondToken, now: { now })
+                    let first = try await prepare([commands[0]], firstToken, .now + .seconds(30))
+                    let second = try await prepare([commands[1]], secondToken, .now + .seconds(30))
                     // Closing the client during deferred COMMIT proves missing
                     // acknowledgement, not whether PostgreSQL finally commits.
                     let results = try await V2RoomSQLDeadline.withDeadline(.now + .milliseconds(900)) {
@@ -359,7 +364,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     for stage: V2SendOperationStage in [.ownerLocks, .ownerReceiptRead,
                         .ownerPreflight, .ownerReduction, .ownerPolicy, .ownerMessagePersistence,
                         .ownerProjection, .ownerProof, .ownerReceiptPersistence] {
-                        #expect(snapshot.stages[stage]?.count == (singleton ? 1 : 2))
+                        #expect(snapshot.stages[stage]?.count ?? 0 == ([V2SendOperationStage.ownerReceiptRead, .ownerProof, .ownerReceiptPersistence].contains(stage) ? 0 : (singleton ? 1 : 2)))
                         #expect(snapshot.stages[stage]?.inFlight == 0)
                     }
                     #expect(snapshot.stages[.ownerAdmission]?.count ?? 0 == 0)

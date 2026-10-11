@@ -29,9 +29,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 room = opened.roomID
             }
             let exports = try await policyFactoryExports(database: control, target: room, profile: profile, now: now)
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
+
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
                 policyOwners: owners, endpoint: "room-b", maximumRooms: 1)
             let write = PostgresV2RoomWriteStore(database: owner,
@@ -40,7 +40,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 try await withRoomActivation(database: owner, roomID: room, shardID: "room-b") { token in
                     try await policyRecoveryRound(write: write, token: token, export: exports[0], owners: owners,
-                        legacy: legacy, control: control, controlSQL: controlSQL, owner: owner, ownerSQL: ownerSQL,
+                        control: control, controlSQL: controlSQL, owner: owner, ownerSQL: ownerSQL,
                         profile: profile, limits: limits, corrupt: corrupt)
                 }
                 try await policies.shutdown(); await owners.shutdown()
@@ -49,7 +49,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     private func policyRecoveryRound(write: PostgresV2RoomWriteStore, token: V2RoomActivationToken, export: V2ForwardExport,
-        owners: PostgresV2PolicyOwnerDirectory, legacy: V2DirectAuthorizationCoordinator,
+        owners: PostgresV2PolicyOwnerDirectory,
         control: any Database, controlSQL: any SQLDatabase, owner: any Database, ownerSQL: any SQLDatabase,
         profile: V2CapacityProfile, limits: V2MessageCommandLimits, corrupt: Bool) async throws {
         try await ownerSQL.raw("""
@@ -89,8 +89,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE \(bind: pid)::integer=ANY(pg_blocking_pids(pid))").first(decoding: PolicyRecoveryCount.self)?.value ?? 0 > 0
             }
             #expect(try await PostgresV2ForwardInboxStore(database: owner).status(exportID: export.intent.exportID) == .pending(.finalization))
-            let disable = try V2PostgresAccountDisableService(database: control, operatorPrincipal: "operator:test",
-                authorizationCoordinator: legacy).usingPolicyOwners(owners)
+            let disable = try V2PostgresAccountDisableService(operatorPrincipal: "operator:test", policyOwners: owners)
             let changing = Task {
                 let result = try await disable.disable(.init(userID: senderID, operationID: UUID(), reason: .policyEnforcement))
                 await finished.mark(); return result
@@ -99,14 +98,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // is provably blocked in an actual SQL transaction.
             try await policyRecoveryObserve { await finished.value }
             _ = try await changing.value
-            #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.room_policy_authorization_leases WHERE NOT revoked").first(decoding: PolicyRecoveryCount.self)?.value == 0)
+            #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.room_policy_authorization_leases')").first(decoding: PolicyRecoveryCount.self)?.value == 0)
             await owners.shutdown()
             await held.release(); try await holding.value
             await #expect(throws: V2RoomTransactionOutcomeUnknown.self) { try await task.value }
             try await ownerSQL.raw("DROP TRIGGER test_hold_policy_forward_finalization ON im_v2.message_forward_inbox").run()
             try await ownerSQL.raw("DROP FUNCTION im_v2.test_hold_policy_forward_finalization()").run()
             let projectionCount = try await count("im_v2.user_state_event_outbox", on: ownerSQL)
-            let holders = try await count("im_v2.policy_authorization_holders", on: controlSQL)
+            let holders = try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')", on: controlSQL)
             let hidden = ["public_user_profiles", "special_accounts", "account_disables", "user_blocks",
                 "user_relationships", "user_stranger_message_preferences"]
             for sql in [controlSQL, ownerSQL] {
@@ -133,7 +132,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             #expect(try await count("im_v2.messages", on: ownerSQL) == 1)
             #expect(try await count("im_v2.user_state_event_outbox", on: ownerSQL) == projectionCount)
-            #expect(try await count("im_v2.policy_authorization_holders", on: controlSQL) == holders)
+            #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')", on: controlSQL) == holders)
         } catch {
             await held.release(); _ = await holding.result; _ = await importing?.result; _ = await mutation?.result
             throw error

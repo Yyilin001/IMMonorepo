@@ -87,7 +87,7 @@ services:
         [{"bucket":"users-primary","database_url":"postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres-user-projection:5432/im_v2","schema":"im_v2"}]
       # Validate the same per-room admission contract as the deployment overlay.
       IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_SIZE: 32
-      IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS: 2
+      IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS: 2
       IM_V2_STRANGER_MESSAGE_MAX_PER_WINDOW: 1000000
       IM_V2_FOREGROUND_WRITE_DATABASE_WORK_LIMIT: 8
       IM_V2_FOREGROUND_CONTROL_WRITE_DATABASE_WORK_LIMIT: 2

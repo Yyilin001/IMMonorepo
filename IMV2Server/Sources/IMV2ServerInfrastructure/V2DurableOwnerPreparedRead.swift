@@ -6,7 +6,7 @@ import SQLKit
 
 /// Final receipt lookup and room-local preflight share one READ COMMITTED
 /// statement within the runtime-owned room write transaction.
-/// Historical completions and closures remain visible to the receipt decoder.
+/// Committed success facts remain visible to the receipt decoder.
 struct V2DurableOwnerPreparedRead {
     let receipts: V2DurableSendBatchReceiptSnapshot
     let rooms: [Int: PlainDirectRoomLogBatchPreflightRow]
@@ -14,20 +14,20 @@ struct V2DurableOwnerPreparedRead {
     static func load(inputs: [V2DurableSendBatchReceiptInput], ordered: [OrderedRoomWriteRequest],
         policies: [Int: V2DirectSendControlPolicy], insertFirst: Bool = false, sql: any SQLDatabase
     ) async throws -> Self {
-        guard inputs.count == ordered.count, inputs.allSatisfy({ $0.attempt == nil }),
+        guard inputs.count == ordered.count,
               Set(try inputs.map { try $0.key }).count == inputs.count else {
             throw V2MessageOperationValidationError.invalidReceipt
         }
-        let read = try PostgresV2DurableSendBatchReceipts().snapshotRead(inputs, includeOwners: false)
+        let read = try PostgresV2DurableSendBatchReceipts().snapshotRead(inputs)
         // Normal accepted sends insert first. PostgreSQL eliminates this
-        // false branch; a uniqueness/closure collision rolls back the entire
+        // false branch; a uniqueness collision rolls back the entire
         // write and uses the existing scalar recovery path.
         let receiptQuery: SQLQueryString = insertFirst
             ? "SELECT * FROM (\(read.query)) unused WHERE false" : read.query
         let prior: SQLQueryString = """
             SELECT map.preflight_ordinal AS ordinal FROM receipt_snapshot receipt
             JOIN receipt_ordinal_map map ON map.receipt_ordinal=receipt.ordinal
-            WHERE receipt.kind IN ('envelope','completion','closure')
+            WHERE receipt.kind IN ('envelope','completion')
             """
         let preflight = try PlainDirectRoomLogPreflight.query(ordered, leasedPolicies: policies, priorOperation: prior, validatesDirectMemberships: !insertFirst, usesAcceptedRoomState: insertFirst)
         V2RoomSQLContinuationObservation.current?.willDispatch()
@@ -85,7 +85,7 @@ struct V2DurableOwnerPreparedRead {
                 }
             }
         }
-        return .init(receipts: try read.decode(receiptRows).snapshot, rooms: rooms)
+        return .init(receipts: try read.decode(receiptRows), rooms: rooms)
     }
 }
 

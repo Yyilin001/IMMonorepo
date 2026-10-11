@@ -17,12 +17,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("account forward HTTP recovers original target proof across worker restart and closes only unexported pairs")
     func forwardPlanHTTPAndOwnerRecovery() async throws {
         try await withForwardOwnerDatabases(mode:.standard) { sourceDB,targetDB,sourceSQL,targetSQL,targetRoom in
-            let now=Date(timeIntervalSince1970:1_750_000_000),profile=try forwardImportTestProfile(),limits=try V2MessageCommandLimits(maxUTF8Bytes:64)
-            guard case .accepted(let sourceMessage)=try await V2SendMessageService(store:PostgresV2RoomWriteStore(database:sourceDB),capacityProfile:profile,limits:limits,now:{now}).send(.init(roomID:roomID,actorUserID:senderID,clientMessageID:.init(uuid:UUID()),text:"forward durable source")) else { throw CancellationError() }
+            let now=Date(),profile=try forwardImportTestProfile(),limits=try V2MessageCommandLimits(maxUTF8Bytes:64)
+            for sql in [sourceSQL,targetSQL] {
+                try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=\(bind: now.addingTimeInterval(600))").run()
+            }
+            guard case .accepted(let sourceMessage)=try await V2SendMessageService(store:V2PolicyAuthorizedTestWriteStore(database:sourceDB,controlDatabase:sourceDB,
+                store:PostgresV2RoomWriteStore(database:sourceDB),shardID:"room-a",epoch:0),capacityProfile:profile,limits:limits,now:{now}).send(.init(roomID:roomID,actorUserID:senderID,clientMessageID:.init(uuid:UUID()),text:"forward durable source")) else { throw CancellationError() }
             guard case .acquired(let sourceLease)=try await PostgresV2RoomActivationStore(database:sourceDB).acquire(roomID:roomID,owner:.init(shardID:"room-a",epoch:0),host:.init(hostID:.init("forward-source"),incarnationID:UUID()),duration:.init(30_000)),
                   case .acquired(let targetLease)=try await PostgresV2RoomActivationStore(database:targetDB).acquire(roomID:targetRoom,owner:.init(shardID:"room-b",epoch:0),host:.init(hostID:.init("forward-target"),incarnationID:UUID()),duration:.init(30_000)) else { throw CancellationError() }
             let sourceExecutor=try V2RoomForwardDomainExecutor(database:sourceDB,token:sourceLease.token,write:.init(database:sourceDB),capacityProfile:profile,limits:limits,now:{now})
-            let targetExecutor=try V2RoomForwardDomainExecutor(database:targetDB,token:targetLease.token,write:.init(database:targetDB),capacityProfile:profile,limits:limits,now:{now})
+            try await withFixturePolicyOwners(database: sourceDB, projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                let policies = V2RoomPolicyAuthorizationService(roomDatabase: targetDB,
+                    policyOwners: owners, endpoint: "forward-plan-target", maximumRooms: 1)
+                do {
+            let targetExecutor=try V2RoomForwardDomainExecutor(database:targetDB,token:targetLease.token,write:PostgresV2RoomWriteStore(database:targetDB).usingControlDatabase(sourceDB).usingPolicyAuthorizations(policies),capacityProfile:profile,limits:limits,now:{now})
             let loseFirstTargetACK=Mutex(true)
             let port=V2OwnerAwareForwardPlanPort(router:ForwardPlanTestRouter(target:targetRoom),execute:{ command,_ in
                 if command.roomID==roomID { return try await sourceExecutor.execute(command) }
@@ -89,6 +97,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 await #expect(throws:(any Error).self) { _=try await sourceExecutor.execute(.recoverExport(.init(actorUserID:senderID,operationID:command.childCommand(index:0).operationID,source:command.command.sources[0],targetRoomID:targetRoom),action:.query)) }
                 try await app.shutdown()
             } catch { try? await app.shutdown();throw error }
+                    await policies.shutdown()
+                } catch {
+                    await policies.shutdown()
+                    throw error
+                }
+            }
         }
     }
 }

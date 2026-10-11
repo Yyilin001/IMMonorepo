@@ -36,7 +36,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let scans = PostgresV2MediaScanStore(database: database)
         let lease = try #require(try await scans.claimPending(now: base, leaseDuration: 30, limit: 1).first)
         try await scans.complete(lease, result: .passed, now: base)
-        let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base })
+        let sender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+            database: database, controlDatabase: database,
+            store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
+            capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { base })
         guard case .accepted = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "resource fixture", media: [.init(mediaID: mediaID)]))
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
     }

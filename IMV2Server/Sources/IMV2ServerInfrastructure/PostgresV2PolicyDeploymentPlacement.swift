@@ -47,17 +47,6 @@ package struct PostgresV2PolicyDeploymentPlacementStore: Sendable {
     package init(database: any Database, schema: String = "im_v2") {
         v2PreconditionSQLSchema(schema); self.database = database; self.schema = schema
     }
-    /// A process without policy routing must not silently become a legacy
-    /// writer after the control database has activated owner authorization.
-    package func requireLegacy() async throws {
-        guard let sql = database as? any SQLDatabase else { throw V2PolicyOwnerPlacement.Failure.corruptPersistence }
-        let row = try await sql.raw("""
-            SELECT EXISTS(SELECT 1 FROM \(unsafeRaw: schema).policy_owner_deployment
-                WHERE deployment_id='active') AS active
-            """).first(decoding: LegacyRow.self)
-        guard let row else { throw V2PolicyOwnerPlacement.Failure.corruptPersistence }
-        guard !row.active else { throw V2PolicyOwnerPlacement.Failure.deploymentChanged }
-    }
     package func require(_ placement: V2PolicyOwnerPlacement) async throws {
         try await database.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2PolicyOwnerPlacement.Failure.corruptPersistence }
@@ -75,7 +64,6 @@ package struct PostgresV2PolicyDeploymentPlacementStore: Sendable {
         }
     }
     private struct DeploymentRow: Decodable { let revision: Int64; let snapshot_digest: Data }
-    private struct LegacyRow: Decodable { let active: Bool }
 }
 
 package struct PostgresV2PolicyDeploymentRoutes: Sendable {

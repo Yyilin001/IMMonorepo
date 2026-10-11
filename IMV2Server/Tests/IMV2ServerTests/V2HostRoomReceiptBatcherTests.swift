@@ -39,18 +39,21 @@ struct V2HostRoomReceiptBatcherTests {
         #expect(metrics.maximumObservedBatchSize == 2)
     }
 
-    @Test("owner change fails only its stale item; a sibling domain error stays typed")
+    @Test("owner change fails only its stale item; successful siblings complete and domain errors stay typed")
     func isolatesPerItemFailures() async throws {
-        let tokens = try [makeToken(), makeToken()]
-        let batcher = V2HostRoomReceiptBatcher(configuration: configuration(size: 2)) { batch, _, _ in
-            #expect(batch.requests.count == 2)
-            return .init(results: [.failure(.ownerChanged), .failure(.roomSequenceNotFound)])
+        let tokens = try [makeToken(), makeToken(), makeToken()]
+        let batcher = V2HostRoomReceiptBatcher(configuration: configuration(size: 3)) { batch, _, _ in
+            #expect(batch.requests.count == 3)
+            return .init(results: [.failure(.ownerChanged), .failure(.roomSequenceNotFound), .success(.idempotencyConflict)])
         }
         let first = Task { try await batcher.record(try makeTurn(tokens[0])) }
         try await waitPending(batcher, count: 1)
         let second = Task { try await batcher.record(try makeTurn(tokens[1])) }
+        try await waitPending(batcher, count: 2)
+        let third = Task { try await batcher.record(try makeTurn(tokens[2])) }
         await #expect(throws: V2RoomActivationLeaseError.activationChanged) { try await first.value }
         #expect(try await second.value == .recordFailure(.store(.roomSequenceNotFound)))
+        #expect(try await third.value == .record(.idempotencyConflict))
     }
 
     @Test("pending cancellation releases its slot; dispatched cancellation stays tracked with one DB permit")
@@ -216,7 +219,7 @@ struct V2HostRoomReceiptBatcherTests {
         #expect(try await second.value == .record(.idempotencyConflict))
     }
 
-    private func configuration(size: Int) -> V2ReadReceiptBatcher.Configuration {
+    private func configuration(size: Int) -> V2RoomReceiptBatchConfiguration {
         .init(maximumBatchSize: size, maximumDelay: .milliseconds(20),
               maximumInFlightBatches: 1, maximumPendingRequests: 4)
     }

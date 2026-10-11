@@ -20,7 +20,7 @@ struct V2AccountDeliveryTCPTests {
     func postgresOwnerAutomaticCoverage() async throws {
         try await withUserEventDatabase { database, sql, schema in
             let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
-            try await sql.raw("CREATE TABLE \(unsafeRaw: schema).realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,PRIMARY KEY(topic_kind,topic_id))").run()
+            try await sql.raw("CREATE TABLE \(unsafeRaw: schema).realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id,owner_epoch,membership_revision) VALUES(\(bind: room.uuidValue!),'tcp-rooms','standard',1,1)").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room.uuidValue!),\(bind: user.uuidValue!),1)").run()
             let leases = PostgresV2RoomActivationStore(database: database, schema: schema)
@@ -167,7 +167,7 @@ struct V2AccountDeliveryTCPTests {
         }
         let scans = Mutex(0), subscriptions = Mutex(0)
         let scannedAccounts = Mutex([UserID]()), subscribedAccounts = Mutex([UserID]())
-        let installedFences = Mutex<[RoomID: V2RoomSubscriptionFence]>([:])
+        let installedFences = Mutex<[String: V2RoomSubscriptionFence]>([:])
         var ownerPumps: [V2RoomSubscriptionDeliveryPump] = []
         var router: TCPAccountClusterRouter?
         let automaticFences = try Dictionary(uniqueKeysWithValues: (automaticAccountCoverage ? rooms : []).map { room in
@@ -221,11 +221,15 @@ struct V2AccountDeliveryTCPTests {
                     if let automaticOwner {
                         let grant = try await automaticOwner.owner.subscribe(gateway: gateway.identity, userID: user,
                             token: token, deadline: deadline)
-                        installedFences.withLock { $0[command.roomID] = grant.fence }
+                        installedFences.withLock { $0["\(gatewayIndex):\(command.roomID.rawValue)"] = grant.fence }
                         return .granted(.init(fence: grant.fence, memberRevision: grant.memberRevision,
                             userBaselineSequence: grant.baselineSequence, remainingLeaseMilliseconds: grant.remainingLeaseMilliseconds))
                     }
-                    return .granted(.init(fence: automaticFences[command.roomID]!, memberRevision: 1,
+                    let key = "\(gatewayIndex):\(command.roomID.rawValue)"
+                    let generation = installedFences.withLock { ($0[key]?.generation ?? 0) + 1 }
+                    let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: generation, baselineSequence: 0)
+                    installedFences.withLock { $0["\(gatewayIndex):\(command.roomID.rawValue)"] = fence }
+                    return .granted(.init(fence: fence, memberRevision: 1,
                         userBaselineSequence: 0, remainingLeaseMilliseconds: 30_000))
                 }, reset: { _, _, _ in .failure(.unavailable) }, renewBatch: { _, _, _ in [] },
                 activate: { command, token, deadline in
@@ -378,7 +382,7 @@ struct V2AccountDeliveryTCPTests {
                 let shard = activation.owner.shardID
                 #expect(activation.roomID == room)
                 for (index, ingress) in ingresses.enumerated() {
-                    var fence = automaticAccountCoverage ? (installedFences.withLock { $0[room] } ?? automaticFences[room]!) : V2RoomSubscriptionFence(activation: activation, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+                    var fence = automaticAccountCoverage ? (installedFences.withLock { $0["\(index):\(room.rawValue)"] } ?? automaticFences[room]!) : V2RoomSubscriptionFence(activation: activation, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
                     if !automaticAccountCoverage {
                         #expect(await ingress.install(fence: fence, sourceShardID: shard, serviceID: "owner", deadline: .now + .seconds(30)))
                         let member = committed?.member ?? V2RoomSubscriptionMember(userID: user, memberRevision: 1)

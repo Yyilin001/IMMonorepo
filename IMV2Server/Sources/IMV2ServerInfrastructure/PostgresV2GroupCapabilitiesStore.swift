@@ -10,7 +10,7 @@ import SQLKit
 ///
 /// 尤其是策略或角色变更，绝不会在没有房间事件与投递计划的情况下提交。
 /// 消费方必须使用来源房间序号而不是接收者的个人同步游标来排列这些效果。
-public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2OwnerValidatedGroupCapabilitiesStore {
+public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
     private let database: any Database
     private let activationScope: V2RoomActivationWriteScope?
     private var usesCapabilityTransaction = false
@@ -161,7 +161,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
         }
     }
 
-    /// 设置置顶消息（不校验房间归属）。
+    /// 设置置顶消息。
     ///
     /// - Parameters:
     ///   - actorUserID: 发起操作的用户。
@@ -172,25 +172,6 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
     /// - Returns: 置顶结果。
     /// - Throws: 无权限、状态冲突或持久化失败时抛出。
     public func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
-        try await setPinnedMessage(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 按房间归属设置置顶消息。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起操作的用户。
-    ///   - command: 置顶消息命令。
-    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 置顶结果。
-    /// - Throws: 归属已变更、无权限、状态冲突或持久化失败时抛出。
-    public func setPinnedMessageOwnerValidated(actorUserID: UserID, command: V2PinnedMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
-        try await setPinnedMessage(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    private func setPinnedMessage(actorUserID: UserID, command: V2PinnedMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage> {
         return try await groupTransaction(database, withinTransaction: usesCapabilityTransaction, classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID, command.messageID)
@@ -198,7 +179,6 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
             if let activationScope { try await activationScope.require([ids.room], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
             guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .permission(.pinMessages), capacityProfile: capacityProfile, now: now, sql: sql)
             guard let message = try await sql.raw("""
@@ -221,7 +201,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
         }
     }
 
-    /// 设置群公告（不校验房间归属）。
+    /// 设置群公告。
     ///
     /// - Parameters:
     ///   - actorUserID: 发起操作的用户。
@@ -232,32 +212,12 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
     /// - Returns: 公告结果。
     /// - Throws: 无权限、状态冲突或持久化失败时抛出。
     public func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
-        try await setAnnouncement(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 按房间归属设置群公告。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起操作的用户。
-    ///   - command: 群公告命令。
-    ///   - ownerRoute: 已选定的房间归属。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 公告结果。
-    /// - Throws: 归属已变更、无权限、状态冲突或持久化失败时抛出。
-    public func setAnnouncementOwnerValidated(actorUserID: UserID, command: V2GroupAnnouncementCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
-        try await setAnnouncement(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    private func setAnnouncement(actorUserID: UserID, command: V2GroupAnnouncementCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement> {
         return try await groupTransaction(database, withinTransaction: usesCapabilityTransaction, classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID)
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
             if let activationScope { try await activationScope.require([ids.room], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
             guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .permission(.manageAnnouncements), capacityProfile: capacityProfile, now: now, sql: sql)
             let current = try await sql.raw("SELECT revision FROM im_v2.group_announcements WHERE room_id = \(bind: ids.room) FOR UPDATE").first(decoding: GroupRevisionRow.self)?.revision ?? 0
@@ -271,7 +231,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
         }
     }
 
-    /// 设置角色权限（不校验房间归属）。
+    /// 设置角色权限。
     ///
     /// - Parameters:
     ///   - actorUserID: 发起操作的用户。
@@ -282,32 +242,12 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
     /// - Returns: 权限变更结果。
     /// - Throws: 无权限、修订冲突或持久化失败时抛出。
     public func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
-        try await setRolePermissions(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 按房间归属设置角色权限。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起操作的用户。
-    ///   - command: 角色权限命令。
-    ///   - ownerRoute: 已选定的房间归属。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 权限变更结果。
-    /// - Throws: 归属已变更、无权限、修订冲突或持久化失败时抛出。
-    public func setRolePermissionsOwnerValidated(actorUserID: UserID, command: V2GroupRolePermissionsCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
-        try await setRolePermissions(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    private func setRolePermissions(actorUserID: UserID, command: V2GroupRolePermissionsCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange> {
         return try await groupTransaction(database, withinTransaction: usesCapabilityTransaction, classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID)
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
             if let activationScope { try await activationScope.require([ids.room], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
             guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .permission(.changeMemberRoles), capacityProfile: capacityProfile, now: now, sql: sql)
             guard try groupUnsigned(context.room.groupPermissionRevision) == command.expectedRevision else { return .revisionConflict }
@@ -325,7 +265,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
         }
     }
 
-    /// 调整成员角色（不校验房间归属）。
+    /// 调整成员角色。
     ///
     /// - Parameters:
     ///   - actorUserID: 发起操作的用户。
@@ -336,25 +276,6 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
     /// - Returns: 角色变更结果。
     /// - Throws: 目标非成员、无权限或持久化失败时抛出。
     public func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
-        try await changeMemberRole(actorUserID: actorUserID, command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 按房间归属调整成员角色。
-    ///
-    /// - Parameters:
-    ///   - actorUserID: 发起操作的用户。
-    ///   - command: 成员角色命令。
-    ///   - ownerRoute: 已选定的房间归属。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 角色变更结果。
-    /// - Throws: 归属已变更、目标非成员、无权限或持久化失败时抛出。
-    public func changeMemberRoleOwnerValidated(actorUserID: UserID, command: V2GroupMemberRoleCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
-        try await changeMemberRole(actorUserID: actorUserID, command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    private func changeMemberRole(actorUserID: UserID, command: V2GroupMemberRoleCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange> {
         return try await groupTransaction(database, withinTransaction: usesCapabilityTransaction, classifyCommitFailure: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID, command.targetUserID)
@@ -362,7 +283,6 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore, V2Owne
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await groupLock(actor: ids.actor, operation: ids.operation, sql: sql)
             if let activationScope { try await activationScope.require([ids.room], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: ids.room, route: ownerRoute, sql: sql) }
             guard ids.actor != targetID else { return .alreadyInDesiredState }
             guard v2PostgresTimestampCanEncode(now) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let context = try await prepare(room: ids.room, actor: ids.actor, required: .permission(.changeMemberRoles), capacityProfile: capacityProfile, now: now, sql: sql)

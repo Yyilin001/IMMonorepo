@@ -13,7 +13,6 @@ import IMV2ServerInfrastructure
 /// 此阶段只准备依赖并配置指标地址，不启动房间 Actor 或 Broker。
 struct GatewayPreparedAssembly {
     let topology: GatewayDatabaseTopology
-    let authorization: V2DirectAuthorizationCoordinator
     let userShardWork: GatewayUserShardWork
     let frontdoor: GatewayFrontdoorAssembly
     let ownerMaintenance: GatewayOwnerMaintenanceAssembly
@@ -32,10 +31,6 @@ struct GatewayPreparedAssembly {
     ) async throws -> Self {
         let topology = try await GatewayDatabaseTopology.build(
             configuration: configuration, resources: resources, logger: logger
-        )
-        let authorization = V2DirectAuthorizationCoordinator(
-            controlDatabase: topology.authorizationControlDatabase,
-            ownerDatabases: topology.authorizationOwners
         )
         // 同址用户桶复用路由栅栏的控制库连接；其他桶使用各自的投递库连接。
         let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
@@ -77,7 +72,6 @@ struct GatewayPreparedAssembly {
         )
         return .init(
             topology: topology,
-            authorization: authorization,
             userShardWork: userShardWork,
             frontdoor: frontdoor,
             ownerMaintenance: ownerMaintenance,

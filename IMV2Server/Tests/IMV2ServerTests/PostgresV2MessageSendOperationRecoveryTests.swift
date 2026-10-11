@@ -43,7 +43,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         identifiers: .init(), now: { now })
                 }
             }
-            #expect(try await count("im_v2.direct_authorization_intents", on: sql) == 0)
+            #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')", on: sql) == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
         }
     }
@@ -63,31 +63,27 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let first = try command("first", id: operation), changed = try command("changed", id: operation)
             try await withRoomActivation(database: database, roomID: roomID) { token in
-                let results = try await store.sendBatch([first, changed], token: token,
-                    capacityProfile: profile, identifiers: .init(), now: { now })
-                #expect(results.count == 2)
-                for result in results {
-                    guard case .sendOperation(.deferred(let hint)) = result else {
-                        Issue.record("Expected a retryable result after rollback: \(result)")
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                    #expect(hint.reason == .rateLimited)
+                await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
+                    try await store.sendBatch([first, command("fresh tail", id: .init(uuid: UUID()))], token: token,
+                        capacityProfile: profile, identifiers: .init(), now: { now })
                 }
-                for table in ["messages", "message_send_completions", "message_operation_closures"] {
+                for table in ["messages", "message_send_completions"] {
                     #expect(try await count("im_v2.\(table)", on: sql) == 0)
                 }
                 let query = try V2MessageSendOperationRecoveryRequest(identity: changed.identity,
-                    fingerprint: changed.fingerprint, domainFingerprint: changed.command.fingerprint, action: .query)
+                    fingerprint: changed.fingerprint, domainFingerprint: changed.command.fingerprint)
                 #expect(try await store.recover(query, token: token) == .unresolved)
-                try await sql.raw("DROP TRIGGER recovery_reject_tail ON im_v2.shard_admission_pools").run()
+                try await sql.raw("DROP TRIGGER recovery_reject_tail ON im_v2.messages").run()
                 guard case .receipt(let accepted) = try await store.send(changed, token: token,
                     capacityProfile: profile, identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID()))),
                       case .accepted = accepted.outcome else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                try await sql.raw("CREATE TRIGGER recovery_reject_tail BEFORE UPDATE OF command_window_used ON im_v2.shard_admission_pools FOR EACH ROW EXECUTE FUNCTION im_v2.recovery_reject_tail()").run()
-                let failed = try await store.sendBatch([command("fresh", id: .init(uuid: UUID())), first],
-                    token: token, capacityProfile: profile, identifiers: .init(), now: { now })
-                guard case .sendOperation(.deferred) = failed[0] else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                #expect(failed[1] == .sendOperation(.fingerprintConflict))
+                try await sql.raw("CREATE TRIGGER recovery_reject_tail BEFORE INSERT ON im_v2.messages FOR EACH ROW EXECUTE FUNCTION im_v2.recovery_reject_tail()").run()
+                await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
+                    try await store.sendBatch([command("fresh", id: .init(uuid: UUID())), first],
+                        token: token, capacityProfile: profile, identifiers: .init(), now: { now })
+                }
+                #expect(try await store.send(first, token: token, capacityProfile: profile,
+                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID()))) == .fingerprintConflict)
                 #expect(try await store.recover(query, token: token) == .receipt(accepted))
                 #expect(try await count("im_v2.message_send_completions", on: sql) == 1)
             }
@@ -119,7 +115,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(rejection.outcome == .rejected(.directPolicyDenied))
                 }
                 let query = try V2MessageSendOperationRecoveryRequest(identity: denied.identity,
-                    fingerprint: denied.fingerprint, domainFingerprint: denied.command.fingerprint, action: .query)
+                    fingerprint: denied.fingerprint, domainFingerprint: denied.command.fingerprint)
                 #expect(try await store.recover(query, token: token) == .unresolved)
                 // A fresh message produces a fresh sender-only hint. Retrying
                 // the original identity above did not duplicate its hint.
@@ -132,7 +128,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 #expect(rejection.outcome == .rejected(.directPolicyDenied))
             }
-            for table in ["messages", "message_send_completions", "direct_message_denials", "direct_authorization_receipts", "message_operation_closures"] {
+            for table in ["messages", "message_send_completions"] {
                 #expect(try await count("im_v2.\(table)", on: sql) == 0)
             }
             #expect(try await count("im_v2.user_state_event_outbox", on: sql) == initialOutbox + 3)
@@ -142,8 +138,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("batch rollback retains a conflict backed by the committed control intent")
-    func durableSendBatchRetainsControlIntentConflict() async throws {
+    @Test("conflicting preparation creates no reservation and an uncommitted identity remains reusable")
+    func durableSendBatchUncommittedIdentityRemainsReusable() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
@@ -161,28 +157,33 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let first = try command("first"), changed = try command("changed")
             try await withRoomActivation(database: database, roomID: direct.roomID) { token in
-                let results = try await store.sendBatch([first, changed], token: token,
-                    capacityProfile: profile, identifiers: .init(), now: { now })
-                guard case .sendOperation(.deferred) = results[0] else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                #expect(results[1] == .sendOperation(.fingerprintConflict))
-                #expect(try await store.send(changed, token: token, capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID()))) == .fingerprintConflict)
+                await #expect(throws: V2PolicyAuthorizationLifecycleError.identityConflict) {
+                    try await store.sendBatch([first, changed], token: token,
+                        capacityProfile: profile, identifiers: .init(), now: { now })
+                }
+                #expect(try await count("im_v2.messages", on: sql) == 0)
+                #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')", on: sql) == 0)
+                try await sql.raw("DROP TRIGGER recovery_reject_tail ON im_v2.messages").run()
+                let changedResult = try await store.send(changed, token: token, capacityProfile: profile,
+                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())))
+                guard case .receipt(let receipt) = changedResult, case .accepted = receipt.outcome else {
+                    throw V2MessageOperationValidationError.invalidReceipt
+                }
             }
-            let intent = try await sql.raw("SELECT count(*) AS count FROM im_v2.direct_authorization_intents WHERE room_id=\(bind:direct.roomID.uuidValue!) AND sender_user_id=\(bind:senderUUID) AND client_message_id=\(bind:operation.uuidValue!) AND request_fingerprint=\(bind:first.command.fingerprint.digest)").first(decoding: RecoveryCount.self)
-            #expect(intent?.count == 1)
-            #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
+            try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+            #expect(try await count("im_v2.message_send_completions", on: sql) == 1)
         }
     }
 
     private func recoveryTestStore(database: any Database, now: Date) throws -> PostgresV2MessageSendOperationStore {
-        .init(database: database, writes: PostgresV2RoomWriteStore(database: database,
+        v2FixtureMessageSendOperationStore(database: database, writes: PostgresV2RoomWriteStore(database: database,
             strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
             contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
     }
 
     private func installRecoveryTailFailure(on sql: any SQLDatabase) async throws {
-        try await sql.raw("CREATE FUNCTION im_v2.recovery_reject_tail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$").run()
-        try await sql.raw("CREATE TRIGGER recovery_reject_tail BEFORE UPDATE OF command_window_used ON im_v2.shard_admission_pools FOR EACH ROW EXECUTE FUNCTION im_v2.recovery_reject_tail()").run()
+        try await sql.raw("CREATE FUNCTION im_v2.recovery_reject_tail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected message persistence lock failure' USING ERRCODE='55P03'; END $$").run()
+        try await sql.raw("CREATE TRIGGER recovery_reject_tail BEFORE INSERT ON im_v2.messages FOR EACH ROW EXECUTE FUNCTION im_v2.recovery_reject_tail()").run()
     }
 }
 

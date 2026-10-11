@@ -20,12 +20,11 @@ WITH receipts AS MATERIALIZED (
         (c.is_accepted IS TRUE AND c.message_id=m.message_id
          AND c.room_sequence=m.room_sequence AND c.timeline_sequence=m.timeline_sequence
          AND c.fingerprint_version=3 AND octet_length(c.request_fingerprint)=32
-         AND octet_length(c.operation_fingerprint)=32 AND closure.room_id IS NULL) IS TRUE AS matches_receipt_and_domain
+         AND octet_length(c.operation_fingerprint)=32) IS TRUE AS matches_receipt_and_domain
     FROM im_v2.messages m
     LEFT JOIN receipts c ON c.room_id=m.room_id AND c.sender_user_id=m.sender_user_id
         AND c.client_message_id=m.client_message_id
-    LEFT JOIN im_v2.message_operation_closures closure ON closure.room_id=m.room_id
-        AND closure.sender_user_id=m.sender_user_id AND closure.client_message_id=m.client_message_id
+
 )
 SELECT json_build_object(
     'databaseObservedAt', clock_timestamp(),
@@ -39,7 +38,6 @@ SELECT json_build_object(
         SELECT 1 FROM im_v2.messages m WHERE m.room_id=c.room_id
             AND m.sender_user_id=c.sender_user_id AND m.client_message_id=c.client_message_id)),
     'completions', (SELECT count(*) FROM receipts),
-    'closures', (SELECT count(*) FROM im_v2.message_operation_closures),
     'roomSequenceSum', (SELECT COALESCE(sum(room_sequence),0) FROM im_v2.rooms)
 )::text
 """
@@ -54,13 +52,13 @@ def prove_message_facts(
     """Execute one SQL snapshot and return only low-sensitivity aggregates.
 
     ``fresh_fixture`` asserts an exclusively owned direct-ring database with
-    zero initial messages/receipts/closures/room sequences and no outside
+    zero initial messages/receipts/room sequences and no outside
     writers. Invoke after every Loader and server writer has actually drained,
     before stopping owned PostgreSQL. Pass whole-run ACKs, including injections.
     The callback must enforce read-only and bounded statement/acquisition time.
     """
     proof = {
-        'formatVersion': 1,
+        'formatVersion': 2,
         'scope': 'fresh_fixture_all_accepted_message_facts',
         'freshFixtureRequired': True,
         'freshFixtureAsserted': fresh_fixture,
@@ -71,7 +69,7 @@ def prove_message_facts(
         'evidenceBoundary': (
             'One coherent SQL snapshot verifies full room/sender/operation keys, '
             'immutable success identity/fingerprints, acceptance message/sequence, '
-            'domain completion and absence of a conflicting negative-outcome closure for every message. '
+            'domain completion for every message. '
             'Unique-key counts alone do not prove fault recovery. This aggregate cannot '
             'identify the injected lost-ACK operations or prove App persistent recovery, '
             'automatic reconnect, delivery latency or absence of earlier rollback attempts.'
@@ -86,7 +84,7 @@ def prove_message_facts(
     count_keys = (
         'messages', 'distinctMessageKeys', 'permanentReceipts', 'acceptedReceipts',
         'otherOrMalformedReceipts', 'unmatchedMessageFacts', 'orphanAcceptedReceipts',
-        'completions', 'closures', 'roomSequenceSum',
+        'completions', 'roomSequenceSum',
     )
     try:
         raw = query(FACT_PROOF_SQL)
@@ -105,7 +103,7 @@ def prove_message_facts(
                 'completions', 'roomSequenceSum'):
         if observed[key] != expected_acknowledged:
             proof['reasons'].append(key + '_ack_mismatch')
-    for key in ('otherOrMalformedReceipts', 'unmatchedMessageFacts', 'orphanAcceptedReceipts', 'closures'):
+    for key in ('otherOrMalformedReceipts', 'unmatchedMessageFacts', 'orphanAcceptedReceipts'):
         if observed[key] != 0:
             proof['reasons'].append(key + '_nonzero')
     proof['passed'] = not proof['reasons']

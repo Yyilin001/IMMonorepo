@@ -9,7 +9,7 @@ public struct V2RealtimeJournalRecipient: Equatable, Sendable {
     public let session: V2RealtimeShardSession
     /// Trusted local coverage deadline; never reconstructed from publisher wire Date.
     public let deadline: ContinuousClock.Instant
-    /// Legacy wire interestGeneration binds the confirmed partition revision,
+    /// Wire interestGeneration binds the confirmed partition revision,
     /// not an individual topic generation. Exact topic generations are retained.
     public let interestGeneration: Int64
     public let interests: [V2RealtimeTopicKey: Int64]

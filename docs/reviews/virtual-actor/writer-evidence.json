@@ -14,18 +14,6 @@
       "table_or_marker": "im_v2.room_events"
     },
     {
-      "id": "W02",
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomAdmissionCommandCreditPool.swift",
-      "symbol": "room_admission",
-      "table_or_marker": "im_v2.room_admission"
-    },
-    {
-      "id": "W02",
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteScalarAcceptance.swift",
-      "symbol": "reserveShardAdmission",
-      "table_or_marker": "im_v2.shard_admission_pools"
-    },
-    {
       "id": "W03",
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageMutationOperationStore.swift",
       "symbol": "func edit",
@@ -154,21 +142,21 @@
     },
     {
       "id": "W19",
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Forwarding/PostgresV2ForwardPersistence.swift",
-      "symbol": "func clientMessageID",
-      "table_or_marker": "im_v2.message_forward_operations"
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2ActorForwardPairDomainExecutor.swift",
+      "symbol": "func prepare(",
+      "table_or_marker": "INSERT INTO im_v2.message_forward_operations"
     },
     {
       "id": "W19",
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteStore.swift",
-      "symbol": "func acceptForwardOwnerValidated",
-      "table_or_marker": "forwardOwnerSourceRoomID"
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2ActorForwardPairDomainExecutor.swift",
+      "symbol": "func executeBounded(",
+      "table_or_marker": "write.acceptActorForwardPair("
     },
     {
       "id": "W20",
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Forwarding/PostgresV2ForwardPersistence.swift",
-      "symbol": "func replayedResults",
-      "table_or_marker": "SET result_message_id"
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2ActorForwardPairDomainExecutor.swift",
+      "symbol": "func replay(",
+      "table_or_marker": "try await record(key"
     },
     {
       "id": "W21",

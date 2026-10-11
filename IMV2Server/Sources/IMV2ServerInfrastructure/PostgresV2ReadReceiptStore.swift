@@ -12,12 +12,7 @@ import SQLKit
 ///
 /// 回执不代表确认了传输投递。该事务只推进明确的人工阅读状态，
 /// 并记录其稳定的操作 ID。
-public struct PostgresV2ReadReceiptStore:
-    V2GroupReadReceiptOwnerStore,
-    V2OwnerValidatedReadReceiptStore,
-    V2ReadReceiptControlStore,
-    V2ReadReceiptBatchStore
-{
+public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
     let database: any Database
     private let projectionDelivery: any V2UserShardProjectionDelivering
 
@@ -26,12 +21,7 @@ public struct PostgresV2ReadReceiptStore:
         self.projectionDelivery = projectionDelivery
     }
     public func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome {
-        try await record(command: command, ownerRoute: nil, activationScope: nil, timeouts: .default, now: now)
-    }
-
-    public func recordOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute,
-                                     now: Date) async throws -> V2ReadReceiptOutcome {
-        try await record(command: command, ownerRoute: Optional(ownerRoute), activationScope: nil, timeouts: .default, now: now)
+        try await record(command: command, activationScope: nil, timeouts: .default, now: now)
     }
 
     /// 虚拟 Actor 路径。每个事务（包括幂等重放）都会先获取规范房间锁，
@@ -41,17 +31,15 @@ public struct PostgresV2ReadReceiptStore:
         now: Date, timeouts: V2RoomActivationSQLTimeouts = .default
     ) async throws -> V2ReadReceiptOutcome {
         guard token.roomID == command.roomID else { throw V2RoomActivationLeaseError.activationChanged }
-        return try await record(command: command, ownerRoute: nil,
-            activationScope: try .init(tokens: [token]), timeouts: timeouts, now: now)
+        return try await record(command: command, activationScope: try .init(tokens: [token]), timeouts: timeouts, now: now)
     }
 
-    private func record(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute?,
-                        activationScope: V2RoomActivationWriteScope?,
+    private func record(command: V2RecordReadReceiptCommand, activationScope: V2RoomActivationWriteScope?,
                         timeouts: V2RoomActivationSQLTimeouts, now: Date) async throws -> V2ReadReceiptOutcome {
         guard v2PostgresTimestampCanEncode(now) else { throw V2ReadReceiptStoreError.corruptPersistenceState }
         let groupAttempt: V2GroupReadReceiptRecordingAttempt
         if let activationScope {
-            let results = try await recordGroups([.init(command: command, now: now)], ownerRoutes: nil,
+            let results = try await recordGroups([.init(command: command, now: now)],
                 activationScope: activationScope, timeouts: timeouts)
             guard let first = results.first, results.count == 1 else {
                 throw V2ReadReceiptStoreError.corruptPersistenceState
@@ -60,8 +48,6 @@ public struct PostgresV2ReadReceiptStore:
             case .success(let value): groupAttempt = value
             case .failure(let error): throw error
             }
-        } else if let ownerRoute {
-            groupAttempt = try await recordGroupOwnerValidated(command: command, ownerRoute: ownerRoute, now: now)
         } else {
             groupAttempt = try await recordGroup(command: command, now: now)
         }
@@ -86,12 +72,6 @@ public struct PostgresV2ReadReceiptStore:
                             sql: sql, timeouts: timeouts)
                     } else {
                         try await v2SetRoomActivationSQLTimeouts(timeouts, sql: sql)
-                    }
-                    if let ownerRoute {
-                        let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: ReceiptSharedOwnerRow.self)
-                        guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch else {
-                            throw V2ReadReceiptStoreError.ownerChanged
-                        }
                     }
                     try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: "v2-read-receipt-operation:" + userID.uuidString.lowercased() + ":" + operationID.uuidString.lowercased()), 0))").run()
                     let requested = try receiptSigned(command.readThroughRoomSequence)
@@ -193,7 +173,7 @@ public struct PostgresV2ReadReceiptStore:
         _ requests: [V2ReadReceiptRecordRequest], activationScope: V2RoomActivationWriteScope?,
         timeouts: V2RoomActivationSQLTimeouts
     ) async throws -> [V2ReadReceiptRecordResult] {
-        let groupResults = try await recordGroups(requests, ownerRoutes: nil,
+        let groupResults = try await recordGroups(requests,
             activationScope: activationScope, timeouts: timeouts)
         var results: [V2ReadReceiptRecordResult] = []
         results.reserveCapacity(requests.count)
@@ -204,7 +184,7 @@ public struct PostgresV2ReadReceiptStore:
             case .success(.notGroup):
                 do {
                     results.append(.success(try await record(command: requests[index].command,
-                        ownerRoute: nil, activationScope: activationScope,
+                        activationScope: activationScope,
                         timeouts: timeouts, now: requests[index].now)))
                 } catch let error as V2ReadReceiptStoreError {
                     results.append(.failure(error))
@@ -216,43 +196,18 @@ public struct PostgresV2ReadReceiptStore:
         return results
     }
 
-    /// 集合式的群组回执事务。
-    ///
-    /// 单个有序的咨询锁图会为每个操作与 `(room,user)` 游标建立围栏，
-    /// 随后由一条 SQL 语句校验成员关系、推进单调游标并写入全部幂等记录。
-    /// 领域非法的行会单独返回；它们绝不会回滚同一批次中的合法行。
-    ///
-    /// - Parameters:
-    ///   - command: 记录已读回执的命令。
-    ///   - ownerRoute: 房间当前所属分片路由。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 群组回执记录尝试结果。
-    /// - Throws: 时间戳无法编码、路由非法或持久化状态损坏时抛出。
-    public func recordGroupOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute, now: Date) async throws -> V2GroupReadReceiptRecordingAttempt {
-        let results = try await recordGroupsOwnerValidated([.init(request: .init(command: command, now: now), ownerRoute: ownerRoute)])
-        guard let result = results.first, results.count == 1 else { throw V2ReadReceiptStoreError.corruptPersistenceState }
-        switch result { case .success(let attempt): return attempt; case .failure(let error): throw error }
-    }
-
-    public func recordGroupsOwnerValidated(_ requests: [V2OwnerValidatedReadReceiptRequest]) async throws -> [V2GroupReadReceiptBatchResult] {
-        try await recordGroups(requests.map(\.request), ownerRoutes: requests.map(\.ownerRoute))
-    }
-
     public func recordGroups(
         _ requests: [V2ReadReceiptRecordRequest]
     ) async throws -> [V2GroupReadReceiptBatchResult] {
-        try await recordGroups(requests, ownerRoutes: nil)
+        try await recordGroups(requests, activationScope: nil)
     }
 
     private func recordGroups(
-        _ requests: [V2ReadReceiptRecordRequest], ownerRoutes: [V2RoomShardRoute]?,
-        activationScope: V2RoomActivationWriteScope? = nil,
+        _ requests: [V2ReadReceiptRecordRequest],
+        activationScope: V2RoomActivationWriteScope?,
         timeouts: V2RoomActivationSQLTimeouts = .default
     ) async throws -> [V2GroupReadReceiptBatchResult] {
         guard !requests.isEmpty, requests.count <= 128 else {
-            throw V2ReadReceiptStoreError.invalidRequest
-        }
-        if let ownerRoutes, ownerRoutes.count != requests.count {
             throw V2ReadReceiptStoreError.invalidRequest
         }
         let validIndices = requests.indices.filter { v2PostgresTimestampCanEncode(requests[$0].now) }
@@ -267,7 +222,6 @@ public struct PostgresV2ReadReceiptStore:
             var results = [V2GroupReadReceiptBatchResult](repeating: .failure(.corruptPersistenceState), count: requests.count)
             if !validIndices.isEmpty {
                 let validResults = try await recordGroups(validIndices.map { requests[$0] },
-                    ownerRoutes: ownerRoutes.map { routes in validIndices.map { routes[$0] } },
                     activationScope: activationScope, timeouts: timeouts)
                 for (index, result) in zip(validIndices, validResults) { results[index] = result }
             }
@@ -315,12 +269,11 @@ public struct PostgresV2ReadReceiptStore:
                     let validatedActivation = activationValidity
                     return try await postgres.withConnection { connection in
                         connection.eventLoop.makeFutureWithTask {
-                            var owners: [UUID: ReceiptSharedOwnerRow] = [:]
                             if validatedActivation == nil {
-                                // 旧的所有者路由调用方也先按规范顺序锁定房间，
-                                // 然后才接触操作锁。
+                                // 未绑定 activation 的领域调用仍按规范顺序
+                                // 锁定房间，然后才接触操作锁。
                                 let roomRows = try await connection.execute(GroupReceiptBatchRoomLockStatement(roomIDs: inputs.map(\.roomID)), logger: connection.logger)
-                                for try await room in roomRows { owners[room.roomID] = room }
+                                for try await _ in roomRows {}
                             }
                             let lockRows = try await connection.execute(
                                 GroupReceiptBatchLockStatement(inputs: inputs),
@@ -333,12 +286,8 @@ public struct PostgresV2ReadReceiptStore:
                             }
                             var validatedInputs = inputs
                             for index in validatedInputs.indices {
-                                let actual = owners[validatedInputs[index].roomID]
                                 if let validatedActivation {
                                     validatedInputs[index].ownerIsValid = validatedActivation[validatedInputs[index].roomID] == true
-                                } else if let ownerRoutes {
-                                    let route = ownerRoutes[index]
-                                    validatedInputs[index].ownerIsValid = actual?.shardID == route.shardID && actual?.epoch == route.epoch
                                 } else {
                                     // 房间缺失时保留既有的逐项领域结果。
                                     validatedInputs[index].ownerIsValid = true
@@ -439,14 +388,6 @@ public struct PostgresV2ReadReceiptStore:
         cursor: String?,
         pageSize: Int
     ) async throws -> V2GroupReadReceiptReaderCandidatePage {
-        try await readerCandidates(roomID: roomID, messageID: messageID, actorUserID: actorUserID, ownerRoute: nil, cursor: cursor, pageSize: pageSize)
-    }
-
-    public func readerCandidatesOwnerValidated(roomID: RoomID, messageID: MessageID, actorUserID: UserID, ownerRoute: V2RoomShardRoute, cursor: String?, pageSize: Int) async throws -> V2GroupReadReceiptReaderCandidatePage {
-        try await readerCandidates(roomID: roomID, messageID: messageID, actorUserID: actorUserID, ownerRoute: ownerRoute, cursor: cursor, pageSize: pageSize)
-    }
-
-    private func readerCandidates(roomID: RoomID, messageID: MessageID, actorUserID: UserID, ownerRoute: V2RoomShardRoute?, cursor: String?, pageSize: Int) async throws -> V2GroupReadReceiptReaderCandidatePage {
         guard (1 ... 100).contains(pageSize) else {
             throw V2ReadReceiptStoreError.invalidRequest
         }
@@ -455,10 +396,6 @@ public struct PostgresV2ReadReceiptStore:
                 throw V2ReadReceiptStoreError.corruptPersistenceState
             }
             let room = try receiptUUID(roomID)
-            if let ownerRoute {
-                let actual = try await sql.raw("SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = \(bind: room) FOR SHARE").first(decoding: ReceiptSharedOwnerRow.self)
-                guard actual?.shardID == ownerRoute.shardID, actual?.epoch == ownerRoute.epoch else { throw V2ReadReceiptStoreError.ownerChanged }
-            }
             let message = try receiptUUID(messageID)
             let actor = try receiptUUID(actorUserID)
             let context = try await receiptReaderContext(
@@ -651,19 +588,7 @@ public struct PostgresV2ReadReceiptStore:
             }
             let pageRows = Array(rows.prefix(pageSize))
             let readers = try pageRows.map { row in
-                let userID = try UserID(row.userID.uuidString)
-                guard let accountKind = V2AccountKind(rawValue: row.accountKind) else {
-                    throw V2ReadReceiptStoreError.corruptPersistenceState
-                }
-                // Keep the legacy single-store account validation; profile
-                // content is never part of the reader transport result.
-                _ = try V2PublicIdentity(
-                    userID: userID,
-                    handle: .init(row.publicHandle),
-                    displayName: row.displayName,
-                    accountKind: accountKind
-                )
-                return V2ReadReceiptReader(userID: userID)
+                V2ReadReceiptReader(userID: try UserID(row.userID.uuidString))
             }
             let next = rows.count > pageSize ? try receiptCursorString(
                 roomID: room,
@@ -693,10 +618,7 @@ public struct PostgresV2ReadReceiptStore:
         if let cursor {
             return try await sql.raw("""
                 SELECT receipt.user_id,
-                       receipt.read_through_room_sequence,
-                       profile.public_handle,
-                       profile.display_name,
-                       profile.account_kind
+                       receipt.read_through_room_sequence
                 FROM im_v2.room_read_receipts AS receipt
                 LEFT JOIN im_v2.user_read_receipt_preferences AS preference
                   ON preference.user_id = receipt.user_id
@@ -734,10 +656,7 @@ public struct PostgresV2ReadReceiptStore:
         }
         return try await sql.raw("""
             SELECT receipt.user_id,
-                   receipt.read_through_room_sequence,
-                   profile.public_handle,
-                   profile.display_name,
-                   profile.account_kind
+                   receipt.read_through_room_sequence
             FROM im_v2.room_read_receipts AS receipt
             LEFT JOIN im_v2.user_read_receipt_preferences AS preference
               ON preference.user_id = receipt.user_id
@@ -1099,26 +1018,18 @@ private struct GroupReceiptBatchLockStatement: PostgresPreparedStatement {
     }
 }
 
-private struct ReceiptSharedOwnerRow: Decodable, Sendable {
-    let roomID: UUID
-    let shardID: String
-    let epoch: Int64
-    enum CodingKeys: String, CodingKey { case roomID = "room_id", shardID = "room_shard_id", epoch = "owner_epoch" }
-}
-
 private struct GroupReceiptBatchRoomLockStatement: PostgresPreparedStatement {
-    static let name = "im_v2_group_read_receipt_owner_locks_v1"
-    static let sql = "SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms WHERE room_id = ANY($1::uuid[]) ORDER BY room_id FOR SHARE"
-    typealias Row = ReceiptSharedOwnerRow
+    static let name = "im_v2_group_read_receipt_room_locks_v2"
+    static let sql = "SELECT room_id FROM im_v2.rooms WHERE room_id = ANY($1::uuid[]) ORDER BY room_id FOR SHARE"
+    typealias Row = UUID
     let roomIDs: [UUID]
     func makeBindings() throws -> PostgresBindings {
         var bindings = PostgresBindings(capacity: 1)
         bindings.append(roomIDs)
         return bindings
     }
-    func decodeRow(_ row: PostgresRow) throws -> ReceiptSharedOwnerRow {
-        let decoded = try row.decode((UUID, String, Int64).self)
-        return .init(roomID: decoded.0, shardID: decoded.1, epoch: decoded.2)
+    func decodeRow(_ row: PostgresRow) throws -> UUID {
+        try row.decode(UUID.self)
     }
 }
 
@@ -1366,15 +1277,9 @@ private struct ReceiptReaderContextRow: Decodable {
 private struct ReceiptReaderRow: Decodable {
     let userID: UUID
     let readThroughRoomSequence: Int64
-    let publicHandle: String
-    let displayName: String
-    let accountKind: String
     enum CodingKeys: String, CodingKey {
         case userID = "user_id"
         case readThroughRoomSequence = "read_through_room_sequence"
-        case publicHandle = "public_handle"
-        case displayName = "display_name"
-        case accountKind = "account_kind"
     }
 }
 private struct ReceiptReaderCandidateRow: Decodable {

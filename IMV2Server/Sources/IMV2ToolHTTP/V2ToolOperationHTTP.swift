@@ -84,7 +84,7 @@ public struct V2ToolOperationHTTP:Sendable {
     public func sendMessage(_ command: V2MessageSendOperationCommand, token: String, deviceID: String) async throws -> V2MessageSendOperationTerminalOutcome {
         let identity = try command.identity, fingerprint = try command.fingerprint
         let recovery = try V2MessageSendOperationRecoveryRequest(identity: identity, fingerprint: fingerprint,
-            domainFingerprint: command.command.fingerprint, action: .query)
+            domainFingerprint: command.command.fingerprint)
         let prefix = "v2/rooms/\(command.command.roomID.rawValue)/message-operations/"
         for attempt in 0..<5 {
             let body = try attempt == 0 ? JSONEncoder().encode(command) : JSONEncoder().encode(recovery)

@@ -210,13 +210,6 @@ enum PlainDirectRoomLogPreflight {
                   ON message.sender_user_id = room.sender_id
                   AND message.room_id = room.room_id
                  AND message.client_message_id = room.client_message_id
-                UNION
-                SELECT room.ordinal
-                FROM locked_room AS room
-                JOIN im_v2.direct_message_denials AS denial
-                  ON denial.sender_user_id = room.sender_id
-                  AND denial.room_id = room.room_id
-                 AND denial.client_message_id = room.client_message_id
             """
         let membershipValidation: SQLQueryString = validatesDirectMemberships ? """
             room.room_kind <> 'direct' OR EXISTS (

@@ -18,7 +18,7 @@ struct PostgresV2GroupPolicyCacheTests {
             let old = try await registry.runtime(sender: sender, token: token)
             let queued = try await old.prepareBatch(commands: [command(sender: sender, token: token)],
                 callerDeadline: .now + .seconds(20))
-            try await sql.raw("ALTER TABLE \(unsafeRaw: schema).room_policy_authorization_leases RENAME TO unavailable_group_leases").run()
+            #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass(\(bind: schema + ".room_policy_authorization_leases"))").first(decoding: GroupRetiredLeaseCount.self)?.value == 0)
             do {
                 _ = try await registry.runtime(sender: UUID(), token: token)
                 #expect(await registry.pressure().directions == 1)
@@ -32,9 +32,7 @@ struct PostgresV2GroupPolicyCacheTests {
                 for _ in 0..<130 { _ = try await registry.runtime(sender: UUID(), token: token) }
                 #expect(await registry.pressure().directions == 1)
                 await registry.shutdown()
-                try await sql.raw("ALTER TABLE \(unsafeRaw: schema).unavailable_group_leases RENAME TO room_policy_authorization_leases").run()
             } catch {
-                try? await sql.raw("ALTER TABLE \(unsafeRaw: schema).unavailable_group_leases RENAME TO room_policy_authorization_leases").run()
                 await registry.shutdown()
                 throw error
             }
@@ -133,3 +131,5 @@ private actor GroupCacheShutdownProbe {
     private(set) var done = false
     func complete() { done = true }
 }
+
+private struct GroupRetiredLeaseCount: Decodable { let value: Int64 }

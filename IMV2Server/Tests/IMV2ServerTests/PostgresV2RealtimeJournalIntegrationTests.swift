@@ -486,7 +486,7 @@ struct PostgresV2RoomSubscriptionDirtyHeadTests {
                 let installed = await ingress.install(fence: grant.fence, sourceShardID: "source", serviceID: "source-service", deadline: .now + .seconds(30))
                 #expect(installed)
                 let connection = UUID(), lifecycle = UUID()
-                authority.registerConnection(connection, userID: userID, lifecycle: lifecycle)
+                await authority.registerFixtureConnection(connection, userID: userID, lifecycle: lifecycle)
                 #expect(await authority.registerRoomInterest(connectionID: connection, lifecycle: lifecycle, roomID: roomID, scopeGeneration: 1))
                 let pump = try #require(await host.currentPump())
                 try await owner.activate(to: pump, descriptor: descriptor, userID: userID, fence: grant.fence, token: token, deadline: .now + .seconds(30))
@@ -509,13 +509,13 @@ struct PostgresV2RoomSubscriptionDirtyHeadTests {
                 await host.checkChanges()
                 let beforeReceipt = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5))
                 #expect(!beforeReceipt.changes.isEmpty)
-                let stillLiveBeforeReceipt = authority.enqueueIfCurrent(permit, enqueue: {})
+                let stillLiveBeforeReceipt = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
                 #expect(stillLiveBeforeReceipt)
                 terminalGate.withLock { $0.released = true }
                 while !(await authority.requiresBaseline(fence: grant.fence)) {
                     guard .now < deadline else { throw ControlTimeout.expired }; try await Task.sleep(for: .milliseconds(1))
                 }
-                let oldPermitAccepted = authority.enqueueIfCurrent(permit, enqueue: {})
+                let oldPermitAccepted = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
                 #expect(!oldPermitAccepted)
                 // Completion is retried only after the real ingress receipt.
                 await host.checkChanges()

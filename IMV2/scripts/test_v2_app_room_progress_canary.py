@@ -25,7 +25,7 @@ def fixture():
         realAppRuntime=True, realDetailRecoveryLoop=True, directoryCompleteBeforeArm=True,
         samePhysicalConnection=True, unresolvedHistoryGap=False, operations=operations)
     fact = dict(roomID=room, roomCount=1, committedHead=7, operations=[dict(messages=1,receipts=1,
-        completions=1,closures=0,exactAccepted=True,messageID=operation['messageID'],roomSequence=operation['roomSequence']) for operation in operations])
+        completions=1,exactAccepted=True,messageID=operation['messageID'],roomSequence=operation['roomSequence']) for operation in operations])
     return nonce, fact, proof
 
 
@@ -76,15 +76,13 @@ class RoomProgressProofTests(unittest.TestCase):
 
     def test_receipt_identity_fingerprint_message_completion_facts_required(self):
         nonce,fact,proof = fixture()
-        for key,value in dict(exactAccepted=False,messages=2,receipts=0,completions=2,closures=1,
+        for key,value in dict(exactAccepted=False,messages=2,receipts=0,completions=2,
             messageID=str(uuid.uuid4()),roomSequence=6).items():
             tampered = copy.deepcopy(fact); tampered['operations'][0][key] = value
             with self.subTest(key=key): self.assertFalse(proof_matches(nonce,tampered,proof))
         for field,value in [('roomCount',0),('committedHead',8),('roomID',str(uuid.uuid4()))]:
             self.assertFalse(proof_matches(nonce,dict(fact,**{field:value}),proof))
         tampered = copy.deepcopy(fact); tampered['operations'].pop()
-        self.assertFalse(proof_matches(nonce,tampered,proof))
-        tampered = copy.deepcopy(fact); tampered['operations'][0]['closures'] = False
         self.assertFalse(proof_matches(nonce,tampered,proof))
 
     def test_identity_sql_injection_and_duplicate_operations_rejected(self):
@@ -101,13 +99,13 @@ class RoomProgressProofTests(unittest.TestCase):
         self.assertFalse(proof_matches(nonce,fact,duplicate))
         with self.assertRaises(ValueError): normalized_operations(duplicate)
 
-    def test_sql_exact_three_fact_joins_and_independent_committed_head(self):
+    def test_sql_exact_success_records_and_independent_committed_head(self):
         _,_,proof = fixture(); sql = fact_sql(proof)
-        for table in ('message_send_completions','message_operation_closures'):
+        for table in ('message_send_completions',):
             self.assertEqual(sql.count('FROM im_v2.'+table),3)
-        self.assertEqual(sql.count('request_fingerprint=decode'),3)
-        self.assertEqual(sql.count('c.request_fingerprint=r.domain_fingerprint'),3)
-        self.assertEqual(sql.count('identity,operation,sendMessage,_0,rawValue'),3)
+        self.assertEqual(sql.count('operation_fingerprint=decode'),3)
+        self.assertEqual(sql.count('c.message_id=m.message_id'),3)
+        self.assertEqual(sql.count('c.room_sequence=m.room_sequence'),3)
         self.assertIn('SELECT room_sequence FROM im_v2.rooms',sql)
         self.assertNotIn('INSERT ',sql); self.assertNotIn('UPDATE ',sql)
 

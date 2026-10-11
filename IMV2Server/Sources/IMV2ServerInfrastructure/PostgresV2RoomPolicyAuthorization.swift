@@ -37,7 +37,7 @@ struct V2RoomPolicyExecution: Sendable {
     func validate(_ command: V2SendMessageCommand) throws {
         guard let original = commands[command.clientMessageID], command == original,
               command.fingerprint.version == 3 else {
-            throw V2DirectAuthorizationIntentError.identityConflict
+            throw V2PolicyAuthorizationLifecycleError.identityConflict
         }
     }
 
@@ -45,7 +45,7 @@ struct V2RoomPolicyExecution: Sendable {
         guard let command = commands[.init(uuid: clientMessageID)],
               command.roomID.uuidValue == roomID, command.senderUserID.uuidValue == senderID,
               sql is any Database else {
-            throw V2DirectAuthorizationIntentError.identityConflict
+            throw V2PolicyAuthorizationLifecycleError.identityConflict
         }
         try await requireExecuting()
 
@@ -94,7 +94,7 @@ struct V2RoomPolicyPreparation: Sendable {
 
     func contains(_ command: V2SendMessageCommand) throws -> Bool {
         guard let original = commands[command.clientMessageID] else { return false }
-        guard original == command else { throw V2DirectAuthorizationIntentError.identityConflict }
+        guard original == command else { throw V2PolicyAuthorizationLifecycleError.identityConflict }
         return true
     }
 }
@@ -150,12 +150,12 @@ actor PostgresV2RoomPolicyAuthorization {
         guard !commands.isEmpty, commands.count <= 256,
               commands.allSatisfy({ $0.roomID == activation.roomID && $0.senderUserID.uuidValue == sender
                   && ($0.forwardedFrom == nil || trustedForward) && $0.fingerprint.version == 3 }) else {
-            throw V2DirectAuthorizationIntentError.identityConflict
+            throw V2PolicyAuthorizationLifecycleError.identityConflict
         }
         var originals: [ClientMessageID: V2SendMessageCommand] = [:]
         for command in commands {
             if let prior = originals[command.clientMessageID], prior != command {
-                throw V2DirectAuthorizationIntentError.identityConflict
+                throw V2PolicyAuthorizationLifecycleError.identityConflict
             }
             originals[command.clientMessageID] = command
         }
@@ -182,7 +182,8 @@ actor PostgresV2RoomPolicyAuthorization {
         let snapshot = prepared.snapshot
         promotions += 1
         defer { promotions -= 1 }
-        guard prepared.deadline > .now else { throw V2RoomPolicyExecutionFailure.expired }
+        let deadline = min(prepared.deadline, V2RoomSQLDeadline.current ?? prepared.deadline)
+        guard deadline > .now else { throw V2RoomPolicyExecutionFailure.expired }
         guard executions.count < maximumInFlight else { throw V2RoomPolicyExecutionFailure.overloaded }
         let lifetime = V2CurrentPolicyExecutionLifetime()
         let execution = V2RoomPolicyExecution(commands: prepared.commands, snapshot: snapshot,
@@ -190,7 +191,11 @@ actor PostgresV2RoomPolicyAuthorization {
         let id = UUID()
         let task = Task.detached(executorPreference: executorPreference) {
             let result: Result<Value, any Error>
-            do { result = .success(try await operation(execution)) } catch { result = .failure(error) }
+            do {
+                result = .success(try await V2RoomSQLDeadline.withDeadline(deadline) {
+                    try await operation(execution)
+                })
+            } catch { result = .failure(error) }
             await lifetime.settled()
             await self.executionFinished(id)
             return try result.get()

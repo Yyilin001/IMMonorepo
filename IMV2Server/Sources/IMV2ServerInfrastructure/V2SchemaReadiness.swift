@@ -10,10 +10,10 @@ public enum V2SchemaReadinessError: Error, Equatable, Sendable { case unavailabl
 /// 它把 schema 供应变为部署前置条件，避免在 TLS 监听已经开始接受已认证流量之后
 /// 才发现缺表。
 public enum V2SchemaReadiness {
-    public static let currentSchemaID = "im-v2-current-69"
+    public static let currentSchemaID = "im-v2-current-72"
     private static let requiredTables = [
-        "direct_authorization_intents", "direct_authorization_receipts", "schema_contract", "control_housekeeping_cursor", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
-        "rooms", "room_activation_leases", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "direct_message_denials", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
+        "schema_contract", "control_housekeeping_cursor", "realtime_device_control_versions", "auth_devices", "device_access_tokens", "device_refresh_sessions", "device_refresh_token_history", "device_credential_operations", "device_revocation_events", "gateway_worker_cursors", "device_session_operations", "remote_device_revocation_baselines", "remote_device_revocation_receipts", "device_revocation_capabilities", "device_registration_cancellations", "device_registration_rate_limits", "account_password_credentials", "account_password_login_rate_limits", "account_password_authentication_audit", "account_edge_client_rate_limits", "account_disables", "public_user_profiles", "public_identity_lookup_rate_limits",
+        "rooms", "room_activation_leases", "room_owner_routes", "direct_room_owner_routes", "group_room_creation_intents", "group_room_creation_intent_members", "group_room_creation_intent_pages", "direct_room_pairs", "room_timeline_activities", "special_accounts", "support_conversation_sessions", "special_account_message_operations", "special_account_message_audit", "public_profile_update_outbox", "public_profile_update_operations", "user_contact_aliases", "contact_alias_operation_receipts", "room_member_nicknames", "group_nickname_operation_receipts", "group_rooms", "group_invitation_admissions", "group_invitation_receipts", "group_invitation_control_commands", "group_invite_links", "group_invite_directory", "group_invite_creation_recovery", "group_join_requests", "group_join_quota_intents",
         "group_join_quota_aliases", "group_join_submission_receipts", "user_relationships", "user_blocks", "user_stranger_message_preferences", "user_add_preferences", "stranger_message_windows", "user_direct_send_policy_versions", "room_memberships", "room_member_mutes", "room_membership_operations", "message_reactions", "message_reaction_key_revisions", "message_reaction_receipts", "room_read_receipts", "read_receipt_operations", "user_read_receipt_preferences", "read_receipt_preference_propagation_outbox", "user_live_activity_preferences", "user_live_presence_leases", "room_admission",
         "shard_admission_pools", "messages", "message_send_completions", "message_mutation_receipts", "message_content_versions", "message_edit_visibility", "message_projection_states", "message_projection_state_values", "room_events", "realtime_partition_leases", "user_sync_wake_outbox", "durable_work_replay_audit", "forward_work_replay_audit",
         "personal_preference_operation_receipts", "user_room_preferences", "user_message_favorites", "room_pinned_messages", "group_announcements", "group_role_permissions", "group_role_policies", "message_moderation_admissions", "message_moderation_receipts", "member_administration_admissions", "member_administration_receipts", "membership_operation_admissions", "membership_operation_receipts", "group_capability_admissions", "group_capability_receipts", "account_preference_receipts", "account_preference_revisions", "group_creation_operations", "group_creation_pages", "group_creation_owner_receipts", "direct_room_operation_handoffs", "direct_room_owner_receipts", "social_operation_receipts", "social_relationship_revisions", "social_block_revisions", "forward_plan_operations", "forward_preparation_rejections", "message_forward_operations", "message_forward_exports", "message_forward_inbox", "message_forward_inbox_media", "message_forward_media_imports", "message_forward_export_receipts", "message_forward_delivery_jobs",
@@ -21,13 +21,13 @@ public enum V2SchemaReadiness {
         "user_projection_versions", "user_projection_checkpoints", "user_projection_ready", "user_sync_retention", "sync_snapshot_artifacts",
         "sync_snapshot_pages", "device_snapshot_resets", "sync_tokens", "sync_receipts", "push_campaigns",
         "push_device_budgets", "push_wake_outbox", "mention_push_wake_intents", "mention_push_wake_receipts", "push_device_endpoints", "push_device_intents",
-        "resource_group_avatar_closures", "resource_group_avatars", "resource_group_avatar_operations", "resource_catalog", "resource_forward_outputs", "resource_upload_sessions", "resource_blob_placements", "resource_variants", "resource_imports", "resource_import_holds", "resource_import_source_closures", "resource_storage_migrations", "message_operation_closures",
+        "resource_group_avatar_closures", "resource_group_avatars", "resource_group_avatar_operations", "resource_catalog", "resource_forward_outputs", "resource_upload_sessions", "resource_blob_placements", "resource_variants", "resource_imports", "resource_import_holds", "resource_import_source_closures", "resource_storage_migrations",
         "media_objects", "media_scan_outbox", "media_download_grants", "media_purge_outbox", "message_media_references", "message_mentions", "moderation_operations", "moderation_audit_entries", "content_review_jobs", "content_review_decisions", "content_review_findings", "content_review_cases",
         "room_recovery_topology", "user_shard_router_configuration", "user_shard_route_overrides",
         "device_room_progress",
-        "policy_authorization_scopes", "policy_authorization_holders",
-        "policy_authorization_changes", "policy_authorization_revocations",
-        "policy_authorization_outbox", "policy_owner_deployment", "room_policy_authorization_leases",
+        "policy_authorization_scopes",
+        "policy_authorization_changes",
+        "policy_authorization_outbox", "policy_owner_deployment",
     ]
 
     public static func verify(database: any Database, schema: String = "im_v2") async throws {
@@ -101,7 +101,7 @@ public enum V2SchemaReadiness {
                     ('mention_push_wake_receipts','source_event_id','uuid','NO'),
                     ('mention_push_wake_receipts','target_user_id','uuid','NO'),
                     ('mention_push_wake_receipts','recorded_at','timestamptz','NO'),
-                    ('push_wake_outbox','source_room_id','uuid','YES')
+                    ('push_wake_outbox','source_room_id','uuid','NO')
                 ) expected(table_name,column_name,udt_name,is_nullable)
                 WHERE NOT EXISTS (SELECT 1 FROM information_schema.columns c
                     WHERE c.table_schema = \(bind: schema) AND c.table_name = expected.table_name
@@ -182,7 +182,7 @@ public enum V2SchemaReadiness {
                   AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = \(bind: schema))
                   AND p.proname = 'capture_message_edit_visibility' AND p.provolatile = 'v'
                   AND encode(sha256(convert_to(replace(p.prosrc, \(bind: schema + "."), 'im_v2.'), 'UTF8')), 'hex') =
-                    '31f73cd4bc6db861440e944de3612d5238588ded0c9b6517d6b5893ae27a65df')
+                    'e937a94bd50aa8842ed4c2d555fceb0f5a6a5ce729f69d1b817d2ccbda90d4c2')
             AND EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
                 WHERE t.tgrelid = to_regclass(\(bind: schema + ".message_edit_visibility"))
                   AND t.tgname = 'message_edit_visibility_immutable' AND t.tgtype = 27
@@ -194,8 +194,16 @@ public enum V2SchemaReadiness {
             """).first(decoding: ProfileOperationContractRow.self), editVisibility.valid else {
             throw V2SchemaReadinessError.unavailableTable(schema + ".message_edit_visibility.retained_audience")
         }
-        for retired in ["room_pinned_message_operations","group_announcement_operations","group_permission_operations","group_role_operations","user_relationship_operations","user_block_operations","user_stranger_message_preference_operations","user_add_preference_operations","user_read_receipt_preference_operations","user_live_activity_preference_operations","group_room_operations","group_room_creation_drafts","group_room_creation_draft_members","direct_room_operations"] {
-            guard let row=try await sql.raw("SELECT to_regclass(\(bind:schema+"."+retired)) IS NULL AS exists").first(decoding:ExistsRow.self),row.exists else { throw V2SchemaReadinessError.unavailableTable(schema+"."+retired+".retired") }
+        let retiredTables = ["direct_message_denials","direct_authorization_intents","direct_authorization_receipts","policy_authorization_holders","policy_authorization_revocations","policy_authorization_holder_generation","room_policy_authorization_leases","room_pinned_message_operations","group_announcement_operations","group_permission_operations","group_role_operations","user_relationship_operations","user_block_operations","user_stranger_message_preference_operations","user_add_preference_operations","user_read_receipt_preference_operations","user_live_activity_preference_operations","group_room_operations","group_room_creation_drafts","group_room_creation_draft_members","direct_room_operations"]
+        if let retired = try await sql.raw("""
+            SELECT retired.name
+            FROM unnest(string_to_array(\(bind: retiredTables.joined(separator: ",")), ','))
+                WITH ORDINALITY AS retired(name, position)
+            WHERE to_regclass(\(bind: schema) || '.' || retired.name) IS NOT NULL
+            ORDER BY retired.position
+            LIMIT 1
+            """).first(decoding: RetiredTableRow.self) {
+            throw V2SchemaReadinessError.unavailableTable(schema + "." + retired.name + ".retired")
         }
         for (table,payload) in [("message_moderation_admissions","admission"),("message_moderation_receipts","receipt"),("member_administration_admissions","admission"),("member_administration_receipts","receipt"),("membership_operation_admissions","admission"),("membership_operation_receipts","receipt"),("group_capability_admissions","admission"),("group_capability_receipts","receipt")] {
             guard let contract=try await sql.raw("""
@@ -503,10 +511,7 @@ public enum V2SchemaReadiness {
                   ('resource_import_holds','content_type','text','NO'),
                   ('resource_import_source_closures','actor_user_id','uuid','NO'),
                   ('resource_import_source_closures','operation_id','uuid','NO'),
-                  ('resource_import_source_closures','closed_at','timestamptz','NO'),
-                  ('message_operation_closures','fingerprint_version','int2','NO'),
-                  ('message_operation_closures','request_fingerprint','bytea','NO'),
-                  ('message_operation_closures','closed_at','timestamptz','NO')
+                  ('resource_import_source_closures','closed_at','timestamptz','NO')
                 ) expected(table_name,column_name,udt_name,is_nullable)
                 LEFT JOIN information_schema.columns actual
                   ON actual.table_schema = \(bind: schema) AND actual.table_name=expected.table_name
@@ -566,17 +571,12 @@ public enum V2SchemaReadiness {
                   ('resource_import_holds','CHECK ((octet_length(sha256) = 32))'),
                   ('resource_import_holds','CHECK (((length(content_type) >= 1) AND (length(content_type) <= 127)))'),
                   ('resource_import_source_closures','PRIMARY KEY (actor_user_id, operation_id)'),
-                  ('resource_import_source_closures','CHECK (isfinite(closed_at))'),
-                  ('message_operation_closures','PRIMARY KEY (room_id, sender_user_id, client_message_id)'),
-                  ('message_operation_closures','CHECK ((fingerprint_version = 3))'),
-                  ('message_operation_closures','CHECK ((octet_length(request_fingerprint) = 32))'),
-                  ('message_operation_closures','CHECK (isfinite(closed_at))')
+                  ('resource_import_source_closures','CHECK (isfinite(closed_at))')
                 ) expected(table_name,definition)
                 WHERE NOT EXISTS (SELECT 1 FROM pg_constraint c
                   WHERE c.conrelid=to_regclass(\(bind: schema + ".") || expected.table_name)
                   AND c.convalidated AND NOT c.condeferrable AND replace(pg_get_constraintdef(c.oid),\(bind: schema + "."),'im_v2.')=expected.definition)
-            ) AND NOT EXISTS (SELECT 1 FROM pg_constraint
-                WHERE conrelid=to_regclass(\(bind: schema + ".message_operation_closures")) AND contype='f') AND EXISTS (
+            ) AND EXISTS (
                 SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid=t.tgfoid
                 WHERE t.tgrelid=to_regclass(\(bind: schema + ".resource_group_avatar_operations"))
                   AND t.tgname='resource_group_avatar_operations_immutable' AND t.tgenabled='O'
@@ -638,13 +638,6 @@ public enum V2SchemaReadiness {
                 SELECT 1 FROM pg_trigger t
                 WHERE t.tgrelid = to_regclass(\(bind: schema + ".message_send_completions"))
                   AND t.tgname = 'message_send_completion_close_fence'
-            ) AND EXISTS (
-                SELECT 1 FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
-                WHERE t.tgrelid = to_regclass(\(bind: schema + ".message_operation_closures"))
-                  AND t.tgname = 'message_operation_closures_immutable' AND t.tgenabled = 'O'
-                  AND NOT t.tgisinternal AND t.tgtype = 27 AND p.proname = 'reject_message_operation_closure_mutation' AND t.tgqual IS NULL
-                  AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname=\(bind: schema))
-                  AND encode(sha256(convert_to(replace(p.prosrc,\(bind: schema + "."),'im_v2.'), 'UTF8')), 'hex') = '8bc2b89a38e9de088284a7f3befcb22591bcf204a4ffc267b103844e343a1a53'
             ) AS exists
             """).first(decoding: ExistsRow.self), operationRecovery.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).message_send_completions[query-recovery]")
@@ -691,72 +684,6 @@ public enum V2SchemaReadiness {
                      AND indisunique AND indisvalid AND indisready) AS exists
             """).first(decoding: ExistsRow.self), activationContract.exists else {
             throw V2SchemaReadinessError.unavailableTable("\(schema).room_activation_leases[activation-contract]")
-        }
-        guard let authorizationIntents = try await sql.raw("""
-            SELECT (SELECT count(*) = 18 FROM information_schema.columns
-             WHERE table_schema = '\(unsafeRaw: schema)' AND table_name = 'direct_authorization_intents'
-             AND (column_name, udt_name, is_nullable, COALESCE(column_default,'')) IN (
-             ('room_id','uuid','NO',''), ('sender_user_id','uuid','NO',''), ('client_message_id','uuid','NO',''),
-             ('recipient_user_id','uuid','NO',''), ('request_fingerprint','bytea','NO',''), ('generation','int8','NO',''),
-             ('owner_shard_id','text','NO',''), ('owner_epoch','int8','NO',''), ('policy','jsonb','NO',''),
-             ('disposition','text','YES',''), ('event_id','uuid','YES',''), ('created_at','timestamptz','NO',''),
-             ('attempt_created_at','timestamptz','NO',''), ('updated_at','timestamptz','NO',''), ('next_check_at','timestamptz','NO',''),
-             ('lease_token','uuid','YES',''), ('lease_until','timestamptz','YES',''), ('attempt_count','int8','NO','0')))
-             AND (SELECT count(*) = 15 FROM pg_constraint
-             WHERE conrelid = to_regclass('\(unsafeRaw: schema).direct_authorization_intents') AND convalidated AND NOT condeferrable
-             AND pg_get_constraintdef(oid) IN (
-             'PRIMARY KEY (room_id, sender_user_id, client_message_id)',
-             'CHECK ((recipient_user_id <> sender_user_id))', 'CHECK ((octet_length(request_fingerprint) = 32))',
-             'CHECK ((generation > 0))', 'CHECK ((octet_length(owner_shard_id) > 0))', 'CHECK ((owner_epoch >= 0))',
-             'CHECK ((jsonb_typeof(policy) = ''object''::text))', 'CHECK (isfinite(created_at))',
-             'CHECK (isfinite(attempt_created_at))', 'CHECK (isfinite(updated_at))', 'CHECK (isfinite(next_check_at))',
-             'CHECK ((attempt_count >= 0))', 'CHECK (((created_at <= attempt_created_at) AND (attempt_created_at <= updated_at)))',
-             'CHECK (((((disposition IS NULL) OR (disposition = ''aborted''::text)) AND (event_id IS NULL)) OR ((disposition IS NOT NULL) AND (disposition = ANY (ARRAY[''accepted''::text, ''denied''::text])) AND (event_id IS NOT NULL))))',
-             'CHECK ((((lease_token IS NULL) AND (lease_until IS NULL)) OR ((lease_token IS NOT NULL) AND (lease_until IS NOT NULL) AND isfinite(lease_until) AND (disposition IS NULL))))'))
-             AND (SELECT count(*) = 4 FROM pg_index WHERE indrelid = to_regclass('\(unsafeRaw: schema).direct_authorization_intents')
-             AND indisvalid AND indisready AND pg_get_indexdef(indexrelid) IN (
-             'CREATE UNIQUE INDEX direct_authorization_intents_pkey ON \(unsafeRaw: schema).direct_authorization_intents USING btree (room_id, sender_user_id, client_message_id)',
-             'CREATE INDEX direct_authorization_held_sender_idx ON \(unsafeRaw: schema).direct_authorization_intents USING btree (sender_user_id, recipient_user_id, room_id, client_message_id) WHERE (disposition IS NULL)',
-             'CREATE INDEX direct_authorization_held_recipient_idx ON \(unsafeRaw: schema).direct_authorization_intents USING btree (recipient_user_id, sender_user_id, room_id, client_message_id) WHERE (disposition IS NULL)',
-             'CREATE INDEX direct_authorization_recovery_idx ON \(unsafeRaw: schema).direct_authorization_intents USING btree (next_check_at, room_id, sender_user_id, client_message_id) WHERE (disposition IS NULL)'))
-             AND EXISTS (SELECT 1 FROM pg_trigger AS t JOIN pg_proc AS p ON p.oid = t.tgfoid
-             WHERE t.tgrelid = to_regclass('\(unsafeRaw: schema).direct_authorization_intents')
-             AND t.tgname = 'direct_authorization_intents_guard' AND t.tgtype = 27 AND t.tgenabled = 'O'
-             AND NOT t.tgisinternal AND t.tgqual IS NULL AND p.proname = 'guard_direct_authorization_intent'
-             AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = '\(unsafeRaw: schema)')
-             AND encode(sha256(convert_to(replace(p.prosrc,\(bind: schema + "."),'im_v2.'), 'UTF8')), 'hex') = '8ec3422d2468ce521737b84c2cbdb5f650972b41b2775df7b7ca2c4556107cb1') AS exists
-            """).first(decoding: ExistsRow.self), authorizationIntents.exists else {
-            throw V2SchemaReadinessError.unavailableTable("\(schema).direct_authorization_intents[durable-obligation]")
-        }
-        guard let authorizationReceipts = try await sql.raw("""
-            SELECT (SELECT count(*) = 11 FROM information_schema.columns
-             WHERE table_schema = '\(unsafeRaw: schema)' AND table_name = 'direct_authorization_receipts'
-             AND (column_name, udt_name, is_nullable) IN (
-             ('room_id','uuid','NO'), ('sender_user_id','uuid','NO'), ('client_message_id','uuid','NO'),
-             ('generation','int8','NO'), ('recipient_user_id','uuid','NO'), ('owner_shard_id','text','NO'),
-             ('owner_epoch','int8','NO'), ('request_fingerprint','bytea','NO'), ('disposition','text','NO'),
-             ('event_id','uuid','YES'), ('recorded_at','timestamptz','NO')))
-             AND (SELECT count(*) = 9 FROM pg_constraint
-             WHERE conrelid = to_regclass('\(unsafeRaw: schema).direct_authorization_receipts') AND convalidated AND NOT condeferrable
-             AND pg_get_constraintdef(oid) IN (
-             'PRIMARY KEY (room_id, sender_user_id, client_message_id, generation)',
-             'FOREIGN KEY (room_id) REFERENCES \(unsafeRaw: schema).rooms(room_id)',
-             'CHECK ((generation > 0))', 'CHECK ((recipient_user_id <> sender_user_id))',
-             'CHECK ((octet_length(owner_shard_id) > 0))', 'CHECK ((owner_epoch >= 0))',
-             'CHECK ((octet_length(request_fingerprint) = 32))', 'CHECK (isfinite(recorded_at))',
-             'CHECK ((((disposition = ''aborted''::text) AND (event_id IS NULL)) OR ((disposition = ANY (ARRAY[''accepted''::text, ''denied''::text])) AND (event_id IS NOT NULL))))'))
-             AND EXISTS (SELECT 1 FROM pg_index WHERE indexrelid = to_regclass('\(unsafeRaw: schema).direct_authorization_receipts_pkey')
-             AND indisunique AND indisvalid AND indisready AND pg_get_indexdef(indexrelid) =
-             'CREATE UNIQUE INDEX direct_authorization_receipts_pkey ON \(unsafeRaw: schema).direct_authorization_receipts USING btree (room_id, sender_user_id, client_message_id, generation)')
-             AND EXISTS (SELECT 1 FROM pg_trigger AS t JOIN pg_proc AS p ON p.oid = t.tgfoid
-             WHERE t.tgrelid = to_regclass('\(unsafeRaw: schema).direct_authorization_receipts')
-             AND t.tgname = 'direct_authorization_receipts_immutable' AND t.tgtype = 27
-             AND t.tgenabled = 'O' AND NOT t.tgisinternal AND t.tgqual IS NULL
-             AND p.proname = 'reject_direct_authorization_receipt_mutation'
-             AND p.pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = '\(unsafeRaw: schema)')
-             AND encode(sha256(convert_to(replace(p.prosrc,\(bind: schema + "."),'im_v2.'), 'UTF8')), 'hex') = '66016f16c858a4b090b00ed45c59ab88b70b92a223718b0c20f38976e2772465') AS exists
-            """).first(decoding: ExistsRow.self), authorizationReceipts.exists else {
-            throw V2SchemaReadinessError.unavailableTable("\(schema).direct_authorization_receipts[terminal-proof]")
         }
         guard let cursor = try await sql.raw("""
             SELECT (SELECT count(*) = 2 FROM information_schema.columns
@@ -1513,14 +1440,13 @@ public enum V2SchemaReadiness {
                   AND t.tgname = 'message_forward_operations_identity_immutable'
                   AND t.tgenabled <> 'D' AND NOT t.tgisinternal
             ) AND (
-                SELECT count(*) = 2
+                SELECT count(*) = 1
                 FROM pg_constraint AS constraint_record
                 JOIN pg_class AS relation ON relation.oid = constraint_record.conrelid
                 JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
                 WHERE namespace.nspname = \(bind: schema)
                   AND (relation.relname, constraint_record.conname) IN (
-                      ('message_send_completions', 'message_send_completions_fingerprint_version_check'),
-                      ('direct_message_denials', 'direct_message_denials_fingerprint_version_check')
+                      ('message_send_completions', 'message_send_completions_fingerprint_version_check')
                   )
                   AND constraint_record.convalidated
                   AND pg_get_expr(constraint_record.conbin, constraint_record.conrelid)
@@ -1838,6 +1764,7 @@ public enum V2SchemaReadiness {
 }
 
 private struct ExistsRow: Decodable { let exists: Bool }
+private struct RetiredTableRow: Decodable { let name: String }
 private struct SearchPathRow: Decodable { let path: String }
 
 private struct ProfileOperationContractRow: Decodable { let valid: Bool }

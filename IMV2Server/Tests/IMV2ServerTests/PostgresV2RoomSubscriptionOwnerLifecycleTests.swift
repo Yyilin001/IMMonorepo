@@ -18,7 +18,7 @@ struct PostgresV2RoomSubscriptionOwnerLifecycleTests {
         try await withUserEventDatabase { database, sql, schema in
             // This fixture installs the core schema without the canonical
             // journal extension. Source snapshots require its control-cut table.
-            try await sql.raw("CREATE TABLE \(unsafeRaw: schema).realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,PRIMARY KEY(topic_kind,topic_id))").run()
+            try await sql.raw("CREATE TABLE \(unsafeRaw: schema).realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
             let roomUUID = UUID(), userUUID = UUID()
             let room = RoomID(uuid: roomUUID), user = UserID(uuid: userUUID)
             let dataOwner = try V2RoomDataOwner(shardID: "source", epoch: 0)

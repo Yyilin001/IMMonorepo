@@ -2005,47 +2005,7 @@ public nonisolated struct IMV2MessageSendOperationRecover: Sendable {
   /// Clears the value of `domainFingerprint`. Subsequent reads from it will return its default value.
   public mutating func clearDomainFingerprint() {self._domainFingerprint = nil}
 
-  public var action: IMV2MessageSendOperationRecover.Action = .unspecified
-
   public var unknownFields = SwiftProtobuf.UnknownStorage()
-
-  public nonisolated enum Action: SwiftProtobuf.Enum, Swift.CaseIterable {
-    public typealias RawValue = Int
-    case unspecified // = 0
-    case query // = 1
-    case closeIfAbsent // = 2
-    case UNRECOGNIZED(Int)
-
-    public init() {
-      self = .unspecified
-    }
-
-    public init?(rawValue: Int) {
-      switch rawValue {
-      case 0: self = .unspecified
-      case 1: self = .query
-      case 2: self = .closeIfAbsent
-      default: self = .UNRECOGNIZED(rawValue)
-      }
-    }
-
-    public var rawValue: Int {
-      switch self {
-      case .unspecified: return 0
-      case .query: return 1
-      case .closeIfAbsent: return 2
-      case .UNRECOGNIZED(let i): return i
-      }
-    }
-
-    // The compiler won't synthesize support with the UNRECOGNIZED case.
-    public static let allCases: [IMV2MessageSendOperationRecover.Action] = [
-      .unspecified,
-      .query,
-      .closeIfAbsent,
-    ]
-
-  }
 
   public init() {}
 
@@ -2173,22 +2133,11 @@ public nonisolated struct IMV2MessageSendOperationReceipt: Sendable {
     set {outcome = .rejected(newValue)}
   }
 
-  /// must be true
-  public var closed: Bool {
-    get {
-      if case .closed(let v)? = outcome {return v}
-      return false
-    }
-    set {outcome = .closed(newValue)}
-  }
-
   public var unknownFields = SwiftProtobuf.UnknownStorage()
 
   public nonisolated enum OneOf_Outcome: Equatable, Sendable {
     case accepted(IMV2MessageSendOperationAcceptance)
     case rejected(IMV2MessageSendOperationRejection)
-    /// must be true
-    case closed(Bool)
 
   }
 
@@ -6866,7 +6815,7 @@ nonisolated extension IMV2MessageSendOperationFingerprint: SwiftProtobuf.Message
 
 nonisolated extension IMV2MessageSendOperationRecover: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationRecover"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{3}domain_fingerprint\0\u{1}action\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{3}domain_fingerprint\0\u{b}action\0\u{c}\u{4}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -6877,7 +6826,6 @@ nonisolated extension IMV2MessageSendOperationRecover: SwiftProtobuf.Message, Sw
       case 1: try { try decoder.decodeSingularMessageField(value: &self._identity) }()
       case 2: try { try decoder.decodeSingularMessageField(value: &self._fingerprint) }()
       case 3: try { try decoder.decodeSingularMessageField(value: &self._domainFingerprint) }()
-      case 4: try { try decoder.decodeSingularEnumField(value: &self.action) }()
       default: break
       }
     }
@@ -6897,9 +6845,6 @@ nonisolated extension IMV2MessageSendOperationRecover: SwiftProtobuf.Message, Sw
     try { if let v = self._domainFingerprint {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
     } }()
-    if self.action != .unspecified {
-      try visitor.visitSingularEnumField(value: self.action, fieldNumber: 4)
-    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -6907,14 +6852,9 @@ nonisolated extension IMV2MessageSendOperationRecover: SwiftProtobuf.Message, Sw
     if lhs._identity != rhs._identity {return false}
     if lhs._fingerprint != rhs._fingerprint {return false}
     if lhs._domainFingerprint != rhs._domainFingerprint {return false}
-    if lhs.action != rhs.action {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
-}
-
-nonisolated extension IMV2MessageSendOperationRecover.Action: SwiftProtobuf._ProtoNameProviding {
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0ACTION_UNSPECIFIED\0\u{1}QUERY\0\u{1}CLOSE_IF_ABSENT\0")
 }
 
 nonisolated extension IMV2MessageSendOperationAcceptance: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
@@ -6988,7 +6928,7 @@ nonisolated extension IMV2MessageSendOperationRejection.Reason: SwiftProtobuf._P
 
 nonisolated extension IMV2MessageSendOperationReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   public static let protoMessageName: String = _protobuf_package + ".MessageSendOperationReceipt"
-  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{3}resolved_at_ms\0\u{1}accepted\0\u{1}rejected\0\u{1}closed\0")
+  public static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{3}resolved_at_ms\0\u{1}accepted\0\u{1}rejected\0\u{b}closed\0\u{c}\u{6}\u{1}")
 
   public mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -7025,14 +6965,6 @@ nonisolated extension IMV2MessageSendOperationReceipt: SwiftProtobuf.Message, Sw
           self.outcome = .rejected(v)
         }
       }()
-      case 6: try {
-        var v: Bool?
-        try decoder.decodeSingularBoolField(value: &v)
-        if let v = v {
-          if self.outcome != nil {try decoder.handleConflictingOneOf()}
-          self.outcome = .closed(v)
-        }
-      }()
       default: break
       }
     }
@@ -7060,10 +6992,6 @@ nonisolated extension IMV2MessageSendOperationReceipt: SwiftProtobuf.Message, Sw
     case .rejected?: try {
       guard case .rejected(let v)? = self.outcome else { preconditionFailure() }
       try visitor.visitSingularMessageField(value: v, fieldNumber: 5)
-    }()
-    case .closed?: try {
-      guard case .closed(let v)? = self.outcome else { preconditionFailure() }
-      try visitor.visitSingularBoolField(value: v, fieldNumber: 6)
     }()
     case nil: break
     }

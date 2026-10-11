@@ -3686,8 +3686,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let actualAction: MessageWireAction = expired || action == .close ? .query : action
         if actualAction != .submit {
             let query = try V2MessageSendOperationRecoveryRequest(identity: operation.identity,
-                fingerprint: operation.fingerprint, domainFingerprint: operation.command.command.fingerprint,
-                action: .query)
+                fingerprint: operation.fingerprint, domainFingerprint: operation.command.command.fingerprint)
             request.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery: query)
         } else { request.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation.command) }
         operation.attempts += 1; operation.wireRequestID = requestID; operation.lastWireAction = actualAction
@@ -3747,9 +3746,6 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             case .rejected(let reason):
                 statistics.recordMessageTransportEvent("TERMINAL_REJECTED_" + reason.rawValue)
                 try finishMessage(operationID, failure: "TCP_REJECTED_" + reason.rawValue, context: context)
-            case .closed:
-                statistics.recordMessageTransportEvent("TERMINAL_CLOSED")
-                try finishMessage(operationID, failure: "TCP_CLOSED", context: context)
             }
         case .fingerprintConflict:
             statistics.recordMessageTransportEvent("FINGERPRINT_CONFLICT")

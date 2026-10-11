@@ -35,9 +35,7 @@ struct PostgresV2PolicyDeploymentPlacementTests {
             let placement = try V2PolicyOwnerPlacement(.init(revision: 1, partitionCount: 1,
                 owners: [.init(hostID: host, endpoint: "a", partitions: [0])]))
             let store = PostgresV2PolicyDeploymentPlacementStore(database: database, schema: schema)
-            try await store.requireLegacy()
             try await store.require(placement); try await store.require(placement)
-            await #expect(throws: V2PolicyOwnerPlacement.Failure.deploymentChanged) { try await store.requireLegacy() }
             let conflict = try V2PolicyOwnerPlacement(.init(revision: 1, partitionCount: 1,
                 owners: [.init(hostID: host, endpoint: "different", partitions: [0])]))
             await #expect(throws: V2PolicyOwnerPlacement.Failure.deploymentChanged) { try await store.require(conflict) }

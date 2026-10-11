@@ -65,7 +65,9 @@ struct V2ResourceForwardPostgresTests {
             let targetRoute = try V2RoomShardRoute(shardID: targetShard, epoch: 0)
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 100, retryAfterSeconds: 1))
             let limits = try V2MessageCommandLimits(maxUTF8Bytes: 1_024)
-            let sourceWrite = try PostgresV2RoomWriteStore(database: sourceDB).usingActivationScope(.init(tokens: [sourceToken]))
+            let sourceStore = try PostgresV2RoomWriteStore(database: sourceDB).usingActivationScope(.init(tokens: [sourceToken]))
+            let sourceWrite = V2PolicyAuthorizedTestWriteStore(database: sourceDB, controlDatabase: sourceDB,
+                store: sourceStore, shardID: shard, epoch: 0, activationToken: sourceToken)
             let targetWrite = try PostgresV2RoomWriteStore(database: targetDB).usingActivationScope(.init(tokens: [targetToken]))
             let a = try V2StorageBinding(id: "forward-a", configurationRevision: 1)
             let b = try V2StorageBinding(id: "forward-b", configurationRevision: 2)
@@ -127,12 +129,24 @@ struct V2ResourceForwardPostgresTests {
             }
             if scenario == "expired-source" {
                 try await sourceSQL.raw("UPDATE im_v2.media_objects SET expires_at=\(bind:now.addingTimeInterval(-1)) WHERE media_id=\(bind:mediaID.uuidValue!)").run()
-                let sameRoom = V2ForwardMessagesService(database: sourceDB, writeStore: sourceWrite,
-                    capacityProfile: profile, limits: limits, now: { now })
-                let results = try await sameRoom.forwardOwnerValidated(actorUserID: actor,
-                    command: .init(operationID: .init(uuid: UUID()), sources: [source], targetRoomIDs: [sourceRoom]),
-                    ownerRoutes: [sourceRoom: sourceRoute])
-                #expect(results.count == 1 && results[0].messageID != nil && results[0].errorCode == nil)
+                let result = try await withFixturePolicyOwners(database: sourceDB,
+                    projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                    let policies = V2RoomPolicyAuthorizationService(roomDatabase: sourceDB,
+                        policyOwners: owners, endpoint: "resource-forward-test", maximumRooms: 1)
+                    do {
+                        let executor = V2ActorForwardPairDomainExecutor(database: sourceDB, write: sourceStore,
+                            capacityProfile: profile, limits: limits, now: { now }).usingPolicyAuthorizations(policies)
+                        let result = try await executor.execute(.init(actorUserID: actor,
+                            operationID: .init(uuid: UUID()), source: source, targetRoomID: sourceRoom),
+                            activationTokens: [sourceToken])
+                        await policies.shutdown()
+                        return result
+                    } catch {
+                        await policies.shutdown()
+                        throw error
+                    }
+                }
+                #expect(result.messageID != nil && result.errorCode == nil)
                 let ordinary = try V2SendMessageCommand(roomID: sourceRoom, senderUserID: actor,
                     clientMessageID: .init(uuid: UUID()), text: "new unbound use", media: [.init(mediaID: mediaID)], limits: limits)
                 await #expect(throws: V2MediaStoreError.mediaUnavailable) {
@@ -154,7 +168,8 @@ struct V2ResourceForwardPostgresTests {
                     VALUES(\(bind:actor.uuidValue!),\(bind:oldOperation.uuidValue!),\(bind:source.messageID.uuidValue!),\(bind:targetRoom.uuidValue!),\(bind:oldClient.uuidValue!),1,\(bind:sourceRoom.uuidValue!),\(bind:now))
                     """).run()
                 #expect(try await routing.requiresImport(actor: actor, operation: oldOperation, source: source, target: targetRoom, route: sourceRoute))
-                let oldResult = try await targetWrite.accept(command: .init(roomID: targetRoom, senderUserID: actor,
+                let oldResult = try await V2PolicyAuthorizedTestWriteStore(database: targetDB, controlDatabase: targetDB,
+                    store: targetWrite, shardID: targetShard, epoch: 0, activationToken: targetToken).accept(command: .init(roomID: targetRoom, senderUserID: actor,
                     clientMessageID: oldClient, text: "historic accepted result", limits: limits), capacityProfile: profile,
                     identifiers: V2AcceptanceIDFactory().make(at: now), now: now)
                 #expect(try await !routing.requiresImport(actor: actor, operation: oldOperation, source: source, target: targetRoom, route: sourceRoute))
@@ -246,11 +261,24 @@ struct V2ResourceForwardPostgresTests {
                     #expect(try await targetSQL.raw("SELECT count(*) AS value FROM im_v2.resource_variants WHERE media_id=\(bind:currentLease.targetMediaID.uuidValue!) AND recipe='preview' AND state='ready' AND size IN (320,1280)").first(decoding: ResourceForwardCount.self)?.value == 2)
                 }
                 #expect(try await importer.complete(currentLease, receipt: receipt, result: .passed, now: copyAt))
-                let outcome = try await targetWrite.importForwardExport(export, capacityProfile: profile,
-                    limits: limits, identifiers: V2AcceptanceIDFactory().make(at: copyAt), now: copyAt)
-                guard case .accepted = outcome else { throw V2ForwardInboxError.corruptPersistenceState }
-                #expect(try await targetWrite.importForwardExport(export, capacityProfile: profile,
-                    limits: limits, identifiers: V2AcceptanceIDFactory().make(at: copyAt), now: copyAt) == outcome)
+                _ = try await withFixturePolicyOwners(database: targetDB,
+                    projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                    let policies = V2RoomPolicyAuthorizationService(roomDatabase: targetDB,
+                        policyOwners: owners, endpoint: "resource-import-test", maximumRooms: 1)
+                    let authorizedWrite = targetWrite.usingPolicyAuthorizations(policies)
+                    do {
+                        let accepted = try await authorizedWrite.importForwardExport(export, capacityProfile: profile,
+                            limits: limits, identifiers: V2AcceptanceIDFactory().make(at: copyAt), now: copyAt)
+                        guard case .accepted = accepted else { throw V2ForwardInboxError.corruptPersistenceState }
+                        #expect(try await authorizedWrite.importForwardExport(export, capacityProfile: profile,
+                            limits: limits, identifiers: V2AcceptanceIDFactory().make(at: copyAt), now: copyAt) == accepted)
+                        await policies.shutdown()
+                        return accepted
+                    } catch {
+                        await policies.shutdown()
+                        throw error
+                    }
+                }
                 let terminal = try #require(try await inbox.terminalReceipt(exportID: export.intent.exportID))
                 try await PostgresV2ForwardReceiptStore(database: sourceDB).usingActivationToken(sourceToken).record(terminal, now: copyAt)
                 try await storageA.delete(facts.reference)

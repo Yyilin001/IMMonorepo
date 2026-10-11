@@ -23,7 +23,7 @@ public struct V2VaporSocialOperationRoutes:Sendable {
             let actor=try await request.v2AuthenticatedAccountIdentity(using:authenticator)
             let command:V2SocialOperationCommand=try await v2DecodeOperationInput(request)
             guard actor.userID==command.actorUserID else { throw Abort(.forbidden,headers:[.cacheControl:"no-store"]) }
-            return try await v2RespondOperation { try await store.submitSocialOperation(command,now:now()) }
+            return try await v2RespondOperation { try await store.submitSocialOperation(command) }
         }
         routes.on(.post,"v2","social","operations","recover",maxBodySize:"4kb") { request async throws -> Response in
             let actor=try await request.v2AuthenticatedAccountIdentity(using:authenticator)

@@ -39,10 +39,10 @@ struct V2RoomWriteForwardInboxPath: Sendable {
         let command = try authority.command(limits: identityLimits)
         if row.state == "accepted" {
             guard let completion = try await sql.raw("""
-                SELECT 'accepted'::text AS outcome_kind, message_id,room_id,room_sequence,timeline_sequence,
+                SELECT message_id,room_id,room_sequence,timeline_sequence,
                     sender_user_id,client_message_id,fingerprint_version,request_fingerprint,created_at,
                     event_id AS source_event_id,accepted_membership_revision,direct_recipient_user_id,
-                    NULL::text AS denial_reason,group_capacity_class
+                    group_capacity_class
                 FROM im_v2.message_send_completions WHERE room_id=\(bind: export.intent.targetRoomID)
                     AND sender_user_id=\(bind: export.intent.actorUserID)
                     AND client_message_id=\(bind: export.intent.targetClientMessageID)
@@ -110,6 +110,8 @@ struct V2RoomWriteForwardInboxPath: Sendable {
             case .rateLimited, .unavailable:
                 return (.pending(.admission), nil, nil)
             }
+        } catch V2SendOperationResponseError.directPolicyDenied {
+            return (try await v2RejectForwardInbox(row, code: "DIRECT_MESSAGE_RESTRICTED", now: now, sql: sql), nil, nil)
         } catch V2RoomWriteStoreError.actorNotEligible {
             return (try await v2RejectForwardInbox(row, code: "FORBIDDEN", now: now, sql: sql), nil, nil)
         } catch V2RoomWriteStoreError.actorMuted {

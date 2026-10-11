@@ -74,8 +74,8 @@ struct V2SendOperationBatchMetricsTests {
         second.recordOwnerCohortStarted(handleCount: 3, commandCount: 3)
         first.recordOwnerCohortCommitted(acceptedCommandCount: 3, replayedCommandCount: 1)
         second.recordOwnerCohortCommitted(acceptedCommandCount: 0, replayedCommandCount: 3)
-        first.recordOwnerScalarFallback(handleCount: 1, commandCount: 2, reason: .multiCommand)
-        second.recordOwnerScalarFallback(handleCount: 1, commandCount: 3, reason: .multiCommand)
+        first.recordOwnerScalarFallback(handleCount: 1, commandCount: 2, reason: .optimizationNotApplicable)
+        second.recordOwnerScalarFallback(handleCount: 1, commandCount: 3, reason: .optimizationNotApplicable)
         second.recordOwnerCohortIsolation()
         first.begin(commandCount: 3)
         second.begin(commandCount: 1)
@@ -108,9 +108,9 @@ struct V2SendOperationBatchMetricsTests {
         #expect(result.ownerCohortCommits == 2 && result.ownerCohortAcceptedCommands == 3 && result.ownerCohortReplayedCommands == 4)
         #expect(result.ownerCohortIsolations == 1)
         #expect(result.ownerScalarFallbacks.count == V2SendOperationOwnerScalarFallbackReason.allCases.count)
-        #expect(result.ownerScalarFallbacks[.multiCommand]?.handles == 2)
-        #expect(result.ownerScalarFallbacks[.multiCommand]?.commands == 5)
-        for reason in V2SendOperationOwnerScalarFallbackReason.allCases where reason != .multiCommand {
+        #expect(result.ownerScalarFallbacks[.optimizationNotApplicable]?.handles == 2)
+        #expect(result.ownerScalarFallbacks[.optimizationNotApplicable]?.commands == 5)
+        for reason in V2SendOperationOwnerScalarFallbackReason.allCases where reason != .optimizationNotApplicable {
             #expect(result.ownerScalarFallbacks[reason] == V2SendOperationOwnerScalarFallbackSnapshot())
         }
     }

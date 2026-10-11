@@ -11,18 +11,16 @@ import SQLKit
 ///
 /// - Parameters:
 ///   - routes: 本次涉及的房间归属，键为房间标识。
-///   - readOnly: 为 `true` 时只加 `FOR SHARE`，不阻塞其他共享读。
 ///   - sql: 当前事务使用的数据库连接。
 /// - Throws: 房间行数不足、缺少对应归属、分片/代次不一致时抛出
 ///   ``V2RoomOwnerFenceError/ownerChanged``。
-func v2RequireForwardOwners(_ routes: [UUID: V2RoomShardRoute], readOnly: Bool = false,
+func v2RequireForwardOwners(_ routes: [UUID: V2RoomShardRoute],
     sql: any SQLDatabase) async throws {
-    let requested = String(decoding: try JSONEncoder().encode(routes.keys.map(\.uuidString)), as: UTF8.self)
-    let locking = readOnly ? "FOR SHARE" : "FOR UPDATE"
+    let requested = Array(routes.keys)
     let rows = try await sql.raw("""
         SELECT room_id, room_shard_id, owner_epoch FROM im_v2.rooms
-        WHERE room_id IN (SELECT value::uuid FROM jsonb_array_elements_text(\(bind: requested)::jsonb))
-        ORDER BY room_id \(unsafeRaw: locking)
+        WHERE room_id = ANY(\(bind: requested)::uuid[])
+        ORDER BY room_id FOR UPDATE
         """).all(decoding: ForwardSelectedOwnerRow.self)
     guard rows.count == routes.count, rows.allSatisfy({ row in
         guard let route = routes[row.roomID] else { return false }

@@ -8,7 +8,7 @@ import Testing
 struct V2RetiredGatewayControlDrainTests {
     @Test("shutdown joins an unregistered connection's actual non-Ready retry writer")
     func retiredControlWorkerIsActuallyJoined() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let connection = UUID(), version = UInt8(IMV2ProtocolVersion.current)
         let limits = try V2FrameLimits(maximumPayloadBytes: 4096, acceptedVersions: [0, version])
         let stream = V2GatewayByteStream(frameLimits: limits,
@@ -20,7 +20,7 @@ struct V2RetiredGatewayControlDrainTests {
         let cancelled = RetiredControlSignal(), settled = RetiredControlSignal(), finished = RetiredControlSignal()
         let selected = Mutex<V2GatewayScopedNotificationWrite?>(nil)
         defer { release.mark() }
-        let attached = await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        let attached = await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             scopedNotificationWriter: { write in
                 selected.withLock { $0 = write }; started.mark()
                 return await withTaskCancellationHandler {

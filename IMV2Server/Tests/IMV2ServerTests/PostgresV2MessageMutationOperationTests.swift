@@ -14,7 +14,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in
             let now=Date(timeIntervalSince1970:1_750_000_000)
             let profile=try forwardImportTestProfile()
-            let sends=try V2SendMessageService(store:PostgresV2RoomWriteStore(database:database),capacityProfile:profile,limits:.init(maxUTF8Bytes:64),now:{now})
+            let sends=try V2SendMessageService(store:V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),capacityProfile:profile,limits:.init(maxUTF8Bytes:64),now:{now})
             guard case .accepted(let accepted)=try await sends.send(.init(roomID:roomID,actorUserID:senderID,clientMessageID:.init(uuid:UUID()),text:"Before")) else { throw CancellationError() }
             let leases=PostgresV2RoomActivationStore(database:database)
             let owner=try V2RoomDataOwner(shardID:"room-a",epoch:0)

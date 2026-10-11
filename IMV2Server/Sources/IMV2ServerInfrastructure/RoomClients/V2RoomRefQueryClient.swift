@@ -57,7 +57,7 @@ public struct V2RoomRefQueryClient: Sendable,
             }
             return outcome
         case .recordFailure(.store(let failure)): throw failure.domainValue()
-        case .recordFailure(.serverBusy): throw V2ReadReceiptBatcherError.serverBusy
+        case .recordFailure(.serverBusy): throw V2RoomReceiptAdmissionError.serverBusy
         default: throw V2RoomCallFailure.outcomeUnknown
         }
     }

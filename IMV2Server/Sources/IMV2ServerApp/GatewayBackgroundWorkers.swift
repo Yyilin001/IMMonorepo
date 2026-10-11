@@ -15,7 +15,6 @@ struct GatewayBackgroundWorkers {
     let logger: Logger
     struct Delivery {
         let forwardRuntime: V2ForwardDeliveryRuntime
-        let directAuthorizationCoordinator: V2DirectAuthorizationCoordinator
         let directRoomLogEventCache: V2DirectRoomLogEventCache?
         let syncWakeCoalescer: V2SyncWakeCoalescer
         let userStateWorkers: [V2UserStateEventWorker]
@@ -71,13 +70,11 @@ struct GatewayBackgroundWorkers {
         let frontdoor = prepared.frontdoor
         let ownerMaintenance = prepared.ownerMaintenance
         let projection = prepared.projection
-        let directAuthorizationCoordinator = prepared.authorization
         return .init(
             configuration: configuration,
             logger: logger,
             delivery: .init(
                 forwardRuntime: forwardDelivery.runtime,
-                directAuthorizationCoordinator: directAuthorizationCoordinator,
                 directRoomLogEventCache: projection.directRoomLogEventCache,
                 syncWakeCoalescer: frontdoor.syncWakeCoalescer,
                 userStateWorkers: projection.userStateWorkers,

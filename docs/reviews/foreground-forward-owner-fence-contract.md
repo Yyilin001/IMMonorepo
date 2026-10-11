@@ -10,6 +10,8 @@ worker 重建后先核对已有 processing 子块，不重新生成身份；取�
 
 下面保留原同库执行器的 owner 栅栏分析，作为内部原语约束；它不再描述当前 App 的生产提交入口。
 
+2026-10-10 清理：旧 `V2ForwardMessagesService`、独立 `PostgresV2ForwardPersistence` 编排及服务协议已退出生产模块。来源读取回归暂由 `Tests/IMV2ServerTests` 中的 `V2StoreTestForwardingService` 承接；下文旧注册表和分阶段提交仅为历史分析。当前同 Owner 转发使用 `V2ActorForwardPairDomainExecutor` 的 activation、权限执行及原子台账提交边界。
+
 ## 原同库执行器的路由和批量处理
 
 `V2RoutedForwardMessagesService` 先批量解析所有房间路由。目录故障、未知配置 owner 不允许扫描其他数据库或回退默认库。部分房间不存在时，保留原有有界点查及逐对 NOT_FOUND 行为。

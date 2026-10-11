@@ -21,8 +21,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             try await sql.raw("CREATE TABLE \(unsafeRaw: schema).policy_test_sink(operation_key text PRIMARY KEY, revision bigint NOT NULL)").run()
             let owners = PostgresV2PolicyOwnerDirectory(journal: journal,
-                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(),
-                    legacyAuthorization: .init(controlDatabase: database, ownerDatabases: [:])),
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()),
                 ownsScope: { _ in false })
             let gate = PolicyNotificationGate()
             let firstPublisher = PostgresV2PolicyOutboxPublisher(journal: journal, ownsScope: { _ in true }, deliver: { notification in

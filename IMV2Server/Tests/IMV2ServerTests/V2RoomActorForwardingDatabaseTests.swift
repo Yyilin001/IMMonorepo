@@ -12,8 +12,8 @@ import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("D5 same-owner pair commits once and an expired token cannot replay",
-          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_D5_TEST_DATABASE_IS_DISPOSABLE"] == "1"), arguments: [false, true])
-    func v2RoomActorForwardPairFenceAndReplay(policyMode: Bool) async throws {
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_D5_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func v2RoomActorForwardPairFenceAndReplay() async throws {
         let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_D5_OWNER_DATABASE_URL"])
         let resources = makeV2DatabaseTestResources()
         resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
@@ -58,7 +58,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             let limits = try V2MessageCommandLimits(maxUTF8Bytes: 128)
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: profile, limits: limits, now: { seededAt })
             guard case .accepted(let source) = try await send.send(.init(roomID: sourceRoom,
                 actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "forward source")) else {
@@ -69,8 +70,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SET valid_until = CURRENT_TIMESTAMP + INTERVAL '1 hour'
                 WHERE room_shard_id = 'room-a'
                 """).run()
-            // Prepare source data before selecting either writer mode.
-            let targetSend = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            // Prepare both source messages through the current policy boundary.
+            let targetSend = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: profile, limits: limits, now: Date.init)
             guard case .accepted(let oppositeSource) = try await targetSend.send(.init(
                 roomID: targetRoom, actorUserID: senderID,
@@ -89,20 +91,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let pair = V2ActorForwardPairWire(actorUserID: senderID,
                 operationID: .init(uuid: UUID()), source: try .init(roomID: sourceRoom,
                     messageID: source.messageID, revision: .init(1)), targetRoomID: targetRoom)
-            var configuredExecutor = V2ActorForwardPairDomainExecutor(database: database,
+            let journal = PostgresV2PolicyAuthorizationJournal(database: database)
+            let owners = PostgresV2PolicyOwnerDirectory(journal: journal,
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
+            let service = V2RoomPolicyAuthorizationService(roomDatabase: database,
+                policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
+            policyOwners = owners; policyService = service
+            let executor = V2ActorForwardPairDomainExecutor(database: database,
                 write: PostgresV2RoomWriteStore(database: database), capacityProfile: profile,
-                limits: limits, now: { Date() })
-            if policyMode {
-                let journal = PostgresV2PolicyAuthorizationJournal(database: database)
-                let legacy = V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: [:])
-                let owners = PostgresV2PolicyOwnerDirectory(journal: journal,
-                    dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
-                let service = V2RoomPolicyAuthorizationService(roomDatabase: database,
-                    policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
-                policyOwners = owners; policyService = service
-                configuredExecutor = configuredExecutor.usingPolicyAuthorizations(service)
-            }
-            let executor = configuredExecutor
+                limits: limits, now: Date.init).usingPolicyAuthorizations(service)
             let tokens = [sourceGrant.token, targetGrant.token]
             let first = try await executor.execute(pair, activationTokens: tokens)
             #expect(first.errorCode == nil && first.messageID != nil)
@@ -142,26 +139,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     senderUserID: senderID, sourceRevision: .init(1)), limits: limits)
             let recoveredPair = V2ActorForwardPairWire(actorUserID: senderID,
                 operationID: .init(uuid: recoveredOperation), source: pair.source, targetRoomID: targetRoom)
-            let recoveredMessageID: MessageID
-            if policyMode {
-                let service = try #require(policyService)
-                let write = PostgresV2RoomWriteStore(database: database).usingPolicyAuthorizations(service)
-                let request = V2RoomWriteRequest(command: recoveredCommand, capacityProfile: profile,
-                    identifiers: try V2AcceptanceIDFactory().make(at: recoveredAt), now: recoveredAt)
-                // The seeded ledger has no result. Fault injection omits only
-                // its result publication; the actual fenced acceptance and
-                // immutable completion still commit through the policy path.
-                let outcome = try await write.acceptActorForwardPair(request: request,
-                    sourceRoomID: sourceRoom, activationTokens: tokens,
-                    prepareLedger: { _ in }, recordLedger: { _, _ in })
-                recoveredMessageID = try #require(outcome.acceptanceReceipt).messageID
-            } else {
-                let outcome = try await PostgresV2RoomWriteStore(database: database)
-                    .accept(command: recoveredCommand, capacityProfile: profile,
-                        identifiers: try V2AcceptanceIDFactory().make(at: recoveredAt), now: recoveredAt)
-                guard let receipt = outcome.acceptanceReceipt else { throw V2ForwardInboxError.corruptPersistenceState }
-                recoveredMessageID = receipt.messageID
-            }
+            let write = PostgresV2RoomWriteStore(database: database).usingPolicyAuthorizations(service)
+            let request = V2RoomWriteRequest(command: recoveredCommand, capacityProfile: profile,
+                identifiers: try V2AcceptanceIDFactory().make(at: recoveredAt), now: recoveredAt)
+            // Omit ledger publication while the fenced acceptance and completion
+            // commit, then verify recovery from the immutable success record.
+            let outcome = try await write.acceptActorForwardPair(request: request,
+                sourceRoomID: sourceRoom, activationTokens: tokens,
+                prepareLedger: { _ in }, recordLedger: { _, _ in })
+            let recoveredMessageID = try #require(outcome.acceptanceReceipt).messageID
             try await sql.raw("""
                 UPDATE im_v2.messages
                 SET withdrawn_at = CURRENT_TIMESTAMP, withdrawn_by_user_id = \(bind: senderUUID)

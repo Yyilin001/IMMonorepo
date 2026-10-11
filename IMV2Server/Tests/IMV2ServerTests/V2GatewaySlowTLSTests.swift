@@ -27,7 +27,7 @@ struct V2GatewaySlowTLSTests {
             let stream = V2GatewayByteStream(frameLimits: limits,
                 session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: SlowTLSAuthenticator(),
                     capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
-                handler: SlowTLSCommands(), registry: V2DeviceConnectionRegistry())
+                handler: SlowTLSCommands(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
             server = try await ServerBootstrap(group: group)
                 .childChannelOption(ChannelOptions.socketOption(.so_sndbuf), value: 4096)
                 .childChannelInitializer { channel in

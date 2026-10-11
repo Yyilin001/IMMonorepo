@@ -14,7 +14,7 @@ struct V2DurableOwnerBatchOperationKey: Hashable, Encodable, Sendable {
     }
 }
 
-/// The same legacy/permanent operation lock namespace and hash ordering used
+/// The same permanent operation lock namespace and hash ordering used
 /// by MessageOperationLockBatchStatement. Recursion creates a real dependency
 /// between acquisitions; an incidental SELECT result order is insufficient.
 func v2AcquireDurableOwnerBatchOperationLocks(

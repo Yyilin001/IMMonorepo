@@ -3,6 +3,10 @@
   "phase": "Implementation inventory; exclusive editing coordinated by the integration owner; not evidence of production coverage",
   "files": [
     {
+      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RealtimeJournalPublisher.swift",
+      "owner": "D3"
+    },
+    {
       "path": "IMV2/docker-compose.isolated-tests.yml",
       "owner": "V1"
     },
@@ -435,7 +439,7 @@
       "retiredPath": "IMV2Server/Sources/IMV2Server/V2GroupEventWake.swift",
       "replacedBy": [
         "IMV2Server/Sources/IMV2ServerContracts/V2GroupEventWakeContracts.swift",
-        "IMV2Server/Sources/IMV2ServerApplication/V2GroupEventWakeApplication.swift"
+        "IMV2Server/Sources/IMV2ServerApplication/V2RealtimeJournalPublisher.swift"
       ]
     },
     {
@@ -602,10 +606,6 @@
       "owner": "D3"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2AggregatedSendMessageBatchMetrics.swift",
-      "owner": "D1"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2CachedRoomShardRouter.swift",
       "owner": "I1"
     },
@@ -614,8 +614,11 @@
       "owner": "D6"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2CrossOwnerForwardService.swift",
-      "owner": "D5"
+      "retiredPath": "IMV2Server/Sources/IMV2ServerApplication/V2CrossOwnerForwardService.swift",
+      "owner": "D5",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerApplication/Room/V2ActorCrossOwnerForwardService.swift"
+      ]
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2DirectMessagingService.swift",
@@ -630,8 +633,11 @@
       "owner": "D5"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ForwardMessagesService.swift",
-      "owner": "D5"
+      "retiredPath": "IMV2Server/Sources/IMV2ServerApplication/V2ForwardMessagesService.swift",
+      "owner": "D5",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerInfrastructure/RoomCoordination/Forwarding/V2ActorForwardPairDomainExecutor.swift"
+      ]
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2ForwardWorkOperatorReplay.swift",
@@ -643,10 +649,6 @@
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupEventLogService.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2GroupEventWakeApplication.swift",
       "owner": "D3"
     },
     {
@@ -694,24 +696,21 @@
       "owner": "D2"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2OwnerValidatedMessageMutationStores.swift",
-      "owner": "I1"
+      "retiredPath": "IMV2Server/Sources/IMV2ServerApplication/V2OwnerValidatedMessageMutationStores.swift",
+      "owner": "I1",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageEditStore.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageWithdrawalStore.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2MessageReactionStore.swift"
+      ]
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2ProfilePresentationService.swift",
       "owner": "C0"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2ReadReceiptService.swift",
-      "owner": "D3"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoomActorMetrics.swift",
       "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoomMembershipDirectoryService.swift",
-      "owner": "D3"
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoomMembershipService.swift",
@@ -790,19 +789,11 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomChangeBuffer.swift",
-      "owner": "D3"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomChangeService.swift",
       "owner": "D3"
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomCoverageIndex.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerGateway/Gateway/V2AccountRoomMembershipChange.swift",
       "owner": "D3"
     },
     {
@@ -882,19 +873,15 @@
       "owner": "D5"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/Forwarding/PostgresV2ForwardPersistence.swift",
-      "owner": "D5"
+      "retiredPath": "IMV2Server/Sources/IMV2ServerInfrastructure/Forwarding/PostgresV2ForwardPersistence.swift",
+      "owner": "D5",
+      "replacedBy": [
+        "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ForwardExportStore.swift",
+        "IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteForwardInboxPath.swift"
+      ]
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2ContentWriteAuthorization.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2DirectAuthorizationIntentStore.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2DirectAuthorizationReceiptStore.swift",
       "owner": "D1"
     },
     {
@@ -951,10 +938,6 @@
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupEventLogStore.swift",
-      "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2GroupEventWakeStore.swift",
       "owner": "D3"
     },
     {
@@ -1166,10 +1149,6 @@
       "owner": "D2"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Messaging/V2ActorGrantedSendBatchAdapter.swift",
-      "owner": "D1"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomDomain/Messaging/V2ActorSpecialAccountAuditMapper.swift",
       "owner": "D1"
     },
@@ -1198,10 +1177,6 @@
       "owner": "D6"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteBatchRouteCache.swift",
-      "owner": "D1"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteForwardInboxPath.swift",
       "owner": "D5"
     },
@@ -1214,10 +1189,6 @@
       "owner": "C0"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectAuthorizationCoordinator.swift",
-      "owner": "D1"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectReadReceiptPolicy.swift",
       "owner": "D3"
     },
@@ -1228,10 +1199,6 @@
     {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectRoomProfilePropagationWorker.swift",
       "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectSendControlPolicyFence.swift",
-      "owner": "D1"
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2DirectSendPolicyCache.swift",
@@ -1262,10 +1229,6 @@
       "owner": "D4"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2HybridGroupShardCreditSnapshotCache.swift",
-      "owner": "D1"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2MembershipIdentitySnapshotValidator.swift",
       "owner": "I1"
     },
@@ -1286,23 +1249,7 @@
       "owner": "D6"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedForwardMessages.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedGroupCapabilitiesStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedModerationStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedReadReceiptStore.swift",
-      "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedRoomWriteStore.swift",
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ForwardRoomOwnerFence.swift",
       "owner": "I1"
     },
     {
@@ -1314,16 +1261,12 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ReadReceiptBatcher.swift",
+      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomReceiptBatchConfiguration.swift",
       "owner": "D3"
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ReadReceiptPreferencePropagationWorker.swift",
       "owner": "D6"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomAdmissionCommandCreditPool.swift",
-      "owner": "D1"
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoomLogRetention.swift",
@@ -1338,24 +1281,8 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2RoutedGroupEventWakeStore.swift",
-      "owner": "I1"
-    },
-    {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SchemaReadiness.swift",
       "owner": "R1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SendMessageAdmissionBatcher.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ShardAdmissionCommandCreditPool.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2ShardedSendMessageAdmissionBatcher.swift",
-      "owner": "D1"
     },
     {
       "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2SpecialAccountMessagingService.swift",
@@ -1494,14 +1421,6 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorGrantedMultiLaneBatchTests.swift",
-      "owner": "D1"
-    },
-    {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorGrantedSendBatchTests.swift",
-      "owner": "I1"
-    },
-    {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2ActorInvitationWireTests.swift",
       "owner": "I1"
     },
@@ -1536,10 +1455,6 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2AggregatedReadReceiptBatchMetricsTests.swift",
       "owner": "D3"
-    },
-    {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2AggregatedSendMessageBatchMetricsTests.swift",
-      "owner": "D1"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2AuthorPresentationIngressTests.swift",
@@ -1622,10 +1537,6 @@
       "owner": "I1"
     },
     {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomCreditRefillFencePostgresTests.swift",
-      "owner": "V1"
-    },
-    {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomHostPostgresCancellationMaintenanceTests.swift",
       "owner": "V1"
     },
@@ -1671,10 +1582,6 @@
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2RoomTransactionAttemptTests.swift",
       "owner": "I1"
-    },
-    {
-      "path": "IMV2Server/Tests/IMV2ServerTests/V2ShardedSendActivationCapacityTests.swift",
-      "owner": "D1"
     },
     {
       "path": "IMV2Server/Tests/IMV2ServerTests/V2SharedRoomSendCommitAckLossTests.swift",

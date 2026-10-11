@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS im_v2.realtime_change_outbox (
  partition_id integer NOT NULL REFERENCES im_v2.realtime_journal_partitions,
  topic_kind text NOT NULL, topic_id text NOT NULL, change_kind text NOT NULL,
  room_sequence bigint, room_control_version bigint, user_control_version bigint, device_id uuid,
+ owner_epoch bigint, membership_room_id uuid,
  created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 CREATE INDEX IF NOT EXISTS realtime_change_outbox_partition_idx ON im_v2.realtime_change_outbox(partition_id,created_at,source_event_id);
@@ -45,12 +46,9 @@ CREATE TABLE IF NOT EXISTS im_v2.realtime_change_journal (
  sequence bigint NOT NULL CHECK(sequence > 0), source_event_id uuid NOT NULL UNIQUE,
  topic_kind text NOT NULL, topic_id text NOT NULL, change_kind text NOT NULL,
  room_sequence bigint, room_control_version bigint, user_control_version bigint, device_id uuid,
+ owner_epoch bigint, membership_room_id uuid,
  PRIMARY KEY(partition_id,sequence)
 );
-ALTER TABLE im_v2.realtime_change_outbox ADD COLUMN IF NOT EXISTS owner_epoch bigint;
-ALTER TABLE im_v2.realtime_change_journal ADD COLUMN IF NOT EXISTS owner_epoch bigint;
-ALTER TABLE im_v2.realtime_change_outbox ADD COLUMN IF NOT EXISTS membership_room_id uuid;
-ALTER TABLE im_v2.realtime_change_journal ADD COLUMN IF NOT EXISTS membership_room_id uuid;
 -- One durable publication floor per independently versioned control topic.
 -- Version allocation holds the topic row lock until source transaction COMMIT:
 -- a later version cannot become visible before its predecessor. Publisher
@@ -68,10 +66,9 @@ CREATE TABLE IF NOT EXISTS im_v2.realtime_dirty_room_heads (
 CREATE INDEX IF NOT EXISTS realtime_dirty_room_heads_pending_idx ON im_v2.realtime_dirty_room_heads(partition_id,room_id) WHERE pending;
 CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions (
  topic_kind text NOT NULL, topic_id text NOT NULL, version bigint NOT NULL CHECK(version > 0),
+ membership_discovery_version bigint NOT NULL DEFAULT 0, session_control_version bigint NOT NULL DEFAULT 0,
  PRIMARY KEY(topic_kind,topic_id)
 );
-ALTER TABLE im_v2.realtime_control_versions ADD COLUMN IF NOT EXISTS membership_discovery_version bigint NOT NULL DEFAULT 0;
-ALTER TABLE im_v2.realtime_control_versions ADD COLUMN IF NOT EXISTS session_control_version bigint NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS im_v2.realtime_device_control_versions (
  user_id uuid NOT NULL, device_id uuid NOT NULL, latest_change_version bigint NOT NULL CHECK(latest_change_version>0),
  PRIMARY KEY(user_id,device_id)
@@ -87,7 +84,6 @@ CREATE TABLE IF NOT EXISTS im_v2.realtime_journal_consumers (
  offered_through bigint NOT NULL DEFAULT 0 CHECK(offered_through>=control_cursor),
  PRIMARY KEY(partition_id,gateway_incarnation)
 );
-ALTER TABLE im_v2.realtime_journal_consumers ADD COLUMN IF NOT EXISTS session_generation bigint NOT NULL DEFAULT 1;
 CREATE INDEX IF NOT EXISTS realtime_journal_consumers_pending_idx ON im_v2.realtime_journal_consumers(partition_id,gateway_incarnation) WHERE offered_through>control_cursor;
 CREATE TABLE IF NOT EXISTS im_v2.realtime_journal_consumer_heads (
  partition_id integer NOT NULL, gateway_incarnation uuid NOT NULL, room_id uuid NOT NULL,

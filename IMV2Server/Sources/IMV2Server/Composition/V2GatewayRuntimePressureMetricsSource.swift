@@ -17,7 +17,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     private let gatewayMessageSendBudget: V2GatewayMessageSendBudget?
     private let databasePools: V2DatabasePoolTopologySnapshot
     private let syncWakeCoalescer: V2SyncWakeCoalescer
-    private let directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)?
     private let readReceiptBatcher: (any V2ReadReceiptBatchMetricsReading)?
     private let directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics?
     private let gatewayEventLoopLagMetrics: V2EventLoopLagMetrics?
@@ -37,7 +36,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     ///   - databaseWorkAdmission: 数据库工作准入控制器。
     ///   - databasePools: 固定连接池配置拓扑；后续采集直接复用此值。
     ///   - syncWakeCoalescer: 同步可用性提示合并器。
-    ///   - directRoomLogAppendBatcher: 私聊追加的只读批处理指标来源，可汇总多个物理归属。
     ///   - readReceiptBatcher: 已读回执批处理只读指标来源，可汇总多个物理归属。
     ///   - directRoomLogAppendStageMetrics: 私聊追加阶段耗时收集器。
     ///   - gatewayEventLoopLagMetrics: 网关事件循环延迟收集器。
@@ -49,7 +47,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWakeCoalescer: V2SyncWakeCoalescer,
-        directRoomLogAppendBatcher: (any V2SendMessageBatchMetricsReading)? = nil,
         readReceiptBatcher: (any V2ReadReceiptBatchMetricsReading)? = nil,
         directRoomLogAppendStageMetrics: V2DirectRoomLogAppendStageMetrics? = nil,
         gatewayEventLoopLagMetrics: V2EventLoopLagMetrics? = nil,
@@ -71,7 +68,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
         self.databaseWorkAdmission = .init([databaseWorkAdmission] + additionalDatabaseWorkAdmissions)
         self.databasePools = databasePools
         self.syncWakeCoalescer = syncWakeCoalescer
-        self.directRoomLogAppendBatcher = directRoomLogAppendBatcher
         self.readReceiptBatcher = readReceiptBatcher
         self.directRoomLogAppendStageMetrics = directRoomLogAppendStageMetrics
         self.gatewayEventLoopLagMetrics = gatewayEventLoopLagMetrics
@@ -93,7 +89,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
     public func runtimePressureMetricsSnapshot() async -> V2RuntimePressureMetricsSnapshot {
         async let databaseWork = databaseWorkAdmission.snapshot()
         async let syncWake = syncWakeCoalescer.snapshot()
-        let appendBatching = await directRoomLogAppendBatcher?.snapshot()
         let receiptBatching = await readReceiptBatcher?.snapshot()
         let appendStages = directRoomLogAppendStageMetrics?.snapshot()
         let eventLoopLag = gatewayEventLoopLagMetrics?.snapshot()
@@ -106,7 +101,6 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             databaseWork: databaseWork,
             databasePools: databasePools,
             syncWake: syncWake,
-            directRoomLogAppendBatching: appendBatching,
             readReceiptBatching: receiptBatching,
             directRoomLogAppendStages: appendStages,
             gatewayEventLoopLag: eventLoopLag,

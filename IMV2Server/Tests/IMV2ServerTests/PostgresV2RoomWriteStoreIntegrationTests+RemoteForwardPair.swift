@@ -24,7 +24,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { now }).openedIdentity(actorUserID: senderID,
                     operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
                     firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let source = try await V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let source = try await V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database,
+                controlDatabase: database, store: PostgresV2RoomWriteStore(database: database),
+                shardID: "room-a", epoch: 0),
                 capacityProfile: profile, limits: limits, now: { now }).send(.init(roomID: sourceRoom,
                     actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "remote pair source"))
             let receipt = try #require(source.acceptanceReceipt)
@@ -45,9 +47,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let runtime = try V2RoomRuntimeConfiguration(), authentication = try V2ActorAuthenticationLimits()
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let leases = try V2RoomServerLeaseStore(databases: ["room-a": database])
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: [:])
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
-                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
                 policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity, leaseStore: leases,
@@ -149,7 +150,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     source: pair.source, targetRoomID: opened.roomID)
                 let limitedResult = try await client.forwardPair(limited, token: token, deadline: .now + .seconds(10))
                 #expect(limitedResult.messageID == nil && limitedResult.errorCode == "RATE_LIMITED")
-                let localSocial = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
+                let localSocial = V2PostgresSocialRelationshipPersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                 let mutations = PostgresV2RemotePolicyMutations(client: client, resolve: { _ in
                     .init(host: identity, endpoint: "room-a")
                 })

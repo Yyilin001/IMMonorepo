@@ -56,12 +56,16 @@ struct V2RoomSubscriptionEventLoopOwnershipTests {
             var starts = started.stream.makeAsyncIterator()
             _ = await starts.next()
             let completed = Mutex(false)
+            let retiring = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
             let revoked = Task {
+                retiring.continuation.yield(())
                 let accepted = await authority.retire(fence: f.fence)
                 completed.withLock { $0 = true }
                 return accepted
             }
-            while authority.enqueueIfCurrent(oldPermit, enqueue: {}) { await Task.yield() }
+            var retireStarts = retiring.stream.makeAsyncIterator()
+            _ = await retireStarts.next()
+            #expect(authority.enqueueIfCurrent(oldPermit, enqueue: {}) == false)
             #expect(completed.withLock { $0 } == false)
             // The first room is waiting for its projection acknowledgement.
             // This second room must finish without releasing that EventLoop.

@@ -83,20 +83,13 @@ public enum V2MessageSendOperationWireCodec {
         wire.identity = encode(identity: value.identity)
         wire.fingerprint = encode(fingerprint: value.fingerprint)
         wire.domainFingerprint = encode(fingerprint: value.domainFingerprint)
-        wire.action = value.action == .query ? .query : .closeIfAbsent
         return wire
     }
 
     public static func decode(recovery wire: IMV2MessageSendOperationRecover) throws -> V2MessageSendOperationRecoveryRequest {
         guard wire.hasIdentity, wire.hasFingerprint, wire.hasDomainFingerprint else { throw V2MessageSendOperationWireCodecError.invalidField }
-        let action: V2OperationRecoveryRequest.Action
-        switch wire.action {
-        case .query: action = .query
-        case .closeIfAbsent: action = .closeIfAbsent
-        default: throw V2MessageSendOperationWireCodecError.invalidField
-        }
         return try .init(identity: decode(identity: wire.identity), fingerprint: decode(fingerprint: wire.fingerprint),
-                         domainFingerprint: V2SendMessageFingerprint(version: checkedUInt16(wire.domainFingerprint.version), digest: wire.domainFingerprint.digest), action: action)
+                         domainFingerprint: V2SendMessageFingerprint(version: checkedUInt16(wire.domainFingerprint.version), digest: wire.domainFingerprint.digest))
     }
 
     public static func encode(result value: V2MessageSendOperationRecoveryResult) -> IMV2MessageSendOperationResult {
@@ -132,7 +125,6 @@ public enum V2MessageSendOperationWireCodec {
                 case .directPolicyDenied: outcome.reason = .directPolicyDenied
                 }
                 item.rejected = outcome
-            case .closed: item.closed = true
             }
             wire.receipt = item
         }
@@ -169,7 +161,6 @@ public enum V2MessageSendOperationWireCodec {
                 default: throw V2MessageSendOperationWireCodecError.invalidField
                 }
                 outcome = .rejected(reason)
-            case .closed(true)?: outcome = .closed
             default: throw V2MessageSendOperationWireCodecError.invalidField
             }
             return .receipt(try .init(identity: decode(identity: item.identity), fingerprint: decode(fingerprint: item.fingerprint),

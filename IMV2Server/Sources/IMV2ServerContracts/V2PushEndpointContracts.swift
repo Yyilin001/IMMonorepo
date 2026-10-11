@@ -126,27 +126,6 @@ public protocol V2PushDeviceEndpointStore: Sendable {
     ) async throws
 }
 
-public extension V2PushDeviceEndpointStore {
-    /// 删除某设备自有端点的兼容实现。
-    ///
-    /// 面向不具备原子身份感知更新的存储：先读取端点再停用它。
-    /// PostgreSQL 实现会覆盖该方法，避免为用户主动删除而读取并解密提供方材料。
-    ///
-    /// - Parameters:
-    ///   - deviceID: 目标设备。
-    ///   - now: 服务端统一授时时刻。
-    /// - Throws: 读取或停用失败时抛出。
-    func disableOwnedEndpoint(
-        actorUserID _: UserID,
-        deviceID: DeviceID,
-        now: Date
-    ) async throws {
-        if let endpoint = try await endpoint(for: deviceID) {
-            try await disable(endpoint, now: now)
-        }
-    }
-}
-
 public enum V2PushEndpointIntent: Sendable {
     case enabled(V2PushDeviceEndpointRegistration)
     case disabled

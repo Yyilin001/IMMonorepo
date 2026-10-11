@@ -10,6 +10,7 @@ import HTTPTypes
 import Darwin
 #endif
 import IMV2Core
+import IMV2ActorContracts
 import IMV2ServerHTTP
 import PostgresNIO
 @testable import IMV2Server
@@ -26,9 +27,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func livePreferenceReplayTimestampBounds() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let live = try PostgresV2LiveActivityStore(database: database)
-            let operations = PostgresV2AccountPreferenceOperationStore(database: database,
-                projectionDelivery: SuccessfulProjectionDelivery(),
-                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let operations = V2PostgresAccountPreferencePersistence(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery())
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let minimum = Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000)
             let maximum = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)
@@ -100,9 +100,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             for (connection, expiry) in [(primary, base.addingTimeInterval(30)), (secondary, base.addingTimeInterval(90))] {
                 try await sql.raw("INSERT INTO im_v2.user_live_presence_leases (connection_id, publication_suppressed, user_id, device_id, expires_at, updated_at) VALUES (\(bind: connection), false, \(bind: memberTwoUUID), \(bind: device), \(bind: expiry), \(bind: base))").run()
             }
-            let preferences = PostgresV2AccountPreferenceOperationStore(database: database,
-                projectionDelivery: SuccessfulProjectionDelivery(),
-                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let preferences = V2PostgresAccountPreferencePersistence(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery())
             guard case .receipt(let proof) = try await preferences.executePreferenceFixture(owner: peer,
                 operation: .liveActivityPreference(.init(uuid: UUID())),
                 value: .liveActivity(allowsOnlinePresence: true, allowsTypingIndicators: true), now: base),
@@ -155,8 +154,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000), operation = UUID()
             let shadow = PreferenceReplayClockDelivery()
-            let store = PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: shadow,
-                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let store = V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: shadow)
             let command = try await store.freezePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: operation)),
                 value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: base)
             let conflict = try V2AccountPreferenceCommand(identity: command.identity,
@@ -198,34 +196,36 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("bound direct/social/preference original proofs survive later clock changes without another effect", arguments: ["direct", "stranger", "userAdd", "relationship", "block"])
+    @Test("direct/preference clock checks and policy-owned social replays preserve immutable effects", arguments: ["direct", "userAdd", "relationship", "block"])
     func directSocialReplayTimestampBounds(kind: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
+            let base = Date()
+            let baseMilliseconds = UInt64(try v2GatewayMilliseconds(base))
+            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = \(bind: base.addingTimeInterval(600))").run()
+            try await withFixturePolicyOwners(database: database, projectionDelivery: SuccessfulProjectionDelivery()) { owners in
             let profile = try forwardImportTestProfile()
             let chosenRoom = RoomID(uuid: UUID()), operation = UUID()
-            let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
-            let preferences = PostgresV2AccountPreferenceOperationStore(database: database,
-                projectionDelivery: SuccessfulProjectionDelivery(),
-                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
+            let preferences = V2PostgresAccountPreferencePersistence(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery())
             enum Proof: Equatable { case direct(V2DirectRoomOperationReceipt), social(V2SocialOperationReceipt), preference(V2AccountPreferenceReceipt) }
             func invoke(_ id: UUID, at now: Date, conflict: Bool = false) async throws -> Proof? {
                 let target = UserID(uuid: conflict ? memberThreeUUID : memberTwoUUID)
                 switch kind {
                 case "direct":
                     let command = try V2DirectRoomOperationCommand(actorUserID: senderID, operationID: .init(uuid: id), targetUserID: target,
-                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+                        firstSubmissionDeadlineMilliseconds: baseMilliseconds + 600_000)
                     let result = try await PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery()).submitDirectRoomOperation(command,
                         roomID: chosenRoom, roomShardID: "room-a", capacityProfile: profile, now: now)
                     if conflict { #expect(result == .fingerprintConflict); return nil }
                     guard case .receipt(let proof) = result, case .opened(let room, _) = proof.outcome else { throw CancellationError() }
                     #expect(room == chosenRoom && proof.validates(command: command))
                     return .direct(proof)
-                case "stranger", "userAdd":
-                    let value: V2AccountPreferenceValue = kind == "stranger" ? .strangerMessage(conflict ? .allow : .deny) : .userAdd(conflict ? .allow : .deny)
-                    let reference: V2OperationReference = kind == "stranger" ? .strangerMessagePreference(.init(uuid: id)) : .userAddPreference(.init(uuid: id))
+                case "userAdd":
+                    let value: V2AccountPreferenceValue = .userAdd(conflict ? .allow : .deny)
+                    let reference: V2OperationReference = .userAddPreference(.init(uuid: id))
                     let command = try V2AccountPreferenceCommand(identity: .init(accountID: senderID, scope: .account(senderID), operation: reference),
-                        value: value, expectedRevision: 0, firstSubmissionDeadlineMilliseconds: 1_750_000_120_000)
+                        value: value, expectedRevision: 0, firstSubmissionDeadlineMilliseconds: baseMilliseconds + 120_000)
                     let result = try await preferences.submit(command, now: now)
                     if conflict { #expect(result == .fingerprintConflict); return nil }
                     guard case .receipt(let proof) = result, case .applied(let actual, let revision) = proof.outcome else { throw CancellationError() }
@@ -235,8 +235,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let action: V2SocialOperationAction = kind == "relationship" ? .relationship(.request) : .userBlock(.block)
                     let reference: V2OperationReference = kind == "relationship" ? .relationship(.init(uuid: id)) : .userBlock(.init(uuid: id))
                     let command = try V2SocialOperationCommand(identity: .init(accountID: senderID, scope: .userPair(senderID, target), operation: reference),
-                        action: action, expectedRevision: 0, firstSubmissionDeadlineMilliseconds: kind == "relationship" ? 1_750_000_600_000 : 1_750_000_120_000)
-                    let result = try await social.submitSocialOperation(command, now: now)
+                        action: action, expectedRevision: 0, firstSubmissionDeadlineMilliseconds: kind == "relationship" ? baseMilliseconds + 600_000 : baseMilliseconds + 120_000)
+                    let result = try await social.submitSocialOperation(command)
                     if conflict { #expect(result == .fingerprintConflict); return nil }
                     guard case .receipt(let proof) = result, case .applied = proof.outcome else { throw CancellationError() }
                     #expect(proof.validates(command: command))
@@ -255,19 +255,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return rows
             }
             let invalid = [Double.nan, .infinity, -.infinity, 1e14, -1e14].map { Date(timeIntervalSince1970: $0) }
-            for date in invalid {
+            // Caller-clock validation only applies to APIs that still accept a clock.
+            for date in (kind == "direct" || kind == "userAdd" ? invalid : []) {
                 let before = try await snapshot()
                 await #expect(throws: (any Error).self) { try await invoke(UUID(), at: date) }
                 #expect(try await snapshot() == before)
             }
             let original = try #require(try await invoke(operation, at: base))
             let before = try await snapshot()
-            for date in invalid + [base.addingTimeInterval(700)] {
+            let replayClocks = kind == "direct" || kind == "userAdd"
+                ? invalid + [base.addingTimeInterval(700)] : [base]
+            for date in replayClocks {
                 #expect(try await invoke(operation, at: date) == original)
                 #expect(try await snapshot() == before)
             }
             _ = try await invoke(operation, at: base, conflict: true)
             #expect(try await snapshot() == before)
+            }
         }
     }
 
@@ -281,15 +285,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 roomShardID: "room-a", roomID: room, now: { now }).openedReceipt(actorUserID: senderID,
                     operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
                     firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let sender = V2SendMessageService(store: PostgresV2RoomWriteStore(database: ownerDB), capacityProfile: profile,
+            let sender = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: ownerDB, controlDatabase: controlDB,
+                store: PostgresV2RoomWriteStore(database: ownerDB), shardID: "room-a", epoch: 0), capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted = try await sender.send(.init(roomID: room, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "read me")) else { throw CancellationError() }
             let store = PostgresV2ReadReceiptStore(database: ownerDB)
             let command = try V2RecordReadReceiptCommand(roomID: room, actorUserID: senderID,
                 operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
-            await #expect(throws: V2ReadReceiptStoreError.ownerChanged) {
-                _ = try await store.recordOwnerValidated(command: command, ownerRoute: .init(shardID: "room-a", epoch: 99), now: now)
+            try await withRoomActivation(database: ownerDB, roomID: room) { token in
+                let stale = V2RoomActivationToken(roomID: room, owner: try .init(shardID: "room-a", epoch: 99),
+                    activationEpoch: token.activationEpoch, host: token.host)
+                await #expect(throws: V2ReadReceiptStoreError.ownerChanged) {
+                    _ = try await store.recordActivationValidated(command: command, token: stale, now: now)
+                }
             }
             try await controlSQL.raw("""
                 INSERT INTO im_v2.user_read_receipt_preferences(user_id, allows_direct_read_receipts, preference_revision, updated_at)
@@ -368,7 +377,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             \(bind: room), 'room-a', \(bind: now), \(bind: now))
                     """).run()
             }
-            let preferences = PostgresV2AccountPreferenceOperationStore(database: controlDB, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: V2DirectAuthorizationCoordinator(controlDatabase: controlDB, ownerDatabases: [:]))
+            let preferences = V2PostgresAccountPreferencePersistence(database: controlDB, projectionDelivery: SuccessfulProjectionDelivery())
             _ = try await preferences.executePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: UUID())), value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
             let worker = V2ReadReceiptPreferencePropagationWorker(database: controlDB, now: { now })
             #expect(try await worker.runOnce(limit: 1) == .init(claimedOperationCount: 1, projectedRoomCount: 1, completedOperationCount: 0))
@@ -432,8 +441,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("Read receipt preference revisions advance independently of time and preserve replay at exhaustion")
     func readReceiptPreferenceRevisionOrdering() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let store = PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(),
-                authorizationCoordinator: V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let store = V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let first = try await store.freezePreferenceFixture(owner: senderID, operation: .readReceiptPreference(.init(uuid: UUID())),
                 value: .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true), now: now)
@@ -534,7 +542,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let base = Date(timeIntervalSince1970: 1_750_000_000), profile = try forwardImportTestProfile()
             try await sql.raw("UPDATE im_v2.room_memberships SET role='owner' WHERE room_id=\(bind:roomUUID) AND user_id=\(bind:senderUUID)").run()
             if kind == "role" { try await sql.raw("UPDATE im_v2.rooms SET membership_revision=1 WHERE room_id=\(bind:roomUUID)").run() }
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile,
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0), capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { base })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "before")) else { throw CancellationError() }
@@ -1416,131 +1425,121 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Local forwarding clocks isolate failed pairs and preserve durable retries", arguments: [false, true])
-    func localForwardClockBounds(ownerValidated: Bool) async throws {
+    @Test("Actor forwarding rejects invalid clocks atomically and replays committed results")
+    func localForwardClockBounds() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let clock = TestSequenceClock([base])
+            let base = Date(), clock = TestSequenceClock([Date()])
+            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=\(bind: base.addingTimeInterval(600))").run()
             let profile = try forwardImportTestProfile(), limits = try V2MessageCommandLimits(maxUTF8Bytes: 64)
             let write = PostgresV2RoomWriteStore(database: database)
-            let sender = V2SendMessageService(store: write, capacityProfile: profile, limits: limits, now: { base })
-            guard case .accepted(let source) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "forward clock")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let reference = try V2ForwardMessageReference(roomID: roomID, messageID: source.messageID, revision: .init(1))
-            let command = try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference], targetRoomIDs: [roomID])
-            let service = V2ForwardMessagesService(database: database, writeStore: write, capacityProfile: profile, limits: limits, now: { clock.now() })
-            @Sendable func forward(_ command: V2ForwardMessagesCommand) async throws -> [V2ForwardMessageResult] {
-                if ownerValidated {
-                    return try await service.forwardOwnerValidated(actorUserID: senderID, command: command, ownerRoutes: [roomID: .init(shardID: "room-a", epoch: 0)])
+            try await withRoomActivation(database: database, roomID: roomID) { token in
+                let authorized = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: write, shardID: "room-a", epoch: 0, activationToken: token)
+                let sender = V2SendMessageService(store: authorized, capacityProfile: profile, limits: limits, now: { base })
+                guard case .accepted(let source) = try await sender.send(.init(roomID: roomID, actorUserID: senderID,
+                    clientMessageID: .init(uuid: UUID()), text: "forward clock")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                let reference = try V2ForwardMessageReference(roomID: roomID, messageID: source.messageID, revision: .init(1))
+                try await withFixturePolicyOwners(database: database, projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                    let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
+                        policyOwners: owners, endpoint: "forward-clock-test", maximumRooms: 1)
+                    do {
+                        let executor = V2ActorForwardPairDomainExecutor(database: database, write: write,
+                            capacityProfile: profile, limits: limits, now: { clock.now() }).usingPolicyAuthorizations(policies)
+                        let pair = V2ActorForwardPairWire(actorUserID: senderID, operationID: .init(uuid: UUID()),
+                            source: reference, targetRoomID: roomID)
+                        func snapshot() async throws -> String {
+                            let row = try #require(try await sql.raw("""
+                                SELECT jsonb_build_object(
+                                    'operations', (SELECT jsonb_agg(to_jsonb(r) ORDER BY actor_user_id,operation_id,source_message_id,target_room_id) FROM im_v2.message_forward_operations r),
+                                    'messages', (SELECT jsonb_agg(to_jsonb(r) ORDER BY message_id) FROM im_v2.messages r),
+                                    'events', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id,room_sequence) FROM im_v2.room_events r),
+                                    'rooms', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id) FROM im_v2.rooms r),
+                                    'room_admission', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id) FROM im_v2.room_admission r),
+                                    'shard_admission', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_shard_id,capacity_profile_id) FROM im_v2.shard_admission_pools r),
+                                    'completions', (SELECT jsonb_agg(to_jsonb(r) ORDER BY sender_user_id,client_message_id) FROM im_v2.message_send_completions r)
+                                )::text AS value
+                                """).first(decoding: StringValueRow.self))
+                            return row.value
+                        }
+                        let invalidSeconds: [Double] = [.nan, .infinity, -.infinity, .greatestFiniteMagnitude,
+                            -.greatestFiniteMagnitude, 1e14, -1e14, -1e12, -1, 281_474_976_710.656]
+                        let postgresMinimum = Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000)
+                        let postgresMaximum = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)
+                        let badDates = invalidSeconds.map { Date(timeIntervalSince1970: $0) }
+                            + [postgresMinimum, postgresMaximum]
+                        let initial = try await snapshot()
+                        for bad in badDates {
+                            clock.set([bad])
+                            await #expect(throws: (any Error).self) {
+                                _ = try await executor.execute(pair, activationTokens: [token])
+                            }
+                            #expect(try await snapshot() == initial)
+                        }
+                        // Current acceptance reads one timestamp; there is no independently committed staging step.
+                        clock.set([base.addingTimeInterval(-30), badDates[0]])
+                        let accepted = try await executor.execute(pair, activationTokens: [token])
+                        #expect(accepted.messageID != nil && accepted.errorCode == nil)
+                        #expect(try await count("im_v2.messages", on: sql) == 2)
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == 2)
+                        #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NOT NULL", on: sql) == 1)
+                        let committed = try await snapshot()
+                        for bad in badDates {
+                            clock.set([bad])
+                            #expect(try await executor.execute(pair, activationTokens: [token]) == accepted)
+                            #expect(try await snapshot() == committed)
+                        }
+                        let replayed = try await withThrowingTaskGroup(of: V2ActorForwardMessageResultWire.self) { group in
+                            for _ in 0..<8 { group.addTask { try await executor.execute(pair, activationTokens: [token]) } }
+                            var results: [V2ActorForwardMessageResultWire] = []
+                            for try await result in group { results.append(result) }
+                            return results
+                        }
+                        #expect(replayed.count == 8 && replayed.allSatisfy { $0 == accepted })
+                        #expect(try await snapshot() == committed)
+
+                        // A ledger update failure rolls back the message and completion in the same transaction.
+                        let interrupted = V2ActorForwardPairWire(actorUserID: senderID, operationID: .init(uuid: UUID()),
+                            source: reference, targetRoomID: roomID)
+                        try await sql.raw("CREATE FUNCTION im_v2.test_forward_clock_result_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'local forward result write failure'; END $$").run()
+                        try await sql.raw("CREATE TRIGGER test_forward_clock_result_failure BEFORE UPDATE ON im_v2.message_forward_operations FOR EACH ROW EXECUTE FUNCTION im_v2.test_forward_clock_result_failure()").run()
+                        clock.set([base])
+                        await #expect(throws: (any Error).self) {
+                            _ = try await executor.execute(interrupted, activationTokens: [token])
+                        }
+                        #expect(try await snapshot() == committed)
+                        try await sql.raw("DROP TRIGGER test_forward_clock_result_failure ON im_v2.message_forward_operations").run()
+                        let repaired = try await executor.execute(interrupted, activationTokens: [token])
+                        #expect(repaired.messageID != nil && repaired.errorCode == nil)
+                        #expect(try await count("im_v2.messages", on: sql) == 3)
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == 3)
+                        #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NULL", on: sql) == 0)
+                        clock.set([badDates[0]])
+                        #expect(try await executor.execute(interrupted, activationTokens: [token]) == repaired)
+
+                        // A failed new pair does not prevent an independent pair from succeeding.
+                        let failedPair = V2ActorForwardPairWire(actorUserID: senderID, operationID: .init(uuid: UUID()),
+                            source: reference, targetRoomID: roomID)
+                        await #expect(throws: (any Error).self) {
+                            _ = try await executor.execute(failedPair, activationTokens: [token])
+                        }
+                        clock.set([base])
+                        let independent = V2ActorForwardPairWire(actorUserID: senderID, operationID: .init(uuid: UUID()),
+                            source: reference, targetRoomID: roomID)
+                        let result = try await executor.execute(independent, activationTokens: [token])
+                        #expect(result.messageID != nil && result.errorCode == nil)
+                        let retried = try await executor.execute(failedPair, activationTokens: [token])
+                        #expect(retried.messageID != nil && retried.errorCode == nil)
+                        #expect(try await executor.execute(independent, activationTokens: [token]) == result)
+                        #expect(try await count("im_v2.messages", on: sql) == 5)
+                        #expect(try await count("im_v2.message_send_completions", on: sql) == 5)
+                        #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NOT NULL", on: sql) == 4)
+                        await policies.shutdown()
+                    } catch {
+                        await policies.shutdown()
+                        throw error
+                    }
                 }
-                return try await service.forward(actorUserID: senderID, command: command)
             }
-            func snapshot(includeOperations: Bool = true) async throws -> String {
-                let row = try await sql.raw("""
-                    SELECT jsonb_build_object(
-                        'operations', CASE WHEN \(bind: includeOperations) THEN (SELECT jsonb_agg(to_jsonb(r) ORDER BY actor_user_id, operation_id, source_message_id, target_room_id) FROM im_v2.message_forward_operations r) END,
-                        'messages', (SELECT jsonb_agg(to_jsonb(r) ORDER BY message_id) FROM im_v2.messages r),
-                        'events', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id, room_sequence) FROM im_v2.room_events r),
-                        'rooms', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id) FROM im_v2.rooms r),
-                        'room_admission', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_id) FROM im_v2.room_admission r),
-                        'shard_admission', (SELECT jsonb_agg(to_jsonb(r) ORDER BY room_shard_id, capacity_profile_id) FROM im_v2.shard_admission_pools r),
-                        'completions', (SELECT jsonb_agg(to_jsonb(r) ORDER BY sender_user_id, client_message_id) FROM im_v2.message_send_completions r)
-                    )::text AS value
-                    """).first(decoding: StringValueRow.self)
-                guard let row else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                return row.value
-            }
-            let unavailable = try V2ForwardMessageResult(sourceMessageID: source.messageID, targetRoomID: roomID, messageID: nil, roomSequence: nil, errorCode: "UNAVAILABLE")
-            let badDates = [Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude, -.greatestFiniteMagnitude, 1e14, -1e14, -1e12].map { Date(timeIntervalSince1970: $0) }
-            let initial = try await snapshot()
-            for bad in badDates {
-                clock.set([bad])
-                #expect(try await forward(command) == [unavailable])
-                #expect(try await snapshot() == initial)
-            }
-            // The staging transaction succeeds, then the acceptance clock becomes invalid.
-            let initialBusiness = try await snapshot(includeOperations: false)
-            clock.set([base, badDates[0]])
-            #expect(try await forward(command) == [unavailable])
-            #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NULL", on: sql) == 1)
-            #expect(try await snapshot(includeOperations: false) == initialBusiness)
-            let staged = try await snapshot()
-            let invalidAcceptanceDates = badDates + [Date(timeIntervalSince1970: -1), Date(timeIntervalSince1970: 281_474_976_710.656), Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000), Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)]
-            for bad in invalidAcceptanceDates {
-                clock.set([bad])
-                #expect(try await forward(command) == [unavailable])
-                #expect(try await snapshot() == staged)
-            }
-            // A recovered clock and concurrent normal retries accept exactly one message.
-            clock.set([base.addingTimeInterval(-30)])
-            let recovered = try await withThrowingTaskGroup(of: [V2ForwardMessageResult].self) { group in
-                for _ in 0..<8 { group.addTask { try await forward(command) } }
-                var results: [[V2ForwardMessageResult]] = []
-                for try await result in group { results.append(result) }
-                return results
-            }
-            let accepted = try #require(recovered.first)
-            #expect(accepted.count == 1)
-            #expect(accepted.first?.errorCode == nil)
-            #expect(accepted.first?.messageID != nil)
-            #expect(recovered.allSatisfy { $0 == accepted })
-            #expect(try await count("im_v2.messages", on: sql) == 2)
-            #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NOT NULL", on: sql) == 1)
-            let committed = try await snapshot()
-            for bad in badDates {
-                clock.set([bad])
-                #expect(try await forward(command) == accepted)
-                #expect(try await snapshot() == committed)
-            }
-
-            guard case .accepted(let secondSource) = try await sender.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "second clock source")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            let secondReference = try V2ForwardMessageReference(roomID: roomID, messageID: secondSource.messageID, revision: .init(1))
-            let multi = try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference, secondReference], targetRoomIDs: [roomID])
-            clock.set([badDates[0], base, base])
-            let partial = try await forward(multi)
-            #expect(partial.count == 2)
-            #expect(partial.first == unavailable)
-            #expect(partial.last?.sourceMessageID == secondSource.messageID)
-            #expect(partial.last?.messageID != nil)
-            #expect(partial.last?.errorCode == nil)
-            #expect(try await count("im_v2.messages", on: sql) == 4)
-            clock.set([base])
-            let completed = try await forward(multi)
-            #expect(completed.count == 2)
-            #expect(completed.allSatisfy { $0.errorCode == nil && $0.messageID != nil })
-            #expect(completed.last == partial.last)
-            #expect(try await count("im_v2.messages", on: sql) == 5)
-
-            // An accepted message also survives a failed result-marker transaction.
-            let interrupted = try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference], targetRoomIDs: [roomID])
-            try await sql.raw("CREATE FUNCTION im_v2.test_forward_clock_result_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'local forward result write failure'; END $$").run()
-            try await sql.raw("CREATE TRIGGER test_forward_clock_result_failure BEFORE UPDATE ON im_v2.message_forward_operations FOR EACH ROW EXECUTE FUNCTION im_v2.test_forward_clock_result_failure()").run()
-            #expect(try await forward(interrupted) == [unavailable])
-            #expect(try await count("im_v2.messages", on: sql) == 6)
-            #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NULL", on: sql) == 1)
-            try await sql.raw("DROP TRIGGER test_forward_clock_result_failure ON im_v2.message_forward_operations").run()
-            clock.set([badDates[0]])
-            let repaired = try await forward(interrupted)
-            #expect(repaired.first?.messageID != nil)
-            #expect(repaired.first?.errorCode == nil)
-            #expect(try await count("im_v2.messages", on: sql) == 6)
-            #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NULL", on: sql) == 0)
-
-            // Staging accepts the full finite PostgreSQL range, independently of message acceptance.
-            for valid in [Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000), Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)] {
-                let boundary = try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference], targetRoomIDs: [roomID])
-                clock.set([valid, badDates[0]])
-                #expect(try await forward(boundary) == [unavailable])
-                let row = try await sql.raw("SELECT created_at AS value FROM im_v2.message_forward_operations WHERE operation_id = \(bind: boundary.operationID.uuidValue!)").first(decoding: RevocationClockDateRow.self)
-                #expect(row?.value == valid)
-                #expect(try await count("im_v2.messages", on: sql) == 6)
-            }
-            clock.set([base])
-            // New ordinary traffic remains usable after every invalid-clock path above.
-            let normal = try V2ForwardMessagesCommand(operationID: .init(uuid: UUID()), sources: [reference], targetRoomIDs: [roomID])
-            let result = try await forward(normal)
-            #expect(result.first?.messageID != nil)
-            #expect(result.first?.errorCode == nil)
-            #expect(try await count("im_v2.messages", on: sql) == 7)
         }
     }
 
@@ -1650,7 +1649,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let pending = try await gatewayStore.events(afterCursorFor: node, limit: 8)
             let later = try #require(pending.first)
             #expect(pending.count == 1)
-            let gatewayWorker = V2DeviceRevocationWorker(store: gatewayStore, registry: V2DeviceConnectionRegistry(), nodeID: node, now: { clock.now() })
+            let gatewayWorker = V2DeviceRevocationWorker(store: gatewayStore, registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), nodeID: node, now: { clock.now() })
             let beforeLater = try await cursorSnapshot()
             for bad in invalidDates {
                 clock.set([bad])

@@ -15,7 +15,7 @@ class AppOutboxCanaryProofTests(unittest.TestCase):
 
     def test_exact_lost_ack_proof_requires_same_fact_and_actual_replacement(self):
         identity = {key:str(uuid.uuid4()) for key in ('nonce','workID','roomID','connectionGeneration')}
-        fact = dict(messages=1,receipts=1,completions=1,closures=0,exactAccepted=True,
+        fact = dict(messages=1,receipts=1,completions=1,exactAccepted=True,
                     messageID=str(uuid.uuid4()),roomSequence=2)
         proof = dict(nonce=identity['nonce'].upper(),workID=identity['workID'].upper(),
             roomID=identity['roomID'].upper(),messageID=fact['messageID'].upper(),roomSequence=2,
@@ -24,7 +24,6 @@ class AppOutboxCanaryProofTests(unittest.TestCase):
             automaticReconnect=True,senderReadyHighWatermark=2,senderAppliedCursor=2,receiverCursor=2)
         self.assertTrue(accepted_fact(fact))
         self.assertTrue(proof_matches(identity,fact,proof))
-        self.assertFalse(accepted_fact(dict(fact,closures=1)))
         self.assertFalse(accepted_fact(dict(fact,exactAccepted=False)))
         self.assertFalse(proof_matches(identity,fact,dict(proof,newConnectionGeneration=identity['connectionGeneration'])))
         self.assertFalse(proof_matches(identity,fact,dict(proof,senderAppliedCursor=1)))

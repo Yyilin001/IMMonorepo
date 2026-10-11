@@ -598,35 +598,6 @@
       "members": []
     },
     {
-      "name": "V2AtomicRoomWriteBatchPartition",
-      "target": "IMV2ServerContracts",
-      "path": "IMV2Server/Sources/IMV2ServerContracts/V2SendMessageContracts.swift",
-      "line": 274,
-      "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2AtomicRoomWriteBatchPartition: Hashable, Sendable",
-      "members": [
-        "public let rawValue: UInt8"
-      ]
-    },
-    {
-      "name": "V2AuthenticatedMembershipChange",
-      "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2RoomMembershipService.swift",
-      "line": 6,
-      "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2AuthenticatedMembershipChange: Sendable",
-      "members": [
-        "public let roomID: RoomID",
-        "public let actorUserID: UserID",
-        "public let operationID: MembershipOperationID",
-        "public let targetUserID: UserID",
-        "public let action: V2RoomMembershipAction",
-        "public let expectedMembershipRevision: UInt64"
-      ]
-    },
-    {
       "name": "V2AuthenticatedMessageEdit",
       "target": "IMV2ServerApplication",
       "path": "IMV2Server/Sources/IMV2ServerApplication/V2MessageEditService.swift",
@@ -2689,32 +2660,6 @@
       ]
     },
     {
-      "name": "V2OwnerValidatedReadReceiptRequest",
-      "target": "IMV2ServerInfrastructure",
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedReadReceiptStore.swift",
-      "line": 7,
-      "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2OwnerValidatedReadReceiptRequest: Sendable",
-      "members": [
-        "public let request: V2ReadReceiptRecordRequest",
-        "public let ownerRoute: V2RoomShardRoute"
-      ]
-    },
-    {
-      "name": "V2OwnerValidatedRoomWriteRequest",
-      "target": "IMV2ServerInfrastructure",
-      "path": "IMV2Server/Sources/IMV2ServerInfrastructure/V2OwnerValidatedRoomWriteStore.swift",
-      "line": 7,
-      "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2OwnerValidatedRoomWriteRequest: Sendable",
-      "members": [
-        "public let request: V2RoomWriteRequest",
-        "public let ownerRoute: V2RoomShardRoute"
-      ]
-    },
-    {
       "name": "V2PinnedMessage",
       "target": "IMV2Core",
       "path": "IMV2Core/Sources/IMV2Core/GroupCapabilities.swift",
@@ -3288,34 +3233,6 @@
       "status": "retired",
       "replacedBy": [
         "V2ReadReceiptPreferences"
-      ]
-    },
-    {
-      "name": "V2SetStrangerMessagePermissionCommand",
-      "target": "IMV2Core",
-      "path": "IMV2Core/Sources/IMV2Core/DirectMessaging.swift",
-      "line": 47,
-      "kind": "struct",
-      "explicitCodable": false,
-      "declaration": "public struct V2SetStrangerMessagePermissionCommand: Equatable, Sendable",
-      "members": [
-        "public let actorUserID: UserID",
-        "public let operationID: StrangerMessagePreferenceOperationID",
-        "public let permission: V2StrangerMessagePermission"
-      ]
-    },
-    {
-      "name": "V2SetStrangerMessagePermissionOutcome",
-      "target": "IMV2ServerApplication",
-      "path": "IMV2Server/Sources/IMV2ServerApplication/V2DirectMessagingService.swift",
-      "line": 100,
-      "kind": "enum",
-      "explicitCodable": false,
-      "declaration": "public enum V2SetStrangerMessagePermissionOutcome: Equatable, Sendable",
-      "members": [
-        "case updated(permission: V2StrangerMessagePermission, updatedAt: Date)",
-        "case idempotent(permission: V2StrangerMessagePermission, updatedAt: Date)",
-        "case idempotencyConflict"
       ]
     },
     {

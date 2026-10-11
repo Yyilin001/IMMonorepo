@@ -21,8 +21,8 @@ import Vapor
 import VaporTesting
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("overlapping warm multi-shard batches preserve lock order without deadlocks")
-    func overlappingMultiShardBatchesUseDeterministicLockOrder() async throws {
+    @Test("independent room writes on multiple logical shards complete without deadlocks")
+    func independentMultiShardRoomWritesAvoidDeadlocks() async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
         else { return }
@@ -76,7 +76,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     """).run()
             }
 
-            var roomActors: [(roomID: RoomID, actorUserID: UserID)] = []
+            var roomActors: [(roomID: RoomID, actorUserID: UserID, shardID: String)] = []
             for shardIndex in shardIDs.indices {
                 let direct = V2DirectRoomOperationTestFixture(database: resources.database(.psql),
                     capacityProfile: profile, roomShardID: shardIDs[shardIndex], now: { now })
@@ -87,12 +87,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let room = try await direct.openedIdentity(actorUserID: actor,
                         operationID: .init(uuid: UUID()), targetUserID: target,
                         firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-                    roomActors.append((room.roomID, actor))
+                    roomActors.append((room.roomID, actor, shardIDs[shardIndex]))
                 }
             }
-            // Each transaction overlaps two shard rows, while no room or user
-            // row overlaps another transaction. Any wait cycle therefore
-            // comes specifically from inconsistent shard-row lock ordering.
+            // Arrival groups interleave logical shards on one physical database.
+            // Every room owns its activation and its own transaction; no group
+            // retains one shard's locks while executing another room.
             let batches = [
                 [roomActors[0], roomActors[2]],
                 [roomActors[3], roomActors[4]],
@@ -104,19 +104,28 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10_000, window: 86_400),
                     contentReviewMode: .disabled)
             }
-            // Prime each direct room through the sole supported per-room path.
-            // The shared revision cache then makes every measured batch a warm append.
+            let database = resources.database(.psql)
+            let leases = PostgresV2RoomActivationStore(database: database)
+            let host = V2ActorHostIdentity(hostID: try .init("multi-shard-write-test"), incarnationID: UUID())
+            var acquired: [RoomID: V2RoomActivationToken] = [:]
             for target in roomActors {
-                let command = try V2SendMessageCommand(
-                    roomID: target.roomID, senderUserID: target.actorUserID,
-                    clientMessageID: .init(UUID().uuidString), text: "预热房间",
-                    limits: .init(maxUTF8Bytes: 128)
-                )
-                guard case .accepted = try await writers[0].accept(
-                    command: command, capacityProfile: profile,
+                guard case .acquired(let lease) = try await leases.acquire(roomID: target.roomID,
+                    owner: .init(shardID: target.shardID, epoch: 0), host: host, duration: .init(120_000)) else {
+                    throw V2RoomActivationLeaseError.activationChanged
+                }
+                acquired[target.roomID] = lease.token
+            }
+            let tokens = acquired
+            // Warm each room through its real authorization and activation.
+            for target in roomActors {
+                let command = try V2SendMessageCommand(roomID: target.roomID, senderUserID: target.actorUserID,
+                    clientMessageID: .init(UUID().uuidString), text: "预热房间", limits: .init(maxUTF8Bytes: 128))
+                let writer = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: writers[0], shardID: target.shardID, epoch: 0,
+                    activationToken: try #require(tokens[target.roomID]))
+                guard case .accepted = try await writer.accept(command: command, capacityProfile: profile,
                     identifiers: .init(messageID: .init(UUID().uuidString), eventID: .init(UUID().uuidString)),
-                    now: now
-                ) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    now: now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
             }
             let deadlocksBefore = try #require(try await sql.raw("""
                 SELECT deadlocks::bigint AS value
@@ -156,7 +165,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                     now: now.addingTimeInterval(Double(round))
                                 )
                             }
-                            return try await writer.acceptAtomically(requests: requests).count
+                            var accepted = 0
+                            for (target, input) in zip(batch, requests) {
+                                let authorized = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                                    store: writer, shardID: target.shardID, epoch: 0,
+                                    activationToken: try #require(tokens[target.roomID]))
+                                guard case .accepted = try await authorized.accept(command: input.command,
+                                    capacityProfile: input.capacityProfile, identifiers: input.identifiers, now: input.now) else {
+                                    throw V2RoomWriteStoreError.corruptPersistenceState
+                                }
+                                accepted += 1
+                            }
+                            return accepted
                         }
                     }
                     var total = 0
@@ -180,6 +200,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).first(decoding: CountRow.self)).value
             #expect(shardUsageAfter == shardUsageBefore)
 
+            try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
+            for token in tokens.values { _ = try await leases.release(token: token) }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {
@@ -192,7 +214,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("activation-scoped multi-room appends and receipts do not deadlock on room foreign keys", arguments: [false, true])
-    func concurrentGroupAppendsAndReceiptsUseCompatibleRoomLocks(_ actorScoped: Bool) async throws {
+    func concurrentGroupAppendsAndReceiptsUseCompatibleRoomLocks(_ ownerValidatedReceipts: Bool) async throws {
         guard let databaseURL = Environment.get("IMV2_POSTGRES_TEST_DATABASE_URL"),
               Environment.get("IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE") == "1"
         else { return }
@@ -230,8 +252,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 VALUES (\(bind: secondRoom), \(bind: senderUUID),
                         '并发回执群', \(bind: now))
                 """).run()
-            // Activation-scoped and local variants exercise the same rooms.
-            // The activation store needs their control-side owner records.
+            // Real writes require the rooms' canonical owner records.
             try await sql.raw("""
                 INSERT INTO im_v2.room_owner_routes
                     (room_id, room_shard_id, route_epoch, created_at, updated_at)
@@ -276,29 +297,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     window: 86_400
                 ),
                 contentReviewMode: .disabled)
-            let writer: any V2AtomicRoomWriteBatchStore
-            if actorScoped {
-                let leases = PostgresV2RoomActivationStore(database: resources.database(.psql))
-                let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-                let host = V2ActorHostIdentity(
-                    hostID: try .init("receipt-lock-test"), incarnationID: UUID()
-                )
-                var tokens: [V2RoomActivationToken] = []
-                for room in [roomUUID, secondRoom] {
-                    guard case .acquired(let lease) = try await leases.acquire(
-                        roomID: .init(uuid: room), owner: owner, host: host,
-                        duration: .init(30_000)
-                    ) else { throw V2RoomActivationLeaseError.activationChanged }
-                    tokens.append(lease.token)
+            let leases = PostgresV2RoomActivationStore(database: resources.database(.psql))
+            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
+            let host = V2ActorHostIdentity(hostID: try .init("receipt-lock-test"), incarnationID: UUID())
+            var tokens: [RoomID: V2RoomActivationToken] = [:]
+            for room in [roomUUID, secondRoom] {
+                let roomID = RoomID(uuid: room)
+                guard case .acquired(let lease) = try await leases.acquire(roomID: roomID,
+                    owner: owner, host: host, duration: .init(120_000)) else {
+                    throw V2RoomActivationLeaseError.activationChanged
                 }
-                writer = localWriter.usingActivationScope(try .init(tokens: tokens))
-            } else {
-                writer = localWriter
+                tokens[roomID] = lease.token
             }
+            let roomTokens = tokens
             let receiptStore = PostgresV2ReadReceiptStore(database: resources.database(.psql))
             let rooms = [roomUUID, secondRoom]
 
-            func appendRequests(round: Int) throws -> [V2RoomWriteRequest] {
+            @Sendable func appendRequests(round: Int) throws -> [V2RoomWriteRequest] {
                 try rooms.enumerated().map { index, room in
                     V2RoomWriteRequest(
                         command: try .init(
@@ -318,9 +333,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
 
-            #expect(try await writer.acceptAtomically(
-                requests: appendRequests(round: 0)
-            ).count == 2)
+            @Sendable func append(round: Int) async throws -> Int {
+                let inputs = try appendRequests(round: round)
+                var completed = 0
+                for input in inputs {
+                    let token = try #require(roomTokens[input.command.roomID])
+                    let writer = V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql),
+                        controlDatabase: resources.database(.psql), store: localWriter,
+                        shardID: "room-a", epoch: 0, activationToken: token)
+                    guard case .accepted = try await writer.accept(command: input.command,
+                        capacityProfile: input.capacityProfile, identifiers: input.identifiers, now: input.now) else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    completed += 1
+                }
+                return completed
+            }
+            #expect(try await append(round: 0) == 2)
             let deadlocksBefore = try #require(try await sql.raw("""
                 SELECT deadlocks::bigint AS value
                 FROM pg_stat_database
@@ -332,9 +361,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let completed = try await withThrowingTaskGroup(of: Int.self) { group in
                     group.addTask {
                         await gate.wait()
-                        return try await writer.acceptAtomically(
-                            requests: appendRequests(round: round)
-                        ).count
+                        return try await append(round: round)
                     }
                     group.addTask {
                         await gate.wait()
@@ -350,9 +377,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             )
                         }
                         let results: [V2GroupReadReceiptBatchResult]
-                        if actorScoped {
-                            let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
-                            results = try await receiptStore.recordGroupsOwnerValidated(requests.map { .init(request: $0, ownerRoute: route) })
+                        if ownerValidatedReceipts {
+                            results = try await receiptStore.recordBatchActivationValidated(requests,
+                                scope: .init(tokens: Array(roomTokens.values))).map { result in
+                                    switch result {
+                                    case .success(let outcome): .success(.handled(outcome))
+                                    case .failure(let error): .failure(error)
+                                    }
+                                }
                         } else { results = try await receiptStore.recordGroups(requests) }
                         guard results.allSatisfy({ result in
                             if case .success(.handled(.recorded)) = result { return true }
@@ -378,6 +410,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.messages", on: sql) == 2 + rounds * 2)
             #expect(try await count("im_v2.read_receipt_operations", on: sql) == rounds * 2)
 
+            for token in roomTokens.values {
+                _ = try await leases.release(token: token)
+            }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {
@@ -436,6 +471,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 maximumConnectionsPerDevice: 2,
                 maximumConnectionsPerUser: 8
             )
+            struct LeaseExpiryRow: Decodable { let value: Date }
+            let beforeAdmission = try #require(try await sql.raw("SELECT clock_timestamp() AS value")
+                .first(decoding: LeaseExpiryRow.self)).value
             let outcomes = try await withThrowingTaskGroup(
                 of: V2AuthenticatedConnectionLeaseOutcome.self,
                 returning: [V2AuthenticatedConnectionLeaseOutcome].self
@@ -461,9 +499,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 return result
             }
             #expect(outcomes.count == admissionCount)
+            let afterAdmission = try #require(try await sql.raw("SELECT clock_timestamp() AS value")
+                .first(decoding: LeaseExpiryRow.self)).value
             #expect(outcomes.allSatisfy { outcome in
-                outcome == .accepted(expiresAt: now.addingTimeInterval(90))
+                guard case .accepted(let expiresAt) = outcome else { return false }
+                return expiresAt >= beforeAdmission.addingTimeInterval(90) &&
+                       expiresAt <= afterAdmission.addingTimeInterval(90)
             })
+            let returnedExpiries = Set(outcomes.compactMap { outcome -> Date? in
+                if case .accepted(let expiresAt) = outcome { return expiresAt }
+                return nil
+            })
+            let storedExpiries = try await sql.raw("SELECT expires_at AS value FROM im_v2.user_live_presence_leases")
+                .all(decoding: LeaseExpiryRow.self)
+            #expect(Set(storedExpiries.map(\.value)) == returnedExpiries)
             #expect(
                 try await count("im_v2.user_live_presence_leases", on: sql)
                     == admissionCount
@@ -911,7 +960,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let old = now.addingTimeInterval(-120)
-            let service = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let service = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { old })
             guard case .accepted(let message) = try await service.send(.init(roomID: roomID,
                 actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "current revision")) else {
@@ -944,7 +994,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func messageStateMaterializationTimestampPrecision(mode: V2GroupCapacityClass) async throws {
         try await withForwardOwnerDatabases(mode: mode) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let service = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let service = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: forwardImportTestProfile(), limits: .init(maxUTF8Bytes: 64), now: { now })
             let repository = PostgresV2MessageProjectionStateRepository()
             let offsets: [Int64] = [-1, 1, 803_315_200_123_457, -211_813_487_999_999_999, 9_223_371_331_199_999_999]
@@ -1567,7 +1618,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 retryAfterSeconds: 1
             ))
             let now = Date(timeIntervalSince1970: 1_750_000_001)
-            let store = PostgresV2RoomWriteStore(database: resources.database(.psql))
+            let store = V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
+                store: PostgresV2RoomWriteStore(database: resources.database(.psql)), shardID: "room-a", epoch: 0)
             let outcome = try await store.accept(command: command, capacityProfile: profile, identifiers: ids, now: now)
             guard case .accepted(let accepted) = outcome else { Issue.record("Expected acceptance"); throw V2RoomWriteStoreError.corruptPersistenceState }
             try await assertSendCompletion(command: command, accepted: accepted, eventID: ids.eventID, sql: sql)
@@ -1642,7 +1694,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     clientMessageID: command.clientMessageID, text: text, media: media,
                     mentions: mentions, entities: entities, replyTo: reply,
                     forwardedFrom: forward, limits: .init(maxUTF8Bytes: 128))
-                #expect(try await store.accept(command: changed, capacityProfile: profile, identifiers: ids, now: afterRetention) == .idempotencyConflict)
+                if field == 5 {
+                    // A client send cannot claim a trusted forwarding identity.
+                    // The current policy boundary rejects it before persistence.
+                    await #expect(throws: V2PolicyAuthorizationLifecycleError.identityConflict) {
+                        try await store.accept(command: changed, capacityProfile: profile,
+                            identifiers: ids, now: afterRetention)
+                    }
+                } else {
+                    #expect(try await store.accept(command: changed, capacityProfile: profile,
+                        identifiers: ids, now: afterRetention) == .idempotencyConflict)
+                }
             }
             #expect(try await count("im_v2.messages", on: sql) == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 1)

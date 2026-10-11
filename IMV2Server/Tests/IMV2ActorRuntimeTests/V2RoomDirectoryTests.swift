@@ -246,7 +246,7 @@ struct V2RoomDirectoryTests {
             deadline: .now + .seconds(2))
         guard case .messaging(.sendOperation(let operation)) = command else { throw TestFailure.timeout }
         let recovery = V2RoomRequest.messaging(.recoverSendOperation(try .init(identity: operation.identity,
-            fingerprint: operation.fingerprint, domainFingerprint: operation.command.fingerprint, action: .query)))
+            fingerprint: operation.fingerprint, domainFingerprint: operation.command.fingerprint)))
         _ = try await fixture.directory.room(fixture.room).call(recovery, principal: .user(user),
             deadline: .now + .seconds(2))
         #expect(await fixture.transport.invoked == [command, command, recovery])

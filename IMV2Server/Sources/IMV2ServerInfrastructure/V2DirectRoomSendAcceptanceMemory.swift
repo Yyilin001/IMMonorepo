@@ -221,7 +221,7 @@ final class V2DirectRoomSendAcceptanceMemory: Sendable {
             states[token] = state
         }
 
-        /// Compatibility appends can change private timeline facts. Keep immutable
+        /// Writes outside the runtime-state append can change private timeline facts. Keep immutable
         /// membership/reply eligibility for preparation, but reload cursors before
         /// a later optimized write. These facts never authorize persistence alone.
         mutating func invalidateCursor(_ token: V2RoomActivationToken) {

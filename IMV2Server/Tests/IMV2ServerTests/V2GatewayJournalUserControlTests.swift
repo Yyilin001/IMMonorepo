@@ -12,7 +12,7 @@ struct V2GatewayJournalUserControlTests {
     @Test("replayed membership control cuts do not rescan the account directory")
     func membershipCutReplayDoesNotRescan() async throws {
         let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID()), connection = UUID()
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let socket = try stream(registry: registry, connection: connection)
         try #require(await registry.register(socket, connectionID: connection,
             identity: .init(userID: user, deviceID: device, capabilityProfile: "base"), publicationSuppressed: true))
@@ -87,7 +87,7 @@ struct V2GatewayJournalUserControlTests {
     @Test("authentication cuts fence baseline races and preserve reauthenticated successors", arguments: [false, true])
     func authoritativeDeviceControls(changedBeforeBaseline: Bool) async throws {
         let user = UserID(uuid: UUID()), device = DeviceID(uuid: UUID()), otherDevice = DeviceID(uuid: UUID())
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let identity = V2RealtimeJournalSourceIdentity(sourceID: UUID(), databaseIncarnation: UUID())
         let source = V2RealtimeJournalSource(sourceID: "users", incarnationID: identity.databaseIncarnation, partitionID: 1)
         let first = UUID(), second = UUID()

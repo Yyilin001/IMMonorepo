@@ -34,8 +34,7 @@ struct GatewayPolicyAssembly: Sendable {
         let journal = PostgresV2PolicyAuthorizationJournal(database: database,
             stateReadAdmission: nil, stateMetrics: stateMetrics)
         let dispatcher = PostgresV2PolicyMutationDispatcher(database: database,
-            projectionDelivery: prepared.projection.userShardProjectionDelivery,
-            legacyAuthorization: prepared.authorization)
+            projectionDelivery: prepared.projection.userShardProjectionDelivery)
         let cache = V2NodePolicyStateCache()
         let endpoint = document.owners.first(where: { $0.hostID == hostID })?.endpoint
             ?? configuration.allowedShards.sorted()[0]

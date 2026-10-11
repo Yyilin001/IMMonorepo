@@ -38,7 +38,7 @@ struct V2GatewayDomainCommandHandlerTests {
                 if recovering {
                     envelope.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
                         try .init(identity: operation.identity, fingerprint: operation.fingerprint,
-                            domainFingerprint: operation.command.fingerprint, action: .query))
+                            domainFingerprint: operation.command.fingerprint))
                 } else {
                     envelope.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
                 }
@@ -87,7 +87,7 @@ struct V2GatewayDomainCommandHandlerTests {
         var query = IMV2Envelope()
         query.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
             try .init(identity: operation.identity, fingerprint: operation.fingerprint,
-                domainFingerprint: operation.command.fingerprint, action: .query))
+                domainFingerprint: operation.command.fingerprint))
         let response = try await handler.handle(envelope: query, identity: fixture.identity)
         #expect(try V2MessageSendOperationWireCodec.decode(result: response.messageSendOperationResult) == .unresolved)
         let snapshot = await admission.snapshot()
@@ -121,7 +121,7 @@ struct V2GatewayDomainCommandHandlerTests {
         var recover = IMV2Envelope()
         recover.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery:
             try .init(identity: operation.identity, fingerprint: operation.fingerprint,
-                      domainFingerprint: operation.command.fingerprint, action: .query))
+                      domainFingerprint: operation.command.fingerprint))
         let recovered = try await handler.handle(envelope: recover, identity: fixture.identity)
         #expect(try V2MessageSendOperationWireCodec.decode(result: recovered.messageSendOperationResult) == receipt)
         let repeated = try await handler.handle(envelope: submission, identity: fixture.identity)
@@ -167,7 +167,7 @@ struct V2GatewayDomainCommandHandlerTests {
 
         let recovery = try V2MessageSendOperationRecoveryRequest(
             identity: operation.identity, fingerprint: operation.fingerprint,
-            domainFingerprint: operation.command.fingerprint, action: .query)
+            domainFingerprint: operation.command.fingerprint)
         var query = IMV2Envelope()
         query.messageSendOperationRecover = V2MessageSendOperationWireCodec.encode(recovery: recovery)
         let recovered = try await handler.handle(envelope: query, identity: fixture.identity)
@@ -404,7 +404,10 @@ struct V2GatewayDomainCommandHandlerTests {
           arguments: ["group", "presence", "typing"])
     func unsubscribeRoomValidation(kind: String) async throws {
         let fixture = try GatewayDomainFixture()
-        let registry = V2DeviceConnectionRegistry(), connectionID = UUID()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), connectionID = UUID()
+        if kind == "group" {
+            _ = try await registry.configureRoomSubscriptionIngress(authority: .init())
+        }
         let version = UInt8(IMV2ProtocolVersion.current)
         let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])
         let handler = makeGatewayDomainCommandHandler( sync: fixture.syncService())
@@ -431,7 +434,7 @@ struct V2GatewayDomainCommandHandlerTests {
         await stream.setOutboundWriter { data in delivered.withLock { $0.append(data) } }
         let room = fixture.roomID, subject = UserID(uuid: UUID())
         switch kind {
-        case "group": await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: room)
+        case "group": _ = try await registry.subscribeForegroundRoom(stream, connectionID: connectionID, roomID: room)
         case "presence": await registry.subscribePresence(stream, connectionID: connectionID, roomID: room, targetUserID: subject)
         default: try await registry.subscribeTyping(stream, connectionID: connectionID, roomID: room)
         }
@@ -689,7 +692,7 @@ struct V2GatewayDomainCommandHandlerTests {
         await admission.release(.interactiveRead)
     }
 
-    @Test("process-local unsubscribe remains available during database overload", arguments: ["group", "presence", "typing"])
+    @Test("domain unsubscribe controls do not wait for database admission", arguments: ["group", "presence", "typing"])
     func databaseAdmissionBypassesUnsubscribe(kind: String) async throws {
         let fixture = try GatewayDomainFixture()
         let admission = V2DatabaseWorkAdmissionController(policy: .init(
@@ -717,10 +720,13 @@ struct V2GatewayDomainCommandHandlerTests {
             envelope: request,
             identity: fixture.identity
         )
-        guard case .some(.acknowledged) = response.body else {
+        if kind == "group" {
+            #expect(response.error.code == "UNAVAILABLE")
+            #expect(response.error.retryable)
+        } else if case .some(.acknowledged) = response.body {
+            // Presence and typing controls retain their own connection handling.
+        } else {
             Issue.record("expected process-local unsubscribe success")
-            await admission.release(.foregroundWrite)
-            return
         }
         #expect(await admission.snapshot().foregroundWriteQueued == 0)
         await admission.release(.foregroundWrite)
@@ -913,8 +919,8 @@ struct V2GatewayDomainCommandHandlerTests {
         #expect(!response.error.retryable)
     }
 
-    @Test("Hybrid room subscription verifies the session actor and returns only its waterline")
-    func groupEventSubscriptionUsesAuthenticatedActor() async throws {
+    @Test("domain handler cannot bypass the connection registry with a database subscription")
+    func groupEventSubscriptionRequiresRegistry() async throws {
         let fixture = try GatewayDomainFixture()
         let store = GatewayGroupEventLogStore()
         let handler = makeGatewayDomainCommandHandler(
@@ -927,9 +933,9 @@ struct V2GatewayDomainCommandHandlerTests {
 
         let response = try await handler.handle(envelope: request, identity: fixture.identity)
 
-        #expect(response.groupEventSubscribed.roomID == fixture.roomID.rawValue)
-        #expect(response.groupEventSubscribed.highWatermark == 91)
-        #expect(await store.actor() == fixture.userID)
+        #expect(response.error.code == "UNAVAILABLE")
+        #expect(response.error.retryable)
+        #expect(await store.actor() == nil)
     }
 
     @Test("member directory owner changes request a fresh page")
@@ -1484,6 +1490,10 @@ private actor GatewayOwnerChangedReadReceiptStore: V2ReadReceiptStore {
 // Returns domain outputs directly so response encoding is exercised independently of storage validation.
 private actor GatewayResponseClockStore: V2ReadReceiptStore, V2LiveActivityStore, V2MessageEditStore, V2MessageWithdrawalStore, V2MessageReactionStore,
     V2ConversationCapabilitiesStore, V2GroupCapabilitiesStore {
+    func presenceBatch(_ requests: [V2PresenceObservationRequest], now: Date) async throws -> [V2PresenceObservationRequest: V2PresenceObservationOutcome] {
+        try await v2FixturePresenceBatch(store: self, requests, now: now)
+    }
+
     private var date: Date
     private var replay: Bool
     private let muteExpiryOnly: Bool

@@ -1,5 +1,7 @@
 # Actor 实时路由本地对照压测
 
+当前发送链路使用 `im_v2_send_operation_*` 指标；旧的 `im_v2_direct_room_log_append_batch_*`、`im_v2_direct_room_log_append_atomic_*` 和 `im_v2_direct_room_log_append_same_room_*` 已退出运行时输出。`capture_gateway_perf_when_busy.sh` 的队列触发参数为 `IM_V2_GATEWAY_OWNER_QUEUED_TURNS_THRESHOLD`，读取 `im_v2_send_operation_owner_queued_turns`，单位是等待 Owner 调度的房间轮次。历史对照报告中的旧指标仅解释原始运行记录，不能用于当前节点的队列判断。
+
 `prepare_v2_actor_realtime_direct_fixture.py` 生成一次固定夹具，随后两版共用其凭据和 SQL。正式夹具包含 50,000 个账号、设备和直聊房间。用户 i 与 i+1 成为房间 i 的两名成员，每个用户保留房间 i 和 i−1 两个目标。正式运行使用 `--foreground-paired`：偶数用户的第一目标为房间 i，奇数用户的第一目标为房间 i−1，其余邻居房间作为第二目标。Common Loader 每个连接只有一个前景详情订阅，因此形成 25,000 个双端前景房间；相邻两端跨 Gateway 接收实时消息。其余 25,000 个房间保留为第二目标，不宣称它们同时具有双端实时订阅。成员允许相互发送，避免将陌生人策略变化混入路由对照。
 
 ```sh
@@ -53,7 +55,7 @@ python3 IMV2/scripts/run_v2_actor_realtime_benchmark.py \
 
 Runner 的 `--baseline-account-binary` 和 `--candidate-account-binary` 必须分别指向两版 Release `IMV2AccountServerApp`。历史 r1–r10 的消息发送固定使用 Account HTTP，不能代表当前 App 的消息路径。当前 common Loader 在既有 TLS/TCP 连接上协商并发送 `messageSendOperation`；`--account-base-url` 仅保留用于工具中的其他 Account 操作。Account caller 使用独立 Actor 身份。当前 App 的 `V2RoutedMessageSendOperationClient` 提交和结果恢复均使用 TCP；缺少就绪会话或超出协商载荷限制时返回明确错误，由持久工作流保留原身份处理，不存在消息 HTTP 自动回退。真实 App 持久 outbox 和跨 Gateway 多设备验证另见[实施证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/actor-realtime-routing-evidence.md)，不能以 Loader 重连代替。
 
-TCP 请求重试保存原 operation identity/fingerprint、冻结首次提交期限和总尝试预算。明确匹配请求的 `SERVER_BUSY` 是前置准入拒绝，客户端保持被拒绝请求的原 submit/query/close 动作；query 被拒绝不证明先前 submit 未执行。`UNAVAILABLE` 与传输超时保持未知并查询持久结果；查询返回 `unresolved` 且首次提交期限仍有效时，才允许同 ID 重提，过期进入 closeIfAbsent。业务 `deferred` 同样保持本次动作。服务端重试下限作为最早时刻，再加不超过剩余总预算的指数随机窗口，避免所有客户端在下限到期同时重试。Loader 与生产策略公式一致，但各自使用单调时钟与持久日期，测试和正式对照必须使用相同新版 common Loader；旧版数据保留其原 hash，不跨版本计算性能比例。
+TCP 请求重试保存原 operation identity/fingerprint、冻结首次提交期限和总尝试预算。明确匹配请求的 `SERVER_BUSY` 是前置准入拒绝，客户端保持被拒绝请求的原 submit/query 动作；query 被拒绝不证明先前 submit 未执行。`UNAVAILABLE` 与传输超时保持未知并查询持久结果；查询返回 `unresolved` 且首次提交期限仍有效时，才允许同 ID 重提，过期后继续查询结果，不再发送关闭动作。业务 `deferred` 同样保持本次动作。服务端重试下限作为最早时刻，再加不超过剩余总预算的指数随机窗口，避免所有客户端在下限到期同时重试。Loader 与生产策略公式一致，但各自使用单调时钟与持久日期，测试和正式对照必须使用相同新版 common Loader；旧版数据保留其原 hash，不跨版本计算性能比例。
 
 当前候选配置关闭 workload pool isolation，Gateway 每实例物理池上限 11（其中 2 条为续期保留），各工作类共享池与实际 loan 准入，不再叠加旧 direct-send-control 和路由解析独立池；write/read/sync 配置保障份额为 5/3/3，工作准入允许借用其它空闲前台份额，不能解释成三个独立硬并发上限。Runner 的 Account 配置为每 EventLoop 8 条连接。两版分别记录实际拓扑及 PostgreSQL 连接采样，不能以历史池数量推算本轮总连接。Runner 默认创建本次输出目录下的独立 PostgreSQL 16 集群，监听回环端口 18532，配置 max_connections=320，并在结束后停止该集群，保留数据文件。既有 PostgreSQL 配置不变。显式选择 `--shared-postgres` 时只读检查连接上限必须至少为 320。Account HTTP 默认为 18544，HTTPS 入口为 18643–18648，Account caller 的 Actor 端口为 18343。
 
@@ -171,7 +173,7 @@ python3 IMV2/scripts/analyze_v2_actor_realtime_hotspots.py \
 | `cohort_isolations_total` | 已证明可回滚隔离的决定次数，不是实际SQL回滚语句数或唯一坏命令数。 |
 | `scalar_fallback_handles_total{reason}` / `scalar_fallback_commands_total{reason}` | 原标量执行边界的handles/命令数，每个实际回退handle记录一次，不按二分层数重复计；不保证最终接受。 |
 
-`reason` 仅允许 `multi_command`、`complex_payload`、`legacy_or_not_ready`、`domain_isolation`，无room/user/operation标签。当前多命令已支持waves，保留 `multi_command` 零基线兼容；复杂媒体/reply/mention/forward或review归 `complex_payload`，单一候选、legacy或未就绪等原路径归 `legacy_or_not_ready`，确认回滚后二分到原执行边界归 `domain_isolation`。纯永久receipt集合回放不算标量fallback，unknown不转换isolation。
+`reason` 仅允许 `complex_payload`、`optimization_not_applicable`、`domain_isolation`，无 room/user/operation 标签。复杂媒体、回复、提及、转发或审核归 `complex_payload`；不适用优化路径的请求归 `optimization_not_applicable`；确认回滚后进入业务隔离的请求归 `domain_isolation`。旧 `multi_command` 零基线兼容标签已删除。成功记录的集合重放不算标量回退，提交结果不确定时不转换为隔离重试。
 
 诊断应联合cohort尝试/提交、固定原因回退、actual owner_body/owner_commit、表写入与客户端reports；largest room count只证明曾跨房间选批，不能证明每命令都进集合或成功。跨窗偏差与缺样披露仍适用，不相加不同边界指标推算吞吐。
 

@@ -867,7 +867,7 @@ struct V2DirectRoomLogEventCacheTests {
     ) -> V2PreparedGroupEventPageEncodingContext {
         .init(
             requestID: requestID,
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1_024,
@@ -894,4 +894,29 @@ private struct RejectingGroupEventLogStore: V2GroupEventLogStore {
     ) async throws -> V2GroupEventSubscription {
         throw V2GroupEventLogError.corruptPersistenceState
     }
+}
+
+// Tests compose the production candidate and authorization APIs explicitly.
+extension V2DirectRoomLogEventCache {
+    func page(
+        roomID: RoomID,
+        actorJoinedRevision: UInt64,
+        actorLeftRevision: UInt64?,
+        currentHighWatermark: UInt64,
+        afterRoomSequence: UInt64,
+        pageSize: Int
+    ) async -> V2GroupEventLogPage? {
+        guard let candidate = await candidate(
+            roomID: roomID,
+            afterRoomSequence: afterRoomSequence,
+            pageSize: pageSize
+        ) else { return nil }
+        return await page(
+            candidate: candidate,
+            actorJoinedRevision: actorJoinedRevision,
+            actorLeftRevision: actorLeftRevision,
+            currentHighWatermark: currentHighWatermark
+        )
+    }
+
 }

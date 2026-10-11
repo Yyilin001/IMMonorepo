@@ -18,8 +18,7 @@ struct GatewayDatabaseTopology {
     let maintenanceDatabase: any Database
     let userStateRouter: V2PostgresUserShardRouter
     let directSendControlPool: V2EventLoopDatabasePool
-    let authorizationControlDatabase: any Database
-    let authorizationOwners: [String: any Database]
+    let roomIdentityControlDatabase: any Database
     let projectionShardLocations: [V2UserShardStorageLocation]
     let maintenanceShardLocations: [V2UserShardStorageLocation]
     let roomShardDatabases: [String: any Database]
@@ -196,29 +195,17 @@ struct GatewayDatabaseTopology {
             try await V2PostgresSessionReadiness.verify(database: policyDatabase, policy: configuration.databasePolicy)
         }
 
-        // 解析操作不借用预留连接池或策略写入连接池。
-        // 控制回执与归属方中止操作可共用此专用物理连接池：
-        // 每笔事务结束后才开始下一笔。
-        var authorizationResolutionDatabases: [String: any Database] = [:]
-        for (index, url) in configuration.directAuthorizationResolutionDatabaseURLs.enumerated() {
-            let id = DatabaseID(string: "gateway-authorization-resolution-\(index)")
-            resources.databases.use(try postgresDatabaseConfiguration(url: url, policy: configuration.databasePolicy,
-                maximumConnectionsPerEventLoop: 1), as: id)
-            let pool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger, identifier: id, eventLoops: controlEventLoops)
-            for member in pool.eventLoopDatabases {
-                try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
-            }
-            authorizationResolutionDatabases[url] = pool.database
+        // Room identity initialization has a control-only read pool. Message
+        // Owner databases no longer allocate authorization resolution pools.
+        let identityID = DatabaseID(string: "gateway-room-identity-control")
+        resources.databases.use(try postgresDatabaseConfiguration(url: configuration.databaseURL,
+            policy: configuration.databasePolicy, maximumConnectionsPerEventLoop: 1), as: identityID)
+        let identityPool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger,
+            identifier: identityID, eventLoops: controlEventLoops)
+        for member in identityPool.eventLoopDatabases {
+            try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
         }
-        guard let authorizationControlDatabase = authorizationResolutionDatabases[configuration.databaseURL] else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
-        }
-        let authorizationOwners = try Dictionary(uniqueKeysWithValues: configuration.roomShardStorage.map { storage in
-            guard let owner = authorizationResolutionDatabases[storage.databaseURL] else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            return (storage.shardID, owner)
-        })
+        let roomIdentityControlDatabase: any Database = identityPool.database
 
         // Schema 就绪性属于拓扑状态，不属于工作类别状态。
         // 各类别连接池验证会话 GUC 后，通过前台连接池逐一验证配置的 Schema。
@@ -292,8 +279,7 @@ struct GatewayDatabaseTopology {
             maintenanceDatabase: maintenanceDatabase,
             userStateRouter: userStateRouter,
             directSendControlPool: directSendControlPool,
-            authorizationControlDatabase: authorizationControlDatabase,
-            authorizationOwners: authorizationOwners,
+            roomIdentityControlDatabase: roomIdentityControlDatabase,
             projectionShardLocations: projectionShardLocations,
             maintenanceShardLocations: maintenanceShardLocations,
             roomShardDatabases: roomShardDatabases,

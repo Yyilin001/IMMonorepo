@@ -5,13 +5,13 @@ import Testing
 
 @Suite("Message outcome recovery without replacing the original intent", .serialized)
 struct V2MessageOperationRecoveryTests {
-    @Test("only a bound permanent closure permits an explicitly new send")
-    func unresolvedThenClosed() async throws {
+    @Test("expired unresolved sends retain the original identity until acceptance is found")
+    func unresolvedThenAccepted() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let intent=try f.intent("never duplicate"),created=Date().addingTimeInterval(-90_000)
         try await f.store.freezeSendIntent(intent,now:created)
         try await f.store.handOffSendIntent(intent.id,now:created)
-        let remote=ClosureMessageClient(),service=V2MessageSendOperationService(accountID:f.account,store:f.store,client:remote)
+        let remote=RecoveryMessageClient(),service=V2MessageSendOperationService(accountID:f.account,store:f.store,client:remote)
         let work=try await f.head()
         guard case .claimed(let submitted)=try await f.store.claimOperationWork(id:work.id,ownerID:UUID(),action:.submit,now:created.addingTimeInterval(1)) else { throw V2OperationWorkError.invalidTransition }
         try await service.execute(submitted)
@@ -25,13 +25,10 @@ struct V2MessageOperationRecoveryTests {
         // Neither an automatic resubmit nor a new identity proves absence.
         try await service.resumeConfirmation(intentID:intent.id)
         try await service.execute(f.claim(try #require(await f.store.operationWork(id:work.id))))
-        #expect(try await f.store.operationWork(id:work.id)?.execution == .closed)
-        #expect(await remote.actions == [.query,.query])
-        let replacement=try await f.store.replaceProvenUnsentSendIntent(intent.id)
-        #expect(try await f.store.replaceProvenUnsentSendIntent(intent.id)==replacement)
-        let draft=try #require(try await f.store.preparingSendIntents().first)
-        #expect(draft.id==replacement && draft.clientMessageID != original.command.clientMessageID)
-        #expect(draft.text==original.command.text)
+        #expect(try await f.store.operationWork(id:work.id)?.execution == .committed)
+        #expect(await remote.recoveries == 2)
+        #expect(try await f.store.messageSendCommand(workID:work.id) == original)
+        await #expect(throws:V2ResourceJournalError.conflict) { try await f.store.replaceProvenUnsentSendIntent(intent.id) }
         try await f.store.close()
     }
     @Test("unknown send blocks its room key without blocking a different room")
@@ -50,16 +47,16 @@ struct V2MessageOperationRecoveryTests {
         try await f.store.close()
     }
 }
-private actor ClosureMessageClient:V2MessageSendOperationClient {
+private actor RecoveryMessageClient:V2MessageSendOperationClient {
     var command:V2MessageSendOperationCommand?
-    var actions:[V2OperationRecoveryRequest.Action]=[]
+    var recoveries = 0
     func submit(_ command:V2MessageSendOperationCommand) async throws -> V2MessageSendOperationRecoveryResult {
         self.command=command;throw URLError(.networkConnectionLost)
     }
     func recover(_ request:V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
-        actions.append(request.action)
-        if actions.count==1 { return .unresolved }
+        recoveries += 1
+        if recoveries==1 { return .unresolved }
         guard let command else { return .unresolved }
-        return .receipt(try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:.closed,resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1_000)))
+        return .receipt(try .init(identity:command.identity,fingerprint:command.fingerprint,outcome:.accepted(.init(messageID:.init(uuid:UUID()),roomSequence:1)),resolvedAtMilliseconds:UInt64(Date().timeIntervalSince1970*1_000)))
     }
 }

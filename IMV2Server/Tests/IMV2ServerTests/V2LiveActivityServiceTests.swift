@@ -24,6 +24,10 @@ struct V2LiveActivityServiceTests {
 }
 
 private actor LiveActivityStoreSpy: V2LiveActivityStore {
+    func presenceBatch(_ requests: [V2PresenceObservationRequest], now: Date) async throws -> [V2PresenceObservationRequest: V2PresenceObservationOutcome] {
+        try await v2FixturePresenceBatch(store: self, requests, now: now)
+    }
+
     struct Observation: Equatable, Sendable {
         let roomID: RoomID
         let viewerUserID: UserID

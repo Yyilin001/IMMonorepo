@@ -32,11 +32,6 @@ public enum V2PushRuntimeConfiguration: Sendable {
     case apns(V2APNSRuntimeConfiguration)
 }
 
-/// 跨网关实时路由默认使用经认证的分布式 Actor。
-public enum V2GroupEventWakeRuntimeConfiguration: Sendable {
-    case actor
-}
-
 public struct V2APNSRuntimeConfiguration: Sendable {
     public let teamID: String
     public let keyID: String
@@ -81,7 +76,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     }
     /// 独立的权威私聊发送连接池；容量与每个 EventLoop 的前台连接池相匹配。
     public let directSendControlConnectionsPerEventLoop: Int
-    public let directAuthorizationResolutionDatabaseURLs: [String]
     /// 每个事件循环允许的数据库连接数。
     ///
     /// Fluent 默认每个事件循环只用一个 PostgreSQL 连接。
@@ -193,7 +187,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let commandSlowLogThresholdMilliseconds: Int
     public let commandDiagnosticLogMaximumPerSecond: Int
     public let durableRetryPolicy: V2DurableRetryPolicy
-    public let groupEventWake: V2GroupEventWakeRuntimeConfiguration
     /// 持久混合群组元数据唤醒的节律。
     ///
     /// 完整前台载荷走各自独立的低延迟路径；
@@ -219,14 +212,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let roomLogRetentionMode: V2RoomLogRetentionMode
     /// 窗口模式下读者不再钉住日志下界的宽限秒数；永久模式不使用该值。
     public let roomLogRetentionWindowSeconds: TimeInterval
-    /// 无物理连接池元数据时的执行并发后备值；生产发送以写池实际容量为准。
-    public let directRoomLogAppendBatchMaximumInFlightBatches: Int
     /// 每个物理 Owner 保留的发送请求上限，独立于其他数据库工作队列。
     public let directRoomLogAppendMaximumPendingRequests: Int
-    /// 房间生命周期覆盖轮次等待的时间预算，兼容原部署变量名。
-    public let directRoomLogAppendBatchMaximumDelayMilliseconds: Int
-    /// 可选的更长覆盖预算；不再启用旧 Batcher 的活跃度检测器。
-    public let directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds: Int?
+    /// 房间轮次收集已有兼容请求的最大等待时间。
+    public let roomTurnBatchMaximumDelayMilliseconds: Int
     /// 稳定单聊策略快照的有界 LRU 容量。
     ///
     /// 该缓存只是加速提示；每次 PostgreSQL 追加仍保留持久的修订围栏。
@@ -267,10 +256,6 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     ///
     /// 既有房间始终使用其持久的控制面路由，绝不会根据这份部署列表重新哈希。
     public let groupRoomShardIDs: [String]
-    /// 供那些其路由存储会忽略所提议归属的服务 API 使用的兼容值。
-    ///
-    /// 单归属部署保留其完全相同的行为。
-    public var groupRoomShardID: String { groupRoomShardIDs[0] }
     public let strangerMessagePolicy: V2StrangerMessagePolicy
     public let push: V2PushRuntimeConfiguration
     /// 该模式控制持久任务的创建与工作者的启动。
@@ -284,8 +269,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
 
     /// Only bounds retained work; physical write connections determine concurrency.
     public func durableSendSchedulingConfiguration() -> V2SendOperationSchedulingConfiguration {
-        .init(maximumPendingRequests: directRoomLogAppendMaximumPendingRequests,
-              fallbackConnectionCapacity: directRoomLogAppendBatchMaximumInFlightBatches)
+        .init(maximumPendingRequests: directRoomLogAppendMaximumPendingRequests)
     }
 
     public init(environment: any V2RuntimeEnvironment) throws {
@@ -672,59 +656,17 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             directRoomLogAppendMaximumPendingRequests =
                 foregroundWriteDatabaseWorkMaximumQueued
         }
-        let maximumAppendBatchConcurrency = databasePolicy.eventLoopThreads *
-            foregroundWriteDatabaseWorkLimit
-        let rawDirectRoomLogAppendBatchMaximumInFlight = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT", environment: environment
-        )
-        if let rawDirectRoomLogAppendBatchMaximumInFlight {
-            guard let parsedDirectRoomLogAppendBatchMaximumInFlight = Int(
-                rawDirectRoomLogAppendBatchMaximumInFlight
-            ),
-            (1 ... maximumAppendBatchConcurrency).contains(
-                parsedDirectRoomLogAppendBatchMaximumInFlight
-            )
-            else {
-                throw V2GatewayRuntimeConfigurationError.invalid(
-                    "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT"
-                )
-            }
-            directRoomLogAppendBatchMaximumInFlightBatches =
-                parsedDirectRoomLogAppendBatchMaximumInFlight
-        } else {
-            // 除非操作员主动选择经测量的覆盖值，否则保持原有应用组装不变。
-            directRoomLogAppendBatchMaximumInFlightBatches = min(
-                8,
-                foregroundWriteDatabaseWorkLimit
-            )
-        }
-        let rawDirectRoomLogAppendBatchDelay = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS", environment: environment
+        let rawRoomTurnBatchDelay = Self.optional(
+            "IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS", environment: environment
         ) ?? "2"
-        guard let parsedDirectRoomLogAppendBatchDelay = Int(rawDirectRoomLogAppendBatchDelay),
-              // 有界的高活跃配置可以用少量明确的排队换取更少的房间日志事务。
-              // 交互请求仍须有硬上限；这不是通用重试或退避参数，
-              // 未完成延迟审查前不得提高。
-              (1 ... 25).contains(parsedDirectRoomLogAppendBatchDelay)
+        guard let parsedRoomTurnBatchDelay = Int(rawRoomTurnBatchDelay),
+              (1 ... 25).contains(parsedRoomTurnBatchDelay)
         else {
             throw V2GatewayRuntimeConfigurationError.invalid(
-                "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"
+                "IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS"
             )
         }
-        directRoomLogAppendBatchMaximumDelayMilliseconds = parsedDirectRoomLogAppendBatchDelay
-        let rawHighActivityAppendDelay = Self.optional(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS",
-            environment: environment
-        )
-        if let rawHighActivityAppendDelay {
-            guard let parsed = Int(rawHighActivityAppendDelay),
-                  parsed > parsedDirectRoomLogAppendBatchDelay, parsed <= 25 else {
-                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS")
-            }
-            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = parsed
-        } else {
-            directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds = nil
-        }
+        roomTurnBatchMaximumDelayMilliseconds = parsedRoomTurnBatchDelay
         let rawDirectSendPolicyCacheMaximumEntries = Self.optional(
             "IM_V2_DIRECT_SEND_POLICY_CACHE_MAX_ENTRIES", environment: environment
         ) ?? "50000"
@@ -807,10 +749,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             jitterFraction: Self.percentage("IM_V2_DURABLE_RETRY_JITTER_PERCENT", environment: environment)
         )
         gatewayReplicaCount = try Self.positive("IM_V2_GATEWAY_REPLICA_COUNT", environment: environment)
-        groupEventWake = try Self.groupEventWakeConfiguration(
-            environment: environment,
-            gatewayReplicaCount: gatewayReplicaCount
-        )
+        _ = try v2RequiredEnvironmentValue("IMV2_ROOM_ACTOR_CONFIGURATION_FILE", environment: environment)
         groupEventWakePollIntervalMilliseconds = try Self.positiveWithDefault(
             "IM_V2_GROUP_EVENT_WAKE_POLL_INTERVAL_MS",
             defaultValue: 500,
@@ -959,9 +898,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 )
             }
         }
-        directAuthorizationResolutionDatabaseURLs = Set([databaseURL] + roomShardStorage.map(\.databaseURL)).sorted()
         let (baseDedicated, baseOverflow) = directSendControlConnectionsPerEventLoop.addingReportingOverflow(1)
-        let (dedicatedPerLoop, dedicatedOverflow) = baseDedicated.addingReportingOverflow(directAuthorizationResolutionDatabaseURLs.count)
+        let (dedicatedPerLoop, dedicatedOverflow) = baseDedicated.addingReportingOverflow(1)
         let (dedicatedConnections, dedicatedTotalOverflow) = databaseNonMessagePoolEventLoopThreads.multipliedReportingOverflow(by: dedicatedPerLoop)
         guard !baseOverflow, !dedicatedOverflow, !dedicatedTotalOverflow else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")
@@ -972,7 +910,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 databaseWorkloadPoolIsolationEnabled
                     ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
                     : databasePolicy.maximumConnectionsPerEventLoop,
-            // 路由、预留和解析连接池均不借用前台连接。
+            // 用户路由、策略控制和房间身份读取均使用专用控制连接。
             additionalConnections: dedicatedConnections,
             workloadConnectionsPerPhysicalStore: databaseWorkloadPoolIsolationEnabled
                 ? databasePolicy.eventLoopThreads * databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop
@@ -1166,23 +1104,5 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         return decoded
     }
 
-    private static func groupEventWakeConfiguration(
-        environment: any V2RuntimeEnvironment,
-        gatewayReplicaCount: Int
-    ) throws -> V2GroupEventWakeRuntimeConfiguration {
-        let transport = optional("IM_V2_REALTIME_ROOM_TRANSPORT", environment: environment) ?? "actor"
-        switch transport {
-        case "actor":
-            guard optional("IMV2_ROOM_ACTOR_CONFIGURATION_FILE", environment: environment) != nil else {
-                throw V2GatewayRuntimeConfigurationError.invalid("IMV2_ROOM_ACTOR_CONFIGURATION_FILE")
-            }
-            return .actor
-        case "local":
-            // Account-wide delivery requires the authenticated room-to-Gateway route.
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_REALTIME_ROOM_TRANSPORT")
-        default:
-            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_REALTIME_ROOM_TRANSPORT")
-        }
-    }
 
 }

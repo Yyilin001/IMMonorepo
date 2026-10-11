@@ -193,26 +193,17 @@ final class V2GatewayForegroundAuthorization: Sendable {
 }
 
 private final class V2GatewayForegroundTransport: Sendable {
-    private enum Writer: Sendable {
-        case callback(@Sendable (ByteBuffer) -> Void)
-        case nio(V2NIOGatewayForegroundWriter)
-    }
-
     private struct State: Sendable {
         var protocolVersion: UInt8?
         var compression: V2NegotiatedFrameCompression?
-        var writer: Writer?
+        var writer: V2NIOGatewayForegroundWriter?
         var authorization: V2GatewayForegroundAuthorization?
     }
 
     private let state = Mutex(State())
 
-    func attach(writer: (@Sendable (ByteBuffer) -> Void)?) {
-        state.withLock { $0.writer = writer.map(Writer.callback) }
-    }
-
     func attach(nioWriter: V2NIOGatewayForegroundWriter?) {
-        state.withLock { $0.writer = nioWriter.map(Writer.nio) }
+        state.withLock { $0.writer = nioWriter }
     }
 
     func activate(
@@ -250,7 +241,7 @@ private final class V2GatewayForegroundTransport: Sendable {
     func submit(_ prepared: V2PreparedGatewayGroupEventAvailable,
                 enqueueIfCurrent: (@Sendable (@Sendable () -> Void) -> Bool)? = nil) -> Bool {
         let submission = state.withLock { state -> (
-            writer: Writer,
+            writer: V2NIOGatewayForegroundWriter,
             bytes: ByteBuffer,
             authorization: V2GatewayForegroundAuthorization
         )? in
@@ -259,16 +250,10 @@ private final class V2GatewayForegroundTransport: Sendable {
             return (writer, prepared.bytes(for: state.compression), authorization)
         }
         guard let submission, submission.authorization.isAuthorizedToWrite() else { return false }
-        switch submission.writer {
-        case .callback(let writer):
-            guard submission.authorization.isAuthorizedToWrite() else { return false }
-            if let enqueueIfCurrent { return enqueueIfCurrent { writer(submission.bytes) } }
-            writer(submission.bytes)
-        case .nio(let writer):
-            let authorization = submission.authorization
-            writer.submit(submission.bytes, isAuthorizedToWrite: { authorization.isAuthorizedToWrite() },
-                enqueueIfCurrent: enqueueIfCurrent)
-        }
+        let authorization = submission.authorization
+        submission.writer.submit(submission.bytes,
+            isAuthorizedToWrite: { authorization.isAuthorizedToWrite() },
+            enqueueIfCurrent: enqueueIfCurrent)
         return true
     }
 
@@ -283,7 +268,7 @@ private final class V2GatewayForegroundTransport: Sendable {
     ) -> V2NIOGatewayForegroundWriteSubmission? {
         state.withLock { state in
             guard state.protocolVersion == prepared.protocolVersion,
-                  case .nio(let writer)? = state.writer,
+                  let writer = state.writer,
                   let authorization = state.authorization,
                   authorization.isAuthorizedToWrite()
             else { return nil }
@@ -636,7 +621,7 @@ public actor V2GatewayByteStream {
                     await authenticationCompleted?(allowsLargeFrames)
                 }
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
-                try await updateHybridGroupSubscription(
+                try await updateAcknowledgedConnectionControls(
                     inbound: exchange.request,
                     response: exchange.responseEnvelope
                 )
@@ -742,48 +727,10 @@ public actor V2GatewayByteStream {
         outboundWriter = writer
     }
 
-    /// 在单次 actor 轮次内安装两个通道回调。
-    ///
-    /// 若分两次 await 安装，EOF 可能在第二个回调装上之前就清空第一个回调，
-    /// 从而使已关闭的 NIO 流水线被永久持有。
-    ///
-    /// - Parameters:
-    ///   - deviceRevocationHandler: 设备吊销通知回调。
-    ///   - outboundWriter: 出站数据写入回调。
-    ///   - foregroundWriter: 可选的前台帧写入回调。
-    /// - Returns: 是否成功安装。
-    public func attachTransport(
-        deviceRevocationHandler: @escaping @Sendable () async -> Void,
-        outboundWriter: @escaping @Sendable (Data) async -> Void,
-        requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
-        scopedNotificationWriter: (@Sendable (V2GatewayScopedNotificationWrite) async -> Bool)? = nil,
-        requiredNotificationClose: (@Sendable () async -> Void)? = nil,
-        foregroundWriter: (@Sendable (Data) -> Void)? = nil,
-        authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil
-    ) -> Bool {
-        guard !transportClosed else { return false }
-        self.deviceRevocationHandler = deviceRevocationHandler
-        self.outboundWriter = outboundWriter
-        self.requiredNotificationWriter = requiredNotificationWriter
-        self.scopedNotificationWriter = scopedNotificationWriter
-        self.requiredNotificationClose = requiredNotificationClose ?? deviceRevocationHandler
-        self.authorPresentationWriter = authorPresentationWriter
-        let adaptedForegroundWriter: (@Sendable (ByteBuffer) -> Void)?
-        if let foregroundWriter {
-            adaptedForegroundWriter = { buffer in
-                foregroundWriter(Data(buffer.readableBytesView))
-            }
-        } else {
-            adaptedForegroundWriter = nil
-        }
-        foregroundTransport.attach(writer: adaptedForegroundWriter)
-        return true
-    }
-
     /// 生产 SwiftNIO 挂载。
     ///
-    /// 面向传输无关兼容性的、由 actor 支撑的 `Data` 回调保持不变；
-    /// 前台群组帧则一路保留其已准备的写时复制 `ByteBuffer` 直到写入通道。
+    /// 普通响应和恢复通知使用有生命周期围栏的回调；前台群组帧
+    /// 保留其已准备的写时复制 `ByteBuffer` 直到写入通道。
     ///
     /// - Parameters:
     ///   - deviceRevocationHandler: 设备吊销通知回调。
@@ -796,7 +743,7 @@ public actor V2GatewayByteStream {
         requiredNotificationWriter: (@Sendable (Data) async -> Bool)? = nil,
         scopedNotificationWriter: (@Sendable (V2GatewayScopedNotificationWrite) async -> Bool)? = nil,
         requiredNotificationClose: (@Sendable () async -> Void)? = nil,
-        foregroundWriter: V2NIOGatewayForegroundWriter?,
+        foregroundWriter: V2NIOGatewayForegroundWriter? = nil,
         authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil,
         roomSubscriptionSocketGate: V2RoomSubscriptionSocketGate? = nil
     ) -> Bool {
@@ -1214,10 +1161,12 @@ public actor V2GatewayByteStream {
     /// The socket retains only one latest H for its requested detail room.
     /// Ready's S is immutable in the authorization; later H never changes it.
     func offerRoomSubscriptionHead(_ authorization: V2GatewayRoomSubscriptionAuthority.Permit,
-        highWatermark: UInt64, permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) -> Bool {
+        highWatermark: UInt64, permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) async -> Bool {
         V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headOffered)
         guard !transportClosed, !recoveryOutbound.isRevoked, scopedNotificationWriter != nil,
-              permit({}) else {
+              let gate = authorization.socketGate,
+              (try? await gate.eventLoop.submit { permit({}) }.get()) == true,
+              !transportClosed, !recoveryOutbound.isRevoked else {
             V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headOfferRefused)
             return false
         }
@@ -1261,7 +1210,8 @@ public actor V2GatewayByteStream {
             while !Task.isCancelled, !transportClosed, !recoveryOutbound.isRevoked,
                   let selected = roomSubscriptionState {
                 let authorization = selected.authorization
-                guard selected.permit({}) else {
+                guard let gate = authorization.socketGate,
+                      (try? await gate.eventLoop.submit { selected.permit({}) }.get()) == true else {
                     if selected.submittedHighWatermark.map({ selected.highWatermark > $0 }) ?? true {
                         V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headPermitExpiredWithUnsentHead)
                     }
@@ -1344,7 +1294,7 @@ public actor V2GatewayByteStream {
     /// 生产前台通知使用该 nonisolated 快速路径。
     ///
     /// 返回 `false` 表示连接未认证、已分离、使用其他协议版本，或没有 NIO 快速写者；
-    /// 这些情况下调用方保留由 actor 支撑的兼容路径。
+    /// 未提交的通知依赖持久日志与恢复水位继续同步。
     ///
     /// - Parameter prepared: 已准备的群组事件帧。
     /// - Returns: 是否已通过快速路径提交。
@@ -1357,7 +1307,7 @@ public actor V2GatewayByteStream {
 
     /// 生产群组发布会先收集这些受生命周期围栏保护的 NIO 提交，再逐个进入每个 EventLoop 通道一次。
     ///
-    /// 其他传输返回 `nil`，并继续走不变的 `submitGroupEventAvailable` 路径。
+    /// 未认证或已失效的连接返回 `nil`，不会进入本轮广播。
     ///
     /// - Parameter prepared: 已准备的群组事件帧。
     /// - Returns: NIO 提交对象；不满足快速路径条件时为 `nil`。
@@ -1716,23 +1666,10 @@ public actor V2GatewayByteStream {
         } catch { return false }
     }
 
-    private func updateHybridGroupSubscription(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
+    private func updateAcknowledgedConnectionControls(inbound: IMV2Envelope, response: IMV2Envelope) async throws {
         switch inbound.body {
-        case .groupEventSubscribe(let request):
-            guard case .groupEventSubscribed(let subscribed)? = response.body,
-                  let roomID = try? RoomID(request.roomID),
-                  let subscribedRoomID = try? RoomID(subscribed.roomID),
-                  subscribedRoomID == roomID
-            else { return }
-            await registry.subscribeForegroundGroup(
-                self,
-                connectionID: connectionID,
-                roomID: roomID,
-                membershipRevision: subscribed.membershipRevision
-            )
         case .groupEventUnsubscribe(let request):
             guard case .acknowledged? = response.body else { return }
-            await registry.unsubscribeForegroundGroup(connectionID: connectionID, roomID: try .init(request.roomID))
             if authorPresentationView?.roomID == (try? RoomID(request.roomID)) { await clearAuthorPresentationView() }
         case .subscribePresence(let request):
             guard case .presenceSubscribed(let subscribed)? = response.body,

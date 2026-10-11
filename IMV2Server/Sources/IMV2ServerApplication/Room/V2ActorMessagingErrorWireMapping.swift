@@ -44,7 +44,6 @@ public extension V2ActorMessagingErrorWire {
 public extension V2ActorMessagingSendStoreErrorWire {
     init(_ value: V2RoomWriteStoreError) {
         switch value {
-        case .messageOperationClosed: self = .messageOperationClosed
         case .roomNotFound: self = .roomNotFound
         case .actorNotEligible: self = .actorNotEligible
         case .actorMuted: self = .actorMuted
@@ -60,7 +59,6 @@ public extension V2ActorMessagingSendStoreErrorWire {
 
     func domainValue() -> V2RoomWriteStoreError {
         switch self {
-        case .messageOperationClosed: .messageOperationClosed
         case .roomNotFound: .roomNotFound
         case .actorNotEligible: .actorNotEligible
         case .actorMuted: .actorMuted

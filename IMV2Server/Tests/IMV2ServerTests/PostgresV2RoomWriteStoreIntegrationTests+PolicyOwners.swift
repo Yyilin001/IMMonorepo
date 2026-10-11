@@ -28,8 +28,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await ownerSQL.raw("UPDATE im_v2.direct_room_pairs SET lower_has_replied=(lower_user_id=\(bind: memberTwoUUID)),higher_has_replied=(higher_user_id=\(bind: memberTwoUUID)) WHERE room_id=\(bind: room.roomID.uuidValue!)").run()
             }
             let directory = PostgresV2PolicyOwnerDirectory(journal: .init(database: control),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
-                    legacyAuthorization: .init(controlDatabase: control, ownerDatabases: [:])))
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
                 policyOwners: directory, endpoint: "room-b", maximumRooms: 1)
             let host = PostgresV2RoomPolicyAuthorizationDirectory(database: owner, endpoint: "room-b-scalar", maximumRooms: 1,
@@ -52,14 +51,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         let command = try V2SendMessageCommand(roomID: room.roomID, senderUserID: senderID,
                             clientMessageID: .init(uuid: UUID()), text: "reply permission", limits: .init(maxUTF8Bytes: 64))
                         if mode == "scalar" {
-                            let result = try await runtime.execute(command: command, callerDeadline: .now + .seconds(5)) { execution in
-                                try await base.usingPolicyExecution(execution).accept(command: command, capacityProfile: profile,
-                                    identifiers: V2AcceptanceIDFactory().make(at: Date()), now: Date())
-                            }
-                            switch result {
-                            case .accepted: #expect(recipientHasReplied)
-                            case .denied: #expect(!recipientHasReplied)
-                            default: throw V2RoomWriteStoreError.corruptPersistenceState
+                            do {
+                                let result = try await runtime.execute(command: command, callerDeadline: .now + .seconds(5)) { execution in
+                                    try await base.usingPolicyExecution(execution).accept(command: command, capacityProfile: profile,
+                                        identifiers: V2AcceptanceIDFactory().make(at: Date()), now: Date())
+                                }
+                                guard case .accepted = result else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                                #expect(recipientHasReplied)
+                            } catch V2SendOperationResponseError.directPolicyDenied {
+                                #expect(!recipientHasReplied)
                             }
                         } else {
                             let operation = try V2MessageSendOperationCommand(command: command,
@@ -130,8 +130,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '10 minutes',command_window_limit=1000").run()
             let directory = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
-                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(),
-                    legacyAuthorization: .init(controlDatabase: database, ownerDatabases: [:])))
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
                 policyOwners: directory, endpoint: "room-a", maximumRooms: 1)
             let store = PostgresV2MessageSendOperationStore(database: database,
@@ -167,7 +166,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         throw V2RoomWriteStoreError.corruptPersistenceState
                     }
                     #expect(rejection.outcome == .rejected(.permissionDenied))
-                    #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.policy_authorization_holders").first(decoding: PolicyDomainCount.self)?.value == 0)
+                    #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')").first(decoding: PolicyDomainCount.self)?.value == 0)
                     try await sql.raw("ALTER TABLE im_v2.current_group_hidden_profiles RENAME TO public_user_profiles").run()
                     hidden = false
                 }
@@ -198,9 +197,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // Command capacity is unrelated to message validity, including cold initialization.
             try await ownerSQL.raw("UPDATE im_v2.room_admission SET command_window_used=command_window_limit WHERE room_id=\(bind: room.roomID.uuidValue!)").run()
             try await ownerSQL.raw("UPDATE im_v2.shard_admission_pools SET command_window_used=command_window_limit,valid_until=clock_timestamp()-interval '1 minute'").run()
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
+
             let directory = PostgresV2PolicyOwnerDirectory(journal: .init(database: control, stateMetrics: metrics),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
                 policyOwners: directory, endpoint: "room-b", maximumRooms: 1,
                 sendOperationMetrics: metrics)
@@ -208,8 +207,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                 .usingControlDatabase(control).usingPolicyAuthorizations(policies)
             let store = PostgresV2MessageSendOperationStore(database: owner, writes: writes, sendOperationMetrics: metrics)
-            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
-                authorizationCoordinator: legacy).usingPolicyOwners(directory)
+            let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: directory)
             try await ownerSQL.raw("CREATE TABLE im_v2.merged_owner_statement_counts (table_name text NOT NULL, combined boolean NOT NULL)").run()
             try await ownerSQL.raw("""
                 CREATE FUNCTION im_v2.count_merged_owner_statement() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -330,10 +328,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     // Simulate the response being lost after COMMIT. A new
                     // query has no dependency on the old actor or activation table.
                     let resultQuery = try V2MessageSendOperationRecoveryRequest(identity: first.identity,
-                        fingerprint: first.fingerprint, domainFingerprint: first.command.fingerprint, action: .query)
+                        fingerprint: first.fingerprint, domainFingerprint: first.command.fingerprint)
                     let missing = try command()
                     let absentQuery = try V2MessageSendOperationRecoveryRequest(identity: missing.identity,
-                        fingerprint: missing.fingerprint, domainFingerprint: missing.command.fingerprint, action: .closeIfAbsent)
+                        fingerprint: missing.fingerprint, domainFingerprint: missing.command.fingerprint)
                     let missingPrepared = try await prepare([missing])
                     let runtimeTables = friends ? ["room_activation_leases", "room_memberships", "room_member_mutes", "direct_room_pairs", "shard_admission_pools", "room_admission"] : ["room_activation_leases"]
                     var runtimeHidden: [String] = []
@@ -345,7 +343,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         #expect(try await PostgresV2MessageSendOperationStore.queryRecovery(resultQuery, database: owner)
                             == { if case .sendOperation(let result) = accepted[0] { return result }; return .unresolved }())
                         #expect(try await PostgresV2MessageSendOperationStore.queryRecovery(absentQuery, database: owner) == .unresolved)
-                        #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.message_operation_closures").first(decoding: MergedReceiptCount.self)?.value == 0)
                         // A fresh ordinary send also needs no durable activation
                         // read. This result was unresolved immediately before it.
                         let later = try await execute(missingPrepared)
@@ -403,7 +400,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: room.roomID.uuidValue!) AND client_message_id=\(bind: concurrentCommand.command.clientMessageID.uuidValue!)").first(decoding: MergedReceiptCount.self)?.value == 1)
                     let block = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                         operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: Date())
-                    _ = try await social.submitSocialOperation(block, now: Date())
+                    _ = try await social.submitSocialOperation(block)
                     let blockedCommand = try command()
                     let blockedResult = try await execute(prepare([blockedCommand]))
                     guard case .sendOperation(.receipt(let denied))? = blockedResult.first else {
@@ -411,13 +408,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     }
                     #expect(denied.outcome == .rejected(.directPolicyDenied))
                     let rejectionQuery = try V2MessageSendOperationRecoveryRequest(identity: blockedCommand.identity,
-                        fingerprint: blockedCommand.fingerprint, domainFingerprint: blockedCommand.command.fingerprint, action: .query)
+                        fingerprint: blockedCommand.fingerprint, domainFingerprint: blockedCommand.command.fingerprint)
                     #expect(try await PostgresV2MessageSendOperationStore.queryRecovery(rejectionQuery, database: owner) == .unresolved)
-                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.direct_message_denials WHERE client_message_id=\(bind: blockedCommand.command.clientMessageID.uuidValue!)").first(decoding: MergedReceiptCount.self)?.value == 0)
+                    #expect(try await retiredDirectDenialTableIsAbsent(on: ownerSQL))
                     #expect(try await execute(prepare([first, second])) == accepted)
                     let unblock = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                         operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.unblock), now: Date())
-                    _ = try await social.submitSocialOperation(unblock, now: Date())
+                    _ = try await social.submitSocialOperation(unblock)
                     // Rejections leave neither a durable result nor a replay
                     // cache entry. The same identity now uses the new policy.
                     let retriedBlocked = try await execute(prepare([blockedCommand]))
@@ -455,8 +452,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(metrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState]?.count ?? 0 == policyPreparationsBefore)
                     #expect(metrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateFacts]?.count == stateReads)
                     #expect(metrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
-                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.policy_authorization_holders").first(decoding: PolicyDomainCount.self)?.value == 0)
-                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.room_policy_authorization_leases").first(decoding: PolicyDomainCount.self)?.value == 0)
+                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')").first(decoding: PolicyDomainCount.self)?.value == 0)
+                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.room_policy_authorization_leases')").first(decoding: PolicyDomainCount.self)?.value == 0)
                     let failedCommand = try command()
                     let sequenceBefore = try await ownerSQL.raw("SELECT room_sequence AS value FROM im_v2.rooms WHERE room_id=\(bind: room.roomID.uuidValue!)").first(decoding: MergedReceiptCount.self)?.value
                     try await ownerSQL.raw("""
@@ -512,7 +509,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         }
                         #expect(resumedAcceptance.roomSequence == UInt64(persisted+1))
                         let recovery = try V2MessageSendOperationRecoveryRequest(identity: uncertain.identity,
-                            fingerprint: uncertain.fingerprint, domainFingerprint: uncertain.command.fingerprint, action: .query)
+                            fingerprint: uncertain.fingerprint, domainFingerprint: uncertain.command.fingerprint)
                         let recovered = try await PostgresV2MessageSendOperationStore.queryRecovery(recovery, database: owner)
                         if case .receipt(let receipt) = recovered {
                             let identity = try uncertain.identity
@@ -535,6 +532,147 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
+    @Test("stranger preference uses policy owner commit time and preserves original replay and conflicts")
+    func currentStrangerPreferenceUsesOwnerCommitTime() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
+            let store = PostgresV2AccountPreferenceOperationStore(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
+            let command = try await store.freezePreferenceFixture(owner: senderID,
+                operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: Date())
+            let before = UInt64(Date().timeIntervalSince1970 * 1000)
+            let result = try await store.submit(command, now: Date(timeIntervalSince1970: .nan))
+            let after = UInt64(Date().timeIntervalSince1970 * 1000)
+            guard case .receipt(let receipt) = result, case .applied(.strangerMessage(.deny), 1) = receipt.outcome else {
+                throw V2AccountPreferenceValidationError.invalidReceipt
+            }
+            #expect(receipt.validates(command: command))
+            #expect(before <= receipt.resolvedAtMilliseconds && receipt.resolvedAtMilliseconds <= after)
+            let saved = try #require(try await sql.raw("""
+                SELECT floor(extract(epoch FROM updated_at)*1000)::bigint AS value
+                FROM im_v2.user_stranger_message_preferences WHERE user_id=\(bind: senderUUID)
+                """).first(decoding: PolicyDomainCount.self))
+            #expect(UInt64(saved.value) == receipt.resolvedAtMilliseconds)
+            for seconds in [Double.nan, .infinity, -.infinity, 1_750_000_000] {
+                #expect(try await store.submit(command, now: Date(timeIntervalSince1970: seconds)) == result)
+            }
+            let changed = try V2AccountPreferenceCommand(identity: command.identity, value: .strangerMessage(.allow),
+                expectedRevision: command.expectedRevision,
+                firstSubmissionDeadlineMilliseconds: command.firstSubmissionDeadlineMilliseconds)
+            #expect(try await store.submit(changed, now: Date()) == .fingerprintConflict)
+            #expect(try await count("im_v2.account_preference_receipts", on: sql) == 1)
+            await owners.shutdown()
+        }
+    }
+
+    @Test("room write refuses unscoped messages before entering SQL authorization", arguments: [false, true])
+    func currentRoomWriteRequiresPolicyExecution(controlBound: Bool) async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { control, owner, _, sql, room in
+            let raw = PostgresV2RoomWriteStore(database: owner, contentReviewMode: .disabled)
+            let write = controlBound ? raw.usingControlDatabase(control) : raw
+            let command = try V2SendMessageCommand(roomID: room, senderUserID: senderID,
+                clientMessageID: .init(uuid: UUID()), text: "unscoped message", limits: .init(maxUTF8Bytes: 64))
+            let profile = try forwardImportTestProfile(), now = Date()
+            let identifiers = try V2AcceptanceIDFactory().make(at: now)
+            await #expect(throws: V2ActorContractError.invalidConfiguration("message policy execution required")) {
+                try await write.accept(command: command, capacityProfile: profile, identifiers: identifiers, now: now)
+            }
+            for table in ["messages"] {
+                #expect(try await count("im_v2." + table, on: sql) == 0)
+            }
+        }
+    }
+
+    @Test("account disable through policy owner preserves rollback and committed replay")
+    func currentAccountDisableRequiresPolicyOwner() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let command = try V2AccountDisableCommand(userID: senderID, operationID: UUID(), reason: .policyEnforcement)
+            #expect(try await count("im_v2.account_disables", on: sql) == 0)
+            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
+            let service = try V2PostgresAccountDisableService(operatorPrincipal: "policy-disable-test", policyOwners: owners)
+            try await sql.raw("CREATE FUNCTION im_v2.fail_current_disable() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected disable failure'; END $$").run()
+            try await sql.raw("CREATE TRIGGER fail_current_disable BEFORE INSERT ON im_v2.public_profile_update_outbox FOR EACH ROW EXECUTE FUNCTION im_v2.fail_current_disable()").run()
+            await #expect(throws: (any Error).self) { try await service.disable(command) }
+            #expect(try await count("im_v2.account_disables", on: sql) == 0)
+            #expect(try await count("im_v2.user_direct_send_policy_versions", on: sql) == 0)
+            try await sql.raw("DROP TRIGGER fail_current_disable ON im_v2.public_profile_update_outbox").run()
+            try await sql.raw("DROP FUNCTION im_v2.fail_current_disable()").run()
+            let before = Date()
+            guard case .disabled(let committedAt) = try await service.disable(command) else {
+                Issue.record("Policy owner must commit disable after rollback")
+                await owners.shutdown()
+                return
+            }
+            #expect(committedAt >= before.addingTimeInterval(-0.001) && committedAt <= Date())
+            for _ in 0..<3 {
+                #expect(try await service.disable(command) == .idempotent(disabledAt: committedAt))
+            }
+            let other = try V2AccountDisableCommand(userID: senderID, operationID: UUID(), reason: .userRequested)
+            #expect(try await service.disable(other) == .alreadyDisabled(disabledAt: committedAt))
+            #expect(try await count("im_v2.account_disables", on: sql) == 1)
+            #expect(try await count("im_v2.public_profile_update_outbox", on: sql) == 1)
+            #expect(try await count("im_v2.public_user_profiles WHERE state='suspended'", on: sql) == 1)
+            try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+            await owners.shutdown()
+        }
+    }
+
+    @Test("social mutations require policy owners and replay their committed result without legacy authorization", arguments: [false, true])
+    func currentSocialOperationRequiresPolicyOwner(block: Bool) async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
+            let store = PostgresV2SocialRelationshipStore(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
+            let command = try await store.freezeSocialFixture(actorUserID: senderID,
+                targetUserID: .init(uuid: memberTwoUUID),
+                operation: block ? .userBlock(.init(uuid: UUID())) : .relationship(.init(uuid: UUID())),
+                action: block ? .userBlock(.block) : .relationship(.request), now: Date())
+            for table in ["user_relationships", "user_blocks", "social_operation_receipts"] {
+                #expect(try await count("im_v2." + table, on: sql) == 0)
+            }
+            let beforeCommit = Date()
+            let result = try await store.submitSocialOperation(command)
+            let afterCommit = Date()
+            guard case .receipt(let receipt) = result, case .applied = receipt.outcome else {
+                Issue.record("Current policy owner must commit social mutation")
+                await owners.shutdown()
+                return
+            }
+            #expect(receipt.validates(command: command))
+            let beforeMilliseconds = UInt64(try v2GatewayMilliseconds(beforeCommit))
+            let afterMilliseconds = UInt64(try v2GatewayMilliseconds(afterCommit))
+            #expect(receipt.resolvedAtMilliseconds >= beforeMilliseconds &&
+                    receipt.resolvedAtMilliseconds <= afterMilliseconds)
+            let persisted = try #require(try await sql.raw("SELECT (receipt->>'resolvedAtMilliseconds')::bigint AS value FROM im_v2.social_operation_receipts WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: UUID(uuidString: command.identity.operation.rawOperationID)!)").first(decoding: CountRow.self))
+            #expect(persisted.value == Int64(receipt.resolvedAtMilliseconds))
+            for _ in 0..<4 {
+                #expect(try await store.submitSocialOperation(command) == result)
+            }
+            #expect(try await count("im_v2.social_operation_receipts", on: sql) == 1)
+            #expect(try await count("im_v2." + (block ? "user_blocks" : "user_relationships"), on: sql) == 1)
+            try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+            await owners.shutdown()
+        }
+    }
+
+    @Test("local preference persistence rejects stranger policy mutations before writing")
+    func currentStrangerPreferenceRequiresPolicyOwner() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let store = V2PostgresAccountPreferencePersistence(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery())
+            let command = try await store.freezePreferenceFixture(owner: senderID,
+                operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: Date())
+            await #expect(throws: V2AccountPreferenceValidationError.invalidCommand) {
+                try await store.submit(command, now: Date())
+            }
+            #expect(try await count("im_v2.user_stranger_message_preferences", on: sql) == 0)
+            #expect(try await count("im_v2.account_preference_receipts", on: sql) == 0)
+        }
+    }
+
     @Test("current policy mutations finish while an authorized message waits for COMMIT and new authorization uses updated memory",
           arguments: ["block", "remove", "stranger", "disable"])
     func currentPolicyMutationDoesNotWaitForRoom(kind: String) async throws {
@@ -554,8 +692,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let journal = PostgresV2PolicyAuthorizationJournal(database: control)
             let directory = PostgresV2PolicyOwnerDirectory(journal: journal,
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
-                    legacyAuthorization: .init(controlDatabase: control, ownerDatabases: [:])))
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             // Warm the potential non-friend branch too. Hiding fact tables
             // after the mutation then proves the new decision is memory-only.
             _ = try await directory.registrationSnapshots(scopes: [.account(senderUUID), .account(memberTwoUUID),
@@ -595,6 +732,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let deadline = ContinuousClock.now + .seconds(5)
                     while !(await barrier.entered), .now < deadline { await Task.yield() }
                     #expect(await barrier.entered)
+                    try await assertRetiredDirectAuthorizationSchemaAbsent(on: controlSQL)
                     // This call must finish with the actual message SQL still
                     // held. A room-draining implementation times out here.
                     _ = try await directory.changeExecution(mutation)
@@ -608,24 +746,31 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let next = try V2SendMessageCommand(roomID: room.roomID, senderUserID: senderID,
                         clientMessageID: .init(uuid: UUID()), text: "new authorization", limits: .init(maxUTF8Bytes: 64))
                     let nextPrepared = try await runtime.prepareBatch(commands: [next], callerDeadline: .now + .seconds(5))
-                    let updatedPolicy = try #require(try await runtime.executePreparedBatch(nextPrepared) { $0.snapshot.policy })
+                    let updatedStates = try #require(try await directory.cachedSnapshots(scopes: [
+                        .account(senderUUID), .account(memberTwoUUID), .pair(senderUUID, memberTwoUUID), .stranger(memberTwoUUID)]))
+                    let pairState = try #require(updatedStates.first { $0.scope.key == V2PolicyAuthorizationScope.pair(senderUUID, memberTwoUUID).key })
+                    guard case .pair(let pairFacts) = pairState.facts else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+                    let requiredStates = pairFacts.isFriend ? updatedStates.filter { $0.scope != .stranger(memberTwoUUID) } : updatedStates
+                    let updatedPolicy = try #require(try V2CurrentRoomPolicySnapshot.direct(
+                        pair: .init(sender: senderUUID, recipient: memberTwoUUID), snapshots: requiredStates).policy)
                     switch kind {
                     case "block": #expect(updatedPolicy.blocked)
                     case "disable": #expect(!updatedPolicy.recipient.isActive)
                     default: #expect(!updatedPolicy.isFriend && !updatedPolicy.allowsStrangers)
                     }
-                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.policy_authorization_holders").first(decoding: PolicyDomainCount.self)?.value == 0)
-                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.policy_authorization_revocations").first(decoding: PolicyDomainCount.self)?.value == 0)
-                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.room_policy_authorization_leases").first(decoding: PolicyDomainCount.self)?.value == 0)
+                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')").first(decoding: PolicyDomainCount.self)?.value == 0)
+                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_revocations')").first(decoding: PolicyDomainCount.self)?.value == 0)
+                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.room_policy_authorization_leases')").first(decoding: PolicyDomainCount.self)?.value == 0)
                     await barrier.release()
                     let (accepted, expiredExecution) = try await held.value
                     guard case .accepted = accepted else { throw V2RoomWriteStoreError.corruptPersistenceState }
                     #expect(await runtime.pressure().executions == 0)
-                    let denied = try await runtime.executePreparedBatch(nextPrepared) { execution in
-                        try await base.usingPolicyExecution(execution).accept(command: next, capacityProfile: profile,
-                            identifiers: V2AcceptanceIDFactory().make(at: Date()), now: Date())
+                    await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
+                        try await runtime.executePreparedBatch(nextPrepared) { execution in
+                            try await base.usingPolicyExecution(execution).accept(command: next, capacityProfile: profile,
+                                identifiers: V2AcceptanceIDFactory().make(at: Date()), now: Date())
+                        }
                     }
-                    guard case .denied = denied else { throw V2RoomWriteStoreError.corruptPersistenceState }
                     await #expect(throws: V2RoomPolicyExecutionFailure.invalidPermit) {
                         try await owner.transaction { transaction in
                             try await expiredExecution.requireActive(roomID: room.roomID.uuidValue!, senderID: senderUUID,
@@ -741,13 +886,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let recipient = UserID(uuid: memberTwoUUID)
         switch kind {
         case "block", "remove":
-            let store = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
+            let store = V2PostgresSocialRelationshipPersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             return .social(try await store.freezeSocialFixture(actorUserID: senderID, targetUserID: recipient,
                 operation: kind == "block" ? .userBlock(.init(uuid: UUID())) : .relationship(.init(uuid: UUID())),
                 action: kind == "block" ? .userBlock(.block) : .relationship(.remove), now: Date()))
         case "stranger":
-            let store = PostgresV2AccountPreferenceOperationStore(database: database,
-                projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:]))
+            let store = V2PostgresAccountPreferencePersistence(database: database,
+                projectionDelivery: SuccessfulProjectionDelivery())
             return .strangerPreference(try await store.freezePreferenceFixture(owner: recipient,
                 operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: Date()))
         default:

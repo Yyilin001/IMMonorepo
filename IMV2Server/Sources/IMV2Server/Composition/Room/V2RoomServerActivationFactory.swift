@@ -31,7 +31,6 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
     let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     let committedMessageObserver: (any V2CommittedMessageBatchObserving)?
     public let sendOperationMetrics = V2SendOperationBatchMetrics()
-    let combineOwnerSendPreflight: Bool
     let durableSendSchedulingConfiguration: V2SendOperationSchedulingConfiguration
     fileprivate let durableOwner = V2RoomDurableOwnerHolder()
     fileprivate let subscriptionHost: V2RoomSubscriptionHost
@@ -58,12 +57,11 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
                 capacityProfile: V2CapacityProfile, messageLimits: V2MessageCommandLimits,
                 maximumEditBytes: Int, contentReviewMode: V2ContentReviewMode,
                 queryBatchConfiguration: V2HostRoomRecoveryQueryBatcher.Configuration,
-                receiptBatchConfiguration: V2ReadReceiptBatcher.Configuration = .init(
+                receiptBatchConfiguration: V2RoomReceiptBatchConfiguration = .init(
                     maximumBatchSize: 64, maximumDelay: .milliseconds(2),
                     maximumInFlightBatches: 4, maximumPendingRequests: 256),
                 databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
                 committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil,
-                combineOwnerSendPreflight: Bool = false,
                 maximumActiveRooms: Int = 8192,
                 maximumRoomSubscriptionBindings: Int = 8192,
                 durableSendSchedulingConfiguration: V2SendOperationSchedulingConfiguration = .init()) throws {
@@ -82,7 +80,6 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         self.subscriptionHost = host; self.committedFacts = facts
         host.install(feed: facts)
         // Opt in only when writes and database share the physical owner.
-        self.combineOwnerSendPreflight = combineOwnerSendPreflight
         self.durableSendSchedulingConfiguration = durableSendSchedulingConfiguration
         self.database = database
         self.sendDatabase = sendDatabase ?? database
@@ -208,6 +205,9 @@ public struct V2RoomServerActivationFactory: Sendable {
                 throw V2ActorContractError.invalidConfiguration("physical owner policy authorization aliases")
             }
         }
+        guard owners.values.allSatisfy({ $0.policyAuthorizations != nil }) else {
+            throw V2ActorContractError.invalidConfiguration("room policy authorization required")
+        }
         var installed: Set<UUID> = []
         for resources in owners.values where installed.insert(resources.durableOwner.id).inserted {
             try resources.durableOwner.install {
@@ -220,24 +220,18 @@ public struct V2RoomServerActivationFactory: Sendable {
                     writes: resources.writes, clock: now,
                     committedMessageObserver: resources.committedMessageObserver,
                     sendOperationMetrics: resources.sendOperationMetrics,
-                    combineOwnerPreflight: resources.combineOwnerSendPreflight,
                     initializationDatabase: resources.database)
-                let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                let batcher = try V2DurableSendOperationOwnerBatcher(store: store,
                     capacityProfile: resources.capacity, now: now,
                     configuration: resources.durableSendSchedulingConfiguration,
                     maximumRetainedBytes: limit.partialValue)
-                let directPreparation: V2RoomSendPreparation
-                if let policies = resources.policyAuthorizations {
-                    directPreparation = { commands, token, deadline in
-                        try await policies.prepareOwnerBatches(store: store,
-                            requests: [.init(commands: commands, token: token, deadline: deadline)],
-                            readAdmission: nil,
-                            now: now)[0].get()
-                    }
-                } else {
-                    directPreparation = { commands, token, deadline in
-                        try await store.prepareSendBatch(commands, token: token, deadline: deadline, now: now)
-                    }
+                guard let policies = resources.policyAuthorizations else {
+                    throw V2ActorContractError.invalidConfiguration("room policy authorization required")
+                }
+                let directPreparation: V2RoomSendPreparation = { commands, token, deadline in
+                    try await policies.prepareOwnerBatches(store: store,
+                        requests: [.init(commands: commands, token: token, deadline: deadline)],
+                        now: now)[0].get()
                 }
                 return .init(store: store, batcher: batcher, directPreparation: directPreparation)
             }
@@ -245,11 +239,6 @@ public struct V2RoomServerActivationFactory: Sendable {
         self.owners = owners
         self.safetyActorUserID = safetyActorUserID
         self.now = now
-    }
-
-    /// Every physical owner must participate in the same authorization mode.
-    package var usesPolicyAuthorizations: Bool {
-        !owners.isEmpty && owners.values.allSatisfy { $0.policyAuthorizations != nil }
     }
 
     /// Recorders are aggregated at the Gateway. Physical lease aliases select
@@ -390,28 +379,20 @@ private actor V2RoomServerActivation {
         let created = try Handlers(token: token, resources: resources, now: now)
         let token = self.token
         let validation = self.validation
-        let initialization: V2RoomSendInitialization? = try await V2RoomSQLDeadline.withDeadline(deadline) {
+        let initialization = try await V2RoomSQLDeadline.withDeadline(deadline) {
             if let validation { try await validation(token) }
-            if resources.policyAuthorizations != nil {
-                return try await v2RestoreRoomSendInitialization(database: resources.activationValidationDatabase,
-                    token: token, validateActivation: validation == nil)
-            }
-            if validation == nil {
-                try await v2ValidateRoomActivation(database: resources.activationValidationDatabase, token: token)
-            }
-            return nil
+            return try await v2RestoreRoomSendInitialization(database: resources.activationValidationDatabase,
+                token: token, validateActivation: validation == nil)
         }
         guard !closed, ContinuousClock.now < deadline else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
-        if let initialization {
-            try await resources.policyAuthorizations?.installRoomInitialization(initialization)
-            await resources.durableOwner.current?.store.installSendInitialization(initialization)
-            guard !closed, ContinuousClock.now < deadline else {
-                await resources.durableOwner.current?.store.invalidateSendState(token: token)
-                await resources.policyAuthorizations?.retire(token: token)
-                throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
-            }
+        try await resources.policyAuthorizations?.installRoomInitialization(initialization)
+        await resources.durableOwner.current?.store.installSendInitialization(initialization)
+        guard !closed, ContinuousClock.now < deadline else {
+            await resources.durableOwner.current?.store.invalidateSendState(token: token)
+            await resources.policyAuthorizations?.retire(token: token)
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
         handlers = created
     }

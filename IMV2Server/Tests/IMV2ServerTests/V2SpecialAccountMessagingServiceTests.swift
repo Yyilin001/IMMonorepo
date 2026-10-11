@@ -22,7 +22,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 stage: { intent, page, _ in try await bootstrap.stage(intent: intent, page: page) })
             let direct = PostgresV2DirectRoomOperationStore(database: database,
                 routes: V2PostgresRoomShardRouter(database: database), selector: try .init(shardIDs: ["room-a"]), bootstrap: port)
-            let messages = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let messages = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
             let service = V2TrustedSpecialAccountMessagingService(store: specialStore, directMessaging: direct, messages: messages, now: { now })
             let request = try V2TrustedSpecialAccountMessage(stableAccountKey: "system_notice", servicePrincipal: "notification-worker",

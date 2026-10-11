@@ -11,7 +11,8 @@ public enum V2DatabasePoolMetricClass: String, CaseIterable, Sendable {
     case userStateRoute = "user_state_route"
     /// 私聊权限范围持锁至 owner 提交的专用连接池。
     case directSendControl = "direct_send_control"
-    case directAuthorizationResolution = "direct_authorization_resolution"
+    /// 控制库房间身份初始化读取使用的连接池。
+    case roomIdentityControl = "room_identity_control"
     /// 前台消息写入、控制写入和交互读取使用的连接池。
     case messageWrite = "message_write"
     case foreground
@@ -185,8 +186,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     public let databasePools: V2DatabasePoolTopologySnapshot
     /// 同步可用性提示的合并、投递和丢弃统计。
     public let syncWake: V2SyncWakeCoalescerSnapshot
-    /// 私聊日志追加的本地排队、执行及批处理结果，使用固定模式和原因分类。
-    public let directRoomLogAppendBatching: V2SendMessageBatchMetricsSnapshot?
     /// 已读游标微批处理的排队与事务统计，不包含用户、房间或操作标识。
     public let readReceiptBatching: V2ReadReceiptBatchMetricsSnapshot?
     /// 私聊权威追加事务的固定阶段耗时分布，阶段名来自枚举而非动态 SQL。
@@ -216,7 +215,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
     ///   - databaseWork: 数据库准入观测。
     ///   - databasePools: 连接池配置拓扑。
     ///   - syncWake: 同步提示合并器观测。
-    ///   - directRoomLogAppendBatching: 私聊日志追加的本地排队、执行及批处理结果，使用固定模式和原因分类。 默认 `nil`，表示未提供。
     ///   - readReceiptBatching: 已读游标微批处理的排队与事务统计，不包含用户、房间或操作标识。 默认 `nil`，表示未提供。
     ///   - directRoomLogAppendStages: 私聊权威追加事务的固定阶段耗时分布，阶段名来自枚举而非动态 SQL。 默认 `nil`，表示未提供。
     ///   - gatewayEventLoopLag: TLS 子通道事件循环上低频探测任务观察到的调度延迟，不等同于请求耗时。 默认 `nil`，表示未提供。
@@ -228,7 +226,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         databaseWork: V2DatabaseWorkAdmissionSnapshot,
         databasePools: V2DatabasePoolTopologySnapshot,
         syncWake: V2SyncWakeCoalescerSnapshot,
-        directRoomLogAppendBatching: V2SendMessageBatchMetricsSnapshot? = nil,
         readReceiptBatching: V2ReadReceiptBatchMetricsSnapshot? = nil,
         directRoomLogAppendStages: V2DirectRoomLogAppendStageMetricsSnapshot? = nil,
         gatewayEventLoopLag: V2RuntimeLatencyHistogramSnapshot? = nil,
@@ -251,7 +248,6 @@ public struct V2RuntimePressureMetricsSnapshot: Equatable, Sendable {
         self.databaseWork = databaseWork
         self.databasePools = databasePools
         self.syncWake = syncWake
-        self.directRoomLogAppendBatching = directRoomLogAppendBatching
         self.readReceiptBatching = readReceiptBatching
         self.directRoomLogAppendStages = directRoomLogAppendStages
         self.gatewayEventLoopLag = gatewayEventLoopLag

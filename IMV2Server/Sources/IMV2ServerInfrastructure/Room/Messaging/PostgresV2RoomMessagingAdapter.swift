@@ -4,8 +4,8 @@ import Foundation
 import IMV2ActorContracts
 import IMV2Core
 
-/// Each operation store owns its transaction and verifies the bound activation
-/// token on the owner connection. This adapter never opens an outer transaction.
+/// 操作存储持有各自的提交边界。发送统一使用注入的权限准备器和房间生命周期，
+/// 本适配器不打开外层事务。
 struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     private let token: V2RoomActivationToken
     private let sendOperations: PostgresV2MessageSendOperationStore?
@@ -27,6 +27,9 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
          sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?,
          directSendPreparation: V2RoomSendPreparation?) throws {
         _ = try V2RoomActivationWriteScope(tokens: [token])
+        guard sendOperations == nil || directSendPreparation != nil else {
+            throw V2ActorContractError.invalidConfiguration("message policy preparation required")
+        }
         self.token = token
         self.sendOperations = sendOperations
         self.sendOperationOwnerBatcher = sendOperationOwnerBatcher
@@ -54,13 +57,11 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
                 actorUserID: value.actorUserID, messageID: value.messageID,
                 reaction: value.reaction, token: token))
         case .sendOperation(let value):
-            guard let sendOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-            do {
-                return .sendOperation(try await sendOperations.send(value, token: token,
-                    capacityProfile: capacityProfile, identifiers: identifiers.make(at: now())))
-            } catch {
-                throw v2NormalizeMessageOperationClosed(error)
+            let results = try await executeSendOperationBatch([value])
+            guard results.count == 1, let result = results.first else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
             }
+            return result
         case .recoverSendOperation(let value):
             guard let sendOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
             return .sendOperation(try await sendOperations.recover(value, token: token))
@@ -79,40 +80,30 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     }
 
     func executeSendOperationBatch(_ commands: [V2MessageSendOperationCommand]) async throws -> [V2RoomMessagingResult] {
-        guard let sendOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-        do {
-            return try await sendOperations.sendBatch(commands, token: token,
-                capacityProfile: capacityProfile, identifiers: identifiers, now: now)
-        } catch { throw v2NormalizeMessageOperationClosed(error) }
+        let prepared = try await prepareSendOperationBatch(commands,
+            deadline: V2RoomSQLDeadline.boundedTransactionDeadline())
+        return try await prepared.execute()
     }
 
     func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
                                    deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
         V2SendPathTrace.current?.mark("persistence_prepare_enter")
-        guard let sendOperations else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-        do {
-            let startedAt = ContinuousClock.now
-            let prepared: V2PreparedMessageSendBatch
-            if let prepare = directSendPreparation {
-                prepared = try await prepare(commands, token, deadline)
-            } else {
-                prepared = try await sendOperations.prepareSendBatch(commands, token: token,
-                    deadline: deadline, now: now)
-            }
-            V2SendPathTrace.current?.record("permission_preparation", from: startedAt)
-            let trace = V2SendPathTrace.current
-            return .init {
-                try await V2SendPathTrace.$current.withValue(trace) {
-                do {
-                    if let batcher = self.sendOperationOwnerBatcher {
-                        return try await batcher.execute(prepared)
-                    }
-                    return try await sendOperations.executePreparedSendBatch(prepared,
-                        capacityProfile: self.capacityProfile, identifiers: self.identifiers, now: self.now)
-                } catch { throw v2NormalizeMessageOperationClosed(error) }
+        guard let sendOperations, let prepare = directSendPreparation else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        let startedAt = ContinuousClock.now
+        let prepared = try await prepare(commands, token, deadline)
+        V2SendPathTrace.current?.record("permission_preparation", from: startedAt)
+        let trace = V2SendPathTrace.current
+        return .init {
+            try await V2SendPathTrace.$current.withValue(trace) {
+                if let batcher = self.sendOperationOwnerBatcher {
+                    return try await batcher.execute(prepared)
                 }
+                return try await sendOperations.executePreparedSendBatch(prepared,
+                    capacityProfile: self.capacityProfile, identifiers: self.identifiers, now: self.now)
             }
-        } catch { throw v2NormalizeMessageOperationClosed(error) }
+        }
     }
 }
 

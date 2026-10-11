@@ -13,7 +13,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func permanentMessageReactionReceipts() async throws {
         try await withForwardOwnerDatabases(mode:.standard) { database,_,sql,_,_ in
             let now=Date(timeIntervalSince1970:1_750_000_000),profile=try forwardImportTestProfile()
-            let sends=try V2SendMessageService(store:PostgresV2RoomWriteStore(database:database),capacityProfile:profile,limits:.init(maxUTF8Bytes:64),now:{now})
+            let sends=try V2SendMessageService(store:V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),capacityProfile:profile,limits:.init(maxUTF8Bytes:64),now:{now})
             guard case .accepted(let message)=try await sends.send(.init(roomID:roomID,actorUserID:senderID,clientMessageID:.init(uuid:UUID()),text:"Reaction target")) else { throw CancellationError() }
             guard case .acquired(let lease)=try await PostgresV2RoomActivationStore(database:database).acquire(roomID:roomID,owner:.init(shardID:"room-a",epoch:0),host:.init(hostID:.init("reaction-receipts"),incarnationID:UUID()),duration:.init(30_000)) else { throw CancellationError() }
             let store=PostgresV2MessageReactionOperationStore(database:database,clock:{now})

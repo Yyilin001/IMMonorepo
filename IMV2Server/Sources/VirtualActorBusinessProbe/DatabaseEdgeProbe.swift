@@ -88,7 +88,7 @@ enum DatabaseEdgeProbe {
                 let writes = PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 1000, window: 86_400),
                     contentReviewMode: .disabled)
-                    .usingControlDatabase(control, authorizationResolutionDatabase: control)
+                    .usingControlDatabase(control)
                 owners["room-\(slot)"] = try .init(database: database, writes: writes,
                     membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                     invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),

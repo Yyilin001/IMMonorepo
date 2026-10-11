@@ -17,7 +17,6 @@ public enum V2ActorMessagingErrorWire: Codable, Equatable, Sendable {
 }
 
 public enum V2ActorMessagingSendStoreErrorWire: String, Codable, CaseIterable, Sendable {
-    case messageOperationClosed
     case roomNotFound
     case actorNotEligible
     case actorMuted

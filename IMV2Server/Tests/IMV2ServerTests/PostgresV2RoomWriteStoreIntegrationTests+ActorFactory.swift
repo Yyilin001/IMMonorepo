@@ -84,7 +84,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
                 timeout: .seconds(1)))
-            let ownerResources = try V2RoomServerOwnerResources(database: database, writes: writes,
+            let ownerResources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -94,7 +94,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 databaseWorkAdmission: admission)
             let leases = try V2RoomServerLeaseStore(databases: ["room-a": database],
                 sqlContinuationMetricsByOwner: ["room-a": ownerResources.sendOperationMetrics])
-            let factory = try V2RoomServerActivationFactory(owners: ["room-a": ownerResources],
+            let factory = try V2RoomServerActivationFactory(owners: ["room-a": ownerResources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
                 safetyActorUserID: senderID, now: { now }).runtimeFactory(validation: {
                     try await leases.validate(token: $0)
                 })
@@ -111,7 +111,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 guard case .ready(let token) = try await first.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }
-                #expect(database.loanMetricsSnapshot().classes[.activation]?.granted == 2)
+                #expect(database.loanMetricsSnapshot().classes[.activation]?.granted == 3)
                 #expect(database.loanMetricsSnapshot().classes[.ordinary]?.granted == 0)
                 let initialSQL = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations
                 for source in [V2RoomSQLContinuationSource.lifecycleRooms, .lifecycleLeases] {
@@ -132,18 +132,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
                 let sendAdmission = await admission.snapshot()
-                #expect(sendAdmission.foregroundWrite.admittedRequests == 1)
+                #expect(sendAdmission.foregroundWrite.admittedRequests == 0)
                 #expect(sendAdmission.foregroundWrite.inFlight == 0)
                 let durableMetrics = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot()
                 #expect(durableMetrics.attemptedBatches == 1 && durableMetrics.committedCommands == 1)
                 #expect(durableMetrics.inFlightBatches == 0)
-                for source in [V2RoomSQLContinuationSource.durableFenceCombined] {
-                    #expect(durableMetrics.sqlContinuations[source]?.settledToResumedCount == 1)
-                    #expect(durableMetrics.sqlContinuations[source]?.resumedToDispatchCount == 1)
-                }
-                // The combined fence is one actual SQL statement. Separate
-                // room/lease labels must not invent two execution boundaries.
-                for source in [V2RoomSQLContinuationSource.durableFenceRooms, .durableFenceLeases] {
+                // Actor lifetime and prepared authorization replace the former
+                // standalone owner fence.
+                for source in [V2RoomSQLContinuationSource.durableFenceCombined,
+                    .durableFenceRooms, .durableFenceLeases] {
                     #expect(durableMetrics.sqlContinuations[source]?.settledToResumedCount == 0)
                 }
                 let read = try V2ActorRecordReadReceiptWire(roomID: roomID, actorUserID: senderID,
@@ -169,8 +166,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(denial == .roomLog(.failure(.actorNotMember)))
                 // An Account-style direct invoke has no Gateway permit. The
                 // physical Host still admits its recovery and room-log SQL.
+                // Message sends use physical write capacity directly.
                 let admissionSnapshot = await admission.snapshot()
-                #expect(admissionSnapshot.foregroundWrite.admittedRequests == 2)
+                #expect(admissionSnapshot.foregroundWrite.admittedRequests == 1)
                 #expect(admissionSnapshot.interactiveRead.admittedRequests == 2)
                 #expect(admissionSnapshot.interactiveRead.inFlight == 0)
                 #expect(await first.stop(deadline: .now + .seconds(10)).completed)
@@ -256,7 +254,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
                 timeout: .seconds(1)))
             let resources = try V2RoomServerOwnerResources(
-                database: ownerDatabase, writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
+                database: ownerDatabase, sendDatabase: try v2FixtureMessageWriteDatabase(ownerDatabase, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: ActorFactoryProjectionDelivery(), capacityProfile: forwardImportTestProfile(),
@@ -265,7 +263,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 databaseWorkAdmission: admission
             )
             let factory = try V2RoomServerActivationFactory(
-                owners: ["room-b": resources], safetyActorUserID: senderID, now: { now }
+                owners: ["room-b": resources.usingFixturePolicyAuthorizations(controlDatabase: control, endpoint: "room-b")], safetyActorUserID: senderID, now: { now }
             ).runtimeFactory()
             let configuration = try V2RoomRuntimeConfiguration()
             let leases = try V2RoomServerLeaseStore(databases: ["room-b": ownerDatabase])

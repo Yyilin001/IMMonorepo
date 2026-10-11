@@ -217,45 +217,6 @@ public struct V2LivePresenceLeaseRefresh: Equatable, Sendable {
     }
 }
 
-public extension V2LivePresenceLeaseManaging {
-    func admitConnectionRefresh(identity: V2AuthenticatedConnection, connectionID: UUID,
-        publicationSuppressed: Bool, policy: V2AuthenticatedConnectionAdmissionPolicy, now: Date)
-        async throws -> V2LivePresenceLeaseRefresh {
-        let outcome = try await admitConnection(identity: identity, connectionID: connectionID,
-            publicationSuppressed: publicationSuppressed, policy: policy, now: now)
-        return .init(outcome: outcome, allowsOnlinePresence: try await allowsOnlinePresence(userID: identity.userID))
-    }
-
-    /// 内存实现与远程实现的兼容路径。
-    ///
-    /// PostgreSQL 实现为热路径提供了单语句覆盖版本。
-    ///
-    /// - Parameter requests: 待续租的连接列表。
-    /// - Returns: 以连接标识为键的续租结果。
-    /// - Throws: 续租或偏好读取失败时抛出。
-    func renewConnections(
-        _ requests: [V2LivePresenceLeaseRenewalRequest]
-    ) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
-        var refreshed: [UUID: V2LivePresenceLeaseRefresh] = [:]
-        refreshed.reserveCapacity(requests.count)
-        for request in requests {
-            let outcome = try await renewConnection(
-                identity: request.identity,
-                connectionID: request.connectionID,
-                now: request.now
-            )
-            let allowsOnlinePresence = try await allowsOnlinePresence(
-                userID: request.identity.userID
-            )
-            refreshed[request.connectionID] = .init(
-                outcome: outcome,
-                allowsOnlinePresence: allowsOnlinePresence
-            )
-        }
-        return refreshed
-    }
-}
-
 /// 注册表侧的尽力而为投递策略。
 ///
 /// 注册表持有套接字，而由数据库支撑的服务仍是房间成员关系与私聊拉黑状态的权威。
@@ -275,30 +236,4 @@ public struct V2PresencePublicationLeaseObservation: Sendable {
     public let isOnline: Bool
     public let expiresAt: Date
     public init(isOnline: Bool, expiresAt: Date) { self.isOnline=isOnline;self.expiresAt=expiresAt }
-}
-
-public extension V2LiveActivityStore {
-    /// 测试替身的兼容实现；生产数据库实现覆盖为单语句快照。
-    func presenceBatch(_ requests: [V2PresenceObservationRequest], now: Date) async throws
-        -> [V2PresenceObservationRequest: V2PresenceObservationOutcome] {
-        guard requests.count <= 128 else { throw V2LiveActivityStoreError.corruptPersistenceState }
-        let unique = Set(requests)
-        guard unique.count <= 128 else { throw V2LiveActivityStoreError.corruptPersistenceState }
-        var result: [V2PresenceObservationRequest: V2PresenceObservationOutcome] = [:]
-        for request in unique {
-            do {
-                let value = try await presence(roomID: request.roomID, viewerUserID: request.viewerUserID, now: now)
-                result[request] = value.targetUserID == request.targetUserID ? .observed(value) : .denied(.actorNotMember)
-            } catch let error as V2LiveActivityStoreError {
-                switch error {
-                case .roomNotFound: result[request] = .denied(.roomNotFound)
-                case .notDirectRoom: result[request] = .denied(.notDirectRoom)
-                case .actorNotMember: result[request] = .denied(.actorNotMember)
-                case .interactionBlocked: result[request] = .denied(.interactionBlocked)
-                case .typingNotAllowed, .corruptPersistenceState: throw error
-                }
-            }
-        }
-        return result
-    }
 }

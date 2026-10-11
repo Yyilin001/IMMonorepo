@@ -104,9 +104,8 @@ public struct V2SendOperationStageMetricsSnapshot: Equatable, Sendable {
 /// Closed vocabulary for why an owner handle takes its original scalar transaction.
 /// A handle is recorded only at that execution boundary, never once per isolation depth.
 public enum V2SendOperationOwnerScalarFallbackReason: String, CaseIterable, Sendable {
-    case multiCommand = "multi_command"
     case complexPayload = "complex_payload"
-    case legacyOrNotReady = "legacy_or_not_ready"
+    case optimizationNotApplicable = "optimization_not_applicable"
     case domainIsolation = "domain_isolation"
 }
 
@@ -169,7 +168,7 @@ public struct V2RoomSQLContinuationSnapshot: Equatable, Sendable {
     public init() {}
 }
 
-/// Counters for the durable sendOperation path, independent of legacy append batching.
+/// Counters for the durable sendOperation path, independent of scalar append batching.
 public enum V2PolicyMemoryEvent: String, CaseIterable, Sendable {
     case snapshotProbeHit = "snapshot_probe_hit", snapshotProbeMiss = "snapshot_probe_miss"
 }

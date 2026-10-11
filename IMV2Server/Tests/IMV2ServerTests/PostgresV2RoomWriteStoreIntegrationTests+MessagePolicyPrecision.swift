@@ -45,8 +45,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let destinationUUID = try #require(destination.uuidValue)
             let writer = PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
-            let send = try V2SendMessageService(store: writer, capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base })
             guard case .acquired(let lease)=try await PostgresV2RoomActivationStore(database:database).acquire(roomID:destination,owner:.init(shardID:"room-a",epoch:0),host:.init(hostID:.init("mutation-precision"),incarnationID:UUID()),duration:.init(30_000)) else { throw CancellationError() }
+            let send = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+                database: database, controlDatabase: database, store: writer,
+                shardID: "room-a", epoch: 0, activationToken: lease.token),
+                capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { base })
             let mutations=PostgresV2MessageMutationOperationStore(database:database,contentReviewMode:.disabled,clock:{base})
             let reactions=PostgresV2MessageReactionOperationStore(database:database,clock:{base})
             let kind=String(path.split(separator:"-")[0])
@@ -144,7 +147,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision=1 WHERE room_id=\(bind: roomUUID)").run()
             let expiry = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 1)
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=\(bind: expiry)").run()
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile,
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0), capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { base })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "Group timestamp fixture")) else { throw CancellationError() }
@@ -204,23 +208,33 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Direct, preference and social proofs retain their original timestamp across retries",
-          arguments: ["direct", "stranger", "userAdd", "request", "accept", "reject", "remove", "block", "unblock", "block-remove"],
+    @Test("Direct and user-add proofs retain persisted precision across retries",
+          arguments: ["direct", "userAdd"],
           [Double](arrayLiteral: 946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 946_684_800 + 0.00000125,
               1_750_000_000 + 0.99999975, 946_684_800 + 9_223_371_331_200 - 660))
     func directSocialResponseTimestampPrecision(kind: String, seconds: Double) async throws {
+        try await verifyPolicyProofTimestamp(kind: kind, now: Date(timeIntervalSince1970: seconds))
+    }
+
+    @Test("Policy-owned preference and social proofs retain authoritative timestamps across retries",
+          arguments: ["stranger", "request", "accept", "reject", "remove", "block", "unblock", "block-remove", "block-pending"])
+    func policyOwnedResponseTimestamp(kind: String) async throws {
+        try await verifyPolicyProofTimestamp(kind: kind, now: Date())
+    }
+
+    private func verifyPolicyProofTimestamp(kind: String, now: Date) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, deliveryDB, sql, deliverySQL, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000), now = Date(timeIntervalSince1970: seconds)
+            let base = ["direct", "userAdd"].contains(kind) ? Date(timeIntervalSince1970: 1_750_000_000) : now
+            try await withFixturePolicyOwners(database: database, projectionDelivery: SuccessfulProjectionDelivery()) { owners in
             let direct = PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery())
-            let social = PostgresV2SocialRelationshipStore(database: database)
+            let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
             let preferences = PostgresV2AccountPreferenceOperationStore(database: database,
-                projectionDelivery: SuccessfulProjectionDelivery(),
-                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+                projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
             let profile = try forwardImportTestProfile(), target = UserID(uuid: memberTwoUUID)
             let newRoom = RoomID(uuid: UUID()), operation = UUID()
             let relationshipAction: V2RelationshipAction = kind == "accept" ? .accept : kind == "reject" ? .reject : kind == "remove" ? .remove : .request
             let blockAction: V2UserBlockAction = kind == "unblock" ? .unblock : .block
-            if ["accept", "reject", "remove", "block-remove"].contains(kind) {
+            if ["accept", "reject", "remove", "block-remove", "block-pending"].contains(kind) {
                 guard case .receipt(let proof) = try await social.executeSocialFixture(actorUserID: target, targetUserID: senderID,
                     operation: .relationship(.init(uuid: UUID())), action: .relationship(.request), now: base), case .applied = proof.outcome else { throw CancellationError() }
                 if ["remove", "block-remove"].contains(kind) {
@@ -248,7 +262,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     value: kind == "stranger" ? .strangerMessage(.deny) : .userAdd(.deny), now: now)
                 directCommand = nil; socialCommand = nil; table = "account_preference_receipts"
             } else {
-                let block = ["block", "unblock", "block-remove"].contains(kind)
+                let block = ["block", "unblock", "block-remove", "block-pending"].contains(kind)
                 socialCommand = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: target,
                     operation: block ? .userBlock(.init(uuid: operation)) : .relationship(.init(uuid: operation)),
                     action: block ? .userBlock(blockAction) : .relationship(relationshipAction), now: now)
@@ -278,7 +292,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     return .preference(proof)
                 }
                 let command = try #require(socialCommand)
-                guard case .receipt(let proof) = try await social.submitSocialOperation(command, now: clock),
+                guard case .receipt(let proof) = try await social.submitSocialOperation(command),
                       case .applied(let value) = proof.outcome else { throw CancellationError() }
                 #expect(proof.validates(command: command))
                 switch value {
@@ -316,7 +330,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 // The receipt must match that persisted sample, not the caller's initial clock.
                 #expect(first.milliseconds >= UInt64(try v2GatewayMilliseconds(now)))
             }
-            let projectionCount: Int64 = kind == "block-remove" ? 3 : ["request", "accept", "reject", "remove"].contains(kind) ? 2 : 1
+            let projectionCount: Int64 = ["block-remove", "block-pending"].contains(kind) ? 3 : ["request", "accept", "reject", "remove"].contains(kind) ? 2 : 1
             let projectionSQL: any SQLDatabase = kind == "direct" ? deliverySQL : sql
             let key = kind == "direct" ? "room_created_at_ms" : "updated_at_ms"
             let projections = try await projectionSQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id=\(bind: operation) AND (payload->>\(bind: key))::bigint=\(bind: Int64(first.milliseconds))").first(decoding: CountRow.self)
@@ -334,6 +348,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await count("im_v2.direct_room_pairs", on: sql) == 1)
                 #expect(try await count("im_v2.direct_room_owner_receipts", on: sql) == 2)
             }
+            }
         }
     }
 
@@ -343,8 +358,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let shadow = PreferenceReplayClockDelivery()
-            let store = PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: shadow,
-                authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: ["room-a": database]))
+            let store = V2PostgresAccountPreferencePersistence(database: database, projectionDelivery: shadow)
             let stateTable = kind == "receipts" ? "user_read_receipt_preferences" : "user_live_activity_preferences"
             let value: V2AccountPreferenceValue = kind == "receipts" ? .readReceipt(allowsDirectReadReceipts: false, allowsGroupReadReceipts: true) : .liveActivity(allowsOnlinePresence: false, allowsTypingIndicators: true)
             func snapshot() async throws -> [String] {
@@ -391,100 +405,98 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Business denials preserve receipt and private-event time through retries",
-          arguments: ["scalar", "batch"], ["generic", "system"])
-    func denialResponseTimestampPrecision(path: String, reason: String) async throws {
+    @Test("Rejected sends retain precise private hints without durable send results",
+          arguments: [false, true], ["generic", "system"])
+    func denialResponseTimestampPrecision(concurrent: Bool, reason: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, deliveryDB, sql, deliverySQL, _ in
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let profile = try forwardImportTestProfile()
-            let direct = PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery())
+            let base = Date(), profile = try forwardImportTestProfile()
+            try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=\(bind: base.addingTimeInterval(600))").run()
             var rooms: [RoomID] = []
             for target in [memberTwoUUID, memberThreeUUID] {
                 let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
-                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                    roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
                         actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: target),
-                        firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
+                        firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(base))
                 rooms.append(room.roomID)
             }
             if reason == "system" {
-                try await sql.raw("INSERT INTO im_v2.special_accounts (account_user_id, stable_key, account_kind, allows_customer_messages, allows_service_messages, created_at, updated_at) VALUES (\(bind: memberTwoUUID), 'clock_system_target', 'system', false, true, \(bind: base), \(bind: base))").run()
-                try await sql.raw("UPDATE im_v2.public_user_profiles SET account_kind = 'system', revision = revision + 1 WHERE user_id = \(bind: memberTwoUUID)").run()
-            } else {
-                _ = try await PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:])).executePreferenceFixture(owner: .init(uuid: memberTwoUUID), operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: base)
+                try await sql.raw("INSERT INTO im_v2.special_accounts (account_user_id,stable_key,account_kind,allows_customer_messages,allows_service_messages,created_at,updated_at) VALUES (\(bind: memberTwoUUID),'clock_system_target','system',false,true,\(bind: base),\(bind: base))").run()
+                try await sql.raw("UPDATE im_v2.public_user_profiles SET account_kind='system',revision=revision+1 WHERE user_id=\(bind: memberTwoUUID)").run()
             }
-            let writer = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
-            let admission = writer
-            func scalar(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
-                try await writer.accept(command: request.command, capacityProfile: request.capacityProfile,
-                    identifiers: request.identifiers, now: request.now)
-            }
-            func request(room: RoomID, now: Date) throws -> V2RoomWriteRequest {
-                .init(command: try .init(roomID: room, senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
-                    text: "business response time", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())), now: now)
-            }
-            func snapshot() async throws -> [String] {
-                var values: [String] = []
-                for table in ["direct_message_denials", "room_timeline_activities", "user_state_event_outbox", "user_sync_log", "user_sync_sequences", "rooms", "direct_room_pairs"] {
-                    let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
-                    values.append(try #require(row).value)
+            try await withFixturePolicyOwners(database: database, projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                if reason == "generic" {
+                    _ = try await PostgresV2AccountPreferenceOperationStore(database: database,
+                        projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
+                        .executePreferenceFixture(owner: .init(uuid: memberTwoUUID),
+                            operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: base)
                 }
-                return values
+                let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
+                    policyOwners: owners, endpoint: "denial-precision-test", maximumRooms: 2)
+                do {
+                    let writer = PostgresV2RoomWriteStore(database: database).usingPolicyAuthorizations(policies)
+                    try await withRoomActivation(database: database, roomID: rooms[0]) { deniedToken in
+                        try await withRoomActivation(database: database, roomID: rooms[1]) { siblingToken in
+                            let seconds = floor(base.timeIntervalSince1970)
+                            let dates = [seconds + 0.00000075, seconds + 0.99999975].map { Date(timeIntervalSince1970: $0) }
+                            for date in dates {
+                                try await sql.raw("UPDATE im_v2.direct_room_pairs SET lower_can_send=true,higher_can_send=true WHERE room_id=\(bind: rooms[0].uuidValue!)").run()
+                                let store = PostgresV2MessageSendOperationStore(database: database, writes: writer, clock: { date })
+                                func request(_ room: RoomID) throws -> V2MessageSendOperationCommand {
+                                    try .init(command: .init(roomID: room, senderUserID: senderID,
+                                        clientMessageID: .init(uuid: UUID()), text: "business response time", limits: .init(maxUTF8Bytes: 64)),
+                                        firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(base))
+                                }
+                                let denied = try request(rooms[0]), sibling = try request(rooms[1])
+                                let result: V2MessageSendOperationRecoveryResult
+                                if concurrent {
+                                    async let rejection = store.send(denied, token: deniedToken, capacityProfile: profile,
+                                        identifiers: V2AcceptanceIDFactory().make(at: date))
+                                    async let allowed = store.send(sibling, token: siblingToken, capacityProfile: profile,
+                                        identifiers: V2AcceptanceIDFactory().make(at: date))
+                                    let pair = try await (rejection, allowed)
+                                    result = pair.0
+                                    guard case .receipt(let receipt) = pair.1, case .accepted = receipt.outcome else { throw CancellationError() }
+                                } else {
+                                    result = try await store.send(denied, token: deniedToken, capacityProfile: profile,
+                                        identifiers: V2AcceptanceIDFactory().make(at: date))
+                                    guard case .receipt(let receipt) = try await store.send(sibling, token: siblingToken,
+                                        capacityProfile: profile, identifiers: V2AcceptanceIDFactory().make(at: date)),
+                                          case .accepted = receipt.outcome else { throw CancellationError() }
+                                }
+                                guard case .receipt(let receipt) = result else { throw CancellationError() }
+                                #expect(receipt.outcome == .rejected(.directPolicyDenied))
+                                let query = try V2MessageSendOperationRecoveryRequest(identity: denied.identity,
+                                    fingerprint: denied.fingerprint, domainFingerprint: denied.command.fingerprint)
+                                #expect(try await store.recover(query, token: deniedToken) == .unresolved)
+                                struct HintRow: Decodable { let source_event_id: UUID; let created_at: Date }
+                                let hint = try #require(try await sql.raw("SELECT source_event_id,created_at FROM im_v2.room_timeline_activities WHERE room_id=\(bind: rooms[0].uuidValue!) AND recipient_user_id=\(bind: senderUUID) ORDER BY timeline_sequence DESC LIMIT 1").first(decoding: HintRow.self))
+                                let milliseconds = try v2GatewayMilliseconds(hint.created_at)
+                                #expect(try await sql.raw("SELECT count(*) AS value FROM im_v2.room_timeline_activities WHERE source_event_id=\(bind: hint.source_event_id) AND created_at=\(bind: date)::timestamptz").first(decoding: CountRow.self)?.value == 1)
+                                let outbox = try PostgresV2UserStateEventOutbox(database: database)
+                                let projector = try PostgresV2UserStateEventProjector(database: deliveryDB)
+                                let leases = try await deliverUserStateEvents(outbox, projector: projector,
+                                    now: max(base, date), leaseDuration: 1, limit: 100)
+                                #expect(leases.filter { $0.event.sourceEventID.uuidValue == hint.source_event_id }.count == 2)
+                                for (kind, field) in [("timeline_activity", "server_created_at_ms"), ("direct_sending_capability", "updated_at_ms")] {
+                                    #expect(try await deliverySQL.raw("SELECT count(*) AS value FROM im_v2.user_sync_log WHERE source_event_id=\(bind: hint.source_event_id) AND projection_kind=\(bind: kind) AND (payload->>\(bind: field))::bigint=\(bind: milliseconds) AND created_at=\(bind: date)::timestamptz").first(decoding: CountRow.self)?.value == 1)
+                                }
+                                #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
+                                #expect(try await store.send(denied, token: deniedToken, capacityProfile: profile,
+                                    identifiers: V2AcceptanceIDFactory().make(at: date)) == result)
+                                #expect(try await count("im_v2.room_timeline_activities", on: sql) == Int64(dates.firstIndex(of: date)! + 1))
+                            }
+                            #expect(try await count("im_v2.messages", on: sql) == Int64(dates.count))
+                            #expect(try await count("im_v2.message_send_completions", on: sql) == Int64(dates.count))
+                        }
+                    }
+                    await policies.shutdown()
+                } catch { await policies.shutdown(); throw error }
             }
-            let dates = [Date(timeIntervalSince1970: 946_684_799.99999925),
-                         Date(timeIntervalSince1970: 946_684_800.00000075), base.addingTimeInterval(0.99999975),
-                         Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000),
-                         Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10)]
-            let deniedRoom = try #require(rooms[0].uuidValue)
-            for date in dates {
-                // Exercise both private events even after an earlier denial
-                // has already set the sender's cached capability to false.
-                try await sql.raw("UPDATE im_v2.direct_room_pairs SET lower_can_send = true, higher_can_send = true WHERE room_id = \(bind: deniedRoom)").run()
-                let input = try request(room: rooms[0], now: date)
-                let sibling = try request(room: rooms[1], now: base)
-                let outcome: V2SendMessageOutcome
-                if path == "batch" {
-                    async let denied = admission.accept(input)
-                    async let allowed = admission.accept(sibling)
-                    let pair = try await (denied, allowed)
-                    outcome = pair.0
-                    guard case .accepted = pair.1 else { throw CancellationError() }
-                } else {
-                    outcome = try await scalar(input)
-                    guard case .accepted = try await scalar(sibling) else { throw CancellationError() }
-                }
-                guard case .denied(let denial) = outcome else { Issue.record("Expected normal business denial"); throw CancellationError() }
-                #expect(denial.reason == (reason == "system" ? .systemAccountReadOnly : .generic))
-                let eventID = try #require(input.identifiers.eventID.uuidValue)
-                let storedRow = try await sql.raw("SELECT created_at AS value FROM im_v2.direct_message_denials WHERE source_event_id = \(bind: eventID)").first(decoding: RevocationClockDateRow.self)
-                let stored = try #require(storedRow).value
-                #expect(denial.createdAt == stored)
-                let milliseconds = try v2GatewayMilliseconds(stored)
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: eventID)").first(decoding: CountRow.self)?.value == 0)
-                let outbox = try PostgresV2UserStateEventOutbox(database: database)
-                let projector = try PostgresV2UserStateEventProjector(database: deliveryDB)
-                let deliveryTime = max(base, date)
-                let leases = try await deliverUserStateEvents(outbox, projector: projector, now: deliveryTime, leaseDuration: 1, limit: 100)
-                #expect(leases.filter { $0.event.sourceEventID.uuidValue == eventID }.count == 2)
-                for (kind, field) in [("timeline_activity", "server_created_at_ms"), ("direct_sending_capability", "updated_at_ms")] {
-                    #expect(try await deliverySQL.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE source_event_id = \(bind: eventID) AND projection_kind = \(bind: kind) AND (payload->>\(bind: field))::bigint = \(bind: milliseconds) AND created_at = \(bind: date)::timestamptz").first(decoding: CountRow.self)?.value == 1)
-                }
-                #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.room_timeline_activities WHERE source_event_id = \(bind: eventID) AND created_at = \(bind: date)::timestamptz").first(decoding: CountRow.self)?.value == 1)
-                let before = try await snapshot()
-                let replay = V2RoomWriteRequest(command: input.command, capacityProfile: profile, identifiers: input.identifiers, now: base)
-                #expect(try await scalar(replay) == outcome)
-                #expect(try await admission.accept(replay) == outcome)
-                #expect(try await snapshot() == before)
-            }
-            #expect(try await count("im_v2.direct_message_denials", on: sql) == Int64(dates.count))
-            #expect(try await count("im_v2.room_timeline_activities", on: sql) == Int64(dates.count))
-            #expect(try await count("im_v2.messages", on: sql) == Int64(dates.count))
         }
     }
 
-    @Test("Stranger quota cutoff bounds and precision agree in scalar, cold and hot writes",
-          arguments: ["scalar", "cold", "hot"], ["precision", "lower", "tiny"])
+    @Test("Authorized stranger quota preserves cold/warm cutoff bounds and precision",
+          arguments: ["cold", "warm"], ["precision", "lower", "tiny"])
     func strangerQuotaCutoffBounds(path: String, scenario: String) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
@@ -498,9 +510,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 rooms.append(room.roomID)
             }
             let interval: TimeInterval = scenario == "precision" ? 0.1234567 : scenario == "tiny" ? 0.0000001 : 86_400
-            func writer(window: TimeInterval) throws -> PostgresV2RoomWriteStore {
-                PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: window), contentReviewMode: .disabled)
+            func writer(window: TimeInterval) throws -> V2PolicyAuthorizedTestWriteStore {
+                V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database,
+                        strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: window), contentReviewMode: .disabled),
+                    shardID: "room-a", epoch: 0)
             }
             let warm = try writer(window: interval)
             func request(_ index: Int, now: Date) throws -> V2RoomWriteRequest {
@@ -509,20 +523,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     capacityProfile: profile,
                     identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())), now: now)
             }
-            func scalar(_ request: V2RoomWriteRequest, on store: PostgresV2RoomWriteStore) async throws -> V2SendMessageOutcome {
+            func scalar(_ request: V2RoomWriteRequest, on store: V2PolicyAuthorizedTestWriteStore) async throws -> V2SendMessageOutcome {
                 try await store.accept(command: request.command, capacityProfile: request.capacityProfile,
                     identifiers: request.identifiers, now: request.now)
             }
             for index in rooms.indices {
                 guard case .accepted = try await scalar(request(index, now: base), on: warm) else { throw CancellationError() }
             }
-            let store = path == "hot" ? warm : try writer(window: interval)
+            let store = path == "warm" ? warm : try writer(window: interval)
             let now: Date = scenario == "precision" ? Date(timeIntervalSince1970: 946_684_800.00000075)
                 : scenario == "lower" ? Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000 + 86_399)
                 : Date(timeIntervalSince1970: 946_684_800)
             let inputs = try rooms.indices.map { try request($0, now: now) }
-            func send(on active: PostgresV2RoomWriteStore, atomic: Bool) async throws -> [V2SendMessageOutcome] {
-                if atomic { return try await active.acceptAtomically(requests: inputs) }
+            func send(on active: V2PolicyAuthorizedTestWriteStore) async throws -> [V2SendMessageOutcome] {
                 var outcomes: [V2SendMessageOutcome] = []
                 for input in inputs { outcomes.append(try await scalar(input, on: active)) }
                 return outcomes
@@ -538,7 +551,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             if scenario != "precision" {
                 let before = try await snapshot()
                 var actual: V2RoomWriteStoreError?
-                do { _ = try await send(on: store, atomic: path == "hot") } catch { actual = error as? V2RoomWriteStoreError }
+                do { _ = try await send(on: store) } catch { actual = error as? V2RoomWriteStoreError }
                 #expect(actual == .corruptPersistenceState)
                 #expect(try await snapshot() == before)
                 return
@@ -549,13 +562,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.stranger_message_windows SET window_started_at = \(bind: cutoff)::timestamptz + INTERVAL '1 microsecond', message_count = 10").run()
             let before = try await snapshot()
             // A separate rejecting writer preserves the warmed cache so the
-            // following successful reset must exercise the prepared fast path.
+            // following successful reset can reuse the same persistence cache.
             let rejecting = try writer(window: interval)
-            do { _ = try await send(on: rejecting, atomic: false); Issue.record("Quota must remain exhausted before its cutoff") }
-            catch { #expect(error is V2RoomWriteStoreError || error is V2AtomicRoomWriteBatchError) }
+            do { _ = try await send(on: rejecting); Issue.record("Quota must remain exhausted before its cutoff") }
+            catch { #expect(error is V2RoomWriteStoreError) }
             #expect(try await snapshot() == before)
             try await sql.raw("UPDATE im_v2.stranger_message_windows SET window_started_at = \(bind: cutoff)").run()
-            let outcomes = try await send(on: store, atomic: path == "hot")
+            let outcomes = try await send(on: store)
             #expect(outcomes.count == 2)
             for (input, outcome) in zip(inputs, outcomes) {
                 guard case .accepted(let message) = outcome else { throw CancellationError() }
@@ -566,9 +579,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Message batches share scalar mute expiry and quota timestamp precision",
+    @Test("Authorized room writes preserve mute expiry and quota timestamp precision",
           arguments: ["hybrid", "direct"], [946_684_799.99999925, 946_684_800.00000075, 1_750_000_000.1234567])
-    func messageBatchCurrentTimestampPrecision(path: String, seconds: Double) async throws {
+    func authorizedMessageMuteTimestampPrecision(path: String, seconds: Double) async throws {
         try await withForwardOwnerDatabases(mode: path == "hybrid" ? .large : .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: seconds)
             let base = Date(timeIntervalSince1970: 1_750_000_000)
@@ -586,9 +599,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     rooms.append(room.roomID)
                 }
             }
-            func store() throws -> PostgresV2RoomWriteStore {
-                PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
+            func store() throws -> V2PolicyAuthorizedTestWriteStore {
+                V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database,
+                        strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled),
+                    shardID: "room-a", epoch: 0)
             }
             func request(_ index: Int) throws -> V2RoomWriteRequest {
                 .init(command: try .init(roomID: rooms[index], senderUserID: senders[index],
@@ -596,7 +611,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     capacityProfile: profile,
                     identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())), now: now)
             }
-            func scalar(_ request: V2RoomWriteRequest, on writer: PostgresV2RoomWriteStore) async throws -> V2SendMessageOutcome {
+            func scalar(_ request: V2RoomWriteRequest, on writer: V2PolicyAuthorizedTestWriteStore) async throws -> V2SendMessageOutcome {
                 try await writer.accept(command: request.command, capacityProfile: request.capacityProfile,
                     identifiers: request.identifiers, now: request.now)
             }
@@ -610,36 +625,34 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writer = try store()
             let muted = try request(0), sibling = try request(1)
             await #expect(throws: V2RoomWriteStoreError.actorMuted) { try await scalar(muted, on: writer) }
-            var batchError: V2AtomicRoomWriteBatchError?
-            do { _ = try await writer.acceptAtomically(requests: [muted, sibling]) }
-            catch { batchError = error as? V2AtomicRoomWriteBatchError }
-            try #require(batchError?.reason == .authorizationState)
             for table in ["messages", "message_send_completions", "room_events", "stranger_message_windows"] {
                 #expect(try await count("im_v2." + table, on: sql) == 0)
             }
-            let admission = writer
-            async let rejected: Void = { () async -> Void in
-                await #expect(throws: V2RoomWriteStoreError.actorMuted) { try await admission.accept(muted) }
-            }()
-            async let accepted = admission.accept(sibling)
-            let (_, siblingOutcome) = try await (rejected, accepted)
+            let siblingOutcome: V2SendMessageOutcome
+            if path == "direct" {
+                // Different rooms may execute concurrently. Each fixture owns
+                // a distinct activation, just as production room Actors do.
+                async let rejected: Void = { () async -> Void in
+                    await #expect(throws: V2RoomWriteStoreError.actorMuted) { try await scalar(muted, on: writer) }
+                }()
+                async let accepted = scalar(sibling, on: writer)
+                (_, siblingOutcome) = try await (rejected, accepted)
+            } else {
+                // One group Actor executes its commands in room order.
+                await #expect(throws: V2RoomWriteStoreError.actorMuted) { try await scalar(muted, on: writer) }
+                siblingOutcome = try await scalar(sibling, on: writer)
+            }
             guard case .accepted = siblingOutcome else { Issue.record("Normal sibling must complete"); throw CancellationError() }
             #expect(try await count("im_v2.messages", on: sql) == 1)
 
             // At the exact stored deadline the mute has ended. A fresh writer
-            // forces the normal batch preflight rather than a warmed fast path.
+            // checks the current persistence boundary without a warmed cache.
             try await sql.raw("UPDATE im_v2.room_member_mutes SET mute_until = \(bind: now) WHERE room_id = \(bind: mutedRoom) AND user_id = \(bind: mutedSender)").run()
             guard case .accepted = try await scalar(request(1), on: writer) else { throw CancellationError() }
             let cold = try store()
             let expiredRequests = [muted, try request(1)]
-            let outcomes: [V2SendMessageOutcome]
-            if path == "direct" {
-                var accepted: [V2SendMessageOutcome] = []
-                for request in expiredRequests { accepted.append(try await scalar(request, on: cold)) }
-                outcomes = accepted
-            } else {
-                outcomes = try await cold.acceptAtomically(requests: expiredRequests)
-            }
+            var outcomes: [V2SendMessageOutcome] = []
+            for request in expiredRequests { outcomes.append(try await scalar(request, on: cold)) }
             #expect(outcomes.count == 2)
             for (request, outcome) in zip(expiredRequests, outcomes) {
                 guard case .accepted(let message) = outcome else { throw CancellationError() }
@@ -656,7 +669,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("Message append paths retain the scalar timestamp and replay the same wire milliseconds",
-          arguments: ["group", "hybrid", "hybrid-batch", "direct", "direct-room"], [false, true])
+          arguments: ["group", "hybrid", "direct"], [false, true])
     func messageAppendTimestampPrecision(path: String, nearDatabaseBounds: Bool) async throws {
         try await withForwardOwnerDatabases(mode: path.hasPrefix("hybrid") ? .large : .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
@@ -672,8 +685,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     rooms.append(room.roomID)
                 }
             }
-            let store = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
+            let store = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database,
+                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled),
+                shardID: "room-a", epoch: 0)
             func scalar(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
                 try await store.accept(command: request.command, capacityProfile: request.capacityProfile,
                     identifiers: request.identifiers, now: request.now)
@@ -702,13 +717,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())),
                         now: date.addingTimeInterval(Double(offset) * 0.25))
                 }
-                let outcomes: [V2SendMessageOutcome]
-                if path.hasSuffix("batch") { outcomes = try await store.acceptAtomically(requests: requests) }
-                else {
-                    var values: [V2SendMessageOutcome] = []
-                    for request in requests { values.append(try await scalar(request)) }
-                    outcomes = values
-                }
+                // The retired shared-transaction append API is no longer a
+                // production path. Check the current authorized persistence
+                // boundary for each room, retaining exact SQL and replay checks.
+                var outcomes: [V2SendMessageOutcome] = []
+                for request in requests { outcomes.append(try await scalar(request)) }
                 #expect(outcomes.count == requests.count)
                 for (request, outcome) in zip(requests, outcomes) {
                     guard case .accepted(let message) = outcome else { Issue.record("Expected fresh acceptance"); throw CancellationError() }
@@ -830,7 +843,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: mode) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let store = PostgresV2ReadReceiptStore(database: database)
-            let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
             let dates = [Date(timeIntervalSince1970: 946_684_800.00000075),
                          Date(timeIntervalSince1970: 946_684_799.99999925),
                          base.addingTimeInterval(0.1234567),
@@ -839,9 +851,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("UPDATE im_v2.rooms SET room_sequence = \(bind: dates.count) WHERE room_id = \(bind: roomUUID)").run()
             func batch(_ requests: [V2ReadReceiptRecordRequest]) async throws -> [V2ReadReceiptRecordResult] {
                 if path == "mixed" { return try await store.recordBatch(requests) }
-                let result = path == "owner"
-                    ? try await store.recordGroupsOwnerValidated(requests.map { .init(request: $0, ownerRoute: route) })
-                    : try await store.recordGroups(requests)
+                if path == "owner" {
+                    return try await withRoomActivation(database: database, roomID: roomID) { token in
+                        try await store.recordBatchActivationValidated(requests, scope: .init(tokens: [token]))
+                    }
+                }
+                let result = try await store.recordGroups(requests)
                 return try result.map {
                     switch $0 {
                     case .success(.handled(let outcome)): return .success(outcome)
@@ -895,7 +910,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Message storage checks caller-supplied clocks and isolates invalid batch entries",
+    @Test("Authorized message storage rejects invalid clocks without blocking valid requests",
           arguments: ["group", "hybrid", "direct-room"])
     func messageStorageClockBounds(path: String) async throws {
         try await withForwardOwnerDatabases(mode: path == "hybrid" ? .large : .standard) { database, _, sql, _, _ in
@@ -909,66 +924,56 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 targetRoom = room.roomID
             } else { targetRoom = roomID }
-            let store = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
-            let admission = store
-            let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
-            func request(at date: Date, actor: UserID) throws -> V2RoomWriteRequest {
-                .init(command: try .init(roomID: targetRoom, senderUserID: actor, clientMessageID: .init(uuid: UUID()),
-                    text: "clock fixture", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())), now: date)
-            }
-            func scalar(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
-                try await store.accept(command: request.command, capacityProfile: request.capacityProfile,
-                    identifiers: request.identifiers, now: request.now)
-            }
-            func snapshot() async throws -> [String] {
-                var values: [String] = []
-                for table in ["messages", "message_send_completions", "direct_message_denials", "rooms", "room_memberships",
-                    "room_events", "room_timeline_activities",
-                    "room_admission", "shard_admission_pools", "direct_room_pairs", "user_sync_log", "user_sync_sequences"] {
-                    let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
-                    values.append(try #require(row).value)
+            try await withRoomActivation(database: database, roomID: targetRoom) { token in
+                let store = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database,
+                        strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled),
+                    shardID: "room-a", epoch: 0, activationToken: token)
+                func request(at date: Date, actor: UserID) throws -> V2RoomWriteRequest {
+                    .init(command: try .init(roomID: targetRoom, senderUserID: actor, clientMessageID: .init(uuid: UUID()),
+                        text: "clock fixture", limits: .init(maxUTF8Bytes: 64)), capacityProfile: profile,
+                        identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())), now: date)
                 }
-                return values
-            }
-            guard case .accepted = try await scalar(request(at: base, actor: senderID)) else { throw CancellationError() }
-            // Start with a finite driver-encodable date outside PostgreSQL's
-            // range. A missing guard fails this requirement before the test
-            // reaches non-finite dates that the driver's encoder cannot handle.
-            for (index, seconds) in [-1e12, Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude,
-                                     -.greatestFiniteMagnitude, 1e14, -1e14].enumerated() {
-                let bad = try request(at: Date(timeIntervalSince1970: seconds), actor: senderID)
-                let good = try request(at: base, actor: .init(uuid: memberTwoUUID))
-                let before = try await snapshot()
-                var scalarError: V2RoomWriteStoreError?
-                do { _ = try await scalar(bad) } catch { scalarError = error as? V2RoomWriteStoreError }
-                try #require(scalarError == .corruptPersistenceState)
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
-                    try await store.acceptOwnerValidated(request: bad, ownerRoute: route)
+                func scalar(_ request: V2RoomWriteRequest) async throws -> V2SendMessageOutcome {
+                    try await store.accept(command: request.command, capacityProfile: request.capacityProfile,
+                        identifiers: request.identifiers, now: request.now)
                 }
-                let ordered = index.isMultiple(of: 2) ? [bad, good] : [good, bad]
-                let invalidIndex = index.isMultiple(of: 2) ? 0 : 1
-                #expect(await store.atomicBatchEligibility(requests: ordered)[invalidIndex] == false)
-                #expect(await store.atomicBatchPartitions(requests: ordered)[invalidIndex] == nil)
-                let batchError = V2AtomicRoomWriteBatchError(reason: .requestShape)
-                await #expect(throws: batchError) { try await store.acceptAtomically(requests: ordered) }
-                await #expect(throws: batchError) {
-                    try await store.acceptAtomicallyOwnerValidated(requests: ordered.map { .init(request: $0, ownerRoute: route) })
+                func snapshot() async throws -> [String] {
+                    var values: [String] = []
+                    for table in ["messages", "message_send_completions", "rooms", "room_memberships",
+                        "room_events", "room_timeline_activities",
+                        "room_admission", "shard_admission_pools", "direct_room_pairs", "user_sync_log", "user_sync_sequences"] {
+                        let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
+                        values.append(try #require(row).value)
+                    }
+                    return values
                 }
-                #expect(try await snapshot() == before)
-                async let rejected: Void = { () async -> Void in
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await admission.accept(bad) }
-                }()
-                async let accepted = admission.accept(good)
-                let (_, outcome) = try await (rejected, accepted)
-                guard case .accepted(let message) = outcome else { Issue.record("Normal sibling failed"); throw CancellationError() }
-                #expect(try await scalar(good) == .idempotent(message.receipt))
-                let after = try await snapshot()
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await admission.accept(bad) }
-                #expect(try await snapshot() == after)
+                guard case .accepted = try await scalar(request(at: base, actor: senderID)) else { throw CancellationError() }
+                // Start with a finite driver-encodable date outside PostgreSQL's
+                // range. A missing guard fails this requirement before the test
+                // reaches non-finite dates that the driver's encoder cannot handle.
+                for seconds in [-1e12, Double.nan, .infinity, -.infinity, .greatestFiniteMagnitude,
+                                         -.greatestFiniteMagnitude, 1e14, -1e14] {
+                    let bad = try request(at: Date(timeIntervalSince1970: seconds), actor: senderID)
+                    let good = try request(at: base, actor: .init(uuid: memberTwoUUID))
+                    let before = try await snapshot()
+                    var scalarError: V2RoomWriteStoreError?
+                    do { _ = try await scalar(bad) } catch { scalarError = error as? V2RoomWriteStoreError }
+                    try #require(scalarError == .corruptPersistenceState)
+                    #expect(try await snapshot() == before)
+                    async let rejected: Void = { () async -> Void in
+                        await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scalar(bad) }
+                    }()
+                    async let accepted = scalar(good)
+                    let (_, outcome) = try await (rejected, accepted)
+                    guard case .accepted(let message) = outcome else { Issue.record("Normal sibling failed"); throw CancellationError() }
+                    #expect(try await scalar(good) == .idempotent(message.receipt))
+                    let after = try await snapshot()
+                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scalar(bad) }
+                    #expect(try await snapshot() == after)
+                }
+                #expect(try await count("im_v2.messages", on: sql) == 9)
             }
-            #expect(try await count("im_v2.messages", on: sql) == 9)
         }
     }
 
@@ -1035,128 +1040,78 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("Message replay validates saved response times across direct store and service admission",
-          arguments: ["group", "hybrid", "direct-planner", "direct-room-log", "direct-denial"])
+    @Test("Successful message replay preserves immutable timestamps while adjacent sends commit",
+          arguments: ["group", "hybrid", "direct"])
     func messageReplayStoredTimestampBounds(path: String) async throws {
         try await withForwardOwnerDatabases(mode: path == "hybrid" ? .large : .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
             let targetRoom: RoomID
-            if path.hasPrefix("direct") {
-                let direct = PostgresV2DirectMessagingStore(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database), projectionDelivery: SuccessfulProjectionDelivery())
+            if path == "direct" {
                 let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
-                        roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
+                    roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { base }).openedIdentity(
                         actorUserID: senderID, operationID: .init(uuid: UUID()), targetUserID: .init(uuid: memberTwoUUID),
                         firstSubmissionDeadlineMilliseconds: 1_750_000_600_000)
                 targetRoom = room.roomID
-                if path == "direct-denial" {
-                    _ = try await PostgresV2AccountPreferenceOperationStore(database: database, projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:])).executePreferenceFixture(owner: .init(uuid: memberTwoUUID), operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: base)
-                }
             } else { targetRoom = roomID }
-            let store = PostgresV2RoomWriteStore(database: database)
-            let scalar = V2SendMessageService(store: store, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { base })
-            let client = UUID()
-            let command = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: senderID, clientMessageID: .init(uuid: client), text: "saved response")
-            let conflict = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: senderID, clientMessageID: command.clientMessageID, text: "changed request")
-            let original = try await scalar.send(command)
-            func expected(at date: Date) throws -> V2SendMessageOutcome {
-                switch original {
-                case .accepted(let message):
-                    let r = message.receipt
-                    return .idempotent(.init(messageID: r.messageID, roomID: r.roomID, roomSequence: r.roomSequence,
-                        timelineSequence: r.timelineSequence, senderUserID: r.senderUserID, clientMessageID: r.clientMessageID,
-                        groupCapacityClass: r.groupCapacityClass, sourceEventID: r.sourceEventID,
-                        acceptedMembershipRevision: r.acceptedMembershipRevision, directRecipientUserID: r.directRecipientUserID, createdAt: date))
-                case .denied(let denial):
-                    #expect(path == "direct-denial")
-                    return .denied(.init(roomID: denial.roomID, sourceEventID: denial.sourceEventID,
-                        timelineSequence: denial.timelineSequence, createdAt: date, reason: denial.reason))
-                default: Issue.record("Expected initial message acceptance or business denial"); throw CancellationError()
+            try await withRoomActivation(database: database, roomID: targetRoom, shardID: "room-a", epoch: 0) { token in
+                let writes = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0,
+                    activationToken: token)
+                let service = V2SendMessageService(store: writes, capacityProfile: profile,
+                    limits: try .init(maxUTF8Bytes: 64), now: { base })
+                let client = UUID()
+                let command = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: senderID,
+                    clientMessageID: .init(uuid: client), text: "saved response")
+                let conflict = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: senderID,
+                    clientMessageID: command.clientMessageID, text: "changed request")
+                guard case .accepted(let accepted) = try await service.send(command) else { throw CancellationError() }
+                let expected = V2SendMessageOutcome.idempotent(accepted.receipt)
+                #expect(accepted.createdAt == base)
+                #expect(try await service.send(command) == expected)
+                func setSavedTime(_ literal: String) async throws {
+                    // Exercise replacement with every production constraint enabled.
+                    try await sql.raw("""
+                        WITH removed AS (
+                            DELETE FROM im_v2.message_send_completions
+                            WHERE sender_user_id = \(bind: senderUUID) AND client_message_id = \(bind: client)
+                            RETURNING *
+                        )
+                        INSERT INTO im_v2.message_send_completions
+                        SELECT (jsonb_populate_record(NULL::im_v2.message_send_completions,
+                            to_jsonb(removed) || jsonb_build_object('created_at', \(bind: literal)::timestamptz))).*
+                        FROM removed
+                        """).run()
                 }
-            }
-            if path == "direct-denial" { guard case .denied = original else { throw CancellationError() } }
-            #expect(try await scalar.send(command) == expected(at: base))
-            let table = path == "direct-denial" ? "direct_message_denials" : "message_send_completions"
-            func setSavedTime(_ literal: String) async throws {
-                // Attempt replacement with all production constraints enabled.
-                // Permanent completion proofs must reject this operation.
-                try await sql.raw("""
-                    WITH removed AS (
-                        DELETE FROM im_v2.\(unsafeRaw: table)
-                        WHERE sender_user_id = \(bind: senderUUID) AND client_message_id = \(bind: client)
-                        RETURNING *
-                    )
-                    INSERT INTO im_v2.\(unsafeRaw: table)
-                    SELECT (jsonb_populate_record(NULL::im_v2.\(unsafeRaw: table),
-                        to_jsonb(removed) || jsonb_build_object('created_at', \(bind: literal)::timestamptz))).*
-                    FROM removed
-                    """).run()
-            }
-            func snapshot() async throws -> [String] {
-                var values: [String] = []
-                for table in ["messages", "message_send_completions", "direct_message_denials", "rooms", "room_memberships",
-                    "room_events", "room_timeline_activities",
-                    "room_admission", "shard_admission_pools", "direct_room_pairs", "user_sync_log", "user_sync_sequences"] {
-                    let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
-                    values.append(try #require(row).value)
+                func snapshot() async throws -> [String] {
+                    var values: [String] = []
+                    for table in ["messages", "message_send_completions", "rooms", "room_memberships",
+                        "room_events", "room_timeline_activities", "room_admission", "shard_admission_pools",
+                        "direct_room_pairs", "user_sync_log", "user_sync_sequences"] {
+                        let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: table) r").first(decoding: StringValueRow.self)
+                        values.append(try #require(row).value)
+                    }
+                    return values
                 }
-                return values
-            }
-            if path != "direct-denial" {
-                // Permanent completion proofs reject replacement, including
-                // extreme timestamps. Replays retain the original result.
                 for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
                     let before = try await snapshot()
                     await #expect(throws: (any Error).self) { try await setSavedTime(literal) }
                     #expect(try await snapshot() == before)
-                    for service in [scalar] {
-                        #expect(try await service.send(command) == expected(at: base))
-                        #expect(try await service.send(conflict) == .idempotencyConflict)
-                    }
-                    let sibling = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: .init(uuid: memberTwoUUID),
-                        clientMessageID: .init(uuid: UUID()), text: "normal sibling")
-                    async let replay = scalar.send(command)
-                    async let accepted = scalar.send(sibling)
-                    let (original, outcome) = try await (replay, accepted)
-                    let expectedOriginal = try expected(at: base)
-                    #expect(original == expectedOriginal)
-                    guard case .accepted(let message) = outcome else { throw CancellationError() }
-                    #expect(try await scalar.send(sibling) == .idempotent(message.receipt))
-                }
-            } else {
-            for literal in ["infinity", "-infinity", "294276-12-31 23:59:59.999999+00"] {
-                try await setSavedTime(literal)
-                let before = try await snapshot()
-                for service in [scalar] {
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await service.send(command) }
+                    #expect(try await service.send(command) == expected)
                     #expect(try await service.send(conflict) == .idempotencyConflict)
+                    let sibling = V2AuthenticatedSendMessage(roomID: targetRoom,
+                        actorUserID: .init(uuid: memberTwoUUID), clientMessageID: .init(uuid: UUID()), text: "normal sibling")
+                    async let replay = service.send(command)
+                    async let newSend = service.send(sibling)
+                    let (original, outcome) = try await (replay, newSend)
+                    #expect(original == expected)
+                    guard case .accepted(let message) = outcome else { throw CancellationError() }
+                    #expect(try await service.send(sibling) == .idempotent(message.receipt))
                 }
-                #expect(try await snapshot() == before)
-                // An adjacent valid send must complete even when the replay
-                // uses the batcher's ordinary-path fallback and fails.
-                let sibling = V2AuthenticatedSendMessage(roomID: targetRoom, actorUserID: .init(uuid: memberTwoUUID),
-                    clientMessageID: .init(uuid: UUID()), text: "normal sibling")
-                async let rejected: Void = { () async -> Void in
-                    await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scalar.send(command) }
-                }()
-                async let accepted = scalar.send(sibling)
-                let (_, outcome) = try await (rejected, accepted)
-                guard case .accepted(let message) = outcome else { Issue.record("Valid sibling did not commit"); throw CancellationError() }
-                #expect(try await scalar.send(sibling) == .idempotent(message.receipt))
-                let after = try await snapshot()
-                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) { try await scalar.send(command) }
-                #expect(try await snapshot() == after)
+                #expect(try await count("im_v2.messages", on: sql) == 4)
+                #expect(try await count("im_v2.message_send_completions", on: sql) == 4)
+                #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
             }
-            for date in [Date(timeIntervalSince1970: 946_684_800 - 211_813_488_000),
-                         Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 10), base] {
-                let literal = try await sql.raw("SELECT \(bind: date)::timestamptz::text AS value").first(decoding: StringValueRow.self)
-                try await setSavedTime(try #require(literal).value)
-                let before = try await snapshot()
-                for service in [scalar] { #expect(try await service.send(command) == expected(at: date)) }
-                #expect(try await snapshot() == before)
-            }
-            }
-            #expect(try await count("im_v2.messages", on: sql) == (path == "direct-denial" ? 3 : 4))
         }
     }
 
@@ -1512,11 +1467,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let command = try V2RecordReadReceiptCommand(roomID: targetRoom, actorUserID: senderID,
                 operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
             let operation = try #require(UUID(uuidString: command.operationID.rawValue))
-            let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
             func batch(_ requests: [V2ReadReceiptRecordRequest]) async throws -> [V2ReadReceiptRecordResult] {
                 let result: [V2GroupReadReceiptBatchResult]
                 if path == "owner-batch" || path == "group-owner" {
-                    result = try await store.recordGroupsOwnerValidated(requests.map { .init(request: $0, ownerRoute: route) })
+                    return try await withRoomActivation(database: database, roomID: targetRoom) { token in
+                        try await store.recordBatchActivationValidated(requests, scope: .init(tokens: [token]))
+                    }
                 } else if path == "group-batch" {
                     result = try await store.recordGroups(requests)
                 } else { return try await store.recordBatch(requests) }
@@ -1537,10 +1493,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     case .failure(let error): throw error
                     }
                 }
-                if path == "group" || path == "group-owner" {
-                    let result = path == "group" ? try await store.recordGroup(command: input, now: base)
-                        : try await store.recordGroupOwnerValidated(command: input, ownerRoute: route, now: base)
-                    guard case .handled(let outcome) = result else { throw CancellationError() }
+                if path == "group-owner" {
+                    return try await withRoomActivation(database: database, roomID: targetRoom) { token in
+                        try await store.recordActivationValidated(command: input, token: token, now: base)
+                    }
+                }
+                if path == "group" {
+                    guard case .handled(let outcome) = try await store.recordGroup(command: input, now: base) else { throw CancellationError() }
                     return outcome
                 }
                 return try await store.record(command: input, now: base)
@@ -1603,7 +1562,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try forwardImportTestProfile()
             let store = PostgresV2ModerationStore(database: database)
             try await sql.raw("UPDATE im_v2.room_memberships SET role = 'owner' WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: senderUUID)").run()
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database), capacityProfile: profile,
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0), capacityProfile: profile,
                 limits: try .init(maxUTF8Bytes: 64), now: { base })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "Moderation timestamp fixture")) else { throw CancellationError() }
@@ -1682,7 +1642,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let event = EventID(uuid: UUID())
                 let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
                 if ownerValidated {
-                    return try await store.applyTrustedSafetyOwnerValidated(command: command, ownerRoute: route, capacityProfile: profile, eventID: event, now: now)
+                    return try await withRoomActivation(database: database, roomID: roomID,
+                        shardID: route.shardID, epoch: Int64(route.epoch)) { token in
+                        try await PostgresV2ModerationStore(database: database,
+                            activationScope: .init(tokens: [token])).applyTrustedSafety(command: command,
+                                capacityProfile: profile, eventID: event, now: now)
+                    }
                 }
                 return try await store.applyTrustedSafety(command: command, capacityProfile: profile, eventID: event, now: now)
             }

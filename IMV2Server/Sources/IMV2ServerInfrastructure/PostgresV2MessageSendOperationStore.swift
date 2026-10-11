@@ -7,6 +7,7 @@ import IMV2Core
 import SQLKit
 import NIOCore
 import PostgresNIO
+import Synchronization
 
 public struct PostgresV2MessageSendOperationStore:Sendable {
     private var database:any Database
@@ -22,7 +23,6 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
     private let clock:@Sendable () -> Date
     private let committedMessageObserver: (any V2CommittedMessageBatchObserving)?
     private let sendOperationMetrics: V2SendOperationBatchMetrics?
-    private let combineOwnerPreflight: Bool
     private let preparationOwner = UUID()
     private let preparationMemory = V2SendPreparationResultMemory()
     private let roomAcceptance = V2DirectRoomSendAcceptanceMemory()
@@ -39,13 +39,13 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
     private var ownerTransactionObserver: (@Sendable (Int32, Bool, Int) async throws -> Void)?
     /// Opt in only when database and writes read the same physical owner.
     /// Control reservations still run after the owner connection is released.
-    public init(database:any Database,writes:PostgresV2RoomWriteStore,clock:@escaping @Sendable () -> Date = Date.init, committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil, sendOperationMetrics: V2SendOperationBatchMetrics? = nil, combineOwnerPreflight: Bool = false,
+    public init(database:any Database,writes:PostgresV2RoomWriteStore,clock:@escaping @Sendable () -> Date = Date.init, committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil, sendOperationMetrics: V2SendOperationBatchMetrics? = nil,
                 initializationDatabase: (any Database)? = nil) {
         self.database=(database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.durableOwner) ?? database
         let reader = initializationDatabase ?? database
         self.initializationDatabase = (reader as? V2EventLoopBalancedDatabase)?.usingObservationSource(.roomSendInitialization) ?? reader
         self.writes=writes;self.clock=clock;self.committedMessageObserver=committedMessageObserver
-        self.sendOperationMetrics=sendOperationMetrics;self.combineOwnerPreflight=combineOwnerPreflight
+        self.sendOperationMetrics=sendOperationMetrics
     }
     /// Binds a runtime-owned actual operation, never a queued preparation.
     /// The runtime must retain this execution through the complete SQL future.
@@ -60,163 +60,38 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         prepared.owner == preparationOwner
     }
 
-    public func send(_ command:V2MessageSendOperationCommand,token:V2RoomActivationToken,capacityProfile:V2CapacityProfile,identifiers:V2AcceptanceIdentifiers) async throws -> V2MessageSendOperationRecoveryResult {
-        guard command.command.roomID == token.roomID else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-        if !executionPrepared {
-            return try await withPreparedExecution([command], capacityProfile: capacityProfile, now: clock) {
-                try await $0.send(command, token: token, capacityProfile: capacityProfile, identifiers: identifiers)
+    public func send(_ command: V2MessageSendOperationCommand, token: V2RoomActivationToken,
+        capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIdentifiers) async throws -> V2MessageSendOperationRecoveryResult {
+        guard let messageID = identifiers.messageID.uuidValue, let eventID = identifiers.eventID.uuidValue else {
+            throw V2MessageOperationValidationError.invalidReceipt
+        }
+        let nextEvent = Mutex(false)
+        let factory = V2AcceptanceIDFactory(makeUUID: {
+            nextEvent.withLock { next in
+                defer { next.toggle() }
+                return next ? eventID : messageID
             }
+        })
+        let results = try await sendBatch([command], token: token, capacityProfile: capacityProfile,
+            identifiers: factory, now: clock)
+        guard results.count == 1, case .sendOperation(let result) = results[0] else {
+            throw V2MessageOperationValidationError.invalidReceipt
         }
-        let identity=try command.identity,fingerprint=try command.fingerprint
-        let preparations = try await prepareBatchAuthorizations([command], now: clock)
-        let committed: (V2MessageSendOperationRecoveryResult, V2SendMessageOutcome?) = try await v2WithRoomScopedTransaction(database:database, sendOperationMetrics: sendOperationMetrics) { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2MessageOperationValidationError.invalidReceipt }
-            if !writes.usesMemorySendPreparation { _ = try await lock(identity: identity, token: token, database: transaction) }
-            let processed = try await processSubmission(command, identity: identity, fingerprint: fingerprint,
-                token: token, capacityProfile: capacityProfile, transaction: transaction, sql: sql,
-                makeIdentifiers: { _ in identifiers }, now: clock, savepoint: "v2_message_domain_body",
-                authorizationPreparation: preparations[self.operationKey(identity: identity)])
-            return (processed.0, processed.1)
-        }
-        // Only a newly accepted domain result from the successfully committed
-        // outer transaction enters the existing bounded live-delivery observer.
-        if let outcome = committed.1 {
-            committedMessageObserver?.observeCommittedMessages([outcome], activation: token)
-        }
-        return committed.0
+        return result
     }
-    /// Commits the durable domain acceptance and all operation receipts in one
-    /// room-scoped transaction. Production memory-authorized sends rely on the
-    /// retained Actor lifecycle and unique message identity. Legacy control
-    /// workflows retain their existing operation fence.
+
+    /// Uses the same Policy Owner preparation and room execution as the Actor path.
     public func sendBatch(_ commands: [V2MessageSendOperationCommand], token: V2RoomActivationToken,
-                          capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIDFactory,
-                          now: @escaping @Sendable () -> Date) async throws -> [V2RoomMessagingResult] {
-        let prepared = try await prepareSendBatch(commands, token: token, now: now)
+        capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIDFactory,
+        now: @escaping @Sendable () -> Date) async throws -> [V2RoomMessagingResult] {
+        guard let policies = writes.currentPolicyAuthorizations else {
+            throw V2ActorContractError.invalidConfiguration("message policy preparation required")
+        }
+        let prepared = try await policies.prepareOwnerBatches(store: self, requests: [
+            .init(commands: commands, token: token, deadline: V2RoomSQLDeadline.boundedTransactionDeadline())
+        ], now: now)[0].get()
         return try await executePreparedSendBatch(prepared, capacityProfile: capacityProfile,
-                                                 identifiers: identifiers, now: now)
-    }
-
-    /// Prepares durable control obligations without entering the owner write
-    /// transaction. Cancellation/deadline never detaches the real preparation:
-    /// structured children must settle before this call returns.
-    public func prepareSendBatch(_ commands: [V2MessageSendOperationCommand], token: V2RoomActivationToken,
-                                 deadline: ContinuousClock.Instant? = nil,
-                                 now: @escaping @Sendable () -> Date) async throws -> V2PreparedMessageSendBatch {
-        guard !commands.isEmpty, commands.count <= 256,
-              commands.allSatisfy({ $0.command.roomID == token.roomID }) else {
-            throw V2RoomCallFailure.notAccepted(.invalidRequest)
-        }
-        let selectedDeadline: ContinuousClock.Instant
-        if let inherited = V2RoomSQLDeadline.current {
-            selectedDeadline = min(deadline ?? inherited, inherited)
-        } else {
-            selectedDeadline = deadline ?? V2RoomSQLDeadline.boundedTransactionDeadline()
-        }
-        try Task.checkCancellation()
-        guard ContinuousClock.now < selectedDeadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        let preparations = try await V2RoomSQLDeadline.withDeadline(selectedDeadline) {
-            try await withThrowingTaskGroup(of: PreparedSendSnapshot.self) { group in
-                group.addTask {
-                    let budget = try await readPreparationSnapshot(commands, capacityProfileID: nil)
-                    let preflight = combineOwnerPreflight && writes.needsOperationAuthorizationPreparation
-                        ? budget.mapValues { $0[0].preflight } : nil
-                    let authorization = try await prepareBatchAuthorizations(commands, now: now, preloaded: preflight)
-                    return PreparedSendSnapshot(authorizations: authorization, budget: budget)
-                }
-                group.addTask {
-                    try await Task.sleep(until: selectedDeadline, clock: .continuous)
-                    throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
-                }
-                defer { group.cancelAll() }
-                guard let result = try await group.next() else { throw V2RoomCallFailure.notAccepted(.cancelled) }
-                return result
-            }
-        }
-        try Task.checkCancellation()
-        guard ContinuousClock.now < selectedDeadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        return .init(owner: preparationOwner, commands: commands, token: token,
-                     preparations: preparations.authorizations, deadline: selectedDeadline, preparationSnapshot: preparations.budget)
-    }
-
-    /// A room policy snapshot can be queued without retaining an execution
-    /// permit. Only unfinished, unexpired identities require fresh policy.
-    func prepareSendBatch(_ commands: [V2MessageSendOperationCommand], token: V2RoomActivationToken,
-        policyDirectory: PostgresV2RoomPolicyAuthorizationDirectory, deadline: ContinuousClock.Instant,
-        now: @escaping @Sendable () -> Date) async throws -> V2PreparedMessageSendBatch {
-        guard !commands.isEmpty, commands.count <= 256,
-              commands.allSatisfy({ $0.command.roomID == token.roomID }) else {
-            throw V2RoomCallFailure.notAccepted(.invalidRequest)
-        }
-        try Task.checkCancellation()
-        guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        let prepared = try await prepareOwnerBatches([.init(commands: commands, token: token, deadline: deadline)],
-            policyDirectory: policyDirectory, now: now)
-        return try prepared[0].get()
-    }
-
-    func prepareSendBatch(_ commands: [V2MessageSendOperationCommand], token: V2RoomActivationToken,
-        policies: PostgresV2RoomPolicyAuthorizationRegistry, deadline: ContinuousClock.Instant,
-        now: @escaping @Sendable () -> Date) async throws -> V2PreparedMessageSendBatch {
-        guard let sender = commands.first?.command.senderUserID.uuidValue,
-              !commands.isEmpty, commands.count <= 256,
-              commands.allSatisfy({ $0.command.roomID == token.roomID && $0.command.senderUserID.uuidValue == sender }) else {
-            throw V2RoomCallFailure.notAccepted(.invalidRequest)
-        }
-        try Task.checkCancellation()
-        let policy = try await policies.runtime(sender: sender, token: token)
-        return try await prepareSendBatch(commands, token: token, policy: policy, deadline: deadline, now: now)
-    }
-
-    func prepareSendBatch(_ commands: [V2MessageSendOperationCommand], token: V2RoomActivationToken,
-        policy: PostgresV2RoomPolicyAuthorization, deadline: ContinuousClock.Instant,
-        now: @escaping @Sendable () -> Date) async throws -> V2PreparedMessageSendBatch {
-        guard !commands.isEmpty, commands.count <= 256,
-              commands.allSatisfy({ $0.command.roomID == token.roomID }) else {
-            throw V2RoomCallFailure.notAccepted(.invalidRequest)
-        }
-        let selected = V2RoomSQLDeadline.current.map { min($0, deadline) } ?? deadline
-        try Task.checkCancellation()
-        guard selected > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        return try await V2RoomSQLDeadline.withDeadline(selected) {
-            try await withThrowingTaskGroup(of: V2PreparedMessageSendBatch.self) { group in
-                group.addTask {
-                    try await self.preparePolicySendSnapshot(commands, token: token, policy: policy, deadline: selected, now: now)
-                }
-                group.addTask {
-                    try await Task.sleep(until: selected, clock: .continuous)
-                    throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
-                }
-                defer { group.cancelAll() }
-                guard let result = try await group.next() else { throw V2RoomCallFailure.notAccepted(.cancelled) }
-                return result
-            }
-        }
-    }
-
-    private func preparePolicySendSnapshot(_ commands: [V2MessageSendOperationCommand], token: V2RoomActivationToken,
-        policy: PostgresV2RoomPolicyAuthorization, deadline selected: ContinuousClock.Instant,
-        now: @escaping @Sendable () -> Date) async throws -> V2PreparedMessageSendBatch {
-        let budget = try await readPreparationSnapshot(commands, capacityProfileID: nil)
-        let prior = try await database.withConnection { borrowed in
-            borrowed.eventLoop.makeFutureWithTask {
-                guard let sql = borrowed as? any SQLDatabase else { throw V2MessageOperationValidationError.invalidReceipt }
-                return try await PostgresV2DurableSendBatchReceipts().existing(commands.map { .init(command: $0, attempt: nil) }, sql: sql)
-            }
-        }.get()
-        let current = try timestamp(now())
-        let pending = try commands.filter { command in
-            let key = try operationKey(identity: command.identity)
-            return prior[key] == nil && command.firstSubmissionDeadlineMilliseconds > current
-                && command.firstSubmissionDeadlineMilliseconds - current <= 86_400_000
-        }
-        let preparation = pending.isEmpty ? nil : try await policy.prepareBatch(commands: pending.map(\.command), callerDeadline: selected)
-        guard preparation == nil || preparation?.activation == token else { throw V2RoomActivationLeaseError.activationChanged }
-        try Task.checkCancellation()
-        guard selected > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        return .init(owner: preparationOwner, commands: commands, token: token, preparations: [:],
-            deadline: preparation.map { min(selected, $0.deadline) } ?? selected,
-            preparationSnapshot: budget, policyPreparations: preparation.map { [$0] } ?? [])
+            identifiers: identifiers, now: now)
     }
 
     /// Retains actual permits around the physical SQL future, never in queued
@@ -240,7 +115,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             let scoped = try self.writes.usingActivationScope(.init(tokens: [rebound.token], reliesOnRuntimeLifecycle: writes.usesMemorySendPreparation)).usingPolicyExecution(execution)
             var preparations = rebound.preparations
             for command in rebound.commands where try policy.contains(command.command) {
-                preparations[self.operationKey(identity: try command.identity)] = .prepared(try scoped.operationBatchScopedStore(for: command.command))
+                preparations[self.operationKey(identity: try command.identity)] = try scoped.operationBatchScopedStore(for: command.command)
             }
             rebound.preparations = preparations
             rebound.policyPreparations.removeFirst()
@@ -250,16 +125,13 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         }
     }
 
-    /// One physical-owner snapshot and bounded control reservation set for
-    /// several room turns. Infrastructure/COMMIT uncertainty is never retried
-    /// through per-room preparation. Structured cancellation waits for the
-    /// real owner/control futures before releasing the preparation permit.
+    /// Prepares current Policy Owner permissions independently for each room.
+    /// No durable authorization reservation is created during preparation.
     func prepareOwnerBatches(_ requests: [V2MessageSendPreparationRequest],
         policyDirectory: PostgresV2RoomPolicyAuthorizationDirectory,
-        readAdmission: V2DatabaseWorkAdmissionController? = nil,
         now: @escaping @Sendable () -> Date) async throws
         -> [Result<V2PreparedMessageSendBatch, any Error>] {
-        let inputs = try await readOwnerPreparationInputs(requests, readAdmission: readAdmission, now: now)
+        let inputs = try await readOwnerPreparationInputs(requests, now: now)
         var results = Array<Result<V2PreparedMessageSendBatch, any Error>?>(repeating: nil, count: inputs.count)
         await withTaskGroup(of: (Int, Result<V2PreparedMessageSendBatch, any Error>).self) { group in
             var next = 0
@@ -281,13 +153,14 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
     }
 
     /// Current policy preparation reads only bounded recent results in memory.
-    /// Compatibility preparation borrows SQL resources for its owner snapshot.
     /// The opaque input can be retained through policy demand; it never grants
     /// ownership or authority to bypass the durable execution fence.
     package func readOwnerPreparationInputs(_ requests: [V2MessageSendPreparationRequest],
-        readAdmission: V2DatabaseWorkAdmissionController? = nil,
         now: @escaping @Sendable () -> Date) async throws
         -> [Result<V2OwnerMessageSendPreparationInput, any Error>] {
+        guard writes.usesMemorySendPreparation else {
+            throw V2ActorContractError.invalidConfiguration("message policy preparation required")
+        }
         let preparationReadStartedAt = ContinuousClock.now
         defer { V2SendPathTrace.current?.record("prepare_inputs", from: preparationReadStartedAt) }
         guard !requests.isEmpty, requests.count <= 128,
@@ -313,39 +186,17 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         if let earliest = selected.map({ $0.1 }).min() {
             let commands = selected.flatMap { requests[$0.0].commands }
             let snapshot = try await V2RoomSQLDeadline.withDeadline(earliest) {
-                try await v2WithAdmittedRoomDatabaseWork(writes.usesMemorySendPreparation ? nil : readAdmission, workClass: .sync,
-                    callerDeadline: earliest) {
-                    try await v2MeasureSendOperationStage(.preparationOwnerRead, metrics: writes.usesMemorySendPreparation ? nil : sendOperationMetrics) {
-                        let budget = writes.usesMemorySendPreparation
-                            ? await preparationMemory.snapshot(commands)
-                            : try await readPreparationSnapshot(commands, capacityProfileID: nil)
-                        // Preparation preflight already reads the immutable owner
-                        // envelope. Decode and validate it here rather than
-                        // borrowing another connection to read the same row.
-                        // The locked execution transaction still checks it again.
-                        var prior: Set<String> = []
-                        for command in commands {
-                            let identity = try command.identity, key = operationKey(identity: identity)
-                            guard let row = budget[key]?.first else {
-                                if writes.usesMemorySendPreparation { continue }
-                                throw V2MessageOperationValidationError.invalidReceipt
-                            }
-                            guard row.completed else {
-                                guard row.receipt == nil, row.domainFingerprint == nil else {
-                                    throw V2MessageOperationValidationError.invalidReceipt
-                                }
-                                continue
-                            }
-                            guard let receipt = row.receipt, let domain = row.domainFingerprint else {
-                                throw V2MessageOperationValidationError.invalidReceipt
-                            }
-                            _ = try decodeExisting(.init(receipt: receipt, domainFingerprint: domain),
-                                identity: identity, fingerprint: command.fingerprint, domain: command.command.fingerprint)
-                            prior.insert(key)
-                        }
-                        return (budget, prior)
-                    }
+                let budget = await preparationMemory.snapshot(commands)
+                var prior: Set<String> = []
+                for command in commands {
+                    let identity = try command.identity, key = operationKey(identity: identity)
+                    guard let row = budget[key]?.first else { continue }
+                    let receipt = row.receipt, domain = row.domainFingerprint
+                    _ = try decodeExisting(.init(receipt: receipt, domainFingerprint: domain),
+                        identity: identity, fingerprint: command.fingerprint, domain: command.command.fingerprint)
+                    prior.insert(key)
                 }
+                return (budget, prior)
             }
             let current = try timestamp(now())
             for (index, deadline) in selected {
@@ -440,74 +291,6 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         return policies
     }
 
-    public func prepareOwnerBatches(_ requests: [V2MessageSendPreparationRequest],
-                                   now: @escaping @Sendable () -> Date) async throws
-        -> [Result<V2PreparedMessageSendBatch, any Error>] {
-        guard !requests.isEmpty, requests.count <= 128 else {
-            throw V2RoomCallFailure.notAccepted(.invalidRequest)
-        }
-        var remaining = 256
-        for request in requests {
-            guard request.commands.count <= remaining else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-            remaining -= request.commands.count
-        }
-        try Task.checkCancellation()
-        var results = Array<Result<V2PreparedMessageSendBatch, any Error>?>(repeating: nil, count: requests.count)
-        var accepted: [(index: Int, deadline: ContinuousClock.Instant)] = []
-        let inherited = V2RoomSQLDeadline.current
-        for (index, request) in requests.enumerated() {
-            do {
-                guard !request.commands.isEmpty,
-                      request.commands.allSatisfy({ $0.command.roomID == request.token.roomID }) else {
-                    throw V2RoomCallFailure.notAccepted(.invalidRequest)
-                }
-                for command in request.commands {
-                    _ = try persistenceKey(identity: command.identity)
-                    _ = try command.fingerprint
-                }
-                let deadline = inherited.map { min($0, request.deadline) } ?? request.deadline
-                guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-                accepted.append((index, deadline))
-            } catch { results[index] = .failure(error) }
-        }
-        guard let deadline = accepted.map(\.deadline).min() else {
-            return try results.map { guard let result = $0 else { throw V2MessageOperationValidationError.invalidReceipt }; return result }
-        }
-        let selected = accepted
-        let commands = selected.flatMap { requests[$0.index].commands }
-        let preparations = try await V2RoomSQLDeadline.withDeadline(deadline) {
-            try await withThrowingTaskGroup(of: PreparedSendSnapshot.self) { group in
-                group.addTask {
-                    let budget = try await readPreparationSnapshot(commands, capacityProfileID: nil)
-                    let preflight = combineOwnerPreflight && writes.needsOperationAuthorizationPreparation
-                        ? budget.mapValues { $0[0].preflight } : nil
-                    let authorization = try await prepareBatchAuthorizations(commands, now: now, preloaded: preflight)
-                    return PreparedSendSnapshot(authorizations: authorization, budget: budget)
-                }
-                group.addTask {
-                    try await Task.sleep(until: deadline, clock: .continuous)
-                    throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
-                }
-                defer { group.cancelAll() }
-                guard let value = try await group.next() else { throw V2RoomCallFailure.notAccepted(.cancelled) }
-                return value
-            }
-        }
-        try Task.checkCancellation()
-        guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        for value in selected {
-            let request = requests[value.index]
-            var scoped: [String: BatchAuthorizationPreparation] = [:]
-            for command in request.commands {
-                let key = operationKey(identity: try command.identity)
-                if let preparation = preparations.authorizations[key] { scoped[key] = preparation }
-            }
-            results[value.index] = .success(.init(owner: preparationOwner, commands: request.commands,
-                token: request.token, preparations: scoped, deadline: value.deadline, preparationSnapshot: preparations.budget))
-        }
-        return try results.map { guard let result = $0 else { throw V2MessageOperationValidationError.invalidReceipt }; return result }
-    }
-
     /// Only this store (or its immutable value copy) can execute the prepared
     /// handle. Receipt, owner epoch, activation and authorization are rechecked
     /// in the original transaction; preparation is never a write permission.
@@ -519,10 +302,8 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         var values: [V2RoomMessagingResult] = []
         for command in prepared.commands {
             let identity = try command.identity, key = operationKey(identity: identity)
-            guard let rows = prepared.preparationSnapshot[key], rows.count == 1, rows[0].completed else { return nil }
-            guard let receipt = rows[0].receipt, let domain = rows[0].domainFingerprint else {
-                throw V2MessageOperationValidationError.invalidReceipt
-            }
+            guard let rows = prepared.preparationSnapshot[key], rows.count == 1 else { return nil }
+            let receipt = rows[0].receipt, domain = rows[0].domainFingerprint
             values.append(.sendOperation(try decodeExisting(.init(receipt: receipt, domainFingerprint: domain),
                 identity: identity, fingerprint: command.fingerprint, domain: command.command.fingerprint)))
         }
@@ -550,8 +331,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         guard prepared.owner == preparationOwner else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         if let replay = try preparedReplay(prepared) { return replay }
         if !executionPrepared {
-            return try await withPreparedExecution(prepared.commands, capacityProfile: capacityProfile, now: now, snapshot: prepared.preparationSnapshot,
-                roomShards: writes.usesMemorySendPreparation ? [prepared.token.roomID: prepared.token.owner.shardID] : nil) {
+            return try await withPreparedExecution {
                 try await $0.executePreparedScalarSendBatch(prepared, capacityProfile: capacityProfile, identifiers: identifiers, now: now)
             }
         }
@@ -588,9 +368,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
               prepared.commands.count <= 256 else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         if let replay = try preparedReplay(prepared) { return replay }
         if !executionPrepared {
-            return try await withPreparedExecution(prepared.commands, capacityProfile: capacityProfile, now: now,
-                snapshot: prepared.preparationSnapshot,
-                roomShards: writes.usesMemorySendPreparation ? [prepared.token.roomID: prepared.token.owner.shardID] : nil) {
+            return try await withPreparedExecution {
                 try await $0.executePreparedRoomSend(prepared, capacityProfile: capacityProfile, identifiers: identifiers, now: now)
             }
         }
@@ -605,7 +383,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 !$0.command.media.isEmpty || !$0.command.mentions.isEmpty || $0.command.replyTo != nil || $0.command.forwardedFrom != nil
             }
             let keys = try prepared.commands.map { try operationKey(identity: $0.identity) }
-            var reason: V2SendOperationOwnerScalarFallbackReason = complex ? .complexPayload : .legacyOrNotReady
+            var reason: V2SendOperationOwnerScalarFallbackReason = complex ? .complexPayload : .optimizationNotApplicable
             if !complex, Set(keys).count == keys.count {
                 if let values = try await executeSingleStatementRoomTurn(prepared,
                     capacityProfile: capacityProfile, identifiers: identifiers, now: now) {
@@ -631,9 +409,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         guard prepared.owner == preparationOwner else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         if let replay = try preparedReplay(prepared) { return replay }
         if !executionPrepared {
-            return try await withPreparedExecution(prepared.commands, capacityProfile: capacityProfile, now: now,
-                snapshot: prepared.preparationSnapshot,
-                roomShards: writes.usesMemorySendPreparation ? [prepared.token.roomID: prepared.token.owner.shardID] : nil) {
+            return try await withPreparedExecution {
                 try await $0.executePreparedRoomSendPreborrowing(prepared, capacityProfile: capacityProfile,
                     identifiers: identifiers, now: now, control: control)
             }
@@ -697,10 +473,9 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
         let operationKeys = try commands.map { try operationKey(identity: $0.identity) }
-        let receiptKeys = try commands.map { try V2DurableSendBatchReceiptInput(command: $0, attempt: nil).key }
+        let receiptKeys = try commands.map { try V2DurableSendBatchReceiptInput(command: $0).key }
         return .init(ordered: commands.indices.sorted { receiptKeys[$0] < receiptKeys[$1] },
             operationKeys: operationKeys,
-            grantKeys: keys.map { [$0.room, $0.actor, $0.operation].map { $0.uuidString.lowercased() }.joined(separator: ":") },
             lockKeys: keys.map { .init(roomID: $0.room, senderID: $0.actor, clientMessageID: $0.operation) },
             successMetadata: try commands.map { try V2SendSuccessMetadata.Prepared($0) })
     }
@@ -774,10 +549,9 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             guard command.firstSubmissionDeadlineMilliseconds > milliseconds,
                   command.firstSubmissionDeadlineMilliseconds - milliseconds <= 86_400_000,
                   command.command.roomID == prepared.token.roomID,
-                  case .prepared(let store) = prepared.preparations[plan.operationKeys[ordinal]],
+                  let store = prepared.preparations[plan.operationKeys[ordinal]],
                   let execution = store.policyExecution, execution.activation == prepared.token,
                   let policy = execution.snapshot.policy,
-                  store.authorizationGrants == nil,
                   let accepted = prepared.acceptedDirect[plan.operationKeys[ordinal]] else { return nil }
             try store.validateAuthorizationCommand(command.command)
             policyInputs.append((execution, command.command))
@@ -871,12 +645,14 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                     for ordinal in ordered {
                         let operation = operations[ordinal], handle = prepared
                         let command = operation
-                        if case .prepared(let store) = handle.preparations[plan.operationKeys[ordinal]] {
+                        if let store = handle.preparations[plan.operationKeys[ordinal]] {
                             scoped[ordinal] = store
-                            let grantKey = plan.grantKeys[ordinal]
-                            inputs[ordinal] = .init(command: command, attempt: store.authorizationGrants?[grantKey]?.attempt)
+                            guard store.policyExecution != nil else {
+                                throw V2ActorContractError.invalidConfiguration("message policy execution required")
+                            }
+                            inputs[ordinal] = .init(command: command)
                         } else {
-                            inputs[ordinal] = .init(command: command, attempt: nil)
+                            inputs[ordinal] = .init(command: command)
                         }
                     }
                     var policyInputs: [(execution: V2RoomPolicyExecution, command: V2SendMessageCommand)] = []
@@ -903,8 +679,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 let successMetadata = try ordered.map { try V2SendSuccessMetadata.Entry(plan.successMetadata[$0], now: resolvedAt) }
                 return try await V2SendSuccessMetadata.$current.withValue(successMetadata) {
                 let combinesCurrentDirect = Set(try allInputs.map { try $0.key }).count == allInputs.count && ordered.allSatisfy { ordinal in
-                    guard inputs[ordinal]?.attempt == nil,
-                          let snapshot = scoped[ordinal]?.policyExecution?.snapshot,
+                    guard let snapshot = scoped[ordinal]?.policyExecution?.snapshot,
                           snapshot.policy != nil else { return false }
                     return true
                 }
@@ -937,7 +712,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                                         ordinal: ordinal, now: resolvedAt) else { return nil }
                                 runtimeRows[ordinal] = row
                             }
-                            return .init(receipts: .init(existing: [:], completions: [:], closedKeys: [], checks: [:]), rooms: runtimeRows)
+                            return .init(receipts: .init(existing: [:], completions: [:]), rooms: runtimeRows)
                         }
                     } else { runtimeRead = nil }
                     let combined: V2DurableOwnerPreparedRead
@@ -955,7 +730,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                         try await receiptSets.snapshot(allInputs, sql: sql)
                     }
                 }
-                let (existing, completions, closedKeys, checks) = (snapshot.existing, snapshot.completions, snapshot.closedKeys, snapshot.checks)
+                let (existing, completions) = (snapshot.existing, snapshot.completions)
                 var results: [Int: V2MessageSendOperationRecoveryResult] = [:]
                 // A turn is indivisible: an unsupported item excludes the whole turn.
                 var fresh: [V2RoomWriteDurableOwnerBatchPath.Item] = []
@@ -964,13 +739,10 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 for ordinal in operations.indices {
                     let input = inputs[ordinal]!, key = try input.key, command = input.command
                     if let receipt = existing[key] { replay[ordinal] = receipt; continue }
-                    guard completions[key] == nil, !closedKeys.contains(key), let store = scoped[ordinal],
+                    guard completions[key] == nil, let store = scoped[ordinal],
                           command.firstSubmissionDeadlineMilliseconds > milliseconds,
                           command.firstSubmissionDeadlineMilliseconds - milliseconds <= 86_400_000 else {
                         eligible = false; break
-                    }
-                    if input.attempt != nil {
-                        guard case .ready? = checks[key] else { eligible = false; break }
                     }
                     try store.validateAuthorizationCommand(command.command)
                     let identity = try command.identity, ids = try persistenceKey(identity: identity)
@@ -984,11 +756,6 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                     var policies: [V2DirectSendPolicyCache.Key: V2DirectSendControlPolicy]? = nil
                     if let policy = store.policyExecution?.snapshot.policy {
                         policies = [.init(roomID: ids.room, senderID: ids.actor): policy]
-                    } else if let grants = store.authorizationGrants {
-                        policies = [:]
-                        for grant in grants.values {
-                            policies?[.init(roomID: grant.attempt.roomID, senderID: grant.policy.sender.userID)] = grant.policy
-                        }
                     }
                     fresh.append(.init(index: ordinal,
                         request: try writeRequests[ordinal] ?? .init(command: command.command, capacityProfile: capacityProfile,
@@ -1015,26 +782,12 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                     throw V2AtomicRoomWriteBatchError(reason: .authorizationState)
                 }
                 let commits = appended.commits
-                let acceptedInputs = commits.map { inputs[$0.originalIndex]! }
-                // Completion facts already contain current sends' success
-                // identity and ACK time. Legacy sends retain only their actual
-                // authorization proof obligation in this transaction.
-                let proofWrites = try await v2MeasureSendOperationStage(.ownerProof, metrics: sendOperationMetrics) {
-                    try await receiptSets.prepareProofs(acceptedInputs, now: resolvedAt, sql: sql)
-                }
-                var permanent: [V2DurableSendBatchPermanentReceipt] = []
                 for commit in commits {
                     let command = inputs[commit.originalIndex]!.command
                     guard let accepted = commit.commit.outcome.acceptanceReceipt else { throw V2MessageOperationValidationError.invalidReceipt }
                     let receipt = try V2MessageSendOperationReceipt(identity: command.identity, fingerprint: command.fingerprint,
                         outcome: .accepted(.init(messageID: accepted.messageID, roomSequence: accepted.roomSequence)), resolvedAtMilliseconds: milliseconds)
-                    permanent.append(.init(receipt: receipt, domainFingerprint: command.command.fingerprint))
                     results[commit.originalIndex] = .receipt(receipt)
-                }
-                if !combinesCurrentDirect {
-                    try await v2MeasureSendOperationStage(.ownerReceiptPersistence, metrics: sendOperationMetrics) {
-                        try await receiptSets.persistAccepted(permanent, proofs: proofWrites, sql: sql)
-                    }
                 }
                 // Validate the complete response while the enclosing transaction owns all staged writes.
                 let values = try operations.indices.map { ordinal in
@@ -1047,7 +800,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
                 return response
                 }
             }
-            guard let values = committed.results else { return .scalarFallback(.legacyOrNotReady) }
+            guard let values = committed.results else { return .scalarFallback(.optimizationNotApplicable) }
             await afterCommit { [preparationMemory, roomAcceptance, sendOperationMetrics, committedMessageObserver] in
                 let results = values.map { V2RoomMessagingResult.sendOperation($0) }
                 await preparationMemory.remember(commands: prepared.commands, results: results)
@@ -1071,7 +824,6 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             case V2RoomActivationLeaseError.outcomeUnknown: canRetryScalar = false
             case is V2AtomicRoomWriteBatchError, is V2RoomActivationLeaseError,
                  is V2RoomOwnerFenceError, is LateShardAdmissionRejection,
-                 is V2DirectAuthorizationReceiptError, is V2DirectAuthorizationIntentError,
                  is V2RoomWriteStoreError:
                 canRetryScalar = true
             case V2RoomCallFailure.rolledBack: canRetryScalar = true
@@ -1150,7 +902,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         makeIdentifiers: @Sendable (Date) throws -> V2AcceptanceIdentifiers,
         now: @Sendable () -> Date,
         savepoint: String,
-        authorizationPreparation: BatchAuthorizationPreparation? = nil,
+        authorizationPreparation: PostgresV2RoomWriteStore? = nil,
         isOperationBatch: Bool = false,
         priorShardAdmissionReservations: [ShardAdmissionReservation] = [],
         acceptanceRejection: LateShardAdmissionRejection? = nil
@@ -1177,7 +929,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         makeIdentifiers: @Sendable (Date) throws -> V2AcceptanceIdentifiers,
         now: @Sendable () -> Date,
         savepoint: String,
-        authorizationPreparation: BatchAuthorizationPreparation? = nil,
+        authorizationPreparation: PostgresV2RoomWriteStore? = nil,
         isOperationBatch: Bool = false,
         priorShardAdmissionReservations: [ShardAdmissionReservation] = [],
         acceptanceRejection: LateShardAdmissionRejection? = nil
@@ -1194,14 +946,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         var shardAdmissionReservation: ShardAdmissionReservation?
         do {
             switch authorizationPreparation {
-            case .failed(.identityConflict):
-                try await rollbackBody(sql, savepoint: savepoint)
-                return (.fingerprintConflict, nil, nil)
-            case .failed(.actorNotEligible):
-                throw V2RoomWriteStoreError.actorNotEligible
-            case .failed(.roomNotFound):
-                throw V2RoomWriteStoreError.roomNotFound
-            case .prepared(let preparedWrites):
+            case .some(let preparedWrites):
                 let scopedWrites = try preparedWrites.usingWorkloadDatabase(transaction).usingOperationTransaction()
                     .usingActivationScope(.init(tokens: [token], reliesOnRuntimeLifecycle: writes.usesMemorySendPreparation))
                 if isOperationBatch {
@@ -1224,12 +969,6 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             // rejection receipt or message. The outer transaction owns commit.
             try await sql.raw("RELEASE SAVEPOINT \(savepoint)").run()
             return (.receipt(try makeReceipt(identity: identity, fingerprint: fingerprint, outcome: .rejected(.directPolicyDenied), now: resolvedAt)), nil, nil)
-        } catch V2DirectAuthorizationIntentError.identityConflict {
-            // A scoped grant carries a control-side fingerprint committed before
-            // this owner transaction. Unlike a rolled-back receipt, that binding
-            // still supports a conflict during batch recovery.
-            try await rollbackBody(sql, savepoint: savepoint)
-            return (.fingerprintConflict, nil, nil)
         } catch V2RoomWriteStoreError.strangerMessageLimitReached {
             try await rollbackBody(sql, savepoint: savepoint)
             return (.deferred(try .init(identity: identity, fingerprint: fingerprint, reason: .rateLimited,
@@ -1300,231 +1039,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         }
     }
 
-    private func prepareBatchAuthorizations(
-        _ commands: [V2MessageSendOperationCommand], now: @Sendable () -> Date,
-        preloaded: [String: CombinedOwnerPreflightRow]? = nil
-    ) async throws -> [String: BatchAuthorizationPreparation] {
-        try await V2DatabaseLoanObservationContext.$source.withValue(.preparationOwnerRead) {
-            try await prepareObservedBatchAuthorizations(commands, now: now, preloaded: preloaded)
-        }
-    }
-
-    private func prepareObservedBatchAuthorizations(
-        _ commands: [V2MessageSendOperationCommand],
-        now: @Sendable () -> Date,
-        preloaded: [String: CombinedOwnerPreflightRow]? = nil
-    ) async throws -> [String: BatchAuthorizationPreparation] {
-        // Validate the whole batch before any receipt lookup or control intent.
-        for command in commands { _ = try persistenceKey(identity: command.identity) }
-        guard database is any SQLDatabase else { throw V2MessageOperationValidationError.invalidReceipt }
-        var candidates: [(String, V2MessageSendOperationCommand)] = []
-        var seen = Set<String>()
-        var combined: [String: CombinedOwnerPreflightRow]?
-        var receiptOnly: [String: V2MessageSendOperationRecoveryResult] = [:]
-        do {
-            let timer = sendOperationMetrics?.startStage(.receiptPreflight)
-            defer { timer?.finish() }
-            if combineOwnerPreflight && writes.needsOperationAuthorizationPreparation {
-                if let preloaded { combined = preloaded }
-                else { combined = try await combinedOwnerPreflight(commands) }
-            }
-            if combined == nil {
-                receiptOnly = try await database.withConnection { borrowed in
-                    borrowed.eventLoop.makeFutureWithTask {
-                        guard let borrowedSQL = borrowed as? any SQLDatabase else { throw V2MessageOperationValidationError.invalidReceipt }
-                        return try await PostgresV2DurableSendBatchReceipts().existing(
-                            commands.map { .init(command: $0, attempt: nil) }, sql: borrowedSQL)
-                    }
-                }.get()
-            }
-            for command in commands {
-                let identity = try command.identity
-                let key = operationKey(identity: identity)
-                guard seen.insert(key).inserted else { continue }
-                // An already completed operation always replays before current
-                // permissions are consulted. The owner transaction repeats this
-                // lookup after obtaining the operation locks.
-                if let combined {
-                    guard let row = combined[key] else { throw V2MessageOperationValidationError.invalidReceipt }
-                    if let receipt = row.receipt {
-                        guard let domain = row.domainFingerprint else { throw V2MessageOperationValidationError.invalidReceipt }
-                        _ = try decodeExisting(.init(receipt: receipt, domainFingerprint: domain),
-                            identity: identity, fingerprint: command.fingerprint, domain: command.command.fingerprint)
-                        continue
-                    }
-                } else if receiptOnly[key] != nil { continue }
-                let currentTime = now(), currentMilliseconds = try timestamp(currentTime)
-                guard command.firstSubmissionDeadlineMilliseconds > currentMilliseconds,
-                      command.firstSubmissionDeadlineMilliseconds - currentMilliseconds <= 86_400_000 else { continue }
-                candidates.append((key, command))
-            }
-        }
-
-        let preloadedRoutes: [DurableAuthorizationRouteRow]?
-        if let combined {
-            let timer = sendOperationMetrics?.startStage(.authorizationRoute)
-            defer { timer?.finish() }
-            var routes: [V2DirectSendPolicyCache.Key: DurableAuthorizationRouteRow] = [:]
-            for (key, _) in candidates {
-                guard let row = combined[key], let kind = row.kind,
-                      let shard = row.shardID, let epoch = row.epoch else { continue }
-                routes[.init(roomID: row.roomID, senderID: row.senderID)] = .init(
-                    roomID: row.roomID, senderID: row.senderID, recipientID: row.recipientID,
-                    kind: kind, shardID: shard, epoch: epoch)
-            }
-            preloadedRoutes = Array(routes.values)
-        } else { preloadedRoutes = nil }
-
-        var preparations: [String: BatchAuthorizationPreparation] = [:]
-        for start in stride(from: 0, to: candidates.count, by: 128) {
-            let end = min(start + 128, candidates.count)
-            let slice = Array(candidates[start..<end])
-            do {
-                let scoped = try await writes.prepareOperationBatchAuthorizations(
-                    commands: slice.map { $0.1.command }, now: now(), sendOperationMetrics: sendOperationMetrics, preloadedRoutes: preloadedRoutes)
-                for (key, command) in slice {
-                    preparations[key] = .prepared(try scoped.operationBatchScopedStore(for: command.command))
-                }
-            } catch let failure as V2DirectAuthorizationIntentError where failure == .identityConflict {
-                // A batch preflight error may be specific to one command
-                // (for example a malformed direct-room route). Isolate it so
-                // each item retains the existing per-operation result.
-                for (key, command) in slice {
-                    do {
-                        let scoped = try await writes.prepareOperationBatchAuthorization(command: command.command, now: now(), sendOperationMetrics: sendOperationMetrics, preloadedRoutes: preloadedRoutes)
-                        preparations[key] = .prepared(scoped)
-                    } catch let failure as V2DirectAuthorizationIntentError where failure == .identityConflict {
-                        preparations[key] = .failed(.identityConflict)
-                    } catch V2RoomWriteStoreError.actorNotEligible {
-                        preparations[key] = .failed(.actorNotEligible)
-                    } catch V2RoomWriteStoreError.roomNotFound {
-                        preparations[key] = .failed(.roomNotFound)
-                    } catch {
-                        throw error
-                    }
-                }
-            } catch V2RoomWriteStoreError.actorNotEligible, V2RoomWriteStoreError.roomNotFound {
-                // These are item-level domain failures. Isolate them while
-                // allowing infrastructure/database failures to fail the call.
-                for (key, command) in slice {
-                    do {
-                        let scoped = try await writes.prepareOperationBatchAuthorization(command: command.command, now: now(), sendOperationMetrics: sendOperationMetrics, preloadedRoutes: preloadedRoutes)
-                        preparations[key] = .prepared(scoped)
-                    } catch let failure as V2DirectAuthorizationIntentError where failure == .identityConflict {
-                        preparations[key] = .failed(.identityConflict)
-                    } catch V2RoomWriteStoreError.actorNotEligible {
-                        preparations[key] = .failed(.actorNotEligible)
-                    } catch V2RoomWriteStoreError.roomNotFound {
-                        preparations[key] = .failed(.roomNotFound)
-                    } catch {
-                        throw error
-                    }
-                }
-            }
-        }
-        return preparations
-    }
-
-    /// One bounded snapshot on one checked-out owner connection. No control
-    /// work runs until this future has completed and returned that connection.
-    private func combinedOwnerPreflight(_ commands: [V2MessageSendOperationCommand]) async throws -> [String: CombinedOwnerPreflightRow] {
-        var seen = Set<String>()
-        var inputs: [CombinedOwnerPreflightInput] = []
-        var keys: [String] = []
-        for command in commands {
-            let identity = try command.identity, key = operationKey(identity: identity)
-            guard seen.insert(key).inserted else { continue }
-            let stored = try persistenceKey(identity: identity)
-            inputs.append(.init(ordinal: inputs.count, roomID: stored.room, actorID: stored.actor, operationID: stored.operation))
-            keys.append(key)
-        }
-        guard !inputs.isEmpty, inputs.count <= 256 else { throw V2MessageOperationValidationError.invalidReceipt }
-        let input = try v2EncodePersistenceJSON(inputs)
-        let rows = try await database.withConnection { borrowed in
-            borrowed.eventLoop.makeFutureWithTask {
-                guard let sql = borrowed as? any SQLDatabase else { throw V2MessageOperationValidationError.invalidReceipt }
-                return try await sql.raw("""
-                    SELECT input.ordinal, input.room_id, input.actor_id AS sender_id,
-                           receipt.message_id, receipt.room_sequence, receipt.request_fingerprint AS domain_fingerprint,
-                           receipt.fingerprint_version, receipt.operation_fingerprint,
-                           receipt.operation_resolved_at_ms, receipt.created_at,
-                           room.room_kind, room.room_shard_id, room.owner_epoch,
-                           CASE WHEN pair.lower_user_id = input.actor_id THEN pair.higher_user_id ELSE pair.lower_user_id END AS recipient_id
-                    FROM (
-                        SELECT * FROM jsonb_to_recordset(\(bind: input)::jsonb)
-                            AS decoded(ordinal integer, room_id uuid, actor_id uuid, operation_id uuid)
-                        LIMIT \(literal: inputs.count)
-                    ) AS input
-                    LEFT JOIN im_v2.message_send_completions receipt
-                      ON receipt.room_id = input.room_id AND receipt.sender_user_id = input.actor_id
-                     AND receipt.client_message_id = input.operation_id
-                    LEFT JOIN im_v2.rooms room ON room.room_id = input.room_id
-                    LEFT JOIN im_v2.direct_room_pairs pair ON pair.room_id = input.room_id
-                     AND room.room_kind = 'direct' AND input.actor_id IN (pair.lower_user_id, pair.higher_user_id)
-                    ORDER BY input.ordinal
-                    """).all(decoding: CombinedOwnerPreflightRow.self)
-            }
-        }.get()
-        guard rows.count == keys.count else { throw V2MessageOperationValidationError.invalidReceipt }
-        var result: [String: CombinedOwnerPreflightRow] = [:]
-        for row in rows {
-            guard keys.indices.contains(row.ordinal), result[keys[row.ordinal]] == nil else {
-                throw V2MessageOperationValidationError.invalidReceipt
-            }
-            result[keys[row.ordinal]] = row
-        }
-        return result
-    }
-
-    private func readPreparationSnapshot(_ commands: [V2MessageSendOperationCommand],
-        capacityProfileID: String?) async throws -> [String: [DurableSendPreparationRow]] {
-        let inputs = try commands.enumerated().map { index, command in
-            let key = try persistenceKey(identity: command.identity)
-            return CombinedOwnerPreflightInput(ordinal: index, roomID: key.room, actorID: key.actor, operationID: key.operation)
-        }
-        let encoded = try v2EncodePersistenceJSON(inputs)
-        let rows = try await database.withConnection { borrowed in
-            borrowed.eventLoop.makeFutureWithTask {
-                guard let sql = borrowed as? any SQLDatabase else { throw V2MessageOperationValidationError.invalidReceipt }
-                return try await sql.raw("""
-                    SELECT input.ordinal, input.room_id, input.actor_id AS sender_id,
-                           receipt.message_id, receipt.room_sequence, receipt.request_fingerprint AS domain_fingerprint,
-                           receipt.fingerprint_version, receipt.operation_fingerprint,
-                           receipt.operation_resolved_at_ms, receipt.created_at,
-                           room.room_kind, room.owner_epoch,
-                           CASE WHEN pair.lower_user_id=input.actor_id THEN pair.higher_user_id ELSE pair.lower_user_id END AS recipient_id,
-                           room.capacity_profile_id, room.room_shard_id,
-                           receipt.client_message_id IS NOT NULL AS completed
-                    FROM (
-                        SELECT * FROM jsonb_to_recordset(\(bind: encoded)::jsonb)
-                            AS decoded(ordinal integer, room_id uuid, actor_id uuid, operation_id uuid)
-                        LIMIT \(literal: inputs.count)
-                    ) AS input
-                    LEFT JOIN im_v2.rooms room ON room.room_id=input.room_id
-                    LEFT JOIN im_v2.message_send_completions receipt ON receipt.room_id=input.room_id
-                         AND receipt.sender_user_id=input.actor_id AND receipt.client_message_id=input.operation_id
-                    LEFT JOIN im_v2.direct_room_pairs pair ON pair.room_id=input.room_id
-                         AND room.room_kind='direct' AND input.actor_id IN (pair.lower_user_id,pair.higher_user_id)
-                    ORDER BY input.ordinal
-                    """).all(decoding: DurableSendPreparationRow.self)
-            }
-        }.get()
-        var snapshot: [String: [DurableSendPreparationRow]] = [:]
-        for row in rows {
-            guard commands.indices.contains(row.ordinal) else { throw V2MessageOperationValidationError.invalidReceipt }
-            let key = operationKey(identity: try commands[row.ordinal].identity)
-            snapshot[key, default: []].append(row)
-        }
-        guard snapshot.count == Set(try commands.map { operationKey(identity: try $0.identity) }).count else {
-            throw V2MessageOperationValidationError.invalidReceipt
-        }
-        return snapshot
-    }
-
-    private func withPreparedExecution<T: Sendable>(_ commands: [V2MessageSendOperationCommand],
-        capacityProfile: V2CapacityProfile, now: @escaping @Sendable () -> Date,
-        snapshot: [String: [DurableSendPreparationRow]]? = nil,
-        roomShards: [RoomID: String]? = nil,
+    private func withPreparedExecution<T: Sendable>(
         operation: @Sendable (Self) async throws -> T) async throws -> T {
         var scoped = self
         scoped.executionPrepared = true
@@ -1538,8 +1053,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         return "\(room):\(identity.accountID.uuidValue?.uuidString.lowercased() ?? ""):\(identity.operation.rawOperationID.lowercased())"
     }
     /// Recovery is a read of committed results, independent of room activation.
-    /// Legacy closeIfAbsent requests are interpreted as queries; absence is never
-    /// made terminal by a query racing a late commit.
+    /// Absence remains unresolved when a query races a late commit.
     public func recover(_ request: V2MessageSendOperationRecoveryRequest,
                         token: V2RoomActivationToken) async throws -> V2MessageSendOperationRecoveryResult {
         guard case .room(let room) = request.identity.scope, room == token.roomID else {
@@ -1564,7 +1078,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             }
             guard let row = try await borrowedSQL.raw("""
                 SELECT message_id, room_sequence, request_fingerprint AS domain_fingerprint,
-                       fingerprint_version, operation_fingerprint, operation_resolved_at_ms, created_at
+                       fingerprint_version, operation_fingerprint, operation_resolved_at_ms
                 FROM im_v2.message_send_completions
                 WHERE room_id=\(bind: roomID) AND sender_user_id=\(bind: actorID)
                   AND client_message_id=\(bind: operationID)
@@ -1595,7 +1109,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         let key = try persistenceKey(identity: identity)
         guard let row = try await sql.raw("""
             SELECT message_id, room_sequence, request_fingerprint AS domain_fingerprint,
-                   fingerprint_version, operation_fingerprint, operation_resolved_at_ms, created_at
+                   fingerprint_version, operation_fingerprint, operation_resolved_at_ms
             FROM im_v2.message_send_completions
             WHERE room_id=\(bind:key.room) AND sender_user_id=\(bind:key.actor)
               AND client_message_id=\(bind:key.operation)
@@ -1638,60 +1152,7 @@ private struct SendReceiptRow:Decodable {
     enum CodingKeys:String,CodingKey { case receipt,domainFingerprint="domain_fingerprint" }
 }
 
-fileprivate enum BatchAuthorizationFailure: Sendable {
-    case identityConflict
-    case actorNotEligible
-    case roomNotFound
-}
-
-fileprivate enum BatchAuthorizationPreparation: Sendable {
-    case prepared(PostgresV2RoomWriteStore)
-    case failed(BatchAuthorizationFailure)
-}
-
 private struct QuotaWindow:Decodable { let startedAt:Date;enum CodingKeys:String,CodingKey { case startedAt="started_at" } }
-
-private struct CombinedOwnerPreflightInput: Encodable {
-    let ordinal: Int
-    let roomID: UUID
-    let actorID: UUID
-    let operationID: UUID
-    enum CodingKeys: String, CodingKey {
-        case ordinal, roomID = "room_id", actorID = "actor_id", operationID = "operation_id"
-    }
-}
-
-fileprivate struct CombinedOwnerPreflightRow: Decodable, Sendable {
-    let ordinal: Int
-    let roomID: UUID
-    let senderID: UUID
-    let receipt: V2SendSuccessRow?
-    let domainFingerprint: Data?
-    let kind: String?
-    let shardID: String?
-    let epoch: Int64?
-    let recipientID: UUID?
-    enum CodingKeys: String, CodingKey {
-        case ordinal, roomID = "room_id", senderID = "sender_id", receipt,
-             domainFingerprint = "domain_fingerprint", kind = "room_kind",
-             shardID = "room_shard_id", epoch = "owner_epoch", recipientID = "recipient_id"
-    }
-}
-
-extension CombinedOwnerPreflightRow {
-    init(from decoder: any Decoder) throws {
-        let v = try decoder.container(keyedBy: CodingKeys.self)
-        ordinal = try v.decode(Int.self, forKey: .ordinal)
-        roomID = try v.decode(UUID.self, forKey: .roomID)
-        senderID = try v.decode(UUID.self, forKey: .senderID)
-        receipt = try V2SendSuccessRow.decodeIfPresent(from: decoder)
-        domainFingerprint = receipt?.domainFingerprint
-        kind = try v.decodeIfPresent(String.self, forKey: .kind)
-        shardID = try v.decodeIfPresent(String.self, forKey: .shardID)
-        epoch = try v.decodeIfPresent(Int64.self, forKey: .epoch)
-        recipientID = try v.decodeIfPresent(UUID.self, forKey: .recipientID)
-    }
-}
 
 /// Store-minted read result, retained with the original room turn budget.
 /// It has no execution authority and exposes no mutating or retargeting API.
@@ -1712,7 +1173,7 @@ public struct V2PreparedMessageSendBatch: Sendable {
     fileprivate let owner: UUID
     fileprivate let commands: [V2MessageSendOperationCommand]
     fileprivate let token: V2RoomActivationToken
-    fileprivate var preparations: [String: BatchAuthorizationPreparation]
+    fileprivate var preparations: [String: PostgresV2RoomWriteStore]
     let deadline: ContinuousClock.Instant
     fileprivate let preparationSnapshot: [String: [DurableSendPreparationRow]]
     fileprivate var policyPreparations: [V2RoomPolicyPreparation] = []
@@ -1723,14 +1184,8 @@ public struct V2PreparedMessageSendBatch: Sendable {
 fileprivate struct PreparedRoomCommandPlan: Sendable {
     let ordered: [Int]
     let operationKeys: [String]
-    let grantKeys: [String]
     let lockKeys: [V2DurableOwnerBatchOperationKey]
     let successMetadata: [V2SendSuccessMetadata.Prepared]
-}
-
-private struct PreparedSendSnapshot: Sendable {
-    let authorizations: [String: BatchAuthorizationPreparation]
-    let budget: [String: [DurableSendPreparationRow]]
 }
 
 private enum PlainRoomTurnExecution: Sendable {
@@ -1755,47 +1210,11 @@ private func durableOwnerConstraintFailure(_ error: any Error) -> Bool {
     return state?.hasPrefix("23") == true
 }
 
-fileprivate struct DurableSendPreparationRow: Decodable, Sendable {
+fileprivate struct DurableSendPreparationRow: Sendable {
     let roomID: UUID
     let senderID: UUID
-    let receipt: V2SendSuccessRow?
-    let domainFingerprint: Data?
-    let kind: String?
-    let epoch: Int64?
-    let recipientID: UUID?
-    fileprivate var preflight: CombinedOwnerPreflightRow {
-        .init(ordinal: ordinal, roomID: roomID, senderID: senderID, receipt: receipt,
-            domainFingerprint: domainFingerprint, kind: kind, shardID: shardID, epoch: epoch, recipientID: recipientID)
-    }
-    let capacityProfileID: String?
-    let ordinal: Int
-    let shardID: String?
-    let completed: Bool
-    enum CodingKeys: String, CodingKey {
-        case ordinal, completed
-        case capacityProfileID = "capacity_profile_id"
-        case roomID = "room_id", senderID = "sender_id", receipt
-        case domainFingerprint = "domain_fingerprint", kind = "room_kind"
-        case epoch = "owner_epoch", recipientID = "recipient_id"
-        case shardID = "room_shard_id"
-    }
-}
-
-extension DurableSendPreparationRow {
-    init(from decoder: any Decoder) throws {
-        let v = try decoder.container(keyedBy: CodingKeys.self)
-        ordinal = try v.decode(Int.self, forKey: .ordinal)
-        roomID = try v.decode(UUID.self, forKey: .roomID)
-        senderID = try v.decode(UUID.self, forKey: .senderID)
-        receipt = try V2SendSuccessRow.decodeIfPresent(from: decoder)
-        domainFingerprint = receipt?.domainFingerprint
-        kind = try v.decodeIfPresent(String.self, forKey: .kind)
-        shardID = try v.decodeIfPresent(String.self, forKey: .shardID)
-        epoch = try v.decodeIfPresent(Int64.self, forKey: .epoch)
-        recipientID = try v.decodeIfPresent(UUID.self, forKey: .recipientID)
-        capacityProfileID = try v.decodeIfPresent(String.self, forKey: .capacityProfileID)
-        completed = receipt != nil
-    }
+    let receipt: V2SendSuccessRow
+    var domainFingerprint: Data { receipt.domainFingerprint }
 }
 
 /// Only confirmed permanent outcomes enter this bounded cache. A miss follows
@@ -1830,10 +1249,7 @@ private actor V2SendPreparationResultMemory {
             if rows[k] == nil { order.append(k) }
             rows[k] = .init(roomID: room, senderID: sender, receipt: .init(messageID: message, roomSequence: Int64(accepted.roomSequence),
                     domainFingerprint: command.command.fingerprint.digest, fingerprintVersion: 3,
-                    operationFingerprint: fingerprint.digest, resolvedAt: resolved,
-                    createdAt: Date(timeIntervalSince1970: Double(resolved) / 1000)),
-                domainFingerprint: command.command.fingerprint.digest, kind: nil, epoch: nil, recipientID: nil,
-                capacityProfileID: nil, ordinal: 0, shardID: nil, completed: true)
+                    operationFingerprint: fingerprint.digest, resolvedAt: resolved))
         }
         if order.count > limit {
             let count = order.count - limit

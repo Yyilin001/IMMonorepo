@@ -440,10 +440,11 @@ public struct V2GatewayDomainCommandHandler:
             case .roomLatestVisibleBatch(let request): return try await roomRecovery.batch(request, actorUserID: identity.userID)
             case .roomSyncStateBatch(let request): return try await roomRecovery.batch(request, actorUserID: identity.userID)
             case .groupEventPull(let request): return try await groupEventCommands.handleGroupEventPull(request, identity: identity)
-            case .groupEventSubscribe(let request): return try await groupEventCommands.handleGroupEventSubscribe(request, identity: identity)
-            case .groupEventUnsubscribe(let request):
-                _ = try RoomID(request.roomID)
-                return successEnvelope()
+            case .groupEventSubscribe:
+                // Subscription authority belongs to the connection registry and signed Room Owner.
+                return v2GatewayErrorEnvelope(code: "UNAVAILABLE", retryable: true)
+            case .groupEventUnsubscribe:
+                return v2GatewayErrorEnvelope(code: "UNAVAILABLE", retryable: true)
             case .listReadReceiptReaders(let request): return try await receiptCommands.handleReadReceiptReaders(request, identity: identity)
             case .getLiveActivityPreferences: return try await liveActivityCommands.handleGetLiveActivityPreferences(identity: identity)
             case .subscribePresence(let request): return try await liveActivityCommands.handleSubscribePresence(request, identity: identity)
@@ -589,21 +590,11 @@ public struct V2GatewayDomainCommandHandler:
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2GroupEventLogError.actorNotMember {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
-        } catch V2DirectAuthorizationIntentError.identityConflict {
-            return errorEnvelope(code: "IDEMPOTENCY_CONFLICT", retryable: false)
-        } catch is V2DirectAuthorizationCoordinationError,
-                is V2DirectAuthorizationIntentError,
-                is V2DirectAuthorizationReceiptError,
-                is V2DirectSendControlPolicyError {
-            // 未完成的撤销、中止的授权许可或不可用的所有者只影响当前请求。
-            // 保留已认证的传输连接供重试。
-            return errorEnvelope(code: "UNAVAILABLE", retryable: true)
         } catch V2SocialRelationshipStoreError.actorInactive {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2SocialRelationshipStoreError.corruptPersistenceState {
             return errorEnvelope(code: "UNAVAILABLE", retryable: true)
-        } catch V2RoomWriteStoreError.messageOperationClosed {
-            return errorEnvelope(code: "MESSAGE_OPERATION_CLOSED", retryable: false)
+
         } catch V2RoomWriteStoreError.actorNotEligible, V2RoomWriteStoreError.actorMuted, V2RoomWriteStoreError.roomFrozen, V2RoomWriteStoreError.directMessageBlocked, V2RoomWriteStoreError.strangerMessagePermissionDenied {
             return errorEnvelope(code: "FORBIDDEN", retryable: false)
         } catch V2RoomWriteStoreError.roomNotFound, V2RoomWriteStoreError.replyTargetNotFound {

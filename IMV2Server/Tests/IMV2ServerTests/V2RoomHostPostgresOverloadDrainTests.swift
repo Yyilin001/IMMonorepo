@@ -151,7 +151,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
             try await overloadSeedRoom(secondRoom, capacityClass: .large, sql: sql)
             let leases = PostgresV2RoomActivationStore(database: database)
             let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
-                configuration: overloadConfiguration())
+                configuration: overloadConfiguration(), writeCapacity: 2)
             let host = hosted.host
             let gate = OverloadGate()
             let advisoryKey: Int64 = 9_240_212
@@ -233,11 +233,11 @@ private func overloadConfiguration(batchWaitMilliseconds: Int64 = 2) throws -> V
 private func overloadHost(database: any Database,
     fixture: PostgresV2RoomWriteStoreIntegrationTests,
     leases: PostgresV2RoomActivationStore,
-    configuration: V2RoomRuntimeConfiguration) throws -> OverloadHosted {
+    configuration: V2RoomRuntimeConfiguration, writeCapacity: Int = 1) throws -> OverloadHosted {
     let writes = PostgresV2RoomWriteStore(database: database,
         strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
         contentReviewMode: .disabled)
-    let resources = try V2RoomServerOwnerResources(database: database, writes: writes,
+    let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: writeCapacity), writes: writes,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -245,7 +245,7 @@ private func overloadHost(database: any Database,
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init())
-    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources],
+    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
         safetyActorUserID: senderID).runtimeFactory()
     let budget = V2RoomCommandBudget(configuration: configuration)
     let identity = V2ActorHostIdentity(hostID: try .init("overload-drain-host"),

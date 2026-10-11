@@ -61,7 +61,7 @@ struct PostgresV2PolicyFactsSnapshotTests {
             let locked = Task {
                 try await database.transaction { transaction in
                     let sql = try #require(transaction as? any SQLDatabase)
-                    try await v2AcquireOrderedDirectAuthorizationLocks(["account-state:" + senderUUID.uuidString], shared: false, sql: sql)
+                    try await v2AcquireOrderedPolicyStateLocks(["account-state:" + senderUUID.uuidString], shared: false, sql: sql)
                     _ = try await sql.raw("SELECT user_id FROM im_v2.public_user_profiles WHERE user_id=\(bind: senderUUID) FOR UPDATE").all()
                     await gate.hold()
                 }
@@ -102,8 +102,7 @@ struct PostgresV2PolicyFactsSnapshotTests {
             let publisher = V2PolicySnapshotPublisher(targets: [subscriber], localHostID: identities[0].hostID,
                 cache: caches[0], client: { clients[0] })
             let journal = PostgresV2PolicyAuthorizationJournal(database: database)
-            let dispatcher = PostgresV2PolicyMutationDispatcher(database: database, projectionDelivery: SuccessfulProjectionDelivery(),
-                legacyAuthorization: .init(controlDatabase: database, ownerDatabases: [:]))
+            let dispatcher = PostgresV2PolicyMutationDispatcher(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             let directories = (0..<2).map { index in
                 PostgresV2PolicyOwnerDirectory(journal: journal, dispatcher: dispatcher, ownerID: identities[index].incarnationID,
                     snapshotPublisher: index == 0 ? publisher : nil, leaseSeconds: 0.05,
@@ -154,22 +153,21 @@ struct PostgresV2PolicyFactsSnapshotTests {
                 for _ in 0..<100 { #expect(try await remote.registrationSnapshots(scopes: scopes) == first) }
                 #expect(await serving[0].reads == 1)
                 for table in hidden { try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_snapshot_hidden") RENAME TO \(unsafeRaw: table)").run() }
-                let social = PostgresV2SocialRelationshipStore(database: database, projectionDelivery: SuccessfulProjectionDelivery())
+                let social = V2PostgresSocialRelationshipPersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                 let block = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                     operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: Date())
                 _ = try await directories[0].change(.social(block))
                 let blocked = try #require(try await remote.cachedSnapshots(scopes: [scopes[2]])?.first)
                 if case .pair(let facts) = blocked.facts { #expect(facts.blocked) }
                 #expect(blocked.version == 2)
-                let preference = PostgresV2AccountPreferenceOperationStore(database: database,
-                    projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:]))
+                let preference = V2PostgresAccountPreferencePersistence(database: database,
+                    projectionDelivery: SuccessfulProjectionDelivery())
                 let deny = try await preference.freezePreferenceFixture(owner: .init(uuid: memberTwoUUID),
                     operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: Date())
                 _ = try await directories[0].change(.strangerPreference(deny))
                 let denied = try #require(try await remote.cachedSnapshots(scopes: [scopes[3]])?.first)
                 if case .stranger(let facts) = denied.facts { #expect(!facts.allowsStrangers) }
-                _ = try await V2PostgresAccountDisableService(database: database, operatorPrincipal: "snapshot:test",
-                    authorizationCoordinator: .init(controlDatabase: database, ownerDatabases: [:])).usingPolicyOwners(directories[0])
+                _ = try await V2PostgresAccountDisableService(operatorPrincipal: "snapshot:test", policyOwners: directories[0])
                     .disable(.init(userID: .init(uuid: memberTwoUUID), operationID: UUID(), reason: .policyEnforcement))
                 let disabled = try #require(try await remote.cachedSnapshots(scopes: [scopes[1]])?.first)
                 if case .account(let facts) = disabled.facts { #expect(!facts.isActive) }

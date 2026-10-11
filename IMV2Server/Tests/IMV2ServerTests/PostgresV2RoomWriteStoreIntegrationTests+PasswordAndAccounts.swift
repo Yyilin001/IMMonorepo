@@ -137,7 +137,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3)
             let send = V2SendMessageService(
-                store: PostgresV2RoomWriteStore(database: resources.database(.psql)),
+                store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
+                    store: PostgresV2RoomWriteStore(database: resources.database(.psql)), shardID: "room-a", epoch: 0),
                 capacityProfile: try .init(id: "standard", limits: profile),
                 limits: try .init(maxUTF8Bytes: 64),
                 now: { now }
@@ -779,12 +780,20 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await sql.raw("INSERT INTO im_v2.account_password_credentials (account_handle, user_id, password_hash, created_at) VALUES ('account991', \(bind: userUUID), \(bind: passwordHash), \(bind: now))").run()
             try await sql.raw("INSERT INTO im_v2.public_user_profiles (user_id, public_handle, display_name, revision, created_at, updated_at) VALUES (\(bind: userUUID), 'account991', '待停用账号', 1, \(bind: now), \(bind: now))").run()
 
-            let disable = try V2PostgresAccountDisableService(database: resources.database(.psql), operatorPrincipal: "account-safety-primary", now: { now.addingTimeInterval(1) })
+            try await withFixturePolicyOwners(database: resources.database(.psql), projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+            let disable = try V2PostgresAccountDisableService(operatorPrincipal: "account-safety-primary", policyOwners: owners)
             let command = try V2AccountDisableCommand(
                 userID: userID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000996")!, reason: .credentialCompromise
             )
-            #expect(try await disable.disable(command) == .disabled(disabledAt: now.addingTimeInterval(1)))
-            #expect(try await disable.disable(command) == .idempotent(disabledAt: now.addingTimeInterval(1)))
+            let beforeDisable = Date()
+            guard case .disabled(let disabledAt) = try await disable.disable(command) else {
+                throw V2AccountDisableError.unavailable
+            }
+            let earliest = try v2GatewayMilliseconds(beforeDisable)
+            let latest = try v2GatewayMilliseconds(Date())
+            let committed = try v2GatewayMilliseconds(disabledAt)
+            #expect(committed >= earliest && committed <= latest)
+            #expect(try await disable.disable(command) == .idempotent(disabledAt: disabledAt))
             let conflictingOperation = try V2AccountDisableCommand(
                 userID: try UserID("00000000-0000-0000-0000-000000000999"), operationID: command.operationID, reason: .credentialCompromise
             )
@@ -792,7 +801,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 _ = try await disable.disable(conflictingOperation)
             }
             let otherOperation = try V2AccountDisableCommand(userID: userID, operationID: UUID(uuidString: "00000000-0000-0000-0000-000000000997")!, reason: .policyEnforcement)
-            #expect(try await disable.disable(otherOperation) == .alreadyDisabled(disabledAt: now.addingTimeInterval(1)))
+            #expect(try await disable.disable(otherOperation) == .alreadyDisabled(disabledAt: disabledAt))
 
             let gateway = V2PostgresGatewayAuthenticator(database: resources.database(.psql), tokenKey: tokenKey, now: { now.addingTimeInterval(2) })
             await #expect(throws: V2GatewayAuthenticationError.unauthenticated) {
@@ -834,6 +843,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.auth_devices WHERE revoked_at IS NULL", on: sql) == 0)
             #expect(try await count("im_v2.device_access_tokens WHERE revoked_at IS NULL", on: sql) == 0)
             #expect(try await count("im_v2.device_refresh_sessions WHERE revoked_at IS NULL", on: sql) == 0)
+            }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {
@@ -1875,7 +1885,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: sql)
             try await installSchema(on: secondarySQL)
 
-            let now = Date(timeIntervalSince1970: 1_750_000_100)
+            let now = Date()
             let registry = try V2StaticUserShardStorageRegistry(locations: [
                 try .init(bucket: "users-source", database: resources.database(.psql), schema: "im_v2"),
                 try .init(bucket: "users-target", database: resources.database(secondaryID), schema: "im_v2"),
@@ -1933,17 +1943,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                      \(bind: UUID(uuidString: "00000000-0000-0000-0000-000000000f21")!),
                      'history', \(bind: now))
                 """).run()
+            try await withFixturePolicyOwners(database: resources.database(.psql), projectionDelivery: shadow) { owners in
             let preferences = PostgresV2AccountPreferenceOperationStore(database: resources.database(.psql),
-                projectionDelivery: shadow, authorizationCoordinator: .init(controlDatabase: resources.database(.psql),
-                    ownerDatabases: ["rooms-primary": resources.database(.psql)]))
+                projectionDelivery: shadow, policyOwners: owners)
             let preference = try await preferences.freezePreferenceFixture(owner: senderID,
                 operation: .strangerMessagePreference(.init("00000000-0000-0000-0000-000000000f12")), value: .strangerMessage(.deny), now: now)
             let originalPreference = try await preferences.submit(preference, now: now)
             // The exact frozen command preserves its original proof and sync allocation.
             #expect(try await preferences.submit(preference, now: now.addingTimeInterval(1)) == originalPreference)
-            let social = PostgresV2SocialRelationshipStore(database: resources.database(.psql), projectionDelivery: shadow)
+            let social = PostgresV2SocialRelationshipStore(database: resources.database(.psql), projectionDelivery: shadow, policyOwners: owners)
             _ = try await social.executeSocialFixture(actorUserID: senderID, targetUserID: .init(memberTwoUUID.uuidString),
-                operation: .relationship(.init("00000000-0000-0000-0000-000000000f13")), action: .relationship(.request), now: now.addingTimeInterval(2))
+                operation: .relationship(.init("00000000-0000-0000-0000-000000000f13")), action: .relationship(.request), now: Date())
 
             // Account-owned profile changes use a separate outbox, but must
             // use the same current-owner delivery as the direct/social
@@ -2014,7 +2024,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     projectionKind: "stranger_permission", payloadJSON: "{}", createdAt: now.addingTimeInterval(4))
             _ = try await preferences.executePreferenceFixture(owner: senderID,
                 operation: .strangerMessagePreference(.init("00000000-0000-0000-0000-000000000f15")),
-                value: .strangerMessage(.allow), now: now.addingTimeInterval(5))
+                value: .strangerMessage(.allow), now: Date())
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 7)
             let latestRecord = try #require(try await secondarySQL.raw("""
                 SELECT user_sync_sequence, projection_kind FROM im_v2.user_sync_log
@@ -2028,6 +2038,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await scopedCount("im_v2", "user_sync_log", user: senderUUID, on: secondarySQL) == 7)
             #expect((try await router.routes(for: [senderID])).first?.bucket == "users-target")
 
+            }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await secondarySQL.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()

@@ -99,11 +99,10 @@ package final class V2RoomPolicyAuthorizationService: Sendable {
 
     package func prepareOwnerBatches(store: PostgresV2MessageSendOperationStore,
         requests: [V2MessageSendPreparationRequest],
-        readAdmission: V2DatabaseWorkAdmissionController? = nil,
         now: @escaping @Sendable () -> Date) async throws
         -> [Result<V2PreparedMessageSendBatch, any Error>] {
         try await store.prepareOwnerBatches(requests, policyDirectory: directory,
-            readAdmission: readAdmission, now: now)
+            now: now)
     }
 
     package func prepareOwnerPolicyInput(store: PostgresV2MessageSendOperationStore,

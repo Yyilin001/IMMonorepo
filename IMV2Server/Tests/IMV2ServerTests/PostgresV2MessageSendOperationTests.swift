@@ -35,7 +35,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let user = UserID(uuid: memberTwoUUID)
             try await sql.raw("DELETE FROM im_v2.room_memberships WHERE room_id=\(bind: roomID.uuidValue!) AND user_id=\(bind: memberTwoUUID)").run()
-            try await sql.raw("CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,PRIMARY KEY(topic_kind,topic_id))").run()
+            try await sql.raw("CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                 .deletingLastPathComponent().deletingLastPathComponent()
             let journalSQL = try String(contentsOf: root.appending(path: "IMV2/sql/realtime-change-journal.sql"), encoding: .utf8)
@@ -161,7 +161,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func durableSendAutomaticRecipientCoverage(loseCommitNotification: Bool) async throws {
         _ = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
-            try await sql.raw("CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,PRIMARY KEY(topic_kind,topic_id))").run()
+            try await sql.raw("CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
             if loseCommitNotification {
                 let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
                     .deletingLastPathComponent().deletingLastPathComponent()
@@ -184,7 +184,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             host.install(feed: facts)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let store = PostgresV2MessageSendOperationStore(database: database,
+            let store = v2FixtureMessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
                     contentReviewMode: .disabled).usingControlDatabase(database), clock: { now },
@@ -259,10 +259,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         _ = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             // The room-write fixture installs the core schema without this journal extension.
-            try await sql.raw("CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,PRIMARY KEY(topic_kind,topic_id))").run()
+            try await sql.raw("CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try forwardImportTestProfile()
-            let store = PostgresV2MessageSendOperationStore(database: database,
+            let store = v2FixtureMessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
                     contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
@@ -357,7 +357,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         resources.databases.use(try .postgres(url: url, maxConnectionsPerEventLoop: 2), as: .psql, isDefault: true)
         let database = resources.database(.psql), now = Date(timeIntervalSince1970: 1_750_000_000)
         let observer = CommitCrashObserver(checkpoint: input.appendingPathExtension("checkpoint"))
-        let store = PostgresV2MessageSendOperationStore(database: database,
+        let store = v2FixtureMessageSendOperationStore(database: database,
             writes: PostgresV2RoomWriteStore(database: database,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
                 contentReviewMode: .disabled).usingControlDatabase(database), clock: { now },
@@ -370,7 +370,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         Issue.record("The committed observer must terminate this process")
         try await resources.shutdown()
     }
-    @Test("durable sendOperation batch counts prior accepted shard reservations")
+    @Test("durable sendOperation batch ignores retired shard command credits")
     func durableSendBatchRespectsCumulativeShardCapacity() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -382,7 +382,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 WHERE room_shard_id = 'room-a'
                   AND capacity_profile_id = (SELECT capacity_profile_id FROM im_v2.rooms WHERE room_id = \(bind: roomID.uuidValue!))
                 """).run()
-            let store = PostgresV2MessageSendOperationStore(database: database,
+            let store = v2FixtureMessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
                     contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
@@ -398,25 +398,25 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     identifiers: .init(), now: { now })
             }
             #expect(results.count == 2)
-            guard case .sendOperation(.receipt(let accepted)) = results[0],
-                  case .accepted = accepted.outcome,
-                  case .sendOperation(.deferred(let deferred)) = results[1] else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
+            for result in results {
+                guard case .sendOperation(.receipt(let accepted)) = result,
+                      case .accepted = accepted.outcome else {
+                    throw V2RoomWriteStoreError.corruptPersistenceState
+                }
             }
-            #expect(deferred.reason == .rateLimited)
             let pool = try await sql.raw("""
                 SELECT command_window_used AS count FROM im_v2.shard_admission_pools
                 WHERE room_shard_id = 'room-a'
                   AND capacity_profile_id = (SELECT capacity_profile_id FROM im_v2.rooms WHERE room_id = \(bind: roomID.uuidValue!))
                 """).first(decoding: SendRollbackCount.self)
-            #expect(pool?.count == 1)
-            for (index, item) in batch.enumerated() {
+            #expect(pool?.count == 0)
+            for item in batch {
                 let completions = try await sql.raw("""
                     SELECT count(*) AS count FROM im_v2.message_send_completions
                     WHERE room_id = \(bind: roomID.uuidValue!) AND sender_user_id = \(bind: senderUUID)
                       AND client_message_id = \(bind: item.command.clientMessageID.uuidValue!)
                     """).first(decoding: SendRollbackCount.self)
-                #expect(completions?.count == (index == 0 ? 1 : 0))
+                #expect(completions?.count == 1)
             }
         }
     }
@@ -435,14 +435,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             try await sql.raw("""
                 CREATE FUNCTION im_v2.fixture_reject_shard_admission_tail() RETURNS trigger
-                LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$
+                LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected message persistence lock failure' USING ERRCODE='55P03'; END $$
                 """).run()
             try await sql.raw("""
                 CREATE TRIGGER fixture_reject_shard_admission_tail
-                BEFORE UPDATE OF command_window_used ON im_v2.shard_admission_pools
+                BEFORE INSERT ON im_v2.messages
                 FOR EACH ROW EXECUTE FUNCTION im_v2.fixture_reject_shard_admission_tail()
                 """).run()
-            let store = PostgresV2MessageSendOperationStore(database: database,
+            let store = v2FixtureMessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
                     contentReviewMode: .disabled).usingControlDatabase(database), clock: { now })
@@ -453,21 +453,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let expired = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "expired before body",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1)
-            let results = try await withRoomActivation(database: database, roomID: roomID) { token in
-                try await store.sendBatch([acceptedCandidate, acceptedCandidate, expired], token: token,
-                    capacityProfile: profile, identifiers: .init(), now: { now })
+            try await withRoomActivation(database: database, roomID: roomID) { token in
+                await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
+                    try await store.sendBatch([acceptedCandidate, acceptedCandidate, expired], token: token,
+                        capacityProfile: profile, identifiers: .init(), now: { now })
+                }
             }
-            #expect(results.count == 3)
-            guard case .sendOperation(.deferred(let tailFailure)) = results[0],
-                  case .sendOperation(.deferred(let replayTailFailure)) = results[1] else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            #expect(tailFailure.reason == .rateLimited)
-            #expect(replayTailFailure.reason == .rateLimited)
-            guard case .sendOperation(.receipt(let expiredReceipt)) = results[2] else {
-                throw V2RoomWriteStoreError.corruptPersistenceState
-            }
-            #expect(expiredReceipt.outcome == .rejected(.expiredUnsubmitted))
             let messageCount = try await sql.raw("""
                 SELECT count(*) AS count FROM im_v2.message_send_completions
                 WHERE room_id = \(bind: roomID.uuidValue!) AND sender_user_id = \(bind: senderUUID)
@@ -486,7 +477,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                   AND client_message_id = \(bind: expired.command.clientMessageID.uuidValue!)
                 """).first(decoding: SendRollbackCount.self)
             #expect(expiredReceiptCount?.count == 0)
-            try await sql.raw("DROP TRIGGER fixture_reject_shard_admission_tail ON im_v2.shard_admission_pools").run()
+            try await sql.raw("DROP TRIGGER fixture_reject_shard_admission_tail ON im_v2.messages").run()
             try await sql.raw("DROP FUNCTION im_v2.fixture_reject_shard_admission_tail()").run()
         }
     }
@@ -505,13 +496,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let leases=PostgresV2RoomActivationStore(database:database)
             let owner=try V2RoomDataOwner(shardID:"room-a",epoch:0)
             guard case .acquired(let lease)=try await leases.acquire(roomID:operationRoom,owner:owner,host:.init(hostID:.init("send-receipts"),incarnationID:UUID()),duration:.init(30_000)) else { throw CancellationError() }
-            let store=PostgresV2MessageSendOperationStore(database:database,writes:PostgresV2RoomWriteStore(database:database,strangerMessagePolicy:try .init(maximumMessagesPerWindow:100,window:86_400),contentReviewMode:.disabled).usingControlDatabase(database),clock:{now})
+            let store=v2FixtureMessageSendOperationStore(database:database,writes:PostgresV2RoomWriteStore(database:database,strangerMessagePolicy:try .init(maximumMessagesPerWindow:100,window:86_400),contentReviewMode:.disabled).usingControlDatabase(database),clock:{now})
             let deadline=UInt64(now.timeIntervalSince1970*1000)+60_000
             func command(_ text:String,operation:ClientMessageID = .init(uuid:UUID()),deadlineMS:UInt64? = nil) throws -> V2MessageSendOperationCommand {
                 try .init(command:.init(roomID:operationRoom,senderUserID:senderID,clientMessageID:operation,text:text,limits:.init(maxUTF8Bytes:64)),firstSubmissionDeadlineMilliseconds:deadlineMS ?? deadline)
             }
-            func recovery(_ command:V2MessageSendOperationCommand,_ action:V2OperationRecoveryRequest.Action) throws -> V2MessageSendOperationRecoveryRequest {
-                try .init(identity:command.identity,fingerprint:command.fingerprint,domainFingerprint:command.command.fingerprint,action:action)
+            func recovery(_ command:V2MessageSendOperationCommand) throws -> V2MessageSendOperationRecoveryRequest {
+                try .init(identity:command.identity,fingerprint:command.fingerprint,domainFingerprint:command.command.fingerprint)
             }
             let first=try command("Accepted")
             #expect(try first.fingerprint.version==1 && first.command.fingerprint.version==3)
@@ -538,34 +529,34 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await store.send(gatewayCommand,token:lease.token,capacityProfile:profile,
                 identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) == .receipt(original))
             let gatewayRecovery = try V2MessageSendOperationWireCodec.decode(recovery:
-                V2MessageSendOperationWireCodec.encode(recovery: recovery(first,.query)))
+                V2MessageSendOperationWireCodec.encode(recovery: recovery(first)))
             #expect(try await store.recover(gatewayRecovery,token:lease.token) == .receipt(original))
             #expect(try await store.send(first,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) == .receipt(original))
-            #expect(try await store.recover(recovery(first,.query),token:lease.token) == .receipt(original))
+            #expect(try await store.recover(recovery(first),token:lease.token) == .receipt(original))
             let deadlineChanged = try command("Accepted", operation: first.command.clientMessageID, deadlineMS: deadline + 1)
-            #expect(try await store.recover(recovery(deadlineChanged,.query),token:lease.token) == .fingerprintConflict)
+            #expect(try await store.recover(recovery(deadlineChanged),token:lease.token) == .fingerprintConflict)
             let changed=try command("Changed",operation:first.command.clientMessageID)
             #expect(try await store.send(changed,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) == .fingerprintConflict)
             let expired=try command("Expired",deadlineMS:deadline-120_000)
             guard case .receipt(let expiredReceipt)=try await store.send(expired,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) else { throw CancellationError() }
             #expect(expiredReceipt.outcome == .rejected(.expiredUnsubmitted))
-            #expect(try await store.recover(recovery(expired,.query),token:lease.token) == .unresolved)
-            let closed=try command("Closed")
-            #expect(try await store.recover(recovery(closed,.closeIfAbsent),token:lease.token) == .unresolved)
-            guard case .receipt(let laterReceipt) = try await store.send(closed,token:lease.token,capacityProfile:profile,
+            #expect(try await store.recover(recovery(expired),token:lease.token) == .unresolved)
+            let pending=try command("Unsubmitted")
+            #expect(try await store.recover(recovery(pending),token:lease.token) == .unresolved)
+            guard case .receipt(let laterReceipt) = try await store.send(pending,token:lease.token,capacityProfile:profile,
                 identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))),
                   case .accepted = laterReceipt.outcome else { throw CancellationError() }
-            #expect(try await store.recover(recovery(closed,.query),token:lease.token) == .receipt(laterReceipt))
+            #expect(try await store.recover(recovery(pending),token:lease.token) == .receipt(laterReceipt))
             for _ in 0..<4 {
                 let racing=try command("Race")
                 async let send=store.send(racing,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID())))
-                async let close=store.recover(recovery(racing,.closeIfAbsent),token:lease.token)
-                let (submitted,closed)=try await(send,close)
-                #expect(closed == .unresolved || submitted == closed)
-                #expect(try await store.recover(recovery(racing,.query),token:lease.token) == submitted)
+                async let query=store.recover(recovery(racing),token:lease.token)
+                let (submitted,observed)=try await(send,query)
+                #expect(observed == .unresolved || submitted == observed)
+                #expect(try await store.recover(recovery(racing),token:lease.token) == submitted)
             }
             if direct {
-                let limited=PostgresV2MessageSendOperationStore(database:database,writes:PostgresV2RoomWriteStore(database:database,strangerMessagePolicy:try .init(maximumMessagesPerWindow:1,window:86_400),contentReviewMode:.disabled).usingControlDatabase(database),clock:{now})
+                let limited=v2FixtureMessageSendOperationStore(database:database,writes:PostgresV2RoomWriteStore(database:database,strangerMessagePolicy:try .init(maximumMessagesPerWindow:1,window:86_400),contentReviewMode:.disabled).usingControlDatabase(database),clock:{now})
                 let quota=try command("Quota")
                 guard case .deferred(let quotaHint)=try await limited.send(quota,token:lease.token,capacityProfile:profile,identifiers:.init(messageID:.init(uuid:UUID()),eventID:.init(uuid:UUID()))) else { throw CancellationError() }
                 #expect(quotaHint.reason == .rateLimited)
@@ -573,16 +564,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let retryAfter = try #require(quotaHint.retryAfterMilliseconds)
                 #expect(retryAfter > 0 && retryAfter <= 86_400_000)
                 #expect(try quotaHint.validates(identity:quota.identity,fingerprint:quota.fingerprint))
-                #expect(try await limited.recover(recovery(quota,.query),token:lease.token) == .unresolved)
-                #expect(try await limited.recover(recovery(quota,.closeIfAbsent),token:lease.token) == .unresolved)
-                let generation=try await sql.raw("SELECT generation AS count FROM im_v2.direct_authorization_intents WHERE room_id=\(bind:operationRoom.uuidValue!) AND sender_user_id=\(bind:senderUUID) AND client_message_id=\(bind:quota.command.clientMessageID.uuidValue!)").first(decoding:SendRollbackCount.self)
-                let attempt=V2DirectAuthorizationAttempt(roomID:operationRoom.uuidValue!,senderID:senderUUID,clientMessageID:quota.command.clientMessageID.uuidValue!,generation:try #require(generation).count,recipientID:memberTwoUUID,ownerShardID:"room-a",ownerEpoch:0,fingerprint:quota.command.fingerprint.digest)
-                let proof=try await PostgresV2DirectAuthorizationReceiptStore().committedReceipt(attempt,database:database)
-                #expect(proof == nil)
+                #expect(try await limited.recover(recovery(quota),token:lease.token) == .unresolved)
+                #expect(try await limited.recover(recovery(quota),token:lease.token) == .unresolved)
+                #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')", on: sql) == 0)
+                #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')", on: sql) == 0)
             }
             // Body retention cannot erase the minimal original acceptance identity.
             try await sql.raw("UPDATE im_v2.messages SET text_body='Retained replacement',content_revision=content_revision+1 WHERE message_id=\(bind:accepted.messageID.uuidValue!)").run()
-            #expect(try await store.recover(recovery(first,.query),token:lease.token) == .receipt(original))
+            #expect(try await store.recover(recovery(first),token:lease.token) == .receipt(original))
             try await sql.raw("CREATE FUNCTION im_v2.fixture_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture failure' USING ERRCODE='23514'; END $$").run()
             try await sql.raw("CREATE TRIGGER fixture_receipt_failure BEFORE INSERT ON im_v2.message_send_completions FOR EACH ROW EXECUTE FUNCTION im_v2.fixture_receipt_failure()").run()
             let rolledBack=try command("Rollback")

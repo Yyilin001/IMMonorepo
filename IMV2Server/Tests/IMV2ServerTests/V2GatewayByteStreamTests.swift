@@ -40,7 +40,7 @@ struct V2GatewayByteStreamTests {
             session: .init(limits: try .init(maximumInFlightRequests: 4),
                            authenticator: ByteStreamAuthFake(), capabilityProfile: "base",
                            commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: slow, registry: V2DeviceConnectionRegistry(),
+            handler: slow, registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits),
             messageSendBudget: budget, maximumConcurrentMessageSends: reason == .connectionCount ? 1 : 4,
             maximumConcurrentMessageSendBytes: reason == .connectionBytes ? payloadBytes + 1 : 4_194_304)
         let recorder = ConcurrentGatewayResponseRecorder()
@@ -117,7 +117,7 @@ struct V2GatewayByteStreamTests {
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
                 capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry())
+            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
         let channel = NIOAsyncTestingChannel()
         let metrics = V2GatewayTransportMetrics()
         try await channel.testingEventLoop.executeInContext {
@@ -198,9 +198,9 @@ struct V2GatewayByteStreamTests {
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
                 capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry())
+            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
         let recorder = OutboundFrameRecorder()
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { bytes in
                 await recorder.append(bytes)
                 return written
@@ -224,7 +224,7 @@ struct V2GatewayByteStreamTests {
         try await stream.finish()
         #expect(!(await stream.supportsRequiredNotifications()))
         #expect(!(await stream.sendAccountRoomNotification(notification)))
-        #expect(!(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(!(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { _ in true })))
         #expect(await recorder.all().count == 1)
     }
@@ -232,13 +232,13 @@ struct V2GatewayByteStreamTests {
     @Test("subscription responses match canonical UUID identity and preserve opaque spelling", arguments: ["group", "presence"])
     func canonicalSubscriptionIdentity(kind: String) async throws {
         for spelling in ["00000000-0000-0000-0000-abcdef123456", "00000000-0000-0000-0000-ABCDEF123456", "Room-A"] {
-            let registry = V2DeviceConnectionRegistry()
-            let room = try RoomID(spelling), subject = UserID(uuid: UUID())
+            let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
+            let room = try RoomID(spelling), subject = UserID(uuid: UUID()), connectionID = UUID()
             let stream = V2GatewayByteStream(
                 frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
                 session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
                     capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
-                handler: CanonicalSubscriptionCommandFake(subject: subject), registry: registry)
+                handler: CanonicalSubscriptionCommandFake(subject: subject), connectionID: connectionID, registry: registry)
             let recorder = OutboundFrameRecorder()
             await stream.setOutboundWriter { await recorder.append($0) }
             var hello = IMV2Envelope(); hello.requestID = 1
@@ -256,8 +256,12 @@ struct V2GatewayByteStreamTests {
             #expect(response.requestID == 3)
             #expect((kind == "group" ? response.groupEventSubscribed.roomID : response.presenceSubscribed.roomID) == room.rawValue)
             if kind == "group" {
+                await #expect(throws: V2ResourceProviderError.configurationInvalid) {
+                    try await registry.subscribeForegroundRoom(stream, connectionID: connectionID, roomID: room)
+                }
                 let detail = await registry.activeForegroundGroupMetrics()
-                #expect(detail.rooms == 1 && detail.viewers == 1)
+                #expect(detail.rooms == 0 && detail.viewers == 0)
+                // A delegate response cannot create a subscription without the Registry entry point.
                 #expect(await recorder.count() == 0)
             } else {
                 await registry.receivePresence(targetUserID: subject, isOnline: true, expiresAt: Date(timeIntervalSince1970: 1_750_000_006))
@@ -271,10 +275,10 @@ struct V2GatewayByteStreamTests {
         }
     }
 
-    @Test("Subscription state changes only after a successful command acknowledgement", arguments: ["subscribe-typing", "unsubscribe-typing", "unsubscribe-presence", "unsubscribe-group"])
+    @Test("Subscription state changes only after a successful command acknowledgement", arguments: ["subscribe-typing", "unsubscribe-typing", "unsubscribe-presence"])
     func subscriptionResponseControlsState(kind: String) async throws {
         for hasPriorSubscription in kind == "subscribe-typing" ? [false, true] : [true] {
-            let registry = V2DeviceConnectionRegistry(), connectionID = UUID()
+            let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), connectionID = UUID()
             let handler = SubscriptionResponseCommandFake()
             let stream = V2GatewayByteStream(
                 frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
@@ -293,7 +297,6 @@ struct V2GatewayByteStreamTests {
             let oldRoom = RoomID(uuid: UUID()), newRoom = RoomID(uuid: UUID()), subject = UserID(uuid: UUID())
             if hasPriorSubscription {
                 switch kind {
-                case "unsubscribe-group": await registry.subscribeForegroundGroup(stream, connectionID: connectionID, roomID: oldRoom)
                 case "unsubscribe-presence": await registry.subscribePresence(stream, connectionID: connectionID, roomID: oldRoom, targetUserID: subject)
                 default: try await registry.subscribeTyping(stream, connectionID: connectionID, roomID: oldRoom)
                 }
@@ -301,9 +304,6 @@ struct V2GatewayByteStreamTests {
             func publish() async {
                 let expiry = Date(timeIntervalSince1970: 1_750_000_006)
                 switch kind {
-                case "unsubscribe-group":
-                    // Detail command state is independent of account receipt.
-                    break
                 case "unsubscribe-presence": await registry.receivePresence(targetUserID: subject, isOnline: true, expiresAt: expiry)
                 default:
                     await registry.receiveTyping(.init(roomID: oldRoom, userID: subject, isTyping: true, expiresAt: expiry))
@@ -315,7 +315,7 @@ struct V2GatewayByteStreamTests {
             case "subscribe-typing": command.subscribeTyping.roomID = newRoom.rawValue
             case "unsubscribe-typing": command.unsubscribeTyping.roomID = oldRoom.rawValue
             case "unsubscribe-presence": command.unsubscribePresence.roomID = oldRoom.rawValue
-            default: command.groupEventUnsubscribe.roomID = oldRoom.rawValue
+            default: Issue.record("Unknown fixture command"); return
             }
             var expectedRooms: [String] = []
             for failure in ["UNAVAILABLE", "RATE_LIMITED", "unexpected-response"] {
@@ -326,14 +326,10 @@ struct V2GatewayByteStreamTests {
                 #expect(response.requestID == command.requestID)
                 if failure != "unexpected-response" { #expect(response.error.code == failure); #expect(response.error.retryable) }
                 await publish()
-                if kind == "unsubscribe-group" {
-                    let detail = await registry.activeForegroundGroupMetrics()
-                    #expect(detail.rooms == 1 && detail.viewers == 1)
-                } else if hasPriorSubscription { expectedRooms.append(oldRoom.rawValue) }
+                if hasPriorSubscription { expectedRooms.append(oldRoom.rawValue) }
                 let rooms = try await recorder.all().map { bytes -> String in
                     let envelope = try decode(bytes)
                     switch kind {
-                    case "unsubscribe-group": return envelope.groupEventAvailable.roomID
                     case "unsubscribe-presence": return envelope.presenceChanged.roomID
                     default: return envelope.typingStateChanged.roomID
                     }
@@ -347,10 +343,6 @@ struct V2GatewayByteStreamTests {
             let response = try decode(#require(responses.first))
             guard case .acknowledged? = response.body else { Issue.record("Expected command acknowledgement"); try await stream.finish(); return }
             await publish()
-            if kind == "unsubscribe-group" {
-                let detail = await registry.activeForegroundGroupMetrics()
-                #expect(detail.rooms == 0 && detail.viewers == 0)
-            }
             if kind == "subscribe-typing" { expectedRooms.append(newRoom.rawValue) }
             #expect(await recorder.count() == expectedRooms.count)
             if kind == "subscribe-typing" {
@@ -367,7 +359,7 @@ struct V2GatewayByteStreamTests {
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
                            capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry())
+            handler: ByteStreamCommandFake(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
         let recorder = OutboundFrameRecorder()
         await stream.setOutboundWriter { await recorder.append($0) }
         var hello = IMV2Envelope(); hello.requestID = 1
@@ -411,7 +403,7 @@ struct V2GatewayByteStreamTests {
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: session,
             handler: ByteStreamCommandFake(),
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
         var hello = IMV2Envelope()
         hello.requestID = 1
@@ -482,15 +474,15 @@ struct V2GatewayByteStreamTests {
                 commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
             handler: ByteStreamCommandFake(),
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
-        #expect(await stream.attachTransport(
+        #expect(await stream.attachFixtureTransport(
             deviceRevocationHandler: {}, outboundWriter: { _ in }
         ))
 
         try await stream.finish()
 
-        #expect(await !stream.attachTransport(
+        #expect(await !stream.attachFixtureTransport(
             deviceRevocationHandler: {}, outboundWriter: { _ in }
         ))
     }
@@ -517,10 +509,12 @@ struct V2GatewayByteStreamTests {
         )
         let fastRecorder = SynchronousFrameRecorder()
         let fallbackRecorder = OutboundFrameRecorder()
-        #expect(await stream.attachTransport(
+        let transport = try await V2GatewayForegroundChannelFixture(record: fastRecorder.append)
+        defer { transport.finish() }
+        #expect(await stream.attachFixtureTransport(
             deviceRevocationHandler: {},
             outboundWriter: { bytes in await fallbackRecorder.append(bytes) },
-            foregroundWriter: { bytes in fastRecorder.append(bytes) }
+            foregroundWriter: transport.writer
         ))
 
         let roomID = try RoomID("00000000-0000-0000-0000-000000000cf1")
@@ -532,6 +526,7 @@ struct V2GatewayByteStreamTests {
             protocolVersion: protocolVersion
         ))
         #expect(!stream.submitGroupEventAvailable(preAuthentication))
+        transport.drain()
         #expect(fastRecorder.count == 0)
 
         var hello = IMV2Envelope()
@@ -551,6 +546,7 @@ struct V2GatewayByteStreamTests {
         let head = try #require(V2PreparedGatewayGroupEventAvailable(roomID: roomID,
             highWatermark: 42, directEvent: nil, frameLimits: limits, protocolVersion: protocolVersion))
         #expect(stream.submitGroupEventAvailable(head))
+        transport.drain()
         let fastFrame = try #require(fastRecorder.first)
         #expect(try decode(fastFrame).groupEventAvailable.highWatermark == 42)
         #expect(await fallbackRecorder.count() == 0)
@@ -567,12 +563,14 @@ struct V2GatewayByteStreamTests {
         let body = try #require(V2PreparedGatewayGroupEventAvailable(roomID: roomID,
             highWatermark: 43, directEvent: direct, frameLimits: limits, protocolVersion: protocolVersion))
         #expect(stream.submitGroupEventAvailable(body))
+        transport.drain()
         let directFrame = try #require(fastRecorder.element(at: 1))
         #expect(try decode(directFrame).groupEventAvailable.eventPayload == direct.payload)
         #expect(await fallbackRecorder.count() == 0)
 
         try await stream.finish()
         #expect(!stream.submitGroupEventAvailable(preAuthentication))
+        transport.drain()
         #expect(fastRecorder.count == 2)
     }
 
@@ -667,7 +665,7 @@ struct V2GatewayByteStreamTests {
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 2), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission(), now: { Date(timeIntervalSince1970: 0) }),
             handler: ByteStreamCommandFake(),
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
 
         var hello = IMV2Envelope()
@@ -710,10 +708,13 @@ struct V2GatewayByteStreamTests {
         #expect(response.error.code == "UNAVAILABLE")
     }
 
-    @Test("authenticated commands carry the exact transport origin")
-    func authenticatedCommandsCarryTransportOrigin() async throws {
+    @Test("Registry owns room unsubscribe while domain commands retain transport origin", arguments: [false, true])
+    func authenticatedCommandsCarryTransportOrigin(roomUnsubscribe: Bool) async throws {
         let connectionID = UUID()
         let handler = OriginRecordingCommandFake()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
+        let room = RoomID(uuid: UUID())
+        if roomUnsubscribe { _ = try await registry.configureRoomSubscriptionIngress(authority: .init()) }
         let stream = V2GatewayByteStream(
             frameLimits: try .init(
                 maximumPayloadBytes: 4_096,
@@ -727,7 +728,7 @@ struct V2GatewayByteStreamTests {
             ),
             handler: handler,
             connectionID: connectionID,
-            registry: V2DeviceConnectionRegistry()
+            registry: registry
         )
         var hello = IMV2Envelope()
         hello.requestID = 1
@@ -747,11 +748,23 @@ struct V2GatewayByteStreamTests {
         var command = IMV2Envelope()
         command.requestID = 3
         command.protocolVersion = UInt32(protocolVersion)
-        command.groupEventUnsubscribe = .init()
-        command.groupEventUnsubscribe.roomID = "00000000-0000-0000-0000-000000000cf8"
+        if roomUnsubscribe {
+            _ = try await registry.subscribeForegroundRoom(stream, connectionID: connectionID, roomID: room)
+            #expect(await registry.activeForegroundGroupMetrics().viewers == 1)
+            command.groupEventUnsubscribe.roomID = room.rawValue
+        } else {
+            command.unsubscribeTyping.roomID = room.rawValue
+        }
         _ = try await stream.receive(encoded(command, version: protocolVersion))
 
-        #expect(await handler.origins() == [connectionID])
+        #expect(await handler.origins() == (roomUnsubscribe ? [] : [connectionID]))
+        if roomUnsubscribe {
+            #expect(await registry.activeForegroundGroupMetrics().viewers == 0)
+            command.requestID += 1
+            _ = try await stream.receive(encoded(command, version: protocolVersion))
+            #expect(await handler.origins().isEmpty)
+        }
+        try await stream.finish()
     }
 
     @Test("malformed framing closes the connection")
@@ -760,7 +773,7 @@ struct V2GatewayByteStreamTests {
             frameLimits: try .init(maximumPayloadBytes: 128, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: ByteStreamCommandFake(),
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
         await #expect(throws: V2FrameCodecError.invalidMagic) {
             try await stream.receive(Data([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
@@ -816,7 +829,7 @@ struct V2GatewayByteStreamTests {
                 commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
             handler: ByteStreamCommandFake(),
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
         var hello = IMV2Envelope()
         hello.requestID = 1
@@ -855,7 +868,7 @@ struct V2GatewayByteStreamTests {
 
     @Test("availability hints are asynchronous, state-free sync prompts")
     func emitsSyncAvailableForRegisteredUser() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(), capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
@@ -888,7 +901,7 @@ struct V2GatewayByteStreamTests {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
             maximumConnectionsPerDevice: 1,
             maximumConnectionsPerUser: 1
-        ))
+        ), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = RejectingByteStreamRenewalLeases()
         await registry.configureLivePresenceLeases(leases)
         let authenticator = CountingByteStreamAuthenticator()
@@ -961,14 +974,16 @@ struct V2GatewayByteStreamTests {
             registry: registry
         )
         let recorder = SynchronousFrameRecorder()
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
-            foregroundWriter: { bytes in
+        let transport = try await V2GatewayForegroundChannelFixture(record: { bytes in
                 if let frame = try? V2FrameCodec.decodeExactlyOne(bytes, limits: limits),
                    let envelope = try? V2ServerProtobufFrameCodec.decode(frame),
                    case .groupEventAvailable(let available) = envelope.body, available.roomSequence > 0 {
                     recorder.append(bytes)
                 }
-            }))
+            })
+        defer { transport.finish() }
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            foregroundWriter: transport.writer))
         var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello = .init(); hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"; hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]; hello.clientHello.supportedCapabilityProfiles = ["base"]
         _ = try await stream.receive(encoded(hello, version: 0))
         var authenticate = IMV2Envelope(); authenticate.requestID = 2; authenticate.protocolVersion = UInt32(protocolVersion); authenticate.authenticate = .init(); authenticate.authenticate.accessToken = "opaque"; authenticate.authenticate.deviceID = "00000000-0000-0000-0000-000000000A02"
@@ -997,6 +1012,7 @@ struct V2GatewayByteStreamTests {
         #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 2,
             authorizationSequence: 1, payload: .event(V2RealtimeRoomEvent(direct), members: [member])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
+        transport.drain()
         let frame = try #require(recorder.first)
         let wake = try decode(frame)
         #expect(wake.groupEventAvailable.roomID == roomID.rawValue)
@@ -1018,6 +1034,7 @@ struct V2GatewayByteStreamTests {
         #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 3,
             authorizationSequence: 1, payload: .event(V2RealtimeRoomEvent(otherRecipient), members: [member])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(3))
+        transport.drain()
         #expect(recorder.count == 1)
         try await stream.finish(); await registry.shutdownRealtimeRecovery()
     }
@@ -1026,6 +1043,7 @@ struct V2GatewayByteStreamTests {
     func routesGroupLivePayloadOnlyToMatchingMembershipRevision() async throws {
         let room = try RoomID("00000000-0000-0000-0000-000000000c12")
         let f = try await ownerSockets(roomID: room, memberRevision: 7)
+        defer { f.transports.forEach { $0.finish() } }
         let user = try UserID("user-a")
         func event(_ delivery: UInt64, authorization: UInt64, sequence: UInt64, member: UInt64) async {
             let body = V2RealtimeRoomEvent(roomID: room, highWatermark: sequence,
@@ -1037,20 +1055,25 @@ struct V2GatewayByteStreamTests {
                 authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(delivery))
         }
         await event(2, authorization: 1, sequence: 52, member: 6)
+        f.transports.forEach { $0.drain() }
         #expect(f.recorders.allSatisfy { $0.count == 0 })
         await event(3, authorization: 1, sequence: 53, member: 7)
+        f.transports.forEach { $0.drain() }
         #expect(f.recorders.allSatisfy { $0.count == 1 })
         #expect(await f.ingress.applyRoomSubscription(.init(fence: f.fence, deliverySequence: 4,
             authorizationSequence: 2, payload: .revoke(userID: user, memberRevision: 7)),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(4))
         await event(5, authorization: 2, sequence: 54, member: 7)
+        f.transports.forEach { $0.drain() }
         #expect(f.recorders.allSatisfy { $0.count == 1 })
         #expect(await f.ingress.applyRoomSubscription(.init(fence: f.fence, deliverySequence: 6,
             authorizationSequence: 3, payload: .grant(member: .init(userID: user, memberRevision: 8), baselineSequence: 54)),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(6))
         await event(7, authorization: 3, sequence: 55, member: 7)
+        f.transports.forEach { $0.drain() }
         #expect(f.recorders.allSatisfy { $0.count == 1 })
         await event(8, authorization: 3, sequence: 56, member: 8)
+        f.transports.forEach { $0.drain() }
         for recorder in f.recorders {
             #expect(recorder.count == 2)
             #expect(try decode(#require(recorder.first)).groupEventAvailable.roomSequence == 53)
@@ -1091,7 +1114,7 @@ struct V2GatewayByteStreamTests {
                 registry: registry
             )
             let recorder = recorders[index]
-            #expect(await stream.attachTransport(deviceRevocationHandler: {},
+            #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {},
                 outboundWriter: { bytes in await recorder.append(bytes) }))
             var hello = IMV2Envelope()
             hello.requestID = 1
@@ -1150,13 +1173,16 @@ struct V2GatewayByteStreamTests {
     func routesDirectLivePayloadToSmallFanoutStreams(excludeOrigin: Bool) async throws {
         let room = try RoomID("00000000-0000-0000-0000-000000000c03")
         let f = try await ownerSockets(roomID: room, memberRevision: 0)
+        defer { f.transports.forEach { $0.finish() } }
         let body = V2RealtimeRoomEvent(roomID: room, highWatermark: 44, sourceEventID: EventID(uuid: UUID()),
             roomSequence: 44, projectionKind: "message", payload: Data(#"{"kind":"message"}"#.utf8),
             recipientUserIDs: [try UserID("user-a")], excludedConnectionID: excludeOrigin ? f.connections[0] : nil)
         #expect(await f.ingress.applyRoomSubscription(.init(fence: f.fence, deliverySequence: 2,
             authorizationSequence: 1, payload: .event(body, members: [.init(userID: try UserID("user-a"), memberRevision: 0)])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(2))
+        f.transports.forEach { $0.drain() }
         #expect(f.recorders[0].count == (excludeOrigin ? 0 : 1))
+        f.transports.forEach { $0.drain() }
         #expect(f.recorders[1].count == 1)
         let peer = try #require(f.recorders[1].first)
         let available = try decode(peer).groupEventAvailable
@@ -1170,25 +1196,28 @@ struct V2GatewayByteStreamTests {
     private func ownerSockets(roomID: RoomID, memberRevision: UInt64) async throws ->
         (registry: V2DeviceConnectionRegistry, ingress: V2GatewayRoomSubscriptionIngress,
          fence: V2RoomSubscriptionFence, streams: [V2GatewayByteStream],
-         recorders: [SynchronousFrameRecorder], connections: [UUID]) {
+         recorders: [SynchronousFrameRecorder], connections: [UUID], transports: [V2GatewayForegroundChannelFixture]) {
         let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion])
         let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: limits)
         let ingress = try await registry.configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority())
         var streams: [V2GatewayByteStream] = [], recorders: [SynchronousFrameRecorder] = [], connections: [UUID] = []
+        var transports: [V2GatewayForegroundChannelFixture] = []
         for _ in 0..<2 {
             let connection = UUID(), recorder = SynchronousFrameRecorder(), device = UUID().uuidString
             let stream = V2GatewayByteStream(frameLimits: limits,
                 session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
                     capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
                 handler: ByteStreamCommandFake(), connectionID: connection, registry: registry)
-            #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
-                foregroundWriter: { bytes in
+            let transport = try await V2GatewayForegroundChannelFixture(record: { bytes in
                     if let frame = try? V2FrameCodec.decodeExactlyOne(bytes, limits: limits),
                        let envelope = try? V2ServerProtobufFrameCodec.decode(frame),
                        case .groupEventAvailable(let available) = envelope.body, available.roomSequence > 0 {
                         recorder.append(bytes)
                     }
-                }))
+                })
+            transports.append(transport)
+            #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+                foregroundWriter: transport.writer))
             var hello = IMV2Envelope(); hello.requestID = 1; hello.clientHello.deviceID = device
             hello.clientHello.supportedProtocolVersions = [UInt32(protocolVersion)]
             hello.clientHello.supportedCapabilityProfiles = ["base"]
@@ -1206,12 +1235,12 @@ struct V2GatewayByteStreamTests {
         #expect(await ingress.applyRoomSubscription(.init(fence: fence, deliverySequence: 1, authorizationSequence: 1,
             payload: .baseline(members: [.init(userID: try UserID("user-a"), memberRevision: memberRevision)])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))
-        return (registry, ingress, fence, streams, recorders, connections)
+        return (registry, ingress, fence, streams, recorders, connections, transports)
     }
 
     @Test("native bootstrap writes authentication and its final response before a coalesced user sync hint")
     func syncHintWaitsForBootstrapWriteBoundary() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, protocolVersion]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: ByteStreamAuthFake(),
@@ -1359,6 +1388,15 @@ private actor CountingByteStreamAuthenticator: V2GatewayAuthenticator {
 }
 
 private actor RejectingByteStreamRenewalLeases: V2LivePresenceLeaseManaging {
+    func admitConnectionRefresh(identity: V2AuthenticatedConnection, connectionID: UUID,
+        publicationSuppressed: Bool, policy: V2AuthenticatedConnectionAdmissionPolicy, now: Date) async throws -> V2LivePresenceLeaseRefresh {
+        try await v2FixtureAdmitConnectionRefresh(store: self, identity: identity, connectionID: connectionID,
+            publicationSuppressed: publicationSuppressed, policy: policy, now: now)
+    }
+    func renewConnections(_ requests: [V2LivePresenceLeaseRenewalRequest]) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+        try await v2FixtureRenewConnections(store: self, requests)
+    }
+
     private(set) var admissions = 0
     private(set) var renewals = 0
     private var active: Set<UUID> = []

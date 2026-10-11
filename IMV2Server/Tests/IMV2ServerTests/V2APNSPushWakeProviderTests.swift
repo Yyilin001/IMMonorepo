@@ -115,6 +115,11 @@ struct V2APNSPushWakeProviderTests {
 }
 
 private actor RecordingEndpointStore: V2PushDeviceEndpointStore {
+    func disableOwnedEndpoint(actorUserID: UserID, deviceID: DeviceID, now: Date) throws {
+        // This provider spy does not model authenticated device ownership.
+        throw CancellationError()
+    }
+
     private let activeEndpoint: V2PushDeviceEndpoint?
     private var disabledEndpoints: [V2PushDeviceEndpoint] = []
 

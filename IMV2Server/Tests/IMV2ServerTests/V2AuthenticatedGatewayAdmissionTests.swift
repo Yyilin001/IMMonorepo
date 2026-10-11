@@ -226,7 +226,7 @@ struct V2AuthenticatedGatewayAdmissionTests {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
             maximumConnectionsPerDevice: 1,
             maximumConnectionsPerUser: 2
-        ))
+        ), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let firstID = UUID()
         let secondID = UUID()
         let thirdID = UUID()
@@ -245,7 +245,7 @@ struct V2AuthenticatedGatewayAdmissionTests {
 
     @Test("a connection identifier cannot be shared by two stream lifecycles")
     func rejectsDuplicateConnectionIdentifier() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let connectionID = UUID()
         let first = try identity(user: 1, device: 1)
         let second = try identity(user: 2, device: 2)
@@ -264,7 +264,7 @@ struct V2AuthenticatedGatewayAdmissionTests {
         let registry = V2DeviceConnectionRegistry(connectionAdmissionPolicy: .init(
             maximumConnectionsPerDevice: 1,
             maximumConnectionsPerUser: 1
-        ))
+        ), foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let leases = HiddenPresenceAdmissionLeases()
         await registry.configureLivePresenceLeases(leases)
         let connectionID = UUID()
@@ -294,7 +294,7 @@ struct V2AuthenticatedGatewayAdmissionTests {
 
     @Test("presence admission storage failures are not disguised as quota rejections")
     func propagatesPresenceAdmissionFailure() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         await registry.configureLivePresenceLeases(FailingPresenceAdmissionLeases())
 
         await #expect(throws: PresenceAdmissionFixtureError.unavailable) {
@@ -326,7 +326,7 @@ struct V2AuthenticatedGatewayAdmissionTests {
                 commandAdmission: V2AllowingGatewayCommandAdmission()
             ),
             handler: Handler(),
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
     }
 }
@@ -341,6 +341,15 @@ private final class AdmissionMonotonicTestClock: Sendable {
 private enum PresenceAdmissionFixtureError: Error { case unavailable }
 
 private actor FailingPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
+    func admitConnectionRefresh(identity: V2AuthenticatedConnection, connectionID: UUID,
+        publicationSuppressed: Bool, policy: V2AuthenticatedConnectionAdmissionPolicy, now: Date) async throws -> V2LivePresenceLeaseRefresh {
+        try await v2FixtureAdmitConnectionRefresh(store: self, identity: identity, connectionID: connectionID,
+            publicationSuppressed: publicationSuppressed, policy: policy, now: now)
+    }
+    func renewConnections(_ requests: [V2LivePresenceLeaseRenewalRequest]) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+        try await v2FixtureRenewConnections(store: self, requests)
+    }
+
     func setPresencePublication(identity _: V2AuthenticatedConnection, connectionID _: UUID,
         suppressed _: Bool, now _: Date) throws -> V2PresencePublicationLeaseObservation {
         throw PresenceAdmissionFixtureError.unavailable
@@ -372,6 +381,15 @@ private actor FailingPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
 }
 
 private actor HiddenPresenceAdmissionLeases: V2LivePresenceLeaseManaging {
+    func admitConnectionRefresh(identity: V2AuthenticatedConnection, connectionID: UUID,
+        publicationSuppressed: Bool, policy: V2AuthenticatedConnectionAdmissionPolicy, now: Date) async throws -> V2LivePresenceLeaseRefresh {
+        try await v2FixtureAdmitConnectionRefresh(store: self, identity: identity, connectionID: connectionID,
+            publicationSuppressed: publicationSuppressed, policy: policy, now: now)
+    }
+    func renewConnections(_ requests: [V2LivePresenceLeaseRenewalRequest]) async throws -> [UUID: V2LivePresenceLeaseRefresh] {
+        try await v2FixtureRenewConnections(store: self, requests)
+    }
+
     private var connectionIDs: Set<UUID> = []
     private var identities: [UUID: V2AuthenticatedConnection] = [:]
     private var publicationSuppressedByConnection: [UUID: Bool] = [:]

@@ -414,7 +414,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     func purePullCollectionPreservesPagesAndBudget(overflow: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let writer = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let writer = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+                database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: try forwardImportTestProfile(), limits: try .init(maxUTF8Bytes: 60_000), now: { base })
             for index in 0..<4 {
                 let text = overflow ? String(repeating: "x", count: 59_999) + String(index) : "page-\(index)"

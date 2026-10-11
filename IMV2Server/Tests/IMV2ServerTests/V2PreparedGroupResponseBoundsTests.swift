@@ -13,16 +13,16 @@ struct V2PreparedGroupResponseBoundsTests {
         let room = try RoomID("room"), user = try UserID("user")
         var envelope = IMV2Envelope()
         envelope.requestID = 7
-        envelope.protocolVersion = 21
+        envelope.protocolVersion = IMV2ProtocolVersion.current
         envelope.groupEventPage.roomID = room.rawValue
         envelope.groupEventPage.nextRoomSequence = value
         envelope.groupEventPage.hasMore_p = hasMore
-        let frame = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 21, compression: nil,
+        let frame = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current), compression: nil,
             maximumUncompressedPayloadBytes: 65536, compressionThresholdBytes: 1024,
             maximumExpansionRatio: 64, bindRequestIDToHeader: true)
         let expected = V2PreparedGroupEventPageResponse(frame: frame, roomID: room, nextRoomSequence: value, hasMore: hasMore)
         let service = V2GroupEventLogService(store: PreparedResponseBoundsStore(response: expected))
-        let context = V2PreparedGroupEventPageEncodingContext(requestID: 7, frameVersion: 21, compression: nil,
+        let context = V2PreparedGroupEventPageEncodingContext(requestID: 7, frameVersion: UInt8(IMV2ProtocolVersion.current), compression: nil,
             maximumUncompressedPayloadBytes: 65536, compressionThresholdBytes: 1024, maximumExpansionRatio: 64,
             maximumGroupEventPagePayloadBytes: 60000,
             cache: .init(configuration: .init(maximumEntries: 1, maximumBytes: 65536, shardCount: 1)))

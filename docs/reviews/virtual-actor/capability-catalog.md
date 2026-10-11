@@ -2,6 +2,14 @@
 
 Source: clean `f1cdd78d6a21bf0ae23da627c0710c65115236aa` business tree, inspected from `8839f6709e961853d377a2b60ba7231c325fc6b4`. This is a migration input, not an implemented Actor contract. Signature references below are the **existing** Swift APIs; their exact declarations appear in the appendix. `C` means command, `Q` query, `K` creation/coordinator, `W` worker. Package ownership follows the task cards. `P` means a durable operation identity exists; retry the *same* identity after an unknown result and reconcile from persistence. `R` means a read may be retried after fresh authorization. `N` means no replay-safe command identity is present; never infer that a lost response means no commit. A source call can throw even when an outcome enum also carries business rejection.
 
+2026-10-10 清理说明：本目录保留原业务树签名作为迁移输入。下文 `V2ForwardMessagesService` 及其独立持久化编排已移出生产代码；对应旧测试编排器、持久化适配层及 `V2OwnerValidatedForwardMessageWriteStore` 也已在 2026-10-11 删除。当前同 Owner 转发入口为 `V2ActorForwardPairDomainExecutor`，资源、时钟、修订与媒体引用回归使用当前执行路径。
+
+2026-10-11 清理说明：历史清单中的 `V2OwnerValidatedRoomWriteStore`、`V2AtomicRoomWriteBatchStore` 及跨房间原子追加入口已删除。当前消息发送由房间 Actor 独立排序、Policy Owner 授权、sendOperation 房间轮次独立提交；对应旧接口及失效 DTO 已从当前清单移除；历史签名通过 Git 历史追溯。
+
+2026-10-11 拒绝结果退役：`direct_message_denials` 及其读写、重放路径已删除，建库与启动校验统一为 `im-v2-current-72`。消息发送拒绝仅返回业务结果，不生成持久发送回执；私有提示仍作为独立呈现事实保留。下文历史拒绝回执签名不是当前协议。
+
+2026-10-11 消息变更入口退役：`V2OwnerValidatedMessageMutationStores.swift` 中编辑、撤回和表情变更的三套归属接口及存储分支已删除；当前 Actor 路径通过持有 activation scope 的存储执行，权限、修订和业务事务校验保留。无调用方的 `readerCandidatesOwnerValidated` 已从代码和当前接口清单删除。
+
 ## Existing capabilities to freeze as distinct wire cases
 
 Resource additions are tracked separately from the original frozen signatures. Q10 has an authenticated Account HTTP read route and a ClientKit reader; C19 has Account command/recovery routes, permanent server closure, a ClientKit submission port and durable intent engine. Client consumption of closure proofs, App composition/presentation/management and the group-avatar upload capability remain pending:
@@ -16,7 +24,7 @@ The DTO register additionally includes the nine group-avatar intent, receipt, pr
 | Case | Existing method and input → result | Stable identity / payload identity | Retry; authorization and transaction boundary | Owner; mapper |
 | --- | --- | --- | --- | --- |
 | C1 send | `V2RoomWriteStore.accept(V2SendMessageCommand, V2CapacityProfile, V2AcceptanceIdentifiers, Date) → V2SendMessageOutcome`; runtime uses `V2RoomRefMessagingClient` durable send operations | `ClientMessageID` scoped by sender+room; request fingerprint includes text/media/entities/reply/forward reference. Generated acceptance/event IDs are local execution data. | P; authenticated sender, current control policy, room membership and media checks; message/room/admission/outbox transaction plus activation fence. | D1; Core command and Server outcome/request to Contracts wire. |
-| C2 send batch | `V2AtomicRoomWriteBatchStore.acceptAtomically([V2RoomWriteRequest]) → [V2SendMessageOutcome]`; eligibility/partition/repeated-room methods are local batch planning | Per-item `ClientMessageID`, not one batch identity. | P per item; shared SQL must validate every participant token in stable lock order; unknown shared commit pauses every participating turn. | D1; array envelope with per-item result and partition metadata local. |
+| C2 send batch | `PostgresV2MessageSendOperationStore.executePreparedRoomSend` 执行同房间已准备消息，返回逐项 `V2RoomMessagingResult`。 | 每条消息独立身份与成功记录。 | 同房间串行、独立事务；提交不确定时按原身份恢复。 | 房间 Actor 内部批量执行，不提供跨房间原子提交接口。 |
 | C3 edit | `V2MessageEditStore.edit(V2EditMessageCommand, V2CapacityProfile, EventID, Date) → V2MessageEditOutcome` | `MessageEditOperationID`; message ID, expected revision, replacement text/limit. | P; author and revision under room transaction, admission/event and content-review enqueue. | D1; Core command, Server outcome. |
 | C4 withdraw | `V2MessageWithdrawalStore.withdraw(V2WithdrawMessageCommand, V2CapacityProfile, EventID, Date) → V2MessageWithdrawalOutcome` | `MessageWithdrawalOperationID`; message ID + expected revision. | P; author/revision, message tombstone/event/admission atomically. | D1; Core command, Server outcome. |
 | C5 reaction | `V2MessageReactionStore.change(V2ChangeMessageReactionCommand, V2CapacityProfile, EventID, Date) → V2MessageReactionOutcome` | `MessageReactionOperationID`; message ID/reaction/action. | P; visible message and member authorization, reaction/event/admission in one room transaction. | D1; Core command, Server outcome. |
@@ -75,7 +83,6 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func forward(actor: UserID, operation: MessageForwardOperationID, source: V2ForwardMessageReference, sourceRoute: V2RoomShardRoute, target: RoomID, targetRoute: V2RoomShardRoute) async throws -> V2CrossOwnerForwardOutcome`
 ## V2DirectMessagingStore (V2DirectMessagingService.swift:119)
 - `func open( command: V2OpenDirectRoomCommand, capacityProfile: V2CapacityProfile, roomShardID: String, roomID: RoomID, now: Date ) async throws -> V2OpenDirectRoomOutcome`
-- `func setStrangerMessagePermission( command: V2SetStrangerMessagePermissionCommand, now: Date ) async throws -> V2SetStrangerMessagePermissionOutcome`
 - `func setUserAddPermission( command: V2SetUserAddPermissionCommand, now: Date ) async throws -> V2SetUserAddPermissionOutcome`
 ## V2ForwardExportDelivering (V2ForwardDeliveryWorker.swift:6)
 - `func deliver(_ export: V2ForwardExport) async throws -> V2ForwardTerminalReceipt?`
@@ -139,45 +146,19 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome`
 ## V2TrustedSafetyModerationStore (V2ModerationService.swift:241)
 - `func applyTrustedSafety(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome`
-## V2OwnerValidatedForwardMessageWriteStore (V2OwnerValidatedForwardMessages.swift:20)
-- `func acceptForwardOwnerValidated(request: V2RoomWriteRequest, sourceRoomID: RoomID, sourceOwnerRoute: V2RoomShardRoute, targetOwnerRoute: V2RoomShardRoute) async throws -> V2SendMessageOutcome`
-## V2OwnerValidatedGroupCapabilitiesStore (V2OwnerValidatedGroupCapabilitiesStore.swift:8)
-- `func setPinnedMessageOwnerValidated(actorUserID: UserID, command: V2PinnedMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2PinnedMessage>`
-- `func setAnnouncementOwnerValidated(actorUserID: UserID, command: V2GroupAnnouncementCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAnnouncement>`
-- `func setRolePermissionsOwnerValidated(actorUserID: UserID, command: V2GroupRolePermissionsCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupRolePermissionsChange>`
-- `func changeMemberRoleOwnerValidated(actorUserID: UserID, command: V2GroupMemberRoleCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupMemberRoleChange>`
-## V2OwnerValidatedModerationStore (V2OwnerValidatedModerationStore.swift:8)
-- `func applyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome`
-- `func applyTrustedSafetyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome`
-## V2OwnerValidatedReadReceiptStore (V2OwnerValidatedReadReceiptStore.swift:24)
-- `func recordOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute, now: Date) async throws -> V2ReadReceiptOutcome`
-- `func recordGroupOwnerValidated(command: V2RecordReadReceiptCommand, ownerRoute: V2RoomShardRoute, now: Date) async throws -> V2GroupReadReceiptRecordingAttempt`
-- `func recordGroupsOwnerValidated(_ requests: [V2OwnerValidatedReadReceiptRequest]) async throws -> [V2GroupReadReceiptBatchResult]`
-- `func readerCandidatesOwnerValidated(roomID: RoomID, messageID: MessageID, actorUserID: UserID, ownerRoute: V2RoomShardRoute, cursor: String?, pageSize: Int) async throws -> V2GroupReadReceiptReaderCandidatePage`
-## V2OwnerValidatedRoomWriteStore (V2OwnerValidatedRoomWriteStore.swift:27)
-- `func acceptOwnerValidated( request: V2RoomWriteRequest, ownerRoute: V2RoomShardRoute ) async throws -> V2SendMessageOutcome`
-- `func acceptAtomicallyOwnerValidated( requests: [V2OwnerValidatedRoomWriteRequest] ) async throws -> [V2SendMessageOutcome]`
 ## V2ProfilePresentationManaging (V2ProfilePresentationService.swift:7)
 - `func contactAliases(ownerUserID: UserID, afterTargetUserID: UserID?, limit: Int) async throws -> V2ContactAliasPage`
 - `func updateContactAlias(ownerUserID: UserID, targetUserID: UserID, operationID: ContactAliasOperationID, expectedRevision: V2ProfileRevision?, remarkName: String?) async throws -> V2ContactAlias`
 - `func groupNicknames(actorUserID: UserID, roomID: RoomID, afterUserID: UserID?, limit: Int) async throws -> V2GroupNicknamePage`
 - `func updateOwnGroupNickname(actorUserID: UserID, roomID: RoomID, operationID: GroupNicknameOperationID, expectedRevision: V2ProfileRevision?, nickname: String?) async throws -> V2GroupMemberPresentation`
-## V2ReadReceiptStore (V2ReadReceiptService.swift:45)
+## V2ReadReceiptStore (V2ReadReceiptContracts.swift)
 - `func record(command: V2RecordReadReceiptCommand, now: Date) async throws -> V2ReadReceiptOutcome`
 - `func readers(roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int) async throws -> V2ReadReceiptReadersPage`
-## V2ReadReceiptBatchStore (V2ReadReceiptService.swift:110)
-- `func recordBatch( _ requests: [V2ReadReceiptRecordRequest] ) async throws -> [V2ReadReceiptRecordResult]`
-## V2GroupReadReceiptRecordingStore (V2ReadReceiptService.swift:125)
-- `func recordGroup( command: V2RecordReadReceiptCommand, now: Date ) async throws -> V2GroupReadReceiptRecordingAttempt`
-## V2GroupReadReceiptBatchRecordingStore (V2ReadReceiptService.swift:148)
-- `func recordGroups( _ requests: [V2ReadReceiptRecordRequest] ) async throws -> [V2GroupReadReceiptBatchResult]`
-## V2GroupReadReceiptReaderCandidateStore (V2ReadReceiptService.swift:251)
-- `func readerCandidates( roomID: RoomID, messageID: MessageID, actorUserID: UserID, cursor: String?, pageSize: Int ) async throws -> V2GroupReadReceiptReaderCandidatePage`
-## V2ReadReceiptReaderVisibilityStore (V2ReadReceiptService.swift:274)
+## V2ReadReceiptReaderVisibilityStore (V2ReadReceiptContracts.swift)
 - `func visibleReaderIdentities( actorUserID: UserID, candidateUserIDs: [UserID] ) async throws -> [UserID: V2PublicIdentity]`
 ## PostgresV2RoomLogRetentionStore
 - `func trimRoomLog(token: V2RoomActivationToken, mode: V2RoomLogRetentionMode, window: TimeInterval, now: Date, timeouts: V2RoomActivationSQLTimeouts) async throws -> V2RoomLogTrimReport`
-## V2RoomMembershipDirectoryStore (V2RoomMembershipDirectoryService.swift:103)
+## V2RoomMembershipDirectoryStore (V2RoomMembershipDirectoryContracts.swift)
 - `func list(_ request: V2RoomMembershipDirectoryRequest) async throws -> V2RoomMembershipDirectoryPage`
 ## V2RoomMembershipStore (V2RoomMembershipService.swift:61)
 - `func change( command: V2ChangeRoomMembershipCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date ) async throws -> V2RoomMembershipChangeOutcome`
@@ -193,11 +174,6 @@ Source extraction lists declared methods, not extension defaults or runtime cove
 - `func changeControlValidated( command: V2ChangeRoomMembershipCommand, ownerRoute: V2RoomShardRoute, identitySnapshot: V2MembershipIdentitySnapshot, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date ) async throws -> V2RoomMembershipChangeOutcome`
 ## V2RoomWriteStore (IMV2ServerContracts/V2SendMessageContracts.swift)
 - `func accept( command: consuming V2SendMessageCommand, capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIdentifiers, now: Date ) async throws -> V2SendMessageOutcome`
-## V2AtomicRoomWriteBatchStore (IMV2ServerContracts/V2SendMessageContracts.swift)
-- `func atomicBatchEligibility( requests: [V2RoomWriteRequest] ) async -> [Bool]`
-- `func atomicBatchPartitions( requests: [V2RoomWriteRequest] ) async -> [V2AtomicRoomWriteBatchPartition?]`
-- `func atomicBatchSupportsRepeatedRooms( in partition: V2AtomicRoomWriteBatchPartition ) async -> Bool`
-- `func acceptAtomically( requests: [V2RoomWriteRequest] ) async throws -> [V2SendMessageOutcome]`
 ## V2SpecialAccountMessagingStore (V2SpecialAccountMessagingService.swift:110)
 - `func resolveActiveAccount(stableKey: String) async throws -> V2ResolvedSpecialAccount?`
 - `func authorizeOutbound(account: V2ResolvedSpecialAccount, roomID: RoomID, customerUserID: UserID) async throws`
@@ -209,10 +185,8 @@ All are in target `IMV2Server`; DTO target and Codable details are in the type r
 
 | Source | Exact existing method |
 | --- | --- |
-| `V2RoomMembershipService.swift:126` | `public func change(_ request: V2AuthenticatedMembershipChange) async throws -> V2RoomMembershipChangeOutcome` |
 | `V2ModerationService.swift:297` | `public func apply(_ request: V2AuthenticatedModeration) async throws -> V2ModerationOutcome` |
 | `V2ModerationService.swift:345,361` | `public func apply(_ request: V2TrustedSafetyRoomControl) async throws -> V2ModerationOutcome`; `public func apply(_ request: V2TrustedSafetyModeration) async throws -> V2ModerationOutcome` |
-| `V2ReadReceiptService.swift:331` | `public func record(_ request: V2AuthenticatedReadReceipt) async throws -> V2ReadReceiptOutcome` |
 | `V2DirectMessagingService.swift:236` | `public func open(actorUserID: UserID, operationID: DirectRoomOperationID, targetUserID: UserID) async throws -> V2OpenDirectRoomOutcome` |
 | `V2GroupMessagingService.swift:232,291` | `public func create(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, initialMemberUserIDs: [UserID]) async throws -> V2CreateGroupRoomOutcome`; `public func createStaged(actorUserID: UserID, operationID: GroupRoomOperationID, title: String, stagedMemberCount: Int) async throws -> V2CreateGroupRoomOutcome` |
 | `IMV2ServerContracts/V2HTTPOperationHandling.swift:26` | `V2GroupCreationOperationHandling.begin/append/finalize/recover` takes `V2GroupCreationIntent`, `V2GroupCreationAppendRequest`, or `V2GroupCreationRecoveryRequest` and returns `V2GroupCreationOperationResult`; implementation is `PostgresV2GroupCreationOperationStore`. |

@@ -47,8 +47,7 @@ public actor V2DeviceConnectionRegistry {
     /// 同一 Gateway 创建的每条流都使用这套进程级帧契约。
     ///
     /// 提供之后，前台广播只编码一次并共享不可变字节；
-    /// 测试与替代嵌入可以省略它，从而保留逐流的兼容路径。
-    private let foregroundFrameLimits: V2FrameLimits?
+    private let foregroundFrameLimits: V2FrameLimits
     private let foregroundFrameCompression: V2NegotiatedFrameCompression?
     private let foregroundMaximumUncompressedPayloadBytes: Int
     private let foregroundCompressionThresholdBytes: Int
@@ -153,7 +152,7 @@ public actor V2DeviceConnectionRegistry {
         ),
         livePresenceRenewalConfiguration: V2LivePresenceRenewalBatcher.Configuration = .init(),
         maximumConnections: Int = 100_000,
-        foregroundFrameLimits: V2FrameLimits? = nil,
+        foregroundFrameLimits: V2FrameLimits,
         foregroundFrameCompression: V2NegotiatedFrameCompression? = nil,
         foregroundMaximumUncompressedPayloadBytes: Int = V2ServerProtobufFrameCodec
             .defaultMaximumUncompressedPayloadBytes,
@@ -197,10 +196,10 @@ public actor V2DeviceConnectionRegistry {
 
     /// Composition opts in before sockets start. RPC ingress, local subscriber
     /// selection and actual socket gates share this one room-local authority.
-    /// The old room Coordinator/Journal path is bypassed while configured.
+    /// Foreground room interest requires this authority.
     public func configureRoomSubscriptionIngress(authority: V2GatewayRoomSubscriptionAuthority,
         maximumRooms: Int = 256) throws -> V2GatewayRoomSubscriptionIngress {
-        guard !hasStartedRegistrations, !realtimeRecoveryClosed, foregroundFrameLimits != nil,
+        guard !hasStartedRegistrations, !realtimeRecoveryClosed,
               roomSubscriptionAuthority.withLock({ $0 == nil }), maximumRooms > 0 else {
             throw V2ResourceProviderError.configurationInvalid
         }
@@ -257,14 +256,14 @@ public actor V2DeviceConnectionRegistry {
         await roomSubscriptionCoordinator?.release(reference: reference)
     }
 
-    /// The per-transport handler invokes this BEFORE the legacy Domain handler.
+    /// Room subscription commands belong to the connection registry.
     /// There is one signed authoritative subscribe, not an old database/Journal
     /// barrier followed by another new room subscribe.
     func handleRoomSubscriptionCommand(_ envelope: IMV2Envelope, connectionID: UUID,
         identity: V2AuthenticatedConnection) async -> IMV2Envelope? {
-        guard roomSubscriptionCoordinator != nil else { return nil }
         switch envelope.body {
         case .groupEventSubscribe(let request):
+            guard roomSubscriptionCoordinator != nil else { return nil }
             guard let room = try? RoomID(request.roomID), directory.identityByConnection[connectionID] == identity,
                   let stream = directory.streamsByUser[identity.userID]?[connectionID] else {
                 return v2GatewayErrorEnvelope(code: "INVALID_ARGUMENT", retryable: false)
@@ -325,7 +324,7 @@ public actor V2DeviceConnectionRegistry {
             _ = await target.stream.offerRoomSubscriptionHead(detail, highWatermark: highWatermark,
                 permit: { enqueue in authority.enqueueIfCurrent(detail, enqueue: enqueue) })
         }
-        guard !backgroundPermits.isEmpty, let foregroundFrameLimits,
+        guard !backgroundPermits.isEmpty,
               let prepared = V2PreparedGatewayGroupEventAvailable(roomID: roomID,
                 highWatermark: highWatermark, directEvent: nil,
                 frameLimits: foregroundFrameLimits, compression: foregroundFrameCompression,
@@ -336,7 +335,7 @@ public actor V2DeviceConnectionRegistry {
     }
     private nonisolated func submitRoomSubscriptionEvent(_ event: V2RealtimeRoomEvent,
         permits: [V2GatewayRoomSubscriptionAuthority.Permit]) {
-        guard let authority = roomSubscriptionAuthority.withLock({ $0 }), let foregroundFrameLimits,
+        guard let authority = roomSubscriptionAuthority.withLock({ $0 }),
               let prepared = V2PreparedGatewayGroupEventAvailable(roomID: event.roomID,
                 highWatermark: event.highWatermark, directEvent: event.localEvent,
                 frameLimits: foregroundFrameLimits, compression: foregroundFrameCompression,
@@ -363,9 +362,6 @@ public actor V2DeviceConnectionRegistry {
             if let submission = stream.prepareNIOGroupEventAvailable(prepared, enqueueIfCurrent: permit) {
                 submissions.append(submission)
                 if hints != nil { supplementTargets.append(stream) }
-            } else if stream.submitGroupEventAvailable(prepared, enqueueIfCurrent: permit),
-                      let hints, let ingress = authorPresentationIngress {
-                stream.offerAuthorPresentation(hints, to: ingress)
             }
         }
         // Channel owners retain their existing bounded best-effort budgets;
@@ -1023,27 +1019,20 @@ public actor V2DeviceConnectionRegistry {
         for stream in streams { await stream.sendSyncAvailable(eventID: eventID, highWatermark: highWatermark) }
     }
 
-    public func subscribeForegroundGroup(
-        _ stream: V2GatewayByteStream, connectionID: UUID, roomID: RoomID, membershipRevision: UInt64 = 0
-    ) async {
-        _ = try? await subscribeForegroundRoom(stream, connectionID: connectionID,
-            roomID: roomID, membershipRevision: membershipRevision)
-    }
-
     @discardableResult
     public func subscribeForegroundRoom(
         _ stream: V2GatewayByteStream,
         connectionID: UUID,
-        roomID: RoomID,
-        membershipRevision: UInt64 = 0
+        roomID: RoomID
     ) async throws -> V2RoomSubscriptionGrant? {
         guard let identity = directory.identityByConnection[connectionID],
               let lifecycle = directory.lifecycleByConnection[connectionID]
         else { return nil }
-        if roomSubscriptionAuthority.withLock({ $0 != nil }) {
-            guard directory.streamsByUser[identity.userID]?[connectionID] === stream,
-                  roomSubscriptionConnections[connectionID]?.lifecycle != nil else { return nil }
+        guard let authority = roomSubscriptionAuthority.withLock({ $0 }) else {
+            throw V2ResourceProviderError.configurationInvalid
         }
+        guard directory.streamsByUser[identity.userID]?[connectionID] === stream,
+              let localLifecycle = roomSubscriptionConnections[connectionID]?.lifecycle else { return nil }
         if let coordinator = roomSubscriptionCoordinator, subscriptions.foregroundGroupByConnection[connectionID] == roomID,
            let reference = roomSubscriptionConnections[connectionID]?.reference {
             let grant = try await coordinator.acquire(roomID: roomID, userID: identity.userID, reference: reference)
@@ -1074,48 +1063,45 @@ public actor V2DeviceConnectionRegistry {
             userID: identity.userID,
             stream: stream
         )
-        if let authority = roomSubscriptionAuthority.withLock({ $0 }), let localLifecycle = roomSubscriptionConnections[connectionID]?.lifecycle {
-            guard directory.streamsByUser[identity.userID]?[connectionID] === stream,
-                  await authority.registerRoomInterest(connectionID: connectionID, lifecycle: localLifecycle,
-                    roomID: roomID, scopeGeneration: mutation) else {
-                _ = subscriptions.detachForeground(connectionID: connectionID)
-                foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
-                return nil
-            }
-            roomSubscriptionConnections[connectionID]?.scopeGeneration = mutation
-            let interestPermit = authority.interestPermit(connectionID: connectionID, lifecycle: localLifecycle,
-                roomID: roomID, generation: mutation)
-            await stream.beginRoomSubscription(roomID: roomID, scopeGeneration: mutation, permit: interestPermit)
-            guard directory.lifecycleByConnection[connectionID] == lifecycle,
-                  roomSubscriptionConnections[connectionID]?.lifecycle == localLifecycle,
-                  roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation,
-                  subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
-                throw V2GatewayRoomSubscriptionCoordinationError.superseded
-            }
-            if let coordinator = roomSubscriptionCoordinator {
-                let reference = UUID(); roomSubscriptionConnections[connectionID]?.reference = reference
-                do {
-                    let grant = try await coordinator.acquire(roomID: roomID, userID: identity.userID, reference: reference)
-                    guard directory.lifecycleByConnection[connectionID] == lifecycle,
-                          roomSubscriptionConnections[connectionID]?.reference == reference,
-                          roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation,
-                          subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
-                        await coordinator.release(reference: reference)
-                        throw V2GatewayRoomSubscriptionCoordinationError.superseded
-                    }
-                    await roomSubscriptionBaselineInstalled(roomID: roomID)
-                    return grant
-                } catch {
-                    if roomSubscriptionConnections[connectionID]?.reference == reference {
-                        await removeForegroundGroupSubscription(connectionID: connectionID)
-                    }
-                    await coordinator.release(reference: reference)
-                    throw error
-                }
-            }
-            await roomSubscriptionBaselineInstalled(roomID: roomID)
+        guard directory.streamsByUser[identity.userID]?[connectionID] === stream,
+              await authority.registerRoomInterest(connectionID: connectionID, lifecycle: localLifecycle,
+                roomID: roomID, scopeGeneration: mutation) else {
+            _ = subscriptions.detachForeground(connectionID: connectionID)
+            foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
             return nil
         }
+        roomSubscriptionConnections[connectionID]?.scopeGeneration = mutation
+        let interestPermit = authority.interestPermit(connectionID: connectionID, lifecycle: localLifecycle,
+            roomID: roomID, generation: mutation)
+        await stream.beginRoomSubscription(roomID: roomID, scopeGeneration: mutation, permit: interestPermit)
+        guard directory.lifecycleByConnection[connectionID] == lifecycle,
+              roomSubscriptionConnections[connectionID]?.lifecycle == localLifecycle,
+              roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation,
+              subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
+            throw V2GatewayRoomSubscriptionCoordinationError.superseded
+        }
+        if let coordinator = roomSubscriptionCoordinator {
+            let reference = UUID(); roomSubscriptionConnections[connectionID]?.reference = reference
+            do {
+                let grant = try await coordinator.acquire(roomID: roomID, userID: identity.userID, reference: reference)
+                guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                      roomSubscriptionConnections[connectionID]?.reference == reference,
+                      roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation,
+                      subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
+                    await coordinator.release(reference: reference)
+                    throw V2GatewayRoomSubscriptionCoordinationError.superseded
+                }
+                await roomSubscriptionBaselineInstalled(roomID: roomID)
+                return grant
+            } catch {
+                if roomSubscriptionConnections[connectionID]?.reference == reference {
+                    await removeForegroundGroupSubscription(connectionID: connectionID)
+                }
+                await coordinator.release(reference: reference)
+                throw error
+            }
+        }
+        await roomSubscriptionBaselineInstalled(roomID: roomID)
         return nil
     }
 

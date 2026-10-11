@@ -104,7 +104,7 @@ struct V2GatewayReceiptCommands: Sendable {
         let outcome: V2ReadReceiptOutcome
         do {
             outcome = try await readReceipt.record(.init(roomID: try .init(request.roomID), actorUserID: identity.userID, operationID: try .init(request.operationID), readThroughRoomSequence: request.readThroughRoomSequence))
-        } catch V2ReadReceiptBatcherError.serverBusy {
+        } catch V2RoomReceiptAdmissionError.serverBusy {
             return v2GatewayErrorEnvelope(code: "SERVER_BUSY", retryable: true)
         }
         switch outcome {
@@ -399,18 +399,7 @@ struct V2GatewayGroupEventCommands: Sendable {
         return response
     }
 
-    func handleGroupEventSubscribe(_ request: IMV2GroupEventSubscribe, identity: V2AuthenticatedConnection) async throws -> IMV2Envelope {
-        let subscription = try await groupEventLog.subscribe(
-            roomID: try .init(request.roomID),
-            actorUserID: identity.userID
-        )
-        var response = IMV2Envelope()
-        response.groupEventSubscribed = .init()
-        response.groupEventSubscribed.roomID = subscription.roomID.rawValue
-        response.groupEventSubscribed.highWatermark = subscription.highWatermark
-        response.groupEventSubscribed.membershipRevision = subscription.membershipRevision
-        return response
-    }
+
 }
 
 func v2GatewaySuccessEnvelope() -> IMV2Envelope {

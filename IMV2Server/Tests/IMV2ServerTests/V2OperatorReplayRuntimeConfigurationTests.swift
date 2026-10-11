@@ -55,8 +55,8 @@ struct V2OperatorReplayRuntimeConfigurationTests {
         #expect(throws: (any Error).self) { try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured)) }
     }
 
-    @Test("operator authorization resolution pools count physical owners once", arguments: [false, true])
-    func authorizationResolutionBudget(separateOwner: Bool) throws {
+    @Test("operator workload pools count physical owners once", arguments: [false, true])
+    func workloadPhysicalOwnerBudget(separateOwner: Bool) throws {
         var configured = values
         let controlURL = try #require(configured["IM_V2_DATABASE_URL"])
         let ownerURL = separateOwner ? "postgres://v2:password@db-third/im_v2" : controlURL
@@ -64,15 +64,14 @@ struct V2OperatorReplayRuntimeConfigurationTests {
         [{"shard_id":"room-a","database_url":"\(ownerURL)"},
          {"shard_id":"room-b","database_url":"\(ownerURL)"}]
         """
-        // Two loops; user-only db-next needs no authorization resolution pool.
-        let total = separateOwner ? 28 : 18
+        // Two loops; only configured workload pools contribute to the connection budget.
+        let total = separateOwner ? 24 : 16
         configured["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = String(total - 1)
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")) {
             _ = try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
         }
         configured["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = String(total)
-        let configuration = try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
-        #expect(configuration.directAuthorizationResolutionDatabaseURLs == Set([controlURL, ownerURL]).sorted())
+        _ = try V2OperatorReplayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(configured))
     }
 
     private var values: [String: String] {

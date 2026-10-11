@@ -16,7 +16,7 @@ struct V2PreparedGroupEventPageCacheTests {
             shardCount: 4
         ))
         let key = V2PreparedGroupEventPageKey(
-            protocolVersion: 21,
+            protocolVersion: UInt8(IMV2ProtocolVersion.current),
             roomID: "group-early-key",
             firstEventID: "event-1",
             lastEventID: "event-2",
@@ -66,7 +66,7 @@ struct V2PreparedGroupEventPageCacheTests {
                 group.addTask {
                     try cache.frame(
                         for: pageEnvelope(requestID: UInt64(requestID), lastSequence: 16),
-                        frameVersion: 21,
+                        frameVersion: UInt8(IMV2ProtocolVersion.current),
                         compression: nil,
                         maximumUncompressedPayloadBytes: 65_536,
                         compressionThresholdBytes: 1_024,
@@ -93,7 +93,7 @@ struct V2PreparedGroupEventPageCacheTests {
         ))
         let first = try #require(try cache.frame(
             for: pageEnvelope(requestID: 101, lastSequence: 2),
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1_024,
@@ -101,7 +101,7 @@ struct V2PreparedGroupEventPageCacheTests {
         ))
         let second = try #require(try cache.frame(
             for: pageEnvelope(requestID: 202, lastSequence: 2),
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1_024,
@@ -126,7 +126,7 @@ struct V2PreparedGroupEventPageCacheTests {
         ))
         let plain = try #require(try cache.frame(
             for: pageEnvelope(requestID: 1, lastSequence: 2),
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1,
@@ -134,7 +134,7 @@ struct V2PreparedGroupEventPageCacheTests {
         ))
         let compressed = try #require(try cache.frame(
             for: pageEnvelope(requestID: 2, lastSequence: 2),
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: .zlib,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1,
@@ -142,7 +142,7 @@ struct V2PreparedGroupEventPageCacheTests {
         ))
         let differentPage = try #require(try cache.frame(
             for: pageEnvelope(requestID: 3, lastSequence: 3),
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1,
@@ -172,7 +172,7 @@ struct V2PreparedGroupEventPageCacheTests {
         ))
         _ = try cache.frame(
             for: pageEnvelope(requestID: 1, lastSequence: 2),
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1_024,
@@ -180,7 +180,7 @@ struct V2PreparedGroupEventPageCacheTests {
         )
         _ = try cache.frame(
             for: pageEnvelope(requestID: 2, lastSequence: 3),
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1_024,
@@ -188,14 +188,14 @@ struct V2PreparedGroupEventPageCacheTests {
         )
         var acknowledged = IMV2Envelope()
         acknowledged.requestID = 4
-        acknowledged.protocolVersion = 21
+        acknowledged.protocolVersion = IMV2ProtocolVersion.current
         acknowledged.acknowledged = .init()
 
         #expect(cache.snapshot().entries == 1)
         #expect(cache.snapshot().evictions == 1)
         #expect(try cache.frame(
             for: acknowledged,
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             compression: nil,
             maximumUncompressedPayloadBytes: 65_536,
             compressionThresholdBytes: 1_024,
@@ -214,7 +214,7 @@ struct V2PreparedGroupEventPageCacheTests {
     private func pageEnvelope(requestID: UInt64, lastSequence: UInt64) -> IMV2Envelope {
         var envelope = IMV2Envelope()
         envelope.requestID = requestID
-        envelope.protocolVersion = 21
+        envelope.protocolVersion = IMV2ProtocolVersion.current
         envelope.groupEventPage = .init()
         envelope.groupEventPage.roomID = "group-prepared-cache-test"
         envelope.groupEventPage.nextRoomSequence = lastSequence + 1

@@ -37,7 +37,6 @@ public struct V2OperatorReplayListenerConfiguration: Equatable, Sendable {
 public struct V2OperatorReplayRuntimeConfiguration: Sendable {
     /// 控制库连接地址。
     public let databaseURL: String
-    public let directAuthorizationResolutionDatabaseURLs: [String]
     /// PostgreSQL 会话与连接策略。
     public let databasePolicy: V2PostgresRuntimePolicy
     /// 重放服务的回环监听配置。
@@ -109,12 +108,8 @@ public struct V2OperatorReplayRuntimeConfiguration: Sendable {
             primaryDatabaseURL: databaseURL,
             userShardStorage: userShardStorage
         )
-        directAuthorizationResolutionDatabaseURLs = Set([databaseURL] + roomShardStorage.map(\.databaseURL)).sorted()
-        let (resolutionConnections, overflow) = directAuthorizationResolutionDatabaseURLs.count.multipliedReportingOverflow(by: databasePolicy.eventLoopThreads)
-        guard !overflow else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS") }
         try databasePolicy.validate(databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL),
-            connectionsPerEventLoopPerPhysicalStore: databasePolicy.maximumConnectionsPerEventLoop,
-            additionalConnections: resolutionConnections)
+            connectionsPerEventLoopPerPhysicalStore: databasePolicy.maximumConnectionsPerEventLoop)
     }
 
 }

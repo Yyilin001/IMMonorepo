@@ -96,16 +96,6 @@ public enum V2OpenDirectRoomOutcome: Equatable, Sendable {
     case unavailable
 }
 
-/// 设置陌生人消息权限的结果。
-public enum V2SetStrangerMessagePermissionOutcome: Equatable, Sendable {
-    /// 本次调用实际更新了权限。
-    case updated(permission: V2StrangerMessagePermission, updatedAt: Date)
-    /// 同一操作已提交过，返回其原有结果。
-    case idempotent(permission: V2StrangerMessagePermission, updatedAt: Date)
-    /// 同一操作标识已被不同载荷占用。
-    case idempotencyConflict
-}
-
 /// 设置被添加好友权限的结果。
 public enum V2SetUserAddPermissionOutcome: Equatable, Sendable {
     /// 本次调用实际更新了权限。

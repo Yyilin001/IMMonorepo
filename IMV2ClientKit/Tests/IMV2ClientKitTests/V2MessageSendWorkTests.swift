@@ -211,8 +211,8 @@ struct V2MessageSendWorkTests {
             let claim = try await f.claim(work)
             if scenario == "negative" {
                 let receipt = try V2MessageSendOperationReceipt(identity: original.identity, fingerprint: original.fingerprint,
-                    outcome: .closed, resolvedAtMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000))
-                try await f.store.completeOperationWork(.init(identity: receipt.identity, fingerprint: receipt.fingerprint, state: .closed, receipt: receipt), now: Date())
+                    outcome: .rejected(.permissionDenied), resolvedAtMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000))
+                try await f.store.completeOperationWork(.init(identity: receipt.identity, fingerprint: receipt.fingerprint, state: .rejected, receipt: receipt), now: Date())
             } else {
                 try await f.store.deferOperationWork(claim, until: Date(), code: "OUTCOME_UNKNOWN", scheduling: .needsAttention)
             }
@@ -428,7 +428,6 @@ actor SendWorkRemote:V2MessageSendOperationClient {
     }
     func recover(_ request:V2MessageSendOperationRecoveryRequest) async throws -> V2MessageSendOperationRecoveryResult {
         recoveries += 1
-        #expect(request.action == .query)
         guard let receipt else { return .unresolved }
         return .receipt(receipt)
     }

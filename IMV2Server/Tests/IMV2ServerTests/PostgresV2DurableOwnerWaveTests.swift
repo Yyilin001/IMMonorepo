@@ -103,11 +103,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             let metrics = V2SendOperationBatchMetrics()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: owner, controlDatabase: control)
             let store = PostgresV2MessageSendOperationStore(database: owner,
                 writes: PostgresV2RoomWriteStore(database: owner,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(control), clock: { now },
-                sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(control).usingPolicyAuthorizations(policies), clock: { now },
+                sendOperationMetrics: metrics)
             let before = try #require(try await sql.raw("SELECT command_window_used AS value FROM im_v2.shard_admission_pools WHERE room_shard_id='room-b' AND capacity_profile_id='standard'").first(decoding: DurableWaveCount.self))
             try await withRoomActivation(database: owner, roomID: rooms[0], shardID: "room-b") { token0 in
                 try await withRoomActivation(database: owner, roomID: rooms[1], shardID: "room-b") { token1 in
@@ -115,13 +116,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         try await withRoomActivation(database: owner, roomID: rooms[3], shardID: "room-b") { token3 in
                             let tokens = [token0, token1, token2, token3]
                             let deadline = ContinuousClock.now + .seconds(30)
-                            let prepared = try await store.prepareOwnerBatches(rooms.indices.map {
+                            let prepared = try await policies.prepareOwnerBatches(store: store, requests: rooms.indices.map {
                                 .init(commands: commands[$0], token: tokens[$0], deadline: deadline)
                             }, now: { now })
                             let handles = try prepared.map { try $0.get() }
-                            // Preparation has fully committed before either
-                            // owner transaction starts. No artificial row-lock
-                            // gate or success result stands in for the chain.
+                            // Both cohorts use real Policy Owner permits before
+                            // independent room transactions begin.
                             let turns = try await withThrowingTaskGroup(
                                 of: (Int, [Result<[V2RoomMessagingResult], any Error>]).self
                             ) { group in
@@ -144,7 +144,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                         commands: commands[cohort * 2 + index], sequences: [1, 2])
                                 }
                             }
-                            for table in ["messages", "message_send_completions", "direct_authorization_receipts"] {
+                            try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+                            for table in ["messages", "message_send_completions"] {
                                 #expect(try await count("im_v2.\(table)", on: sql) == 8)
                             }
                             let after = try #require(try await sql.raw("SELECT command_window_used AS value FROM im_v2.shard_admission_pools WHERE room_shard_id='room-b' AND capacity_profile_id='standard'").first(decoding: DurableWaveCount.self))
@@ -206,14 +207,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let secondCommands = try [command(rooms[1], sender: senderID, text: "healthy other room")]
             let initialRevision = try #require(try await sql.raw("SELECT direct_policy_revision AS value FROM im_v2.direct_room_pairs WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: DurableWaveCount.self)).value
             let metrics = V2SendOperationBatchMetrics()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: owner, controlDatabase: control)
             let store = PostgresV2MessageSendOperationStore(database: owner,
                 writes: PostgresV2RoomWriteStore(database: owner,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: quotaBoundary ? 2 : 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(control), clock: { now },
-                sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(control).usingPolicyAuthorizations(policies), clock: { now },
+                sendOperationMetrics: metrics)
             try await withRoomActivation(database: owner, roomID: rooms[0], shardID: "room-b") { firstToken in
                 try await withRoomActivation(database: owner, roomID: rooms[1], shardID: "room-b") { secondToken in
-                    let prepared = try await store.prepareOwnerBatches([
+                    let prepared = try await policies.prepareOwnerBatches(store: store, requests: [
                         .init(commands: firstCommands, token: firstToken, deadline: .now + .seconds(30)),
                         .init(commands: secondCommands, token: secondToken, deadline: .now + .seconds(30))
                     ], now: { now })
@@ -244,7 +246,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     try assertWaveReceipts(try results[1].get(), commands: secondCommands, sequences: [1])
                     #expect(try await sql.raw("SELECT direct_policy_revision AS value FROM im_v2.direct_room_pairs WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: DurableWaveCount.self)?.value == initialRevision + (quotaBoundary ? 1 : 2))
                     #expect(try await sql.raw("SELECT message_count::bigint AS value FROM im_v2.stranger_message_windows WHERE sender_user_id=\(bind: senderUUID) AND recipient_user_id=\(bind: memberTwoUUID)").first(decoding: DurableWaveCount.self)?.value == 2)
-                    for table in ["messages", "message_send_completions", "direct_authorization_receipts"] {
+                    try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+                    for table in ["messages", "message_send_completions"] {
                         #expect(try await count("im_v2.\(table)", on: sql) == acceptedCount)
                     }
                     // Ignore opening projections: only the source events of
@@ -270,7 +273,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         identifiers: .init(), now: { now })
                     #expect(try replay[0].get() == first)
                     #expect(try replay[1].get() == results[1].get())
-                    for table in ["messages", "message_send_completions", "direct_authorization_receipts"] {
+                    try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+                    for table in ["messages", "message_send_completions"] {
                         #expect(try await count("im_v2.\(table)", on: sql) == acceptedCount)
                     }
                     let replayEvents = try #require(try await sql.raw("""
@@ -444,11 +448,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let firstCommands = try [command(rooms[0], "wave A one"), command(rooms[0], "wave A two")]
             let secondCommands = try [command(rooms[1], "wave B one"), command(rooms[1], "wave B two")]
             let metrics = V2SendOperationBatchMetrics()
+            let policies = v2FixtureRoomPolicyAuthorizations(database: owner, controlDatabase: control)
             let store = PostgresV2MessageSendOperationStore(database: owner,
                 writes: PostgresV2RoomWriteStore(database: owner,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
-                    contentReviewMode: .disabled).usingControlDatabase(control), clock: { now },
-                sendOperationMetrics: metrics, combineOwnerPreflight: true)
+                    contentReviewMode: .disabled).usingControlDatabase(control).usingPolicyAuthorizations(policies), clock: { now },
+                sendOperationMetrics: metrics)
             try await sql.raw("CREATE TABLE im_v2.fixture_wave_statements (table_name text NOT NULL, transaction_id bigint NOT NULL)").run()
             try await sql.raw("""
                 CREATE FUNCTION im_v2.fixture_count_wave_statements() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -458,7 +463,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 END
                 $$
                 """).run()
-            for table in ["messages", "message_send_completions", "direct_authorization_receipts"] {
+            try await assertRetiredDirectAuthorizationSchemaAbsent(on: sql)
+            for table in ["messages", "message_send_completions"] {
                 try await sql.raw("CREATE TRIGGER fixture_wave_statement AFTER INSERT ON im_v2.\(unsafeRaw: table) FOR EACH STATEMENT EXECUTE FUNCTION im_v2.fixture_count_wave_statements()").run()
             }
             try await sql.raw("CREATE TRIGGER fixture_wave_admission AFTER UPDATE ON im_v2.shard_admission_pools FOR EACH STATEMENT EXECUTE FUNCTION im_v2.fixture_count_wave_statements()").run()
@@ -480,7 +486,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let before = try await sql.raw("SELECT room_shard_id,command_window_used AS value FROM im_v2.shard_admission_pools WHERE room_shard_id IN ('room-b','room-wave-b') ORDER BY room_shard_id").all(decoding: DurableWaveAdmission.self)
             try await withRoomActivation(database: owner, roomID: rooms[0], shardID: "room-b") { firstToken in
                 try await withRoomActivation(database: owner, roomID: rooms[1], shardID: "room-wave-b") { secondToken in
-                    let prepared = try await store.prepareOwnerBatches([
+                    let prepared = try await policies.prepareOwnerBatches(store: store, requests: [
                         .init(commands: firstCommands, token: firstToken, deadline: .now + .seconds(30)),
                         .init(commands: secondCommands, token: secondToken, deadline: .now + .seconds(30))
                     ], now: { now })
@@ -502,9 +508,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         for table in ["messages", "message_send_completions"] {
                             #expect(try await waveStatementCount(table, sql: sql) == 2)
                         }
-                        for table in ["direct_authorization_receipts", "message_send_completions"] {
-                            #expect(try await waveStatementCount(table, sql: sql) == 2)
-                        }
+                        #expect(try await waveStatementCount("direct_authorization_receipts", sql: sql) == 0)
                         #expect(try await waveStatementCount("shard_admission_pools", sql: sql) == 0)
                         #expect(try await sql.raw("SELECT count(DISTINCT transaction_id)::bigint AS value FROM im_v2.fixture_wave_statements").first(decoding: DurableWaveCount.self)?.value == 2)
                         #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.fixture_wave_statements budget JOIN im_v2.fixture_wave_statements message USING(transaction_id) WHERE budget.table_name='shard_admission_pools' AND message.table_name='messages'").first(decoding: DurableWaveCount.self)?.value == 0)
@@ -513,7 +517,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         #expect(try await waveStatementCount("messages", sql: sql) == 2)
                         let freshFirst = try command(rooms[0], "wave A three")
                         let freshSecond = try command(rooms[1], "wave B three")
-                        let mixed = try await store.prepareOwnerBatches([
+                        let mixed = try await policies.prepareOwnerBatches(store: store, requests: [
                             .init(commands: [firstCommands[0], freshFirst], token: firstToken, deadline: .now + .seconds(30)),
                             .init(commands: [secondCommands[0], freshSecond], token: secondToken, deadline: .now + .seconds(30))
                         ], now: { now })

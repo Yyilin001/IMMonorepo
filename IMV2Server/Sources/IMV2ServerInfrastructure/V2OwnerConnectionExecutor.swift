@@ -45,8 +45,8 @@ package final class V2OwnerPostCommitWork: Sendable {
 }
 
 /// Invoked on actual pool settlement, before resuming the suspended borrower.
-/// Production pools notify synchronously; custom/legacy borrowers use the
-/// dispatcher's idempotent fallback after their async borrowing call returns.
+/// Physical pools notify synchronously. The dispatcher also settles calls
+/// rejected before a loan exists; injected test borrowers use that same boundary.
 package final class V2ScheduledSendLoanReturn: Sendable {
     @TaskLocal package static var current: V2ScheduledSendLoanReturn?
     private let callback: Mutex<(@Sendable () -> Void)?>

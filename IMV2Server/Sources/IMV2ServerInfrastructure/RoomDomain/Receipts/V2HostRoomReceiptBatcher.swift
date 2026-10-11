@@ -44,7 +44,7 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
         let deadlineTimer: Task<Void, Never>
     }
 
-    private let configuration: V2ReadReceiptBatcher.Configuration
+    private let configuration: V2RoomReceiptBatchConfiguration
     private let databaseWorkAdmission: V2DatabaseWorkAdmissionController?
     private let execute: @Sendable (V2ActorReadReceiptRecordBatchWire, V2RoomActivationWriteScope, [Date]) async throws -> V2ActorReadReceiptRecordBatchResultWire
     private var queue: [UUID] = []
@@ -70,7 +70,7 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
     }
 
     public init(executor: V2ActorRoomReceiptExecutor,
-                configuration: V2ReadReceiptBatcher.Configuration,
+                configuration: V2RoomReceiptBatchConfiguration,
                 databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil) {
         self.configuration = configuration
         self.databaseWorkAdmission = databaseWorkAdmission
@@ -81,7 +81,7 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
 
     // 确定性的执行器接入点允许测试队列、准入和取消，
     // 同时不削弱生产环境受激活围栏保护的初始化器。
-    init(configuration: V2ReadReceiptBatcher.Configuration,
+    init(configuration: V2RoomReceiptBatchConfiguration,
          databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,
          execute: @escaping @Sendable (V2ActorReadReceiptRecordBatchWire, V2RoomActivationWriteScope, [Date]) async throws -> V2ActorReadReceiptRecordBatchResultWire) {
         self.configuration = configuration

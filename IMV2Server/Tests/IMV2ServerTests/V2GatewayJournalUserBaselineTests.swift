@@ -27,7 +27,7 @@ struct V2GatewayJournalUserBaselineTests {
         guard case .applied = receiver.applyJournalProjection(snapshot, authenticatedServiceID: "fixture") else {
             Issue.record("auth baseline not installed"); return
         }
-        let registry = V2DeviceConnectionRegistry(), writer = UserBaselineWriter()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), writer = UserBaselineWriter()
         await registry.configureJournalUserControlReceiver(receiver)
         let baselineReads = Mutex(0)
         await registry.configureJournalUserBaselineBarrier { requestedUser in
@@ -43,7 +43,7 @@ struct V2GatewayJournalUserBaselineTests {
                 capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: UserBaselineHandler(), connectionID: connection, registry: registry)
         let transportClosed = Mutex(false)
-        let attached = await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        let attached = await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { _ in true }, scopedNotificationWriter: { await writer.write($0) },
             requiredNotificationClose: { transportClosed.withLock { $0 = true } })
         try #require(attached)

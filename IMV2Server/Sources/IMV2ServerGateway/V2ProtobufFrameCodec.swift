@@ -53,7 +53,7 @@ public enum V2ServerProtobufFrameCodec {
     ///   - maximumUncompressedPayloadBytes: 必须为正的原始载荷预算。
     ///   - compressionThresholdBytes: 非负压缩阈值。
     ///   - maximumExpansionRatio: 必须为正的解压扩展比上限。
-    ///   - bindRequestIDToHeader: 仅对版本至少为 21 的群事件页面有效，将载荷请求号清零，关联号只放在帧头。
+    ///   - bindRequestIDToHeader: 仅对当前协议的群事件页面有效，将载荷请求号清零，关联号只放在帧头。
     /// - Returns: 未压缩或 zlib 压缩的帧；压缩无收益或扩展比超限时回退未压缩载荷。
     /// - Throws: 版本、消息体、标志、预算或压缩错误，也可能传播 protobuf 序列化错误。
     ///
@@ -82,7 +82,7 @@ public enum V2ServerProtobufFrameCodec {
         try validate(envelope: envelope, frameVersion: frameVersion)
         let payloadLimit = command.isMessageSendOperation ? maximumMessageSendUncompressedPayloadBytes : maximumUncompressedPayloadBytes
         if bindRequestIDToHeader {
-            guard frameVersion >= 21, command == .groupEventPage else {
+            guard command == .groupEventPage else {
                 throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags
             }
         }
@@ -135,7 +135,7 @@ public enum V2ServerProtobufFrameCodec {
     /// - Returns: 已核对命令、版本与请求号的 envelope；绑定模式从帧头恢复请求号。
     /// - Throws: 未知或不适用标志、未协商压缩、资源预算、protobuf 格式或帧头一致性错误。
     ///
-    /// 绑定请求号只允许版本至少为 21 的群事件页面，且载荷中请求号必须为零。解码成功不代表命令已获授权。
+    /// 绑定请求号只允许当前协议的群事件页面，且载荷中请求号必须为零。解码成功不代表命令已获授权。
     public static func decode(
         _ frame: V2Frame,
         maximumMessageDepth: Int = defaultMaximumMessageDepth,
@@ -149,7 +149,7 @@ public enum V2ServerProtobufFrameCodec {
             throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags
         }
         if frame.flags.contains(.headerBoundRequestID) {
-            guard frame.version >= 21, frame.command == .groupEventPage else {
+            guard frame.command == .groupEventPage else {
                 throw V2ServerProtobufFrameCodecError.unsupportedFrameFlags
             }
         }
@@ -201,29 +201,14 @@ public enum V2ServerProtobufFrameCodec {
 
     /// 检查载荷与帧版本合同。
     ///
-    /// 零版本只要求消息体是客户端握手，不在此要求其载荷版本为零；其他版本必须与 envelope 完全一致。
-    /// 支持版本集合由会话协商层另外检查。
+    /// 零版本仅用于客户端初始握手；业务帧只接受当前版本，且载荷与帧头必须一致。
     private static func validate(envelope: IMV2Envelope, frameVersion: UInt8) throws {
         if frameVersion == 0 {
             guard case .clientHello? = envelope.body else { throw V2ServerProtobufFrameCodecError.protocolVersionMismatch }
-        } else if envelope.protocolVersion != UInt32(frameVersion) {
-            throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
-        }
-        if frameVersion < 47, let body = envelope.body {
-            switch body {
-            case .deviceRoomProgressReport, .deviceRoomProgressRecorded:
+        } else {
+            guard frameVersion == UInt8(IMV2ProtocolVersion.current),
+                  envelope.protocolVersion == UInt32(frameVersion) else {
                 throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
-            default: break
-            }
-        }
-        if frameVersion < 46, case .realtimeCoverage? = envelope.body {
-            throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
-        }
-        if frameVersion < 45, let body = envelope.body {
-            switch body {
-            case .messageSendOperation, .messageSendOperationRecover, .messageSendOperationResult:
-                throw V2ServerProtobufFrameCodecError.protocolVersionMismatch
-            default: break
             }
         }
     }

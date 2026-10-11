@@ -95,13 +95,13 @@ private struct V2UnsupportedGatewayTestDependency: Error,
 
 func makeGatewayDomainCommandHandler(
     messageSendOperations: (any V2GatewayMessageSendOperationHandling)? = nil,
-    readReceipt: V2ReadReceiptService? = nil,
+    readReceipt: V2ReadReceiptTestService? = nil,
     liveActivity: V2LiveActivityService? = nil,
     groupEventLog: V2GroupEventLogService? = nil,
-    membershipDirectory: V2RoomMembershipDirectoryService? = nil,
+    membershipDirectory: V2MembershipDirectoryTestService? = nil,
     roomRecovery: (any V2RoomRecoveryCommandHandling)? = nil,
     accountChanges: (any V2AccountRoomChangesStarting)? = nil,
-    conversationCapabilities: V2ConversationCapabilitiesService? = nil,
+    conversationCapabilities: V2ConversationCapabilitiesTestService? = nil,
     groupRolePolicyBaseline: (any V2GroupRolePolicyBaselineReading)? = nil,
     sync: V2SyncService,
     telemetry: any V2TelemetrySink = V2DiscardingTelemetrySink(),
@@ -209,16 +209,9 @@ extension PostgresV2DirectMessagingStore {
         self.init(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database),
             projectionDelivery: V2DiscardingUserShardProjectionDelivery())
     }
-    init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering,
-         authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
+    init(database: any Database, projectionDelivery: any V2UserShardProjectionDelivering) {
         self.init(database: database, identityReader: PostgresV2DirectRoomIdentityReader(database: database),
-            projectionDelivery: projectionDelivery, authorizationCoordinator: authorizationCoordinator)
-    }
-}
-
-extension PostgresV2SocialRelationshipStore {
-    init(database: any Database) {
-        self.init(database: database, projectionDelivery: V2DiscardingUserShardProjectionDelivery())
+            projectionDelivery: projectionDelivery)
     }
 }
 

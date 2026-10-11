@@ -25,12 +25,13 @@ struct V2GatewayForegroundAuthorizationTests {
         let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])
         let stream = V2GatewayByteStream(
             frameLimits: limits, session: session,
-            handler: AuthorizationCommandHandler(), registry: V2DeviceConnectionRegistry()
+            handler: AuthorizationCommandHandler(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
         let writes = AuthorizationWriteCount()
-        #expect(await stream.attachTransport(
-            deviceRevocationHandler: {}, outboundWriter: { _ in },
-            foregroundWriter: { _ in writes.increment() }
+        let transport = try await V2GatewayForegroundChannelFixture(record: { _ in writes.increment() })
+        defer { transport.finish() }
+        #expect(await stream.attachFixtureTransport(
+            deviceRevocationHandler: {}, outboundWriter: { _ in }, foregroundWriter: transport.writer
         ))
         try await authenticate(stream, limits: limits)
         let prepared = try #require(V2PreparedGatewayGroupEventAvailable(
@@ -39,6 +40,7 @@ struct V2GatewayForegroundAuthorizationTests {
             protocolVersion: version
         ))
         #expect(stream.submitGroupEventAvailable(prepared))
+        transport.drain()
         #expect(writes.read() == 1)
         clock.set(Date(timeIntervalSince1970: 11))
         #expect(!stream.submitGroupEventAvailable(prepared))
@@ -59,11 +61,12 @@ struct V2GatewayForegroundAuthorizationTests {
         let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])
         let stream = V2GatewayByteStream(
             frameLimits: limits, session: session,
-            handler: AuthorizationCommandHandler(), registry: V2DeviceConnectionRegistry()
+            handler: AuthorizationCommandHandler(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
-        #expect(await stream.attachTransport(
-            deviceRevocationHandler: {}, outboundWriter: { _ in },
-            foregroundWriter: { _ in }
+        let transport = try await V2GatewayForegroundChannelFixture(record: { _ in })
+        defer { transport.finish() }
+        #expect(await stream.attachFixtureTransport(
+            deviceRevocationHandler: {}, outboundWriter: { _ in }, foregroundWriter: transport.writer
         ))
         try await authenticate(stream, limits: limits)
         let prepared = try #require(V2PreparedGatewayGroupEventAvailable(
@@ -72,6 +75,7 @@ struct V2GatewayForegroundAuthorizationTests {
             protocolVersion: version
         ))
         #expect(stream.submitGroupEventAvailable(prepared))
+        transport.drain()
         stream.invalidateForegroundAuthorization()
         #expect(!stream.submitGroupEventAvailable(prepared))
 
@@ -99,7 +103,7 @@ struct V2GatewayForegroundAuthorizationTests {
         let handler = CountingAuthorizationHandler()
         let stream = V2GatewayByteStream(
             frameLimits: limits, session: session, handler: handler,
-            registry: V2DeviceConnectionRegistry()
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         )
         try await authenticate(stream, limits: limits)
 
@@ -123,7 +127,7 @@ struct V2GatewayForegroundAuthorizationTests {
 
     @Test("unregister revokes the foreground fast path before suspended interest cleanup")
     func unregisterRevokesBeforeInterestCleanup() async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let interests = SuspendedAuthorizationInterestCleanup()
         await registry.configureUserSyncInterests(V2SharedGroupEventWakeInterests(underlying: interests))
         let session = V2GatewaySession(
@@ -137,14 +141,17 @@ struct V2GatewayForegroundAuthorizationTests {
         let stream = V2GatewayByteStream(frameLimits: limits, session: session,
             handler: AuthorizationCommandHandler(), connectionID: connectionID, registry: registry)
         let writes = AuthorizationWriteCount()
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
-            foregroundWriter: { _ in writes.increment() }))
+        let transport = try await V2GatewayForegroundChannelFixture(record: { _ in writes.increment() })
+        defer { transport.finish() }
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+            foregroundWriter: transport.writer))
         try await authenticate(stream, limits: limits)
         await interests.waitForActivation()
         let prepared = try #require(V2PreparedGatewayGroupEventAvailable(
             roomID: try RoomID("00000000-0000-0000-0000-000000000e04"),
             highWatermark: 1, directEvent: nil, frameLimits: limits, protocolVersion: version))
         #expect(stream.submitGroupEventAvailable(prepared))
+        transport.drain()
         let close = Task { await registry.unregister(connectionID: connectionID) }
         await interests.waitForRemoval()
         #expect(!stream.submitGroupEventAvailable(prepared))

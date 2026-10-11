@@ -76,14 +76,13 @@ struct GatewayComposition {
             try await prepared.frontdoor.connectionRegistry.installDeviceRoomProgressStore(
                 PostgresV2DeviceRoomProgressStore(database: prepared.topology.deliveryDatabase))
             databaseTopology = prepared.topology
-            let deployment = PostgresV2PolicyDeploymentPlacementStore(database: prepared.topology.authorizationControlDatabase)
-            if let placement = prepared.roomOwners.actorConfiguration.policyPlacement {
-                try await deployment.require(V2PolicyOwnerPlacement(placement))
-                policies = try GatewayPolicyAssembly.build(prepared: prepared, logger: logger)
-                if let policies { durableOwnerResources = policies.physicalResources }
-            } else {
-                try await deployment.requireLegacy()
+            let deployment = PostgresV2PolicyDeploymentPlacementStore(database: prepared.topology.roomIdentityControlDatabase)
+            guard let placement = prepared.roomOwners.actorConfiguration.policyPlacement else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
+            try await deployment.require(V2PolicyOwnerPlacement(placement))
+            policies = try GatewayPolicyAssembly.build(prepared: prepared, logger: logger)
+            if let policies { durableOwnerResources = policies.physicalResources }
             // 2. 启动房间 Actor：有 hostIdentity 时启动房间承载节点及发现服务，
             // 否则启动仅调用远端房间的客户端节点。返回的目录和预留协调器供房间服务使用。
             let actorFactory = try V2RoomServerActivationFactory(owners: policies?.ownerResources ?? prepared.roomOwners.ownerResources,

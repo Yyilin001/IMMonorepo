@@ -196,13 +196,6 @@ package struct PostgresV2PolicyAuthorizationJournal: Sendable {
             }
             guard row.pending_change_key == nil else { throw V2PolicyAuthorizationLifecycleError.busy }
             guard owner.revision < Int64.max else { throw V2PolicyAuthorizationLifecycleError.staleVersion }
-            guard try await sql.raw("""
-                SELECT count(*)::bigint AS value
-                FROM \(unsafeRaw: self.schema).policy_authorization_holders
-                WHERE scope_key = \(bind: scope.key) AND NOT revoked
-                """).first(decoding: CountRow.self)?.value == 0 else {
-                throw V2PolicyAuthorizationLifecycleError.notDrained
-            }
             let change = V2PolicyAuthorizationChange(operationKey: operationKey, scopeKey: scope.key,
                 fingerprint: fingerprint, commandJSON: commandJSON, expectedRevision: owner.revision,
                 nextRevision: owner.revision + 1, committed: false, receipt: nil)

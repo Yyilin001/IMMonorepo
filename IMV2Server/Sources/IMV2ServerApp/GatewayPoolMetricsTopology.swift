@@ -41,11 +41,9 @@ enum GatewayPoolMetricsTopology {
                   eventLoopHandles: configuration.databaseNonMessagePoolEventLoopThreads,
                   connectionCeiling: configuration.databaseNonMessagePoolEventLoopThreads *
                     configuration.directSendControlConnectionsPerEventLoop),
-            .init(poolClass: .directAuthorizationResolution,
-                  eventLoopHandles: configuration.databaseNonMessagePoolEventLoopThreads *
-                    configuration.directAuthorizationResolutionDatabaseURLs.count,
-                  connectionCeiling: configuration.databaseNonMessagePoolEventLoopThreads *
-                    configuration.directAuthorizationResolutionDatabaseURLs.count)
+            .init(poolClass: .roomIdentityControl,
+                  eventLoopHandles: configuration.databaseNonMessagePoolEventLoopThreads,
+                  connectionCeiling: configuration.databaseNonMessagePoolEventLoopThreads)
         ])
     }
 

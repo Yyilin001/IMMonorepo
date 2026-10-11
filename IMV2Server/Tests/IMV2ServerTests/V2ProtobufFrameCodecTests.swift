@@ -9,23 +9,29 @@ import Testing
 @testable import IMV2ServerGateway
 
 struct V2ProtobufFrameCodecTests {
-    @Test("device confirmation commands require protocol 47", arguments: [false, true])
-    func deviceProgressVersionBoundary(recorded: Bool) throws {
+    @Test("business frames accept only the current protocol", arguments: ["sync", "progress", "progressRecorded"])
+    func businessProtocolBoundary(command: String) throws {
         var envelope = IMV2Envelope(); envelope.requestID = 1
-        if recorded { envelope.deviceRoomProgressRecorded = .init() }
-        else { envelope.deviceRoomProgressReport = .init() }
-        for oldVersion: UInt8 in [1, 45, 46] {
-            envelope.protocolVersion = UInt32(oldVersion)
-            #expect(throws: V2ServerProtobufFrameCodecError.protocolVersionMismatch) {
-                _ = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: oldVersion)
-            }
-            let frame = V2Frame(version: oldVersion,
-                command: recorded ? .deviceRoomProgressRecorded : .deviceRoomProgressReport,
-                requestID: 1, payload: try envelope.serializedData())
-            #expect(throws: V2ServerProtobufFrameCodecError.protocolVersionMismatch) { _ = try V2ServerProtobufFrameCodec.decode(frame) }
+        let frameCommand: V2FrameCommand
+        switch command {
+        case "sync": envelope.syncPull = .init(); frameCommand = .syncPull
+        case "progress": envelope.deviceRoomProgressReport = .init(); frameCommand = .deviceRoomProgressReport
+        default: envelope.deviceRoomProgressRecorded = .init(); frameCommand = .deviceRoomProgressRecorded
         }
-        envelope.protocolVersion = 47
-        #expect(try V2ServerProtobufFrameCodec.decode(V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 47)) == envelope)
+        let current = UInt8(IMV2ProtocolVersion.current)
+        for unsupported in Array(UInt8(0)..<current) + [current + 1] {
+            envelope.protocolVersion = UInt32(unsupported)
+            #expect(throws: V2ServerProtobufFrameCodecError.protocolVersionMismatch) {
+                _ = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: unsupported)
+            }
+            let frame = V2Frame(version: unsupported, command: frameCommand,
+                requestID: 1, payload: try envelope.serializedData())
+            #expect(throws: V2ServerProtobufFrameCodecError.protocolVersionMismatch) {
+                _ = try V2ServerProtobufFrameCodec.decode(frame)
+            }
+        }
+        envelope.protocolVersion = IMV2ProtocolVersion.current
+        #expect(try V2ServerProtobufFrameCodec.decode(V2ServerProtobufFrameCodec.encode(envelope, frameVersion: current)) == envelope)
     }
     @Test("heartbeat progress and authoritative scope state survive protobuf framing")
     func heartbeatProgressRoundTrip() throws {
@@ -87,10 +93,10 @@ struct V2ProtobufFrameCodecTests {
     func rejectsMismatch() throws {
         var envelope = IMV2Envelope()
         envelope.requestID = 11
-        envelope.protocolVersion = 1
+        envelope.protocolVersion = IMV2ProtocolVersion.current
         envelope.syncAck = .init()
-        let frame = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 1)
-        let mismatch = V2Frame(version: 1, command: .syncPull, requestID: 11, payload: frame.payload)
+        let frame = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current))
+        let mismatch = V2Frame(version: UInt8(IMV2ProtocolVersion.current), command: .syncPull, requestID: 11, payload: frame.payload)
         #expect(throws: V2ServerProtobufFrameCodecError.headerCommandMismatch) { _ = try V2ServerProtobufFrameCodec.decode(mismatch) }
     }
 
@@ -98,9 +104,9 @@ struct V2ProtobufFrameCodecTests {
     func rejectsFrameFlags() throws {
         var envelope = IMV2Envelope()
         envelope.requestID = 12
-        envelope.protocolVersion = 1
+        envelope.protocolVersion = IMV2ProtocolVersion.current
         envelope.syncPull = .init()
-        let plain = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 1)
+        let plain = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current))
         let compressed = V2Frame(
             version: plain.version,
             flags: [.compressed],
@@ -112,7 +118,7 @@ struct V2ProtobufFrameCodecTests {
             _ = try V2ServerProtobufFrameCodec.decode(compressed)
         }
         #expect(throws: V2ServerProtobufFrameCodecError.unsupportedFrameFlags) {
-            _ = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 1, flags: [.compressed])
+            _ = try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current), flags: [.compressed])
         }
     }
 
@@ -149,17 +155,17 @@ struct V2ProtobufFrameCodecTests {
         }
     }
 
-    @Test("v21 group pages may bind request correlation to the frame header")
+    @Test("current group pages may bind request correlation to the frame header")
     func headerBoundRequestIDRoundTrip() throws {
         var envelope = IMV2Envelope()
         envelope.requestID = 77
-        envelope.protocolVersion = 21
+        envelope.protocolVersion = IMV2ProtocolVersion.current
         envelope.groupEventPage = .init()
         envelope.groupEventPage.roomID = "group-header-bound-test"
 
         let frame = try V2ServerProtobufFrameCodec.encode(
             envelope,
-            frameVersion: 21,
+            frameVersion: UInt8(IMV2ProtocolVersion.current),
             bindRequestIDToHeader: true
         )
         #expect(frame.flags == [.headerBoundRequestID])
@@ -168,16 +174,16 @@ struct V2ProtobufFrameCodecTests {
         #expect(try V2ServerProtobufFrameCodec.decode(frame) == envelope)
     }
 
-    @Test("header-bound correlation is restricted to v21 group-event pages")
+    @Test("header-bound correlation is restricted to group-event pages")
     func rejectsInvalidHeaderBoundRequestIDUse() throws {
         var ordinary = IMV2Envelope()
         ordinary.requestID = 78
-        ordinary.protocolVersion = 21
+        ordinary.protocolVersion = IMV2ProtocolVersion.current
         ordinary.syncAck = .init()
         #expect(throws: V2ServerProtobufFrameCodecError.unsupportedFrameFlags) {
             _ = try V2ServerProtobufFrameCodec.encode(
                 ordinary,
-                frameVersion: 21,
+                frameVersion: UInt8(IMV2ProtocolVersion.current),
                 bindRequestIDToHeader: true
             )
         }
@@ -186,7 +192,7 @@ struct V2ProtobufFrameCodecTests {
         page.requestID = 79
         page.protocolVersion = 20
         page.groupEventPage = .init()
-        #expect(throws: V2ServerProtobufFrameCodecError.unsupportedFrameFlags) {
+        #expect(throws: V2ServerProtobufFrameCodecError.protocolVersionMismatch) {
             _ = try V2ServerProtobufFrameCodec.encode(
                 page,
                 frameVersion: 20,
@@ -210,10 +216,10 @@ struct V2ProtobufFrameCodecTests {
     private func nestedSyncBatchFrame() throws -> V2Frame {
         var envelope = IMV2Envelope()
         envelope.requestID = 13
-        envelope.protocolVersion = 1
+        envelope.protocolVersion = IMV2ProtocolVersion.current
         envelope.syncBatch = .init()
         envelope.syncBatch.records = [.init()]
-        return try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: 1)
+        return try V2ServerProtobufFrameCodec.encode(envelope, frameVersion: UInt8(IMV2ProtocolVersion.current))
     }
 }
 

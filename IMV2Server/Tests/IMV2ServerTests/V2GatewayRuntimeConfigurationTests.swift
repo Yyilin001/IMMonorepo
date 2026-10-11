@@ -31,14 +31,13 @@ struct V2GatewayRuntimeConfigurationTests {
         }
     }
 
-    @Test("durable scheduling retains only pending and fallback connection limits", arguments: [288, 16])
+    @Test("durable scheduling retains only pending request limits", arguments: [288, 16])
     func durableOwnerSchedulingConfiguration(pending: Int) throws {
         var environment = runtimeValues
         environment["IM_V2_FOREGROUND_WRITE_DATABASE_WORK_MAX_QUEUED"] = String(pending)
         let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(environment))
         let durable = configuration.durableSendSchedulingConfiguration()
         #expect(durable.maximumPendingRequests == pending)
-        #expect(durable.fallbackConnectionCapacity == configuration.directRoomLogAppendBatchMaximumInFlightBatches)
     }
 
     @Test("author supplements default off and require an explicit boolean rollout value")
@@ -215,9 +214,7 @@ struct V2GatewayRuntimeConfigurationTests {
         // 保留窗口默认是"永久"=不裁剪历史，与既有行为一致；窗口模式必须显式选择。
         #expect(defaults.roomLogRetentionMode == .permanent)
         #expect(defaults.roomLogRetentionWindowSeconds == V2GatewayRuntimeConfiguration.defaultRoomLogRetentionWindowSeconds)
-        #expect(defaults.directRoomLogAppendBatchMaximumInFlightBatches == 8)
-        #expect(defaults.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
-        #expect(defaults.directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds == nil)
+        #expect(defaults.roomTurnBatchMaximumDelayMilliseconds == 2)
         #expect(defaults.directSendPolicyCacheMaximumEntries == 50_000)
         #expect(defaults.directRoomLogEventCacheMaximumEntries == 0)
         #expect(defaults.directRoomLogEventCacheMaximumBytes == 0)
@@ -250,13 +247,12 @@ struct V2GatewayRuntimeConfigurationTests {
         }
 
         var appendBatch = roomLog
-        appendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "2"
+        appendBatch["IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS"] = "2"
         let appendBatchConfiguration = try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(appendBatch)
         )
-        #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumInFlightBatches == 8)
         #expect(appendBatchConfiguration.directRoomLogAppendMaximumPendingRequests == 288)
-        #expect(appendBatchConfiguration.directRoomLogAppendBatchMaximumDelayMilliseconds == 2)
+        #expect(appendBatchConfiguration.roomTurnBatchMaximumDelayMilliseconds == 2)
 
         var burstSizedAppendBatch = appendBatch
         burstSizedAppendBatch[
@@ -275,26 +271,6 @@ struct V2GatewayRuntimeConfigurationTests {
         )) {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(undersizedAppendPending)
-            )
-        }
-
-        var widenedAppendBatchConcurrency = appendBatch
-        widenedAppendBatchConcurrency[
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT"
-        ] = "12"
-        #expect(try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(widenedAppendBatchConcurrency)
-        ).directRoomLogAppendBatchMaximumInFlightBatches == 12)
-
-        var oversizedAppendBatchConcurrency = appendBatch
-        oversizedAppendBatchConcurrency[
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT"
-        ] = "37"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_IN_FLIGHT"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(oversizedAppendBatchConcurrency)
             )
         }
 
@@ -357,20 +333,10 @@ struct V2GatewayRuntimeConfigurationTests {
         }
 
         var highActivityAppendBatch = appendBatch
-        highActivityAppendBatch["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "20"
+        highActivityAppendBatch["IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS"] = "20"
         #expect(try V2GatewayRuntimeConfiguration(
             environment: V2DictionaryRuntimeEnvironment(highActivityAppendBatch)
-        ).directRoomLogAppendBatchMaximumDelayMilliseconds == 20)
-
-        var adaptiveHighActivityAppendBatch = appendBatch
-        adaptiveHighActivityAppendBatch[
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"
-        ] = "20"
-        let adaptiveHighActivityConfiguration = try V2GatewayRuntimeConfiguration(
-            environment: V2DictionaryRuntimeEnvironment(adaptiveHighActivityAppendBatch)
-        )
-        #expect(adaptiveHighActivityConfiguration
-            .directRoomLogAppendBatchHighActivityMaximumDelayMilliseconds == 20)
+        ).roomTurnBatchMaximumDelayMilliseconds == 20)
 
         // The single-host deployment reserves the same 32 isolated
         // foreground permits as 12/4/16 (append/control/read). This protects
@@ -391,22 +357,10 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(readBiasedForegroundConfiguration.foregroundWriteDatabaseWorkLimit == 12)
         #expect(readBiasedForegroundConfiguration.interactiveReadDatabaseWorkLimit == 16)
 
-        var nonIncreasingAdaptiveHighActivityAppendBatch = adaptiveHighActivityAppendBatch
-        nonIncreasingAdaptiveHighActivityAppendBatch[
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"
-        ] = "2"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_HIGH_ACTIVITY_DELAY_MS"
-        )) {
-            _ = try V2GatewayRuntimeConfiguration(
-                environment: V2DictionaryRuntimeEnvironment(nonIncreasingAdaptiveHighActivityAppendBatch)
-            )
-        }
-
         var excessiveAppendBatchDelay = appendBatch
-        excessiveAppendBatchDelay["IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"] = "26"
+        excessiveAppendBatchDelay["IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS"] = "26"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid(
-            "IM_V2_DIRECT_ROOM_LOG_APPEND_BATCH_MAX_DELAY_MS"
+            "IM_V2_ROOM_TURN_BATCH_MAX_DELAY_MS"
         )) {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(excessiveAppendBatchDelay)
@@ -510,7 +464,7 @@ struct V2GatewayRuntimeConfigurationTests {
         [{"shard_id":"room-a","database_url":"\(ownerURL)"},
          {"shard_id":"room-b","database_url":"\(ownerURL)"}]
         """
-        // Logical aliases share physical data and resolution pools.
+        // Logical aliases share physical data; identity reads use one control-only pool.
         let physicalStores = separateOwner ? 2 : 1
         values["IM_V2_DIRECT_ROOM_SHARD_ID"] = "room-a"
         values["IM_V2_GROUP_ROOM_SHARD_ID"] = "room-b"
@@ -519,7 +473,7 @@ struct V2GatewayRuntimeConfigurationTests {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         }
         let controlConnections = isolated ? 4 : 8
-        let total = 4 * (8 * physicalStores + 1 + controlConnections + physicalStores)
+        let total = 4 * (8 * physicalStores + 2 + controlConnections)
         values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = String(total - 1)
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
@@ -527,7 +481,6 @@ struct V2GatewayRuntimeConfigurationTests {
         values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = String(total)
         let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         #expect(configuration.directSendControlConnectionsPerEventLoop == controlConnections)
-        #expect(configuration.directAuthorizationResolutionDatabaseURLs == Set([controlURL, ownerURL]).sorted())
     }
 
     @Test("policy control overrides preserve other pools and obey the process ceiling", arguments: [false, true])
@@ -730,7 +683,6 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.userShardStorage == [try .init(bucket: "users-primary", databaseURL: "postgres://v2:password@db/im_v2")])
         #expect(configuration.directRoomShardID == "rooms-primary")
         #expect(configuration.directRoomShardRouter.shardIDs == ["rooms-primary"])
-        #expect(configuration.groupRoomShardID == "rooms-primary")
         #expect(configuration.groupRoomShardIDs == ["rooms-primary"])
         #expect(configuration.strangerMessagePolicy.maximumMessagesPerWindow == 3)
         #expect(configuration.strangerMessagePolicy.window == 86_400)
@@ -798,28 +750,16 @@ struct V2GatewayRuntimeConfigurationTests {
         #expect(configuration.contentReviewEscalationTerms == ["manual-review"])
     }
 
-    @Test("Actor routing is the default and requires its authenticated cluster configuration")
-    func actorRoutingDefault() throws {
+    @Test("Actor routing requires its authenticated cluster configuration")
+    func requiresActorConfiguration() throws {
         var values = runtimeValues
-        values.removeValue(forKey: "IM_V2_REALTIME_ROOM_TRANSPORT")
         values.removeValue(forKey: "IMV2_ROOM_ACTOR_CONFIGURATION_FILE")
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IMV2_ROOM_ACTOR_CONFIGURATION_FILE")) {
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IMV2_ROOM_ACTOR_CONFIGURATION_FILE")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         }
         values["IMV2_ROOM_ACTOR_CONFIGURATION_FILE"] = "/run/im-v2-room-actor/configuration.json"
         values["IM_V2_GATEWAY_REPLICA_COUNT"] = "2"
-        guard case .actor = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values)).groupEventWake else {
-            Issue.record("Expected Actor routing"); return
-        }
-        values["IM_V2_REALTIME_ROOM_TRANSPORT"] = "unsupported"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_REALTIME_ROOM_TRANSPORT")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
-        }
-        values["IM_V2_REALTIME_ROOM_TRANSPORT"] = "local"
-        values["IM_V2_GATEWAY_REPLICA_COUNT"] = "1"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_REALTIME_ROOM_TRANSPORT")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
-        }
+        _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
     }
 
     @Test("Hybrid durable wake cadence is independently bounded")
@@ -845,16 +785,6 @@ struct V2GatewayRuntimeConfigurationTests {
             _ = try V2GatewayRuntimeConfiguration(
                 environment: V2DictionaryRuntimeEnvironment(values)
             )
-        }
-    }
-
-    @Test("a multi-gateway topology cannot silently use process-local hybrid wakes")
-    func rejectsLocalOnlyGroupWakeForMultipleGatewayReplicas() {
-        var values = runtimeValues
-        values["IM_V2_GATEWAY_REPLICA_COUNT"] = "2"
-        values["IM_V2_REALTIME_ROOM_TRANSPORT"] = "local"
-        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_REALTIME_ROOM_TRANSPORT")) {
-            _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         }
     }
 
@@ -1119,7 +1049,6 @@ struct V2GatewayRuntimeConfigurationTests {
             "IM_V2_METRICS_REFRESH_TIMEOUT_MS": "4000",
             "IM_V2_GATEWAY_NODE_ID": "gateway-a",
             "IM_V2_GATEWAY_REPLICA_COUNT": "1",
-            "IM_V2_REALTIME_ROOM_TRANSPORT": "actor",
             "IMV2_ROOM_ACTOR_CONFIGURATION_FILE": "/run/im-v2-room-actor/configuration.json",
             "IM_V2_USER_SHARD_BUCKET": "users-primary",
             "IM_V2_USER_SHARD_ROUTER_EPOCH": "7",

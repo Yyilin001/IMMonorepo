@@ -10,7 +10,7 @@ import SQLKit
 ///
 /// 它使用独立的幂等与审计记录，但写入与撤回相同的可见墓碑投影形态，
 /// 因此较旧的本地时间线不会把未知的审核事件当成一次有效的消息接受。
-public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2OwnerValidatedModerationStore {
+public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
     private let database: any Database
     private let activationScope: V2RoomActivationWriteScope?
     private var existingMemberAdministrationTransaction=false
@@ -33,39 +33,27 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
     }
 
     func apply(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
-        try await apply(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    private func apply(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         switch command.action {
         case .redactMessage:
             guard existingMessageModerationTransaction else { throw V2ModerationStoreError.unsupportedAction }
-            return try await redact(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
+            return try await redact(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now)
         case .muteMember:
             guard existingMemberAdministrationTransaction else { throw V2ModerationStoreError.unsupportedAction }
-            return try await mute(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
+            return try await mute(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now)
         case .removeMember:
             guard existingMemberAdministrationTransaction else { throw V2ModerationStoreError.unsupportedAction }
-            return try await removeMember(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
+            return try await removeMember(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now)
         case .freezeRoom, .unfreezeRoom:
             throw V2ModerationStoreError.unsupportedAction
         }
     }
 
     public func applyTrustedSafety(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
-        try await applyTrustedSafety(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    public func applyTrustedSafetyOwnerValidated(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
-        try await applyTrustedSafety(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    private func applyTrustedSafety(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         switch command.action {
         case .redactMessage:
-            return try await redact(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now, isTrustedSafety: true)
+            return try await redact(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now, isTrustedSafety: true)
         case .freezeRoom, .unfreezeRoom:
-            return try await controlRoom(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
+            return try await controlRoom(command: command, capacityProfile: capacityProfile, eventID: eventID, now: now)
         case .removeMember, .muteMember:
             throw V2ModerationStoreError.unsupportedAction
         }
@@ -79,7 +67,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
         return retainUntil
     }
 
-    private func controlRoom(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
+    private func controlRoom(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
             classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
@@ -92,7 +80,6 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let activationScope { try await activationScope.require([roomID], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             if let prior = try await sql.raw("""
                 SELECT room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code,
                        room_sequence, event_id, created_at
@@ -171,7 +158,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
         }
     }
 
-    private func redact(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date, isTrustedSafety: Bool = false) async throws -> V2ModerationOutcome {
+    private func redact(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date, isTrustedSafety: Bool = false) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
             classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingMessageModerationTransaction
@@ -186,7 +173,6 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let activationScope { try await activationScope.require([roomID], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             if !existingMessageModerationTransaction, let prior = try await sql.raw("""
                 SELECT room_id, action, target_user_id, message_id, resulting_message_revision, mute_until, reason_code,
                        room_sequence, event_id, created_at
@@ -302,7 +288,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
         }
     }
 
-    private func removeMember(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
+    private func removeMember(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         return try await v2WithPostgresTransactionRetry(
             database: database, maximumRetryCount: 0,
             classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil, existingTransaction: existingMemberAdministrationTransaction
@@ -318,7 +304,6 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let activationScope { try await activationScope.require([roomID], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
 
             let retainUntil = try validatedAuditRetention(now: now)
             guard let room = try await sql.raw("""
@@ -413,7 +398,7 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
         }
     }
 
-    private func mute(command: V2ModerationCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
+    private func mute(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
         if let muteUntil = command.muteUntil, !v2PostgresTimestampCanEncode(muteUntil) {
             throw V2ModerationValidationError.invalidMuteExpiry
         }
@@ -433,7 +418,6 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore, V2Owner
             if activationScope != nil { try await v2SetRoomActivationSQLTimeouts(.default, sql: sql) }
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
             if let activationScope { try await activationScope.require([roomID], sql: sql) }
-            if activationScope == nil, let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
 
             let retainUntil = try validatedAuditRetention(now: now)
             guard v2PostgresTimestampPrecedes(now, commandMuteUntil) else { throw V2ModerationValidationError.invalidMuteExpiry }

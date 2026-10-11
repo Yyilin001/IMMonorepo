@@ -14,8 +14,7 @@ public enum V2RoomActorApplicationError: Error, Sendable {
     case incompleteShutdown
 }
 
-/// One coherent opt-in; configuration cannot silently run a legacy room
-/// factory while exposing the new policy mutation endpoints.
+/// Policy hosting binds room construction and mutation endpoints as one configuration.
 public struct V2PolicyHostedServices: Sendable {
     package var clientBinding: V2PolicyClusterClientBinding? = nil
     package var forwardPairs: V2RoomForwardPairService? = nil
@@ -105,7 +104,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                              policyServices: V2PolicyHostedServices? = nil) async throws -> V2RoomActorApplication {
         if let services = policyServices {
             guard configuration.hostIdentity != nil, configuration.policyPlacement == services.placement,
-                  factory?.usesPolicyAuthorizations == true else { throw V2RoomActorApplicationError.invalidRole }
+                  factory != nil else { throw V2RoomActorApplicationError.invalidRole }
         } else if configuration.hostIdentity != nil, configuration.policyPlacement != nil {
             throw V2RoomActorApplicationError.invalidRole
         }

@@ -74,7 +74,7 @@ struct V2ActorRoomReceiptErrorMapperTests {
     @Test("store rejection and admission busy have different wire cases")
     func failures() throws {
         let store = V2ActorRoomReceiptFailureWire(V2ReadReceiptStoreError.ownerChanged)
-        let busy = V2ActorRoomReceiptFailureWire(V2ReadReceiptBatcherError.serverBusy)
+        let busy = V2ActorRoomReceiptFailureWire(V2RoomReceiptAdmissionError.serverBusy)
         #expect(store == .store(.ownerChanged))
         #expect(busy == .serverBusy)
         #expect(store.domainValue() == .store(.ownerChanged))

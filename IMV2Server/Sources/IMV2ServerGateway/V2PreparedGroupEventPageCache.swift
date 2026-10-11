@@ -9,7 +9,7 @@ import Synchronization
 ///
 /// 授权与游标可见性仍由 `V2GroupEventLogStore` 负责，并对每次请求都执行。
 /// 只有在存储返回了已授权的不可变分页之后才会命中该缓存，且缓存不保存任何身份或成员事实。
-/// 协议 v21 把请求关联绑定到 TLS 帧头，使同一份 protobuf 载荷可以被共享，
+/// 当前协议把请求关联绑定到 TLS 帧头，使同一份 protobuf 载荷可以被共享，
 /// 又不会削弱请求匹配的严格性。
 public final class V2PreparedGroupEventPageCache: Sendable {
     /// 缓存配置。
@@ -119,7 +119,7 @@ public final class V2PreparedGroupEventPageCache: Sendable {
     ///
     /// - Parameters:
     ///   - envelope: 待编码信封。
-    ///   - frameVersion: 协商的帧版本，需不低于 21。
+    ///   - frameVersion: 协商的帧版本，必须为当前版本。
     ///   - compression: 协商的压缩方式。
     ///   - maximumUncompressedPayloadBytes: 未压缩载荷上限。
     ///   - compressionThresholdBytes: 启用压缩的阈值。
@@ -134,7 +134,7 @@ public final class V2PreparedGroupEventPageCache: Sendable {
         compressionThresholdBytes: Int,
         maximumExpansionRatio: Int
     ) throws -> V2Frame? {
-        guard frameVersion >= 21,
+        guard frameVersion == UInt8(IMV2ProtocolVersion.current),
               case .groupEventPage(let page)? = envelope.body
         else { return nil }
         let key = Self.key(page: page, protocolVersion: frameVersion)
@@ -155,7 +155,7 @@ public final class V2PreparedGroupEventPageCache: Sendable {
     /// 因此热路径命中除极小的请求专属帧头之外不产生额外分配。
     ///
     /// - Parameters:
-    ///   - key: 分页键，协议版本需不低于 21。
+    ///   - key: 分页键，协议版本必须为当前版本。
     ///   - requestID: 本次请求标识。
     ///   - compression: 协商的压缩方式。
     ///   - maximumUncompressedPayloadBytes: 未压缩载荷上限。
@@ -173,7 +173,7 @@ public final class V2PreparedGroupEventPageCache: Sendable {
         maximumExpansionRatio: Int,
         envelope: () throws -> IMV2Envelope
     ) throws -> V2Frame {
-        precondition(key.protocolVersion >= 21)
+        precondition(key.protocolVersion == UInt8(IMV2ProtocolVersion.current))
         let wantsCompressed = compression == .zlib
         let shard = shards[Self.shardIndex(for: key, count: shards.count)]
         // 有意在分片内部编码未预热的表示：首位调用方成为单飞生产者，

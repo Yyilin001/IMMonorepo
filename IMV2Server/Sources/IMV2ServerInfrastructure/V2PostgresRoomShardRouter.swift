@@ -50,7 +50,7 @@ public struct V2PostgresRoomShardRouter: V2DirectRoomShardRouting {
     /// 两次读取未包裹在本方法创建的统一事务中，不保证跨查询的同一时刻快照。
     ///
     /// - Parameter roomIDs: 可重复的 UUID 房间标识，空输入不访问数据库。
-    /// - Returns: 所有不同房间的完整路由映射，历史回退值使用零代次。
+    /// - Returns: 所有不同房间的完整路由映射，分片和代次均来自显式目录。
     /// - Throws: 缺失任一请求房间时抛出 `roomNotFound`；标识、SQL 能力、JSON 编码、
     ///   路由校验及查询错误按实际失败路径传播。
     public func routes(for roomIDs: [RoomID]) async throws -> [RoomID: V2RoomShardRoute] {

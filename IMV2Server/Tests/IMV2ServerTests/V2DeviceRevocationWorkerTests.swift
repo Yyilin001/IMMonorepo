@@ -13,7 +13,7 @@ struct V2DeviceRevocationWorkerTests {
     func invalidBatchLimits(limit: Int) async throws {
         let store = InMemoryDeviceRevocationEventStore(events: [])
         let cleaner = FailOnceProjectionCleaner()
-        let gateway = V2DeviceRevocationWorker(store: store, registry: V2DeviceConnectionRegistry(), nodeID: "gateway-limit-test")
+        let gateway = V2DeviceRevocationWorker(store: store, registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), nodeID: "gateway-limit-test")
         let cleanup = V2RevokedDeviceProjectionCleanupWorker(store: store, cleaner: cleaner)
         await #expect(throws: V2GatewayAuthenticationError.corruptPersistenceState) {
             try await gateway.runOnce(limit: limit)
@@ -37,7 +37,7 @@ struct V2DeviceRevocationWorkerTests {
         ])
         let worker = V2DeviceRevocationWorker(
             store: store,
-            registry: V2DeviceConnectionRegistry(),
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits),
             nodeID: "gateway-test",
             now: { Date(timeIntervalSince1970: 1_750_000_000) }
         )
@@ -60,7 +60,7 @@ struct V2DeviceRevocationWorkerTests {
         ])
         let worker = V2DeviceRevocationWorker(
             store: store,
-            registry: V2DeviceConnectionRegistry(),
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits),
             nodeID: "new-gateway-test",
             now: { Date(timeIntervalSince1970: 1_750_000_000) }
         )
@@ -84,7 +84,7 @@ struct V2DeviceRevocationWorkerTests {
     func revokesRegisteredLiveStreamBeforeAcknowledgingEvent() async throws {
         let user = try UserID("00000000-0000-0000-0000-000000000711")
         let device = try DeviceID("00000000-0000-0000-0000-000000000712")
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 4_096, acceptedVersions: [0, 1]),
             session: .init(

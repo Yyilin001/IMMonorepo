@@ -11,10 +11,13 @@ public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetri
     public convenience init(store: PostgresV2MessageSendOperationStore, capacityProfile: V2CapacityProfile,
                 identifiers: V2AcceptanceIDFactory = .init(), now: @escaping @Sendable () -> Date,
                 configuration: V2SendOperationSchedulingConfiguration,
-                maximumRetainedBytes: Int) {
+                maximumRetainedBytes: Int) throws {
+        guard let capacity = store.scheduledSendConnectionCapacity, capacity > 0 else {
+            throw V2ActorContractError.invalidConfiguration("message send requires physical connection capacity")
+        }
         self.init(store: store, configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes,
-            resourceDemandLimit: store.scheduledSendConnectionCapacity ?? configuration.fallbackConnectionCapacity,
+            resourceDemandLimit: capacity,
             scheduledConnection: { deadline, body in
                 try await store.withScheduledSendConnection(deadline: deadline, body)
             }, startScheduledConnection: { deadline, body in

@@ -12,50 +12,50 @@ readonly duration_seconds="${3:-30}"
 readonly timeout_seconds="${4:-300}"
 readonly container="${IM_V2_GATEWAY_CONTAINER:-imv2gateway2_gateway_1}"
 readonly metrics_url="${IM_V2_GATEWAY_METRICS_URL:-http://127.0.0.1:9464/metrics}"
-readonly append_pending_threshold="${IM_V2_GATEWAY_APPEND_PENDING_THRESHOLD:-}"
+readonly owner_queued_turns_threshold="${IM_V2_GATEWAY_OWNER_QUEUED_TURNS_THRESHOLD:-}"
 
 [[ "${accepted_threshold}" =~ ^[0-9]+$ ]] || exit 64
 [[ "${duration_seconds}" =~ ^[0-9]+$ ]] && (( duration_seconds >= 1 )) || exit 64
 [[ "${timeout_seconds}" =~ ^[0-9]+$ ]] && (( timeout_seconds >= 1 )) || exit 64
-if [[ -n "${append_pending_threshold}" ]]; then
-  [[ "${append_pending_threshold}" =~ ^[0-9]+$ ]] \
-    && (( append_pending_threshold >= 1 )) \
+if [[ -n "${owner_queued_turns_threshold}" ]]; then
+  [[ "${owner_queued_turns_threshold}" =~ ^[0-9]+$ ]] \
+    && (( owner_queued_turns_threshold >= 1 )) \
     || exit 64
 fi
 
 deadline=$((SECONDS + timeout_seconds))
 while (( SECONDS < deadline )); do
-  read -r accepted append_pending < <({
+  read -r accepted owner_queued_turns < <({
     curl --fail --silent --show-error --max-time 3 "${metrics_url}" || true
   } | awk '
     /^im_v2_gateway_commands_total\{command="send_message",outcome="accepted"/ {
       if (!accepted_found) { accepted = int($2); accepted_found = 1 }
     }
-    /^im_v2_direct_room_log_append_batch_pending_requests / {
-      append_pending = int($2)
-      append_pending_found = 1
+    /^im_v2_send_operation_owner_queued_turns / {
+      owner_queued_turns = int($2)
+      owner_queued_turns_found = 1
     }
     END {
       if (!accepted_found) accepted = 0
-      if (!append_pending_found) append_pending = 0
-      print accepted, append_pending
+      if (!owner_queued_turns_found) owner_queued_turns = 0
+      print accepted, owner_queued_turns
     }
   ')
-  if [[ -n "${append_pending_threshold}" ]] \
-      && (( append_pending >= append_pending_threshold )); then
+  if [[ -n "${owner_queued_turns_threshold}" ]] \
+      && (( owner_queued_turns >= owner_queued_turns_threshold )); then
     break
   fi
-  if [[ -z "${append_pending_threshold}" ]] \
+  if [[ -z "${owner_queued_turns_threshold}" ]] \
       && (( accepted >= accepted_threshold )); then
     break
   fi
   sleep 1
 done
 
-if [[ -n "${append_pending_threshold}" ]]; then
-  if (( append_pending < append_pending_threshold )); then
-    printf 'append-pending threshold not reached: pending=%s threshold=%s\n' \
-      "${append_pending}" "${append_pending_threshold}" >&2
+if [[ -n "${owner_queued_turns_threshold}" ]]; then
+  if (( owner_queued_turns < owner_queued_turns_threshold )); then
+    printf 'owner-queued-turns threshold not reached: pending=%s threshold=%s\n' \
+      "${owner_queued_turns}" "${owner_queued_turns_threshold}" >&2
     exit 1
   fi
 else

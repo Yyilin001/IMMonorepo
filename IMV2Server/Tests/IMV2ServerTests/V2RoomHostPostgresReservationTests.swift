@@ -256,7 +256,7 @@ private func makePairHost(database: any Database, profile: V2CapacityProfile,
         maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
         timeout: .seconds(2)))
     let writes = PostgresV2RoomWriteStore(database: database)
-    let resources = try V2RoomServerOwnerResources(database: database, writes: writes,
+    let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -264,7 +264,7 @@ private func makePairHost(database: any Database, profile: V2CapacityProfile,
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init(),
         databaseWorkAdmission: admission)
-    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources],
+    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
         safetyActorUserID: senderID).runtimeFactory()
     let identity = V2ActorHostIdentity(hostID: try .init("pair-pg-host"), incarnationID: UUID())
     return .init(host: .init(identity: identity, leaseStore: leases,

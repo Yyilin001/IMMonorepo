@@ -13,7 +13,7 @@ import Testing
 struct V2AccountRoomGatewayTests {
     @Test("device transport closure completes before suspended account route cleanup")
     func revocationTransportPrecedesCleanup() async throws {
-        let registry = V2DeviceConnectionRegistry(), cleanup = CoverageInstallGate()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), cleanup = CoverageInstallGate()
         let user = UserID(uuid: UUID()), room = RoomID(uuid: UUID()), connection = UUID()
         let activated = Mutex(false), closed = Mutex(0), finished = Mutex(false)
         let service = try V2AccountRoomChangeService(states: GatewayCoverageStates(recordRead: {}),
@@ -28,7 +28,7 @@ struct V2AccountRoomGatewayTests {
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: FixedCoverageAuth(user: user),
                 capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: GatewayCoverageCommands(registry: registry, rooms: []), connectionID: connection, registry: registry)
-        try #require(await stream.attachTransport(deviceRevocationHandler: { closed.withLock { $0 += 1 } },
+        try #require(await stream.attachFixtureTransport(deviceRevocationHandler: { closed.withLock { $0 += 1 } },
             outboundWriter: { _ in }, requiredNotificationWriter: { _ in true },
             scopedNotificationWriter: { write in write.enqueueIfCurrent({}) }))
         let device = UUID().uuidString
@@ -63,14 +63,14 @@ struct V2AccountRoomGatewayTests {
 
     @Test("concurrent Start cannot replace the installing directory write fence")
     func concurrentStartKeepsInstallingFence() async throws {
-        let registry = V2DeviceConnectionRegistry(), gate = CoverageInstallGate()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits), gate = CoverageInstallGate()
         let user = UserID(uuid: UUID()), connection = UUID(), device = UUID().uuidString
         let stream = V2GatewayByteStream(
             frameLimits: try .init(maximumPayloadBytes: 48 * 1024, acceptedVersions: [0, version]),
             session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: FixedCoverageAuth(user: user),
                 capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission()),
             handler: GatewayCoverageCommands(registry: registry, rooms: []), connectionID: connection, registry: registry)
-        try #require(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        try #require(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { _ in true }, scopedNotificationWriter: { write in
                 await gate.suspendOnce()
                 return write.enqueueIfCurrent({})
@@ -107,7 +107,7 @@ struct V2AccountRoomGatewayTests {
     }
 
     private func runLifecycle(duringInstallation: Bool) async throws {
-        let registry = V2DeviceConnectionRegistry()
+        let registry = V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits)
         let broker = GatewayCoverageInterest()
         let interests = V2SharedGroupEventWakeInterests(underlying: broker)
         let rooms = (0..<129).map { _ in RoomID(uuid: UUID()) }
@@ -129,7 +129,7 @@ struct V2AccountRoomGatewayTests {
             handler: GatewayCoverageCommands(registry: registry, rooms: rooms), registry: registry)
         let recorder = CoverageFrameRecorder()
         do {
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             requiredNotificationWriter: { bytes in await recorder.record(bytes); return true },
             scopedNotificationWriter: { write in
                 guard write.enqueueIfCurrent({}) else { return false }

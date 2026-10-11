@@ -62,9 +62,10 @@ struct V2SharedRoomSendCommitAckLossTests {
             let first = try preparedSend(token: firstToken, text: "first", profile: profile, now: now)
             let second = try preparedSend(token: secondToken, text: "second", profile: profile, now: now)
 
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let writer = PostgresV2RoomWriteStore(database: proxied.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled)
+                contentReviewMode: .disabled).usingPolicyAuthorizations(policies)
             let operations = PostgresV2MessageSendOperationStore(database: proxied.database(.psql),
                 writes: writer, clock: { now }, initializationDatabase: database)
                 .observingOwnerTransactions { _, scalar, _ in if scalar { proxy.arm() } }
@@ -73,17 +74,19 @@ struct V2SharedRoomSendCommitAckLossTests {
                 firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             let secondCommand = try V2MessageSendOperationCommand(command: second.request.command,
                 firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
-            let firstHandle = try await operations.prepareSendBatch([firstCommand], token: firstToken,
-                deadline: deadline, now: { now })
-            let secondHandle = try await operations.prepareSendBatch([secondCommand], token: secondToken,
-                deadline: deadline, now: { now })
+            let prepared = try await policies.prepareOwnerBatches(store: operations, requests: [
+                .init(commands: [firstCommand], token: firstToken, deadline: deadline),
+                .init(commands: [secondCommand], token: secondToken, deadline: deadline)
+            ], now: { now })
+            let firstHandle = try prepared[0].get()
+            let secondHandle = try prepared[1].get()
             let identifiers = Mutex(try [first, second].flatMap { send in
                 [try #require(send.request.identifiers.messageID.uuidValue),
                  try #require(send.request.identifiers.eventID.uuidValue)]
             })
-            let dispatcher = V2DurableSendOperationOwnerBatcher(store: operations, capacityProfile: profile,
+            let dispatcher = V2DurableSendOperationOwnerBatcher(fixtureStore: operations, connectionCapacity: 1, capacityProfile: profile,
                 identifiers: .init(makeUUID: { identifiers.withLock { $0.removeFirst() } }),
-                now: { now }, configuration: .init(maximumPendingRequests: 4, fallbackConnectionCapacity: 1),
+                now: { now }, configuration: .init(maximumPendingRequests: 4),
                 maximumRetainedBytes: 16_384)
             ownerExecutor = dispatcher
             await #expect(throws: V2RoomTransactionOutcomeUnknown.self) { try await dispatcher.execute(firstHandle) }
@@ -110,7 +113,7 @@ struct V2SharedRoomSendCommitAckLossTests {
                 writes: PostgresV2RoomWriteStore(database: database), clock: { now })
             for (send, command) in zip([first, second], [firstCommand, secondCommand]) {
                 let recovery = try await replayStore.recover(.init(identity: command.identity,
-                    fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint, action: .query), token: send.token)
+                    fingerprint: command.fingerprint, domainFingerprint: command.command.fingerprint), token: send.token)
                 guard case .receipt(let recovered) = recovery,
                       case .accepted(let message) = recovered.outcome else {
                     throw V2SharedAckLossTestError.replayNotIdempotent

@@ -12,7 +12,7 @@ struct V2RoutedMessageSendOperationClientTests {
         _ = try await router.submit(command)
         #expect(await tcp.submissions == 1)
         let recovery = try V2MessageSendOperationRecoveryRequest(identity: command.identity, fingerprint: command.fingerprint,
-            domainFingerprint: command.command.fingerprint, action: .query)
+            domainFingerprint: command.command.fingerprint)
         _ = try await router.recover(recovery)
         #expect(await tcp.recoveries == 1)
         #expect(await router.routeObservations().count == 2)
@@ -26,7 +26,7 @@ struct V2RoutedMessageSendOperationClientTests {
         await #expect(throws: V2MessageSendTransportError.outcomeUnknown) { try await router.submit(command) }
         #expect(await tcp.submissions == 1)
         let recovery = try V2MessageSendOperationRecoveryRequest(identity: command.identity, fingerprint: command.fingerprint,
-            domainFingerprint: command.command.fingerprint, action: .query)
+            domainFingerprint: command.command.fingerprint)
         _ = try await router.recover(recovery)
         #expect(await tcp.submissions == 1)
         #expect(await tcp.recoveries == 1)
@@ -39,7 +39,7 @@ struct V2RoutedMessageSendOperationClientTests {
         let automatic = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp)
         await #expect(throws: V2MessageSendTransportError.unavailableBeforeSubmission) { try await automatic.submit(command) }
         let recovery = try V2MessageSendOperationRecoveryRequest(identity: command.identity, fingerprint: command.fingerprint,
-            domainFingerprint: command.command.fingerprint, action: .query)
+            domainFingerprint: command.command.fingerprint)
         _ = try await automatic.recover(recovery)
         #expect(await tcp.recoveries == 1)
         let forced = V2RoutedMessageSendOperationClient(accountID: command.command.senderUserID, realtime: tcp)

@@ -40,7 +40,11 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
         return try await v2WithAdmittedRoomDatabaseWork(databaseWorkAdmission,
             workClass: .foregroundWrite, callerDeadline: deadline) {
             try await V2RoomSQLDeadline.withDeadline(deadline) {
-                try await executeBounded(pair, activationTokens: activationTokens)
+                do {
+                    return try await executeBounded(pair, activationTokens: activationTokens)
+                } catch V2SendOperationResponseError.directPolicyDenied {
+                    return try failure(pair, code: "DIRECT_MESSAGE_RESTRICTED")
+                }
             }
         }
     }
@@ -61,7 +65,7 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
         guard content.revision == pair.source.revision.signedValue else {
             return try failure(pair, code: "SOURCE_CHANGED")
         }
-        let clientID = try await existingClientID(key, scope: scope) ?? deterministicClientID(key)
+        let clientID = deterministicClientID(key)
         let command = try V2SendMessageCommand(roomID: pair.targetRoomID,
             senderUserID: pair.actorUserID, clientMessageID: .init(uuid: clientID),
             text: content.text,
@@ -100,22 +104,6 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
     private func failure(_ pair: V2ActorForwardPairWire, code: String) throws -> V2ActorForwardMessageResultWire {
         .init(domain: try .init(sourceMessageID: pair.source.messageID,
             targetRoomID: pair.targetRoomID, messageID: nil, roomSequence: nil, errorCode: code))
-    }
-
-    /// 只读观察可能存在竞争；prepareLedger 才是具有权威性的栅栏检查。
-    /// 重放时保留现有的旧版随机 ID。
-    private func existingClientID(_ key: ForwardPairIdentity,
-                                  scope: V2RoomActivationWriteScope) async throws -> UUID? {
-        try await v2WithRoomScopedTransaction(database: database) { transaction in
-            let sql = try forwardSQL(transaction)
-            try await scope.require([key.sourceRoom, key.target], sql: sql)
-            return try await sql.raw("""
-            SELECT target_client_message_id
-            FROM im_v2.message_forward_operations
-            WHERE actor_user_id = \(bind: key.actor) AND operation_id = \(bind: key.operation)
-              AND source_message_id = \(bind: key.source) AND target_room_id = \(bind: key.target)
-            """).first(decoding: ForwardPairLedgerRow.self)?.clientMessageID
-        }
     }
 
     private func replay(_ key: ForwardPairIdentity,
@@ -217,10 +205,6 @@ private struct ForwardPairIdentity: Sendable {
     }
 }
 
-private struct ForwardPairLedgerRow: Decodable {
-    let clientMessageID: UUID
-    enum CodingKeys: String, CodingKey { case clientMessageID = "target_client_message_id" }
-}
 private struct ForwardPairReplayRow: Decodable {
     let resultMessageID: UUID?
     let completionMessageID: UUID?

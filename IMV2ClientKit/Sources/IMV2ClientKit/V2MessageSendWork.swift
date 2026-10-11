@@ -115,7 +115,6 @@ extension GRDBV2LocalSyncStore {
         guard receipt.validates(identity:identity,fingerprint:fingerprint) else { throw V2OperationWorkError.identityConflict }
         let state:V2OperationExecutionState
         switch receipt.outcome { case .accepted: state = .committed
-        case .closed: state = .closed
         case .rejected: state = .rejected }
         try databasePool.write { db in
             try Self.completeOperationWork(.init(identity:identity,fingerprint:fingerprint,state:state,receipt:receipt),now:now,db:db)
@@ -166,7 +165,7 @@ public actor V2MessageSendOperationService {
             if claim.action == .submit { result=try await client.submit(command) }
             else {
                 result=try await client.recover(.init(identity:claim.work.identity,fingerprint:claim.work.fingerprint,
-                    domainFingerprint:command.command.fingerprint,action:.query))
+                    domainFingerprint:command.command.fingerprint))
             }
             switch result {
             case .receipt(let receipt):try await store.completeMessageSend(command,receipt:receipt)

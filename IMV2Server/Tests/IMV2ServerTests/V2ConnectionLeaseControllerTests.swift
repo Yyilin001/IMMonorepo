@@ -199,6 +199,12 @@ struct V2ConnectionLeaseControllerTests {
 }
 
 private actor ControllerLeaseStore: V2LivePresenceLeaseManaging {
+    func admitConnectionRefresh(identity: V2AuthenticatedConnection, connectionID: UUID,
+        publicationSuppressed: Bool, policy: V2AuthenticatedConnectionAdmissionPolicy, now: Date) async throws -> V2LivePresenceLeaseRefresh {
+        try await v2FixtureAdmitConnectionRefresh(store: self, identity: identity, connectionID: connectionID,
+            publicationSuppressed: publicationSuppressed, policy: policy, now: now)
+    }
+
     let failRenewal: Bool
     let rejectRenewal: Bool
     let leaseSeconds: TimeInterval

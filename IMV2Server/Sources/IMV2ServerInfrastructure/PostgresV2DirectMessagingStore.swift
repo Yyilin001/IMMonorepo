@@ -12,7 +12,6 @@ import SQLKit
 public struct PostgresV2DirectMessagingStore: Sendable {
     private let database: any Database
     private let identityReader: any V2DirectRoomIdentityReading
-    private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
     private let projectionDelivery: any V2UserShardProjectionDelivering
 
     /// 组合数据库与当前用户分片投影投递器。
@@ -20,11 +19,9 @@ public struct PostgresV2DirectMessagingStore: Sendable {
     /// - Parameters:
     ///   - database: 存放私聊房间、操作记录与偏好设置的数据库。
     ///   - projectionDelivery: 用于把控制面投影投递到当前用户分片的实现。
-    public init(database: any Database, identityReader: any V2DirectRoomIdentityReading, projectionDelivery: any V2UserShardProjectionDelivering,
-        authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil) {
+    public init(database: any Database, identityReader: any V2DirectRoomIdentityReading, projectionDelivery: any V2UserShardProjectionDelivering) {
         self.database = database
         self.identityReader = identityReader
-        self.authorizationCoordinator = authorizationCoordinator
         self.projectionDelivery = projectionDelivery
     }
 
@@ -114,40 +111,6 @@ public struct PostgresV2DirectMessagingStore: Sendable {
             return .opened(.init(roomID:roomID,actorUserID:command.actorUserID,targetUserID:command.targetUserID,createdAt:now))
     }
 
-    /// 设置陌生人消息权限。
-    ///
-    /// - Parameters:
-    ///   - command: 权限变更命令。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 变更结果。
-    /// - Throws: 持久化失败时抛出。
-    func applyStrangerMessagePermission(command:V2SetStrangerMessagePermissionCommand,transaction:any Database,now:Date,policyMutation:V2PolicyMutationContext? = nil) async throws -> V2SetStrangerMessagePermissionOutcome {
-            guard let sql = transaction as? any SQLDatabase else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-            let actorID = try directUUID(command.actorUserID)
-            let operationID = try directUUID(command.operationID)
-            let requested = command.permission == .allow
-            // 将重放查询与该账号的偏好状态转换串行化，
-            // 即使策略修订号已耗尽也一样。
-            let lockKey = "v2-stranger-message-preference:" + actorID.uuidString.lowercased()
-            try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: lockKey), 0))").run()
-            guard v2PostgresTimestampCanEncode(now) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
-            if policyMutation != nil {
-                guard try await PostgresV2DirectAuthorizationIntentStore(database: transaction)
-                    .held(in: .user(actorID), limit: 1, transaction: transaction).isEmpty else {
-                    throw V2DirectAuthorizationCoordinationError.revocationIncomplete
-                }
-            } else {
-                try await v2DrainDirectAuthorizations(.user(actorID), coordinator: authorizationCoordinator, transaction: transaction, now: now)
-            }
-            try await sql.raw("INSERT INTO im_v2.user_stranger_message_preferences (user_id, allows_stranger_messages, updated_at) VALUES (\(bind: actorID), \(bind: requested), \(bind: now)) ON CONFLICT (user_id) DO UPDATE SET allows_stranger_messages = EXCLUDED.allows_stranger_messages, updated_at = EXCLUDED.updated_at").run()
-            try await bumpDirectSendPolicyVersion(userID: actorID, now: now, sql: sql)
-            guard let sequence = try await sql.raw("INSERT INTO im_v2.user_sync_sequences (user_id, next_sequence) VALUES (\(bind: actorID), 1) ON CONFLICT (user_id) DO UPDATE SET next_sequence = im_v2.user_sync_sequences.next_sequence + 1 WHERE im_v2.user_sync_sequences.next_sequence < \(bind: Int64.max) RETURNING next_sequence").first(decoding: DirectSyncSequenceRow.self) else {
-                throw V2DirectMessagingStoreError.corruptPersistenceState
-            }
-            try await sql.raw("INSERT INTO im_v2.user_sync_log (user_id, user_sync_sequence, source_event_id, projection_kind, payload, created_at) VALUES (\(bind: actorID), \(bind: sequence.nextSequence), \(bind: operationID), 'stranger_message_permission', jsonb_build_object('allows_stranger_messages', \(bind: requested), 'updated_at_ms', \(bind: try v2GatewayMilliseconds(now))), \(bind: now))").run()
-            return .updated(permission: command.permission, updatedAt: now)
-    }
-
     /// 设置被添加好友权限。
     ///
     /// - Parameters:
@@ -170,20 +133,6 @@ public struct PostgresV2DirectMessagingStore: Sendable {
             return .updated(permission: command.permission, updatedAt: now)
     }
 
-    private func bumpDirectSendPolicyVersion(userID: UUID, now: Date, sql: any SQLDatabase) async throws {
-        guard let updated = try await sql.raw("""
-            INSERT INTO im_v2.user_direct_send_policy_versions AS version (user_id, revision, updated_at)
-            VALUES (\(bind: userID), 2, \(bind: now))
-            ON CONFLICT (user_id) DO UPDATE
-            SET revision = version.revision + 1,
-                updated_at = EXCLUDED.updated_at
-            WHERE version.revision < \(bind: Int64.max)
-            RETURNING 1 AS value
-            """).first(decoding: DirectCountRow.self), updated.value == 1 else {
-            throw V2DirectMessagingStoreError.corruptPersistenceState
-        }
-    }
-
     private func appendDirectRoomProfileProjection(recipientID: UUID, roomID: UUID, profile: DirectPublicProfileRow, sourceEventID: UUID, createdAt: Date, sql: any SQLDatabase) async throws {
         guard profile.revision > 0, v2PostgresTimestampCanEncode(profile.updatedAt) else { throw V2DirectMessagingStoreError.corruptPersistenceState }
         // 所有房间事件载荷均使用 Foundation 的规范 UUID 字符串形式。
@@ -201,7 +150,6 @@ private struct DirectPairRow: Decodable {
     enum CodingKeys: String, CodingKey { case roomID = "room_id", createdAt = "created_at", capacityProfileID = "capacity_profile_id" }
     func directRoom(actor: UserID, target: UserID) throws -> V2DirectRoom { .init(roomID: try .init(roomID.uuidString), actorUserID: actor, targetUserID: target, createdAt: createdAt) }
 }
-private struct DirectCountRow: Decodable { let value: Int }
 private struct DirectShardLeaseRow: Decodable {
     let leaseID: UUID; let generation: Int64; let validUntil: Date
     enum CodingKeys: String, CodingKey { case leaseID = "lease_id", generation, validUntil = "valid_until" }

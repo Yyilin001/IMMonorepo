@@ -1,3 +1,4 @@
+import IMV2ActorContracts
 import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
@@ -8,37 +9,22 @@ import SQLKit
 
 /// 基于 PostgreSQL 的账号停用实现。
 public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
-    private let database: any Database
-    private var policyOwners: (any V2PolicyMutationExecuting)? = nil
-    private let authorizationCoordinator: V2DirectAuthorizationCoordinator?
+    private let policyOwners: any V2PolicyMutationExecuting
     private let operatorPrincipal: String
-    private let now: @Sendable () -> Date
 
-    /// 组合数据库与固定的运维主体。
+    /// 配置固定的运维主体及负责执行策略变更的 Owner。
     ///
     /// - Parameters:
-    ///   - database: 存放账号状态、设备会话与公开资料的数据库。
     ///   - operatorPrincipal: 运维主体标识，需符合通用运维主体格式。
-    ///   - now: 可注入的当前时刻读取函数。
+    ///   - policyOwners: 负责提交停用策略变更的 Owner。
     /// - Throws: 运维主体格式非法时抛出
     ///   ``V2AccountDisableError/invalidOperatorPrincipal``。
-    public init(
-        database: any Database,
-        operatorPrincipal: String,
-        authorizationCoordinator: V2DirectAuthorizationCoordinator? = nil,
-        now: @escaping @Sendable () -> Date = Date.init
-    ) throws {
+    package init(operatorPrincipal: String, policyOwners: any V2PolicyMutationExecuting) throws {
         guard V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal) else {
             throw V2AccountDisableError.invalidOperatorPrincipal
         }
-        self.database = database
-        self.authorizationCoordinator = authorizationCoordinator
         self.operatorPrincipal = operatorPrincipal
-        self.now = now
-    }
-
-    package func usingPolicyOwners(_ owners: any V2PolicyMutationExecuting) -> Self {
-        var copy = self; copy.policyOwners = owners; return copy
+        self.policyOwners = policyOwners
     }
 
     /// 在单个事务内停用账号并吊销其全部凭据。
@@ -56,20 +42,26 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
     ///   连接不可用、时刻不可编码、计数已饱和或资料暂停未生效时抛出
     ///   ``V2AccountDisableError/unavailable``。
     public func disable(_ command: V2AccountDisableCommand) async throws -> V2AccountDisableOutcome {
-        guard let userUUID = UUID(uuidString: command.userID.rawValue) else {
-            throw V2AccountDisableError.invalidUserID
+        guard command.userID.uuidValue != nil else { throw V2AccountDisableError.invalidUserID }
+        do {
+            let execution = try await policyOwners.changeExecution(.disable(.init(command: command, operatorPrincipal: operatorPrincipal)))
+            guard case .disable(let receipt) = execution.result else { throw V2AccountDisableError.unavailable }
+            if execution.replayed, receipt.kind == .disabled { return .idempotent(disabledAt: receipt.disabledAt) }
+            return receipt.outcome
+        } catch V2PolicyAuthorizationLifecycleError.identityConflict { throw V2AccountDisableError.operationConflict }
+    }
+
+}
+
+/// Policy Owner 事务内的停用写入；上下文证明负责授权，不能作为业务入口直接提交。
+package struct V2PostgresAccountDisableMutation: Sendable {
+    private let operatorPrincipal: String
+
+    package init(operatorPrincipal: String) throws {
+        guard V2DurableWorkOperatorReplayService.isValidPrincipal(operatorPrincipal) else {
+            throw V2AccountDisableError.invalidOperatorPrincipal
         }
-        if let policyOwners {
-            do {
-                let execution = try await policyOwners.changeExecution(.disable(.init(command: command, operatorPrincipal: operatorPrincipal)))
-                guard case .disable(let receipt) = execution.result else { throw V2AccountDisableError.unavailable }
-                if execution.replayed, receipt.kind == .disabled { return .idempotent(disabledAt: receipt.disabledAt) }
-                return receipt.outcome
-            } catch V2PolicyAuthorizationLifecycleError.identityConflict { throw V2AccountDisableError.operationConflict }
-        }
-        return try await database.transaction { transaction in
-            try await applyDisable(command, userUUID: userUUID, transaction: transaction, occurredAt: now(), policyMutation: nil)
-        }
+        self.operatorPrincipal = operatorPrincipal
     }
 
     package func applyPolicyOperation(_ command: V2AccountDisableCommand, occurredAt: Date,
@@ -78,11 +70,11 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
         try context.require(scope: mutation.scope, operationKey: mutation.operationKey, fingerprint: mutation.fingerprint)
         guard let user = command.userID.uuidValue else { throw V2AccountDisableError.invalidUserID }
         return try await applyDisable(command, userUUID: user, transaction: context.transaction,
-            occurredAt: occurredAt, policyMutation: context)
+            occurredAt: occurredAt)
     }
 
     private func applyDisable(_ command: V2AccountDisableCommand, userUUID: UUID, transaction: any Database,
-        occurredAt: Date, policyMutation: V2PolicyMutationContext?) async throws -> V2AccountDisableOutcome {
+        occurredAt: Date) async throws -> V2AccountDisableOutcome {
             guard let sql = transaction as? any SQLDatabase else { throw V2AccountDisableError.unavailable }
             // 凭据签发和刷新在返回凭据前使用同一把锁。
             // 此顺序保证：新签发的凭据要么被本事务撤销，
@@ -99,21 +91,6 @@ public struct V2PostgresAccountDisableService: V2AccountDisabling, Sendable {
             }
 
             guard v2PostgresTimestampCanEncode(occurredAt) else { throw V2AccountDisableError.unavailable }
-            do {
-                if policyMutation != nil {
-                    guard try await PostgresV2DirectAuthorizationIntentStore(database: transaction)
-                        .held(in: .user(userUUID), limit: 1, transaction: transaction).isEmpty else {
-                        throw V2DirectAuthorizationCoordinationError.revocationIncomplete
-                    }
-                } else {
-                    try await v2DrainDirectAuthorizations(.user(userUUID), coordinator: authorizationCoordinator, transaction: transaction, now: occurredAt)
-                }
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                throw V2AccountDisableError.unavailable
-            }
-
             guard let persisted = try await sql.raw("""
                 INSERT INTO im_v2.account_disables (user_id, operation_id, reason, operator_principal, disabled_at)
                 VALUES (\(bind: userUUID), \(bind: command.operationID), \(bind: command.reason.rawValue), \(bind: operatorPrincipal), \(bind: occurredAt))

@@ -29,8 +29,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 maximumForegroundWriteQueued: 1, maximumInteractiveReadQueued: 1,
                 maximumSyncQueued: 16, timeout: .seconds(5)))
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database, stateReadAdmission: admission),
-                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(),
-                    legacyAuthorization: .init(controlDatabase: database, ownerDatabases: [:])),
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()),
                 ownsScope: { $0 != V2PolicyAuthorizationScope.account(memberThreeUUID).key })
             let remote = PostgresV2RemotePolicyOwners(clientProvider: {
                 await gate.hold()
@@ -45,7 +44,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
-                    .usingControlDatabase(database))
+                    .usingControlDatabase(database).usingPolicyAuthorizations(policies))
             @Sendable func command(_ room: RoomID) throws -> V2MessageSendOperationCommand {
                 try .init(command: .init(roomID: room, senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
                     text: "independent room", limits: .init(maxUTF8Bytes: 64)),
@@ -137,15 +136,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
                 rooms.append(room.roomID)
             }
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: database, ownerDatabases: [:])
+
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
-                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
                 policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
             let store = PostgresV2MessageSendOperationStore(database: database,
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
-                    .usingControlDatabase(database))
+                    .usingControlDatabase(database).usingPolicyAuthorizations(policies))
             let operation = ClientMessageID(uuid: UUID()), expiry = UInt64(now.timeIntervalSince1970 * 1000) + 60_000
             func command(_ room: RoomID, _ operation: ClientMessageID, _ text: String) throws -> V2MessageSendOperationCommand {
                 try .init(command: .init(roomID: room, senderUserID: senderID, clientMessageID: operation,
@@ -183,7 +182,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         guard case .sendOperation(.receipt(let receipt)) = secondResults[1], case .accepted = receipt.outcome else {
                             throw V2RoomWriteStoreError.corruptPersistenceState
                         }
-                        #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.direct_authorization_intents").first(decoding: PolicyFactoryCount.self)?.value == 0)
+                        #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                         #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.messages").first(decoding: PolicyFactoryCount.self)?.value == 3)
                     }
                 }
@@ -209,26 +208,29 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             try await controlSQL.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '10 minutes'").run()
             let exports = try await policyFactoryExports(database: control, target: roomID, profile: profile, now: now)
-            let legacy = V2DirectAuthorizationCoordinator(controlDatabase: control, ownerDatabases: [:])
+
             let coldAdmission = V2DatabaseWorkAdmissionController(policy: .init(maximumForegroundWriteInFlight: 1,
                 maximumInteractiveReadInFlight: 1, maximumSyncInFlight: 1,
                 maximumForegroundWriteQueued: 1, maximumInteractiveReadQueued: 1,
                 maximumSyncQueued: 2, timeout: .seconds(2)))
             let coldMetrics = V2SendOperationBatchMetrics()
             let policyOwners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control, stateReadAdmission: coldAdmission, stateMetrics: coldMetrics),
-                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery(), legacyAuthorization: legacy))
+                dispatcher: .init(database: control, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: owner,
                 policyOwners: policyOwners, endpoint: "room-b", maximumRooms: 1,
                 sendOperationMetrics: coldMetrics)
             let writes = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                 .usingControlDatabase(control)
-            let baseResources = try V2RoomServerOwnerResources(database: owner, writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: owner),
+            let baseResources = try V2RoomServerOwnerResources(database: owner, sendDatabase: try v2FixtureMessageWriteDatabase(owner, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: owner),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: owner),
                 invitationSecretIssuer: .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: SuccessfulProjectionDelivery(), capacityProfile: profile,
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init())
+            #expect(throws: V2ActorContractError.invalidConfiguration("room policy authorization required")) {
+                try V2RoomServerActivationFactory(owners: ["room-b": baseResources], safetyActorUserID: senderID)
+            }
             let resources = try baseResources.usingPolicyAuthorizations(policies)
             #expect(throws: V2ActorContractError.invalidConfiguration("physical owner policy authorization aliases")) {
                 try V2RoomServerActivationFactory(owners: ["room-b": resources, "room-alias": baseResources], safetyActorUserID: senderID)
@@ -272,21 +274,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     return try await host.invoke(token: token, encodedRequest: encodedForwards[0], deadline: .now + .seconds(10))
                 }
                 guard case .forward(.imported(.accepted)) = firstForward else { throw PolicyFactoryForwardError.unexpectedForward(firstForward) }
-                let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(),
-                    authorizationCoordinator: legacy).usingPolicyOwners(policyOwners)
+                let social = PostgresV2SocialRelationshipStore(database: control, projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: policyOwners)
                 let block = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
                     operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: Date())
-                _ = try await social.submitSocialOperation(block, now: Date())
+                _ = try await social.submitSocialOperation(block)
                 if group {
                     let preferences = PostgresV2AccountPreferenceOperationStore(database: control,
-                        projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator: legacy)
-                        .usingPolicyOwners(policyOwners)
+                        projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: policyOwners)
                     let preference = try await preferences.freezePreferenceFixture(owner: senderID,
                         operation: .strangerMessagePreference(.init(uuid: UUID())), value: .strangerMessage(.deny), now: Date())
                     _ = try await preferences.submit(preference, now: Date())
                     #expect(try await policyOwners.cachedSnapshots(scopes: [.account(senderUUID)])?.first?.version == 1)
                     #expect(try await controlSQL.raw("SELECT revision AS value FROM im_v2.policy_authorization_scopes WHERE scope_key=\(bind: V2PolicyAuthorizationScope.stranger(senderUUID).key)").first(decoding: PolicyFactoryCount.self)?.value == 2)
-                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.policy_authorization_holders WHERE room_id=\(bind: roomID.uuidValue!) AND NOT revoked").first(decoding: PolicyFactoryCount.self)?.value == 0)
+                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                     let hidden = ["public_user_profiles", "special_accounts", "account_disables", "user_blocks",
                         "user_relationships", "user_stranger_message_preferences"]
                     for sql in [controlSQL, ownerSQL] {
@@ -304,7 +304,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                           case .accepted = value.outcome else { throw V2RoomWriteStoreError.corruptPersistenceState }
                     let groupForward = try await host.invoke(token: token, encodedRequest: encodedForwards[1], deadline: .now + .seconds(10))
                     guard case .forward(.imported(.accepted)) = groupForward else { throw PolicyFactoryForwardError.cachedImport }
-                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.policy_authorization_holders WHERE room_id=\(bind: roomID.uuidValue!) AND NOT revoked").first(decoding: PolicyFactoryCount.self)?.value == 0)
+                    #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.policy_authorization_holders')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                     try await ownerSQL.raw("UPDATE im_v2.room_memberships SET left_revision=0 WHERE room_id=\(bind: roomID.uuidValue!) AND user_id=\(bind: senderUUID)").run()
                     let nonmember = try await host.invoke(token: token,
                         encodedRequest: JSONEncoder().encode(request("former member denied")), deadline: .now + .seconds(10))
@@ -325,8 +325,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                             try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_group_hidden") RENAME TO \(unsafeRaw: table)").run()
                         }
                     }
-                    let disable = try V2PostgresAccountDisableService(database: control, operatorPrincipal: "operator:test",
-                        authorizationCoordinator: legacy).usingPolicyOwners(policyOwners)
+                    let disable = try V2PostgresAccountDisableService(operatorPrincipal: "operator:test", policyOwners: policyOwners)
                     _ = try await disable.disable(.init(userID: senderID, operationID: UUID(), reason: .policyEnforcement))
                 }
                 let rejectedForward = try await host.invoke(token: token, encodedRequest: encodedForwards[group ? 2 : 1], deadline: .now + .seconds(10))
@@ -345,8 +344,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(combined?.resumedToDispatchCount ?? 0 == 0)
                 #expect(combined?.settledNotResumed ?? 0 == 0)
                 #expect(combined?.resumedNotDispatched ?? 0 == 0)
-                #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.direct_authorization_intents").first(decoding: PolicyFactoryCount.self)?.value == 0)
-                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.direct_authorization_receipts").first(decoding: PolicyFactoryCount.self)?.value == 0)
+                #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')").first(decoding: PolicyFactoryCount.self)?.value == 0)
+                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                 #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: roomID.uuidValue!)").first(decoding: PolicyFactoryCount.self)?.value == (group ? 4 : 2))
                 let coldDrained = await coldAdmission.snapshot()
                 #expect(coldDrained.syncInFlight == 0 && coldDrained.syncQueued == 0)
@@ -354,7 +353,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(sample.count > 0 && sample.inFlight == 0 && sample.totalMilliseconds > 0)
                 #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
                 #expect(await host.stop(deadline: .now + .seconds(10)).completed)
-                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.room_policy_authorization_leases WHERE NOT revoked").first(decoding: PolicyFactoryCount.self)?.value == 0)
+                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.room_policy_authorization_leases')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                 await resources.shutdownDurableSendOperations()
                 await leases.shutdownLifecycle(); await leases.shutdownRenewals()
                 await policyOwners.shutdown()
@@ -373,12 +372,25 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let command = try V2SendMessageCommand(roomID: sourceRoom, senderUserID: senderID,
             clientMessageID: .init(uuid: UUID()), text: "forward source", limits: .init(maxUTF8Bytes: 64))
         let identifiers = try V2AcceptanceIDFactory().make(at: now)
-        let outcome = try await write.accept(command: command, capacityProfile: profile, identifiers: identifiers, now: now)
-        guard case .accepted(let receipt) = outcome else { throw PolicyFactoryForwardError.sourceAccept }
-        let reference = try V2ForwardMessageReference(roomID: sourceRoom, messageID: receipt.messageID, revision: .init(1))
         let sourceRoute = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
         let targetRoute = try V2RoomShardRoute(shardID: "room-b", epoch: 0)
-        return try await withRoomActivation(database: database, roomID: sourceRoom) { token in
+        let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
+            dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
+        let host = PostgresV2RoomPolicyAuthorizationDirectory(database: database, endpoint: "source-fixture", maximumRooms: 1,
+            currentLoader: { _, sender, _, _ in
+                try .account(sender: sender, snapshots: await owners.registrationSnapshots(scopes: [.account(sender)]))
+            })
+        let values: [V2ForwardExport]
+        do {
+            values = try await withRoomActivation(database: database, roomID: sourceRoom) { token in
+            let runtime = try await host.registry(token: token).runtime(sender: senderUUID, token: token)
+            let scoped = write.usingActivationScope(try .init(tokens: [token]))
+            let outcome = try await runtime.execute(command: command, callerDeadline: .now + .seconds(5)) { execution in
+                try await scoped.usingPolicyExecution(execution).accept(command: command,
+                    capacityProfile: profile, identifiers: identifiers, now: now)
+            }
+            guard case .accepted(let receipt) = outcome else { throw PolicyFactoryForwardError.sourceAccept }
+            let reference = try V2ForwardMessageReference(roomID: sourceRoom, messageID: receipt.messageID, revision: .init(1))
             let exporter = try PostgresV2ForwardExportStore(database: database).usingActivationToken(token)
             var values: [V2ForwardExport] = []
             for _ in 0..<3 {
@@ -388,7 +400,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 values.append(value)
             }
             return values
+            }
+        } catch {
+            await owners.shutdown()
+            throw error
         }
+        await owners.shutdown()
+        return values
     }
 }
 private struct PolicyFactoryCount: Decodable { let value: Int64 }

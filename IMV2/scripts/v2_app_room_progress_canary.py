@@ -103,7 +103,7 @@ def proof_matches(nonce, fact, proof):
         facts = fact['operations']
         if not isinstance(facts, list) or len(facts) != 3: return False
         for expected, actual in zip(operations, facts):
-            if not accepted_fact(actual) or type(actual.get('closures')) is not int: return False
+            if not accepted_fact(actual): return False
             if canonical_uuid(actual['messageID']) != expected['messageID'] or sequence(actual['roomSequence'], positive=True) != expected['roomSequence']: return False
         return True
     except (ValueError, TypeError, KeyError, AttributeError):

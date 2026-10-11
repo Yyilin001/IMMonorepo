@@ -15,23 +15,3 @@ public protocol V2RoomSubscriptionHandler: Sendable {
                                     authenticatedServiceID: String,
                                     sourceShardID: String) async -> V2RoomSubscriptionBatchResult
 }
-
-public extension V2RoomSubscriptionHandler {
-    /// Compatibility implementation; production receivers additionally reconcile
-    /// already applied prefixes against their current exact-fence checkpoint.
-    func applyRoomSubscriptionBatch(_ batch: V2RoomSubscriptionDeliveryBatch,
-                                    authenticatedServiceID: String,
-                                    sourceShardID: String) async -> V2RoomSubscriptionBatchResult {
-        var order: [V2RoomSubscriptionFence] = []
-        var results: [V2RoomSubscriptionFence: V2RoomSubscriptionDeliveryResult] = [:]
-        for delivery in batch.deliveries {
-            if results[delivery.fence] == nil { order.append(delivery.fence) }
-            if let previous = results[delivery.fence] {
-                switch previous { case .snapshotRequired, .stale: continue; case .appliedThrough: break }
-            }
-            results[delivery.fence] = await applyRoomSubscription(delivery,
-                authenticatedServiceID: authenticatedServiceID, sourceShardID: sourceShardID)
-        }
-        return .init(receipts: order.map { .init(fence: $0, result: results[$0]!) })
-    }
-}

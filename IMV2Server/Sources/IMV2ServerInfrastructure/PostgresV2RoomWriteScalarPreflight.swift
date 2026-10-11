@@ -213,8 +213,7 @@ enum ScalarMessagePreflight {
                 WHERE room.room_id = \(bind: roomID)
                 FOR UPDATE OF room
             ), prior_operation AS MATERIALIZED (
-                SELECT 'accepted'::text AS prior_outcome_kind,
-                       message.message_id AS prior_message_id,
+                SELECT message.message_id AS prior_message_id,
                        message.room_id AS prior_room_id,
                        message.room_sequence AS prior_room_sequence,
                        message.timeline_sequence AS prior_timeline_sequence,
@@ -226,34 +225,11 @@ enum ScalarMessagePreflight {
                        message.event_id AS prior_source_event_id,
                        message.accepted_membership_revision AS prior_accepted_membership_revision,
                        message.direct_recipient_user_id AS prior_direct_recipient_user_id,
-                       NULL::text AS prior_denial_reason,
                        message.group_capacity_class AS prior_group_capacity_class
                 FROM locked_room
                 JOIN im_v2.message_send_completions AS message ON message.room_id = locked_room.room_id
                 WHERE message.sender_user_id = \(bind: senderID)
                   AND message.client_message_id = \(bind: clientMessageID)
-                UNION ALL
-                SELECT 'denied'::text,
-                       NULL::uuid,
-                       denial.room_id,
-                       NULL::bigint,
-                       denial.timeline_sequence,
-                       denial.sender_user_id,
-                       denial.client_message_id,
-                       denial.fingerprint_version,
-                       denial.request_fingerprint,
-                       denial.created_at,
-                       denial.source_event_id,
-                       NULL::bigint,
-                       NULL::uuid,
-                       denial.reason,
-                       NULL::text
-                FROM locked_room
-                JOIN im_v2.direct_message_denials AS denial ON denial.room_id = locked_room.room_id
-                WHERE denial.sender_user_id = \(bind: senderID)
-                  AND denial.client_message_id = \(bind: clientMessageID)
-            ), prior_operation_count AS MATERIALIZED (
-                SELECT COUNT(*)::integer AS prior_operation_count FROM prior_operation
             ), fresh_room AS MATERIALIZED (
                 SELECT room.*
                 FROM locked_room AS room
@@ -295,8 +271,7 @@ enum ScalarMessagePreflight {
             SELECT room.room_kind, room.room_shard_id, room.room_sequence,
                    room.timeline_sequence, room.membership_revision,
                    room.capacity_profile_id, room.capacity_class, room.frozen_at,
-                   count.prior_operation_count,
-                   prior.prior_outcome_kind, prior.prior_message_id,
+                   prior.prior_message_id,
                    prior.prior_room_id, prior.prior_room_sequence,
                    prior.prior_timeline_sequence, prior.prior_sender_user_id,
                    prior.prior_client_message_id, prior.prior_fingerprint_version,
@@ -304,7 +279,7 @@ enum ScalarMessagePreflight {
                    prior.prior_created_at, prior.prior_source_event_id,
                    prior.prior_accepted_membership_revision,
                    prior.prior_direct_recipient_user_id,
-                   prior.prior_denial_reason, prior.prior_group_capacity_class,
+                   prior.prior_group_capacity_class,
                    actor.actor_role, actor.sender_is_active, actor.muted,
                    policy.recipient_user_id, policy.sender_profile_visible_to_recipient,
                    policy.direct_policy_revision, policy.sender_policy_revision,
@@ -316,16 +291,12 @@ enum ScalarMessagePreflight {
                    policy.sender_allows_service_messages, policy.recipient_account_kind,
                    policy.recipient_account_status, policy.recipient_allows_customer_messages
             FROM locked_room AS room
-            CROSS JOIN prior_operation_count AS count
             LEFT JOIN prior_operation AS prior ON TRUE
             LEFT JOIN locked_actor AS actor ON TRUE
             LEFT JOIN direct_policy AS policy ON TRUE
             """).all(decoding: MessageAcceptanceContextRow.self)
         guard rows.count == 1, let row = rows.first else {
             throw rows.isEmpty ? V2RoomWriteStoreError.roomNotFound : V2RoomWriteStoreError.corruptPersistenceState
-        }
-        guard row.priorOperationCount <= 1 else {
-            throw V2RoomWriteStoreError.corruptPersistenceState
         }
         return row
     }
@@ -345,8 +316,6 @@ struct MessageAcceptanceContextRow: Decodable {
     let capacityProfileID: String
     let capacityClass: V2GroupCapacityClass
     let frozenAt: Date?
-    let priorOperationCount: Int
-    let priorOutcomeKind: String?
     let priorMessageID: UUID?
     let priorRoomID: UUID?
     let priorRoomSequence: Int64?
@@ -359,7 +328,6 @@ struct MessageAcceptanceContextRow: Decodable {
     let priorSourceEventID: UUID?
     let priorAcceptedMembershipRevision: Int64?
     let priorDirectRecipientUserID: UUID?
-    let priorDenialReason: String?
     let priorGroupCapacityClass: V2GroupCapacityClass?
     let actorRole: String?
     let senderIsActive: Bool?
@@ -392,8 +360,6 @@ struct MessageAcceptanceContextRow: Decodable {
         case capacityProfileID = "capacity_profile_id"
         case capacityClass = "capacity_class"
         case frozenAt = "frozen_at"
-        case priorOperationCount = "prior_operation_count"
-        case priorOutcomeKind = "prior_outcome_kind"
         case priorMessageID = "prior_message_id"
         case priorRoomID = "prior_room_id"
         case priorRoomSequence = "prior_room_sequence"
@@ -406,7 +372,6 @@ struct MessageAcceptanceContextRow: Decodable {
         case priorSourceEventID = "prior_source_event_id"
         case priorAcceptedMembershipRevision = "prior_accepted_membership_revision"
         case priorDirectRecipientUserID = "prior_direct_recipient_user_id"
-        case priorDenialReason = "prior_denial_reason"
         case priorGroupCapacityClass = "prior_group_capacity_class"
 
         case actorRole = "actor_role"
@@ -447,15 +412,15 @@ struct MessageAcceptanceContextRow: Decodable {
     }
 
     func existingOperation() throws -> ExistingMessageOperation? {
-        guard let priorOutcomeKind else {
-            guard priorMessageID == nil, priorRoomID == nil,
+        guard let priorMessageID else {
+            guard priorRoomID == nil,
                   priorRoomSequence == nil, priorTimelineSequence == nil,
                   priorSenderUserID == nil, priorClientMessageID == nil,
                   priorFingerprintVersion == nil, priorRequestFingerprint == nil,
                   priorCreatedAt == nil,
                   priorSourceEventID == nil, priorAcceptedMembershipRevision == nil,
                   priorDirectRecipientUserID == nil,
-                  priorDenialReason == nil, priorGroupCapacityClass == nil
+                  priorGroupCapacityClass == nil
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             return nil
         }
@@ -463,7 +428,6 @@ struct MessageAcceptanceContextRow: Decodable {
               let priorClientMessageID, let priorCreatedAt
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         return try MessageOperationReplayRow(
-            outcomeKind: priorOutcomeKind,
             messageID: priorMessageID,
             roomID: priorRoomID,
             roomSequence: priorRoomSequence,
@@ -476,7 +440,6 @@ struct MessageAcceptanceContextRow: Decodable {
             sourceEventID: priorSourceEventID,
             acceptedMembershipRevision: priorAcceptedMembershipRevision,
             directRecipientUserID: priorDirectRecipientUserID,
-            denialReason: priorDenialReason,
             groupCapacityClass: priorGroupCapacityClass
         ).operation()
     }
@@ -518,11 +481,9 @@ struct MessageAcceptanceContextRow: Decodable {
 
 enum ExistingMessageOperation {
     case accepted(V2MessageAcceptanceReceipt, V2SendMessageFingerprint)
-    case denied(V2DirectMessageDenied, V2SendMessageFingerprint)
 }
 
 struct MessageOperationReplayRow: Decodable {
-    let outcomeKind: String
     let messageID: UUID?
     let roomID: UUID
     let roomSequence: Int64?
@@ -535,17 +496,16 @@ struct MessageOperationReplayRow: Decodable {
     let sourceEventID: UUID?
     let acceptedMembershipRevision: Int64?
     let directRecipientUserID: UUID?
-    let denialReason: String?
     let groupCapacityClass: V2GroupCapacityClass?
 
     enum CodingKeys: String, CodingKey {
-        case outcomeKind = "outcome_kind", messageID = "message_id", roomID = "room_id"
+        case messageID = "message_id", roomID = "room_id"
         case roomSequence = "room_sequence", timelineSequence = "timeline_sequence"
         case senderUserID = "sender_user_id", clientMessageID = "client_message_id"
         case fingerprintVersion = "fingerprint_version", requestFingerprint = "request_fingerprint"
         case createdAt = "created_at", sourceEventID = "source_event_id"
         case acceptedMembershipRevision = "accepted_membership_revision"
-        case directRecipientUserID = "direct_recipient_user_id", denialReason = "denial_reason"
+        case directRecipientUserID = "direct_recipient_user_id"
         case groupCapacityClass = "group_capacity_class"
     }
 
@@ -554,32 +514,17 @@ struct MessageOperationReplayRow: Decodable {
               let requestFingerprint, let sourceEventID, timelineSequence > 0
         else { throw V2RoomWriteStoreError.corruptPersistenceState }
         let fingerprint = try V2SendMessageFingerprint(version: version, digest: requestFingerprint)
-        switch outcomeKind {
-        case "accepted":
-            guard let messageID, let roomSequence, roomSequence > 0,
-                  let acceptedMembershipRevision, acceptedMembershipRevision >= 0,
-                  denialReason == nil
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            return .accepted(try .init(
-                messageID: .init(uuid: messageID), roomID: .init(uuid: roomID),
-                roomSequence: scalarPreflightUnsigned(roomSequence), timelineSequence: scalarPreflightUnsigned(timelineSequence),
-                senderUserID: .init(uuid: senderUserID), clientMessageID: .init(uuid: clientMessageID),
-                groupCapacityClass: groupCapacityClass,
-                sourceEventID: .init(uuid: sourceEventID), acceptedMembershipRevision: scalarPreflightUnsigned(acceptedMembershipRevision),
-                directRecipientUserID: directRecipientUserID.map { .init(uuid: $0) }, createdAt: createdAt
-            ), fingerprint)
-        case "denied":
-            guard messageID == nil, roomSequence == nil,
-                  acceptedMembershipRevision == nil, directRecipientUserID == nil,
-                  groupCapacityClass == nil, let denialReason,
-                  let reason = V2DirectMessageDenied.Reason(rawValue: denialReason)
-            else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            return .denied(try .init(
-                roomID: .init(uuid: roomID), sourceEventID: .init(uuid: sourceEventID),
-                timelineSequence: scalarPreflightUnsigned(timelineSequence), createdAt: createdAt, reason: reason
-            ), fingerprint)
-        default: throw V2RoomWriteStoreError.corruptPersistenceState
-        }
+        guard let messageID, let roomSequence, roomSequence > 0,
+              let acceptedMembershipRevision, acceptedMembershipRevision >= 0
+        else { throw V2RoomWriteStoreError.corruptPersistenceState }
+        return .accepted(try .init(
+            messageID: .init(uuid: messageID), roomID: .init(uuid: roomID),
+            roomSequence: scalarPreflightUnsigned(roomSequence), timelineSequence: scalarPreflightUnsigned(timelineSequence),
+            senderUserID: .init(uuid: senderUserID), clientMessageID: .init(uuid: clientMessageID),
+            groupCapacityClass: groupCapacityClass,
+            sourceEventID: .init(uuid: sourceEventID), acceptedMembershipRevision: scalarPreflightUnsigned(acceptedMembershipRevision),
+            directRecipientUserID: directRecipientUserID.map { .init(uuid: $0) }, createdAt: createdAt
+        ), fingerprint)
     }
 }
 

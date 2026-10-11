@@ -203,20 +203,11 @@ enum IMV2AccountServerApp {
             let socialRouteFence=V2PostgresUserShardRouter(database:socialCoordinationPool.database)
             let socialProjectionDelivery=V2PostgresUserShardProjectionDelivery(registry:socialUserRegistry,routeFence:socialRouteFence,batchRouteFence:socialRouteFence,
                 coLocatedControlBuckets:Set(configuration.userShardStorage.filter{$0.databaseURL==configuration.databaseURL && $0.schema=="im_v2"}.map(\.bucket)))
-            let socialAuthorization=V2DirectAuthorizationCoordinator(controlDatabase:socialCoordinationPool.database,ownerDatabases:roomDatabases)
-            await runtimeTasks.start {
-                while !Task.isCancelled {
-                    do { _ = try await socialAuthorization.recover(limit:100,now:Date()) }
-                    catch is CancellationError { break }
-                    catch { V2ServiceLogging.logWorkerFailure(logger,worker:"social_direct_authorization_recovery",error:error) }
-                    do { try await v2Sleep(for:.seconds(1)) } catch { break }
-                }
-            }
             var fixedGroupBootstraps:[String:V2RoomBootstrapDomainExecutor]=[:]
             for storage in configuration.roomShardStorage {
                 guard let owner=roomDatabases[storage.shardID] else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 fixedGroupBootstraps[storage.shardID]=try .init(shardID:storage.shardID,
-                    direct:PostgresV2DirectMessagingStore(database:owner,identityReader:PostgresV2DirectRoomIdentityReader(database:socialCoordinationPool.database),projectionDelivery:socialProjectionDelivery,authorizationCoordinator:socialAuthorization),
+                    direct:PostgresV2DirectMessagingStore(database:owner,identityReader:PostgresV2DirectRoomIdentityReader(database:socialCoordinationPool.database),projectionDelivery:socialProjectionDelivery),
                     group:PostgresV2GroupMessagingStore(database:owner),capacityProfile:configuration.capacityProfile)
             }
             let groupBootstrapOwners=fixedGroupBootstraps
@@ -238,25 +229,20 @@ enum IMV2AccountServerApp {
             let actorConfiguration = try V2RoomActorApplicationConfiguration(
                 environment: ProcessRuntimeEnvironment(), hostsRooms: false,
                 configuredShardIDs: Set(roomDatabases.keys))
-            if let placement = actorConfiguration.policyPlacement {
-                try await PostgresV2PolicyDeploymentPlacementStore(database: database).require(
-                    V2PolicyOwnerPlacement(placement))
-            } else {
-                try await PostgresV2PolicyDeploymentPlacementStore(database: database).requireLegacy()
+            guard let placement = actorConfiguration.policyPlacement else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
+            try await PostgresV2PolicyDeploymentPlacementStore(database: database).require(
+                V2PolicyOwnerPlacement(placement))
             let actor = try await V2RoomActorApplication.start(
                 configuration: actorConfiguration, ownerRouter: roomRouter,
                 roomDatabases: roomDatabases)
             roomActor = actor
-            var socialOperations = PostgresV2SocialRelationshipStore(database: database,
-                projectionDelivery: socialProjectionDelivery, authorizationCoordinator: socialAuthorization)
-            var accountPreferenceOperations = PostgresV2AccountPreferenceOperationStore(database: database,
-                projectionDelivery: socialProjectionDelivery, authorizationCoordinator: socialAuthorization)
-            if actorConfiguration.policyPlacement != nil {
-                let policies = try await actor.policyMutationExecutor()
-                socialOperations = socialOperations.usingPolicyOwners(policies)
-                accountPreferenceOperations = accountPreferenceOperations.usingPolicyOwners(policies)
-            }
+            let policies = try await actor.policyMutationExecutor()
+            let socialOperations = PostgresV2SocialRelationshipStore(database: database,
+                projectionDelivery: socialProjectionDelivery, policyOwners: policies)
+            let accountPreferenceOperations = PostgresV2AccountPreferenceOperationStore(database: database,
+                projectionDelivery: socialProjectionDelivery, policyOwners: policies)
             V2VaporSocialOperationRoutes(authenticator: authenticator, store: socialOperations).register(on: authenticatedAccountRoutes)
             V2VaporAccountPreferenceOperationRoutes(authenticator: authenticator, store: accountPreferenceOperations).register(on: authenticatedAccountRoutes)
             let forwardPlans=V2ForwardPlanService(store:.init(database:database),

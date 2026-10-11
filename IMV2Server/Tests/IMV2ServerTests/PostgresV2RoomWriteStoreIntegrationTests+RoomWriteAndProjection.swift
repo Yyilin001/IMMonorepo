@@ -161,7 +161,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 10, maxCommandsPerWindow: 10,    retryAfterSeconds: 3)
             let store = PostgresV2RoomWriteStore(database: resources.database(.psql))
-            let service = V2SendMessageService(store: store, capacityProfile: try .init(id: "standard", limits: profile), limits: try .init(maxUTF8Bytes: 64), now: { Date(timeIntervalSince1970: 1_750_000_000) })
+            let service = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
+                store: store, shardID: "room-a", epoch: 0), capacityProfile: try .init(id: "standard", limits: profile), limits: try .init(maxUTF8Bytes: 64), now: { Date(timeIntervalSince1970: 1_750_000_000) })
             let outcome = try await service.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "transactional"))
             guard case .accepted(let message) = outcome else {
                 Issue.record("expected accepted message")
@@ -205,10 +206,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.push_wake_outbox
-                    (dispatch_id, source_event_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, created_at)
-                VALUES (\(bind: pushDispatchID), \(bind: acceptedEvent.eventID), \(bind: senderUUID), \(bind: UUID(uuidString: deviceID.rawValue)!), 'sync-wake', \(bind: pushWindow), \(bind: pushWindow))
+                    (dispatch_id, source_event_id, source_room_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, created_at)
+                VALUES (\(bind: pushDispatchID), \(bind: acceptedEvent.eventID), (SELECT room_id FROM im_v2.room_events WHERE event_id=\(bind: acceptedEvent.eventID)), \(bind: senderUUID), \(bind: UUID(uuidString: deviceID.rawValue)!), 'sync-wake', \(bind: pushWindow), \(bind: pushWindow))
             """).run()
-            let pushStore = PostgresV2PushWakeStore(database: resources.database(.psql), makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000021")! })
+            let pushStore = v2FixturePushWakeStore(database: resources.database(.psql), makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000021")! })
             let pushLease = try #require(try await pushStore.claimAdmitted(now: pushWindow, leaseDuration: 30, limit: 1).first)
             try await pushStore.markSent(pushLease, now: pushWindow.addingTimeInterval(1))
             #expect(message.roomSequence == 1)
@@ -226,7 +227,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try await sql.raw("UPDATE im_v2.room_events SET payload = payload || '{\"text\":\"tampered\"}'::jsonb WHERE event_id = \(bind: acceptedEvent.eventID)").run()
             }
             let capacity = try #require(try await sql.raw("SELECT command_window_used FROM im_v2.room_admission WHERE room_id = \(bind: roomUUID)").first(decoding: CapacityRow.self))
-            #expect(capacity.commandWindowUsed == 1)
+            #expect(capacity.commandWindowUsed == 0)
             let pushState = try #require(try await sql.raw("SELECT state FROM im_v2.push_wake_outbox WHERE dispatch_id = \(bind: pushDispatchID)").first(decoding: PushStateRow.self))
             let pushBudget = try #require(try await sql.raw("SELECT used_work_units, used_new_key_operations FROM im_v2.push_device_budgets WHERE device_id = \(bind: UUID(uuidString: deviceID.rawValue)!)").first(decoding: PushBudgetRow.self))
             #expect(pushLease.wake.deviceID == deviceID)
@@ -736,11 +737,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.push_wake_outbox
-                    (dispatch_id, source_event_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, created_at)
-                VALUES (\(bind: dispatch), \(bind: event), \(bind: user), \(bind: device), 'wake', \(bind: now), \(bind: now))
+                    (dispatch_id, source_event_id, source_room_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, created_at)
+                VALUES (\(bind: dispatch), \(bind: event), (SELECT room_id FROM im_v2.room_events WHERE event_id=\(bind: event)), \(bind: user), \(bind: device), 'wake', \(bind: now), \(bind: now))
                 """).run()
 
-            let store = PostgresV2PushWakeStore(
+            let store = v2FixturePushWakeStore(
                 database: resources.database(.psql),
                 makeUUID: { UUID(uuidString: "00000000-0000-0000-0000-000000000306")! }
             )
@@ -812,11 +813,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.push_wake_outbox
-                    (dispatch_id, source_event_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, created_at)
-                VALUES (\(bind: dispatch), \(bind: event), \(bind: user), \(bind: device), 'wake', \(bind: now), \(bind: now))
+                    (dispatch_id, source_event_id, source_room_id, target_user_id, target_device_id, campaign_id, budget_window_started_at, created_at)
+                VALUES (\(bind: dispatch), \(bind: event), (SELECT room_id FROM im_v2.room_events WHERE event_id=\(bind: event)), \(bind: user), \(bind: device), 'wake', \(bind: now), \(bind: now))
                 """).run()
 
-            let store = PostgresV2PushWakeStore(database: resources.database(.psql))
+            let store = v2FixturePushWakeStore(database: resources.database(.psql))
             #expect(try await store.claimAdmitted(now: now, leaseDuration: 30, limit: 1).isEmpty)
             let state = try #require(try await sql.raw("SELECT state, suppression_reason FROM im_v2.push_wake_outbox WHERE dispatch_id = \(bind: dispatch)").first(decoding: PushSuppressionStateRow.self))
             let budget = try #require(try await sql.raw("SELECT used_work_units, used_new_key_operations FROM im_v2.push_device_budgets WHERE device_id = \(bind: device)").first(decoding: PushBudgetRow.self))
@@ -1058,7 +1059,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let schemaExists = try await sql.raw("SELECT to_regnamespace('im_v2') IS NOT NULL AS exists").first(decoding: ExistsRow.self)
             guard schemaExists?.exists == false else { throw TestConfigurationError.schemaAlreadyExists }
             try await installSchema(on: sql)
-            let now = Date(timeIntervalSince1970: 1_750_100_000)
+            let now = Date()
             let profile = try V2CapacityProfile(id: "standard", limits: .init(maxEligibleMembers: 10, maxCommandsPerWindow: 100,    retryAfterSeconds: 3))
             let leaseID = UUID(uuidString: "00000000-0000-0000-0000-000000000071")!
             try await sql.raw("INSERT INTO im_v2.shard_admission_pools (room_shard_id, capacity_profile_id, lease_id, generation, valid_until, command_window_limit) VALUES ('rooms-primary', 'standard', \(bind: leaseID), 1, \(bind: now.addingTimeInterval(600)), 100)").run()
@@ -1072,10 +1073,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let replayed = try await directService.openedReceipt(actorUserID: senderID, operationID: openingOperation,
                 targetUserID: recipient, firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
             #expect(replayed == room.receipt)
+            try await withFixturePolicyOwners(database: resources.database(.psql), projectionDelivery: SuccessfulProjectionDelivery()) { owners in
             let accountPreferences = PostgresV2AccountPreferenceOperationStore(database: resources.database(.psql),
-                projectionDelivery: SuccessfulProjectionDelivery(), authorizationCoordinator:
-                    V2DirectAuthorizationCoordinator(controlDatabase: resources.database(.psql),
-                        ownerDatabases: ["rooms-primary": resources.database(.psql)]))
+                projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
             // This fixture co-locates the user owner. Materialize the durable
             // opening event explicitly before asserting its user snapshot.
             let openingOutbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
@@ -1243,17 +1243,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await V2PostgresUserShardRouter(database: resources.database(.psql)).bootstrap(
                 defaultRoute: try .init(bucket: "test-users", observedRouterEpoch: 9)
             )
+            try await withRoomActivation(database: resources.database(.psql), roomID: room.roomID, shardID: "rooms-primary") { firstToken in
+            try await withRoomActivation(database: resources.database(.psql), roomID: otherRoom.roomID, shardID: "rooms-primary") { otherToken in
+            let activationScope = try V2RoomActivationWriteScope(tokens: [firstToken, otherToken])
             let writer = PostgresV2RoomWriteStore(
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400),
                 contentReviewMode: .enabled)
-            let messages = V2SendMessageService(store: writer, capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
-            let deniedOutcome = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID, clientMessageID: try .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
-            guard case .denied(let denial) = deniedOutcome else {
-                Issue.record("expected a durable private denial")
-                throw V2RoomWriteStoreError.corruptPersistenceState
+            let messages = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
+                store: writer, shardID: "rooms-primary", epoch: 0, activationScope: activationScope, policyOwners: owners), capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { now })
+            await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
+                try await messages.send(.init(roomID: room.roomID, actorUserID: senderID,
+                    clientMessageID: .init("00000000-0000-0000-0000-000000000074"), text: "blocked-by-setting"))
             }
-            #expect(denial.reason == .generic)
             let crossRoomReplay = try await messages.send(.init(
                 roomID: otherRoom.roomID,
                 actorUserID: senderID,
@@ -1263,60 +1265,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             guard case .accepted = crossRoomReplay else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
-            let originalDenialReplay = try await messages.send(.init(
-                roomID: room.roomID,
-                actorUserID: senderID,
-                clientMessageID: try .init("00000000-0000-0000-0000-000000000074"),
-                text: "blocked-by-setting"
-            ))
-            #expect(originalDenialReplay == .denied(denial))
-            let changedDeniedIntent = try await messages.send(.init(
-                roomID: room.roomID,
-                actorUserID: senderID,
-                clientMessageID: try .init("00000000-0000-0000-0000-000000000074"),
-                text: "different-denied-intent"
-            ))
-            #expect(changedDeniedIntent == .idempotencyConflict)
-            let denialActivity = try #require(try await sql.raw("SELECT activity_type FROM im_v2.room_timeline_activities WHERE source_event_id = \(bind: UUID(uuidString: denial.sourceEventID.rawValue)!)").first(decoding: TimelineActivityTypeAssertionRow.self))
-            #expect(denialActivity.activityType == "direct_message_restricted")
-            let denialSource = try #require(denial.sourceEventID.uuidValue)
-            #expect(try await sql.raw("""
-                SELECT count(*)::bigint AS value FROM im_v2.user_sync_log
-                WHERE source_event_id = \(bind: denialSource)
-                """).first(decoding: CountRow.self)?.value == 0)
-            #expect(try await sql.raw("""
-                SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
-                WHERE source_event_id = \(bind: denialSource) AND user_id = \(bind: senderUUID)
-                """).first(decoding: CountRow.self)?.value == 2)
-            if let targetURL = Environment.get("IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL") {
-                #expect(targetURL != databaseURL)
-                try await withUserEventDatabase(databaseURL: targetURL) { targetDatabase, targetSQL, targetSchema in
-                    let outbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
-                    let projector = try PostgresV2UserStateEventProjector(database: targetDatabase, schema: targetSchema)
-                    let leases = try await deliverUserStateEvents(outbox, projector: projector, now: now)
-                        .filter { $0.event.sourceEventID == denial.sourceEventID }
-                    #expect(leases.count == 2)
-                    var sequences = Set<UInt64>()
-                    for lease in leases {
-                        #expect(lease.event.userID == senderID)
-                        let sequence = try await projector.project(lease.event)
-                        sequences.insert(sequence)
-                        // A lost source ACK reuses the target receipt and sequence.
-                        #expect(try await projector.project(lease.event) == sequence)
-                    }
-                    // Earlier, unrelated stream heads must also be delivered. The
-                    // two denial effects remain consecutive and reuse their receipts.
-                    #expect(sequences.count == 2 && sequences.max() == sequences.min().map { $0 + 1 })
-                    #expect(try await targetSQL.raw("""
-                        SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log
-                        WHERE user_id = \(bind: senderUUID) AND source_event_id = \(bind: denialSource)
-                        """).first(decoding: CountRow.self)?.value == 2)
-                    #expect(try await targetSQL.raw("""
-                        SELECT count(*)::bigint AS value FROM \(unsafeRaw: targetSchema).user_sync_log
-                        WHERE user_id = \(bind: memberTwoUUID)
-                        """).first(decoding: CountRow.self)?.value == 0)
+            for text in ["blocked-by-setting", "different-denied-intent"] {
+                await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
+                    try await messages.send(.init(roomID: room.roomID, actorUserID: senderID,
+                        clientMessageID: .init("00000000-0000-0000-0000-000000000074"), text: text))
                 }
             }
+            #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
             let deniedRecipientProfiles = try #require(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.user_sync_log WHERE user_id = \(bind: memberTwoUUID) AND projection_kind = 'direct_room_profile'").first(decoding: CountRow.self))
             #expect(deniedRecipientProfiles.value == 0)
             let deniedPairState = try #require(try await sql.raw("""
@@ -1325,7 +1280,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 FROM im_v2.direct_room_pairs
                 WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
                 """).first(decoding: DirectPairProjectionStateAssertionRow.self))
-            #expect(deniedPairState.lowerCanSend == false)
+            #expect(deniedPairState == openedPairState)
 
             _ = try await accountPreferences.executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(try .init("00000000-0000-0000-0000-000000000075")), value: .strangerMessage(.allow), now: now)
             let attempts = await withTaskGroup(of: StrangerMessageAttempt.self, returning: [StrangerMessageAttempt].self) { group in
@@ -1408,6 +1363,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             guard case .idempotent = afterReplyReplay else { Issue.record("expected idempotent post-reply message"); return }
             // Replay must reuse the original durable facts without producing more work.
             #expect(try await count("im_v2.user_state_event_outbox", on: sql) == pendingBeforeEstablishedMessage)
+            // An ephemeral rejection reserves no operation identity or fingerprint.
+            // Once the pair can send, the previously denied ID may carry a new intent.
+            let formerlyDenied = try await messages.send(.init(roomID: room.roomID, actorUserID: senderID,
+                clientMessageID: .init("00000000-0000-0000-0000-000000000074"), text: "different-denied-intent"))
+            guard case .accepted = formerlyDenied else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let window = try #require(try await sql.raw("SELECT message_count FROM im_v2.stranger_message_windows WHERE sender_user_id = \(bind: senderUUID) AND recipient_user_id = \(bind: memberTwoUUID)").first(decoding: StrangerWindowAssertionRow.self))
             #expect(window.messageCount == 3)
             let racedClientID = try ClientMessageID("00000000-0000-0000-0000-000000000089")
@@ -1434,12 +1394,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 SELECT
                     (SELECT COUNT(*) FROM im_v2.messages
                      WHERE sender_user_id = \(bind: senderUUID)
-                       AND client_message_id = \(bind: racedClientUUID)) AS accepted_count,
-                    (SELECT COUNT(*) FROM im_v2.direct_message_denials
-                     WHERE sender_user_id = \(bind: senderUUID)
-                       AND client_message_id = \(bind: racedClientUUID)) AS denied_count
+                       AND client_message_id = \(bind: racedClientUUID)) AS accepted_count
                 """).first(decoding: MessageOperationCardinalityAssertionRow.self))
-            #expect(racedPersistence == .init(acceptedCount: 2, deniedCount: 0))
+            #expect(racedPersistence == .init(acceptedCount: 2))
             let sameRoomClientID = try ClientMessageID("ABCDEFAB-CDEF-ABCD-EFAB-CDEFABCDEF01")
             let sameRoomResults = try await withThrowingTaskGroup(of: V2SendMessageOutcome.self) { group in
                 for _ in 0..<8 {
@@ -1525,6 +1482,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 ))
             }
             #expect(try await directWriteArtifactCounts(sql: sql) == beforeCorruptWrite)
+            }
+            }
+            }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await resources.shutdown()
         } catch {
             if let sql = resources.database(.psql) as? any SQLDatabase { try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run() }
@@ -1688,11 +1648,9 @@ private struct DirectRoomLockProbeRow: Decodable {
 }
 private struct MessageOperationCardinalityAssertionRow: Decodable, Equatable {
     let acceptedCount: Int64
-    let deniedCount: Int64
 
     enum CodingKeys: String, CodingKey {
         case acceptedCount = "accepted_count"
-        case deniedCount = "denied_count"
     }
 }
 

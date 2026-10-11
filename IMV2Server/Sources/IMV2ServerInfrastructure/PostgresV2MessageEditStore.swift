@@ -8,7 +8,7 @@ import SQLKit
 /// 消息编辑的 PostgreSQL 实现。
 ///
 /// 受修订约束的正文替换、权威房间事件与持久化操作重放记录会在同一个事务内提交。
-public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMessageEditStore {
+public struct PostgresV2MessageEditStore: V2MessageEditStore {
     private let database: any Database
     private var existingOperationTransaction = false
     func usingOperationTransaction() -> Self { var copy=self;copy.existingOperationTransaction=true;return copy }
@@ -44,40 +44,6 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
     /// - Returns: 编辑结果。
     /// - Throws: 无权限、状态冲突、容量不足或持久化失败时抛出。
     public func edit(command: V2EditMessageCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome {
-        try await edit(command: command, ownerRoute: nil, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 按房间归属执行一次消息编辑。
-    ///
-    /// - Parameters:
-    ///   - command: 消息编辑命令。
-    ///   - ownerRoute: 已选定的房间归属，事务内据此校验归属。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 编辑结果。
-    /// - Throws: 归属已变更、无权限、状态冲突、容量不足或持久化失败时抛出。
-    public func editOwnerValidated(command: V2EditMessageCommand, ownerRoute: V2RoomShardRoute, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome {
-        try await edit(command: command, ownerRoute: ownerRoute, capacityProfile: capacityProfile, eventID: eventID, now: now)
-    }
-
-    /// 在单个事务内完成身份校验、幂等判定、授权、容量预留与事件写入。
-    ///
-    /// 借用归属事务之前先复用控制面身份边界：编辑只有一个发起者，因此快照中的两个标识
-    /// 都必须指向该发起者。事务内依次校验可选归属、历史操作幂等性、房间容量档位、
-    /// 发起者成员资格与禁言状态、房间冻结、消息归属与作者身份。
-    /// 撤回墓碑先于修订栅栏判定，使并发撤回被判定为终态而不被误认为可重试的陈旧写入冲突。
-    ///
-    /// - Parameters:
-    ///   - command: 消息编辑命令。
-    ///   - ownerRoute: 已选定的房间归属；为 `nil` 时跳过归属校验。
-    ///   - capacityProfile: 本次命令使用的容量档位。
-    ///   - eventID: 命令幂等标识。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 编辑结果或不需要变更的结论。
-    /// - Throws: 房间或消息不存在、发起者非作者、房间冻结、账号或角色不可用、
-    ///   已达禁言状态或持久化失败时抛出。
-    private func edit(command: V2EditMessageCommand, ownerRoute: V2RoomShardRoute?, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2MessageEditOutcome {
         // 借用所有者事务前复用控制侧身份边界。
         // 编辑只有一位操作者，因此两个快照 ID 都指向该操作者。
         let identity = try await identities.snapshot(actorUserID: command.actorUserID, targetUserID: command.actorUserID)
@@ -91,7 +57,6 @@ public struct PostgresV2MessageEditStore: V2MessageEditStore, V2OwnerValidatedMe
             let roomID = try editUUID(command.roomID), actorID = try editUUID(command.actorUserID)
             let operationID = try editUUID(command.operationID), messageID = try editUUID(command.messageID)
             try await sql.raw("SELECT pg_advisory_xact_lock(hashtextextended(\(bind: actorID.uuidString + ":" + operationID.uuidString), 0))").run()
-            if let ownerRoute { try await v2RequireRoomOwner(roomID: roomID, route: ownerRoute, sql: sql) }
             try await activationScope?.require([roomID], sql: sql)
             guard v2PostgresTimestampCanEncode(now) else { throw V2MessageEditStoreError.corruptPersistenceState }
             guard let room = try await sql.raw("SELECT room_kind, frozen_at, room_shard_id, room_sequence, membership_revision, capacity_profile_id, capacity_class FROM im_v2.rooms WHERE room_id = \(bind: roomID) FOR UPDATE").first(decoding: EditRoomRow.self) else { throw V2MessageEditStoreError.roomNotFound }

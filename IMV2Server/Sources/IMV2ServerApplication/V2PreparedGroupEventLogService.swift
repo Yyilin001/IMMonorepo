@@ -12,7 +12,7 @@ extension V2GroupEventLogService {
     ///   - actorUserID: 发起拉取的用户。
     ///   - afterRoomSequence: 起始序号。
     ///   - pageSize: 本页最多返回的事件数。
-    ///   - context: 帧与压缩协商上下文，帧版本需不低于 21。
+    ///   - context: 帧与压缩协商上下文，协议版本由传输层校验。
     /// - Returns: 预编码拉取结果。
     /// - Throws: 参数越界时抛出 ``V2GroupEventLogError/invalidRequest``；
     ///   返回分页序号异常时抛出 ``V2GroupEventLogError/corruptPersistenceState``。
@@ -25,8 +25,7 @@ extension V2GroupEventLogService {
     ) async throws -> V2PreparedGroupEventPullResult {
         guard (try? V2RoomCursor(afterRoomSequence)) != nil,
               pageSize > 0,
-              pageSize <= Self.maximumPageSize,
-              context.frameVersion >= 21
+              pageSize <= Self.maximumPageSize
         else { throw V2GroupEventLogError.invalidRequest }
         guard let preparedStore = store as? any V2PreparedGroupEventLogStore else {
             return .page(try validatePage(await store.pull(

@@ -27,30 +27,6 @@ struct V2RoomWriteOwnerSelection: Sendable {
         return copy
     }
 
-    func selectingRoutes(_ routes: [UUID: V2RoomShardRoute]) throws -> Self {
-        if let forwardSource {
-            guard let selected = routes[forwardSource],
-                  selected == self.routes?[forwardSource] else {
-                throw V2RoomOwnerFenceError.ownerChanged
-            }
-        }
-        var copy = self
-        copy.routes = routes
-        return copy
-    }
-
-    func selectingForwardSource(_ source: UUID, route: V2RoomShardRoute) throws -> Self {
-        guard var routes, forwardSource == nil || forwardSource == source,
-              routes[source] == nil || routes[source] == route else {
-            throw V2RoomOwnerFenceError.ownerChanged
-        }
-        routes[source] = route
-        var copy = self
-        copy.routes = routes
-        copy.forwardSource = source
-        return copy
-    }
-
     static func actorForwardPair(
         activation: V2RoomActivationWriteScope,
         routes: [UUID: V2RoomShardRoute],

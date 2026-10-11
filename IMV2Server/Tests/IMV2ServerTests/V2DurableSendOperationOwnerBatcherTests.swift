@@ -12,15 +12,27 @@ import Testing
 // are real, immutable and store-bound. Only owner execution is held at a
 // deterministic boundary; Store SQL correctness has separate integration tests.
 extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("production dispatcher requires physical connection capacity")
+    func durableOwnerRequiresPhysicalPoolCapacity() async throws {
+        try await withDurableCoordinatorHandles { store, _, _ in
+            let profile = try V2CapacityProfile(id: "standard", limits: .init(
+                maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
+            #expect(throws: V2ActorContractError.invalidConfiguration("message send requires physical connection capacity")) {
+                _ = try V2DurableSendOperationOwnerBatcher(store: store, capacityProfile: profile,
+                    now: Date.init, configuration: .init(maximumPendingRequests: 4), maximumRetainedBytes: 16_384)
+            }
+        }
+    }
+
     @Test("synchronous loan registration keeps caller context while settlement and finalization stay global")
     func durableOwnerDirectLoanRegistration() async throws {
         let resources = makeV2DatabaseTestResources()
         let loop = resources.eventLoopGroup.next(), executor = V2DatabaseEventLoopTaskExecutor(loop)
         do {
-            try await withDurableCoordinatorHandles { store, handles in
+            try await withDurableCoordinatorHandles { store, handles, _ in
                 let entries = Mutex(0)
                 let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                    configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1),
+                    configuration: .init(maximumPendingRequests: 8),
                     maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
                     scheduledConnection: { _, _ in Issue.record("Direct registration must not use the async entry"); return nil },
                     startScheduledConnection: { _, body in
@@ -61,10 +73,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("an inline unbound loan failure settles before resubmitting its ready room")
     func durableOwnerDirectLoanFailure() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let entries = Mutex(0)
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1),
+                configuration: .init(maximumPendingRequests: 8),
                 maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
                 scheduledConnection: { _, _ in Issue.record("Unexpected async fallback"); return nil },
                 startScheduledConnection: { _, _ in
@@ -89,9 +101,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         let loop = resources.eventLoopGroup.next()
         let taskExecutor = V2DatabaseEventLoopTaskExecutor(loop)
         do {
-            try await withDurableCoordinatorHandles { store, handles in
+            try await withDurableCoordinatorHandles { store, handles, _ in
                 let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                    configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1),
+                    configuration: .init(maximumPendingRequests: 8),
                     maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
                     scheduledConnection: { _, body in
                         let acquisitionOnLoop = loop.inEventLoop
@@ -115,12 +127,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
     @Test("physical return and selection progress before borrower resumption and room finalization", arguments: [false, true])
     func durableOwnerPhysicalDispatchProgress(delayBorrowerResume: Bool) async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let resources = DurablePhysicalConnectionGate(), execution = DurableCoordinatorExecutionGate()
             let finalization = DurableCoordinatorExecutionGate(), borrowerResume = DurableCoordinatorExecutionGate()
             await resources.grantAll()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1), maximumRetainedBytes: 65_536,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
                 resourceDemandLimit: 1,
                 scheduledConnection: { _, body in
                     let outcome = try await resources.borrow {
@@ -164,7 +176,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     @Test("a granted unbound ticket does not clip the selected room transaction deadline")
     func durableOwnerSelectedRoomOwnsDeadline() async throws {
         let observer = DurablePostCommitObserver()
-        try await withDurableCoordinatorHandles(committedMessageObserver: observer) { store, handles in
+        try await withDurableCoordinatorHandles(committedMessageObserver: observer) { store, handles, _ in
             let finalizer = Mutex<(@Sendable () async -> Void)?>(nil)
             try await store.withScheduledSendConnection(deadline: .now + .seconds(1)) { executor in
                 try await Task.sleep(for: .milliseconds(1_100))
@@ -184,10 +196,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
     @Test("a hot room cannot consume all retained owner capacity including its active turn")
     func durableOwnerHotRoomBudgetLeavesPeerCapacity() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let gate = DurableCoordinatorExecutionGate()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 1_024, fallbackConnectionCapacity: 1),
+                connectionCapacity: 1, configuration: .init(maximumPendingRequests: 1_024),
                 maximumRetainedBytes: 2 * 1_024 * 1_024,
                 executeOwnerBatch: { try await gate.execute($0) })
             var workers = [Task { try await batcher.execute(handles[0]) }]
@@ -219,10 +231,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
     @Test("single-room transactions preserve room FIFO and drain all retained work")
     func durableOwnerCoordinatorRoomFIFOAndDrain() async throws {
-        try await withDurableCoordinatorHandles { store, prepared in
+        try await withDurableCoordinatorHandles { store, prepared, _ in
             let gate = DurableCoordinatorExecutionGate()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 4, fallbackConnectionCapacity: 1), maximumRetainedBytes: 16_384,
+                connectionCapacity: 1, configuration: .init(maximumPendingRequests: 4), maximumRetainedBytes: 16_384,
                 executeOwnerBatch: { try await gate.execute($0) })
             var workers: [Task<[V2RoomMessagingResult], any Error>] = []
             do {
@@ -257,10 +269,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("durable owner cancellation and repeated shutdown retain actual submitted work")
     func durableOwnerCoordinatorCancellationAndDrain() async throws {
-        try await withDurableCoordinatorHandles { store, prepared in
+        try await withDurableCoordinatorHandles { store, prepared, _ in
             let gate = DurableCoordinatorExecutionGate()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 2, fallbackConnectionCapacity: 1),
+                connectionCapacity: 1, configuration: .init(maximumPendingRequests: 2),
                 maximumRetainedBytes: 16_384,
                 executeOwnerBatch: { try await gate.execute($0) })
             let completed = Mutex(false), closes = Mutex(0)
@@ -318,10 +330,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("distinct rooms on the same shard execute concurrently within the owner limit")
     func durableOwnerCoordinatorIsolatesRoomsOnSameShard() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let gate = DurableCoordinatorExecutionGate()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 2, fallbackConnectionCapacity: 2),
+                connectionCapacity: 2, configuration: .init(maximumPendingRequests: 2),
                 maximumRetainedBytes: 16_384, executeOwnerBatch: { try await gate.execute($0) })
             var workers: [Task<[V2RoomMessagingResult], any Error>] = []
             do {
@@ -357,10 +369,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("queued deadlines release only queued budget while actual quota ownership is held", arguments: [false, true])
     func durableOwnerCoordinatorQueuedDeadlineWhileBusy(occupiedRoom: Bool) async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, prepare in
             let gate = DurableCoordinatorExecutionGate()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 2, fallbackConnectionCapacity: 1),
+                connectionCapacity: 1, configuration: .init(maximumPendingRequests: 2),
                 maximumRetainedBytes: 16_384, executeOwnerBatch: { try await gate.execute($0) })
             var workers: [Task<[V2RoomMessagingResult], any Error>] = []
             do {
@@ -369,9 +381,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 // Prepare through the actual Store after execution is held so
                 // the absolute deadline belongs to this queued request alone.
                 let source = handles[occupiedRoom ? 1 : 2]
-                let queuedHandle = try await store.prepareSendBatch(source.commandPayload,
-                    token: source.activationToken, deadline: .now + .milliseconds(500),
-                    now: { Date(timeIntervalSince1970: 1_750_000_000) })
+                let queuedHandle = try await prepare(source.commandPayload,
+                    source.activationToken, .now + .milliseconds(500))
                 let queuedSettled = Mutex(false)
                 workers.append(Task {
                     defer { queuedSettled.withLock { $0 = true } }
@@ -404,10 +415,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("occupied room FIFO does not block independent rooms within owner capacity")
     func durableOwnerCoordinatorRoomFIFOAndIndependentProgress() async throws {
-        try await withDurableCoordinatorHandles(includeDisjoint: true) { store, handles in
+        try await withDurableCoordinatorHandles(includeDisjoint: true) { store, handles, _ in
             let gate = DurableCoordinatorExecutionGate()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 4, fallbackConnectionCapacity: 2),
+                connectionCapacity: 2, configuration: .init(maximumPendingRequests: 4),
                 maximumRetainedBytes: 32_768, executeOwnerBatch: { try await gate.execute($0) })
             var workers: [Task<[V2RoomMessagingResult], any Error>] = []
             do {
@@ -448,10 +459,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("shutdown joins both independent physical executions despite caller cancellation", arguments: [false, true])
     func durableOwnerIndependentShutdownJoins(cancelSubmitted: Bool) async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let gate = DurableCoordinatorExecutionGate()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 3, fallbackConnectionCapacity: 2),
+                connectionCapacity: 2, configuration: .init(maximumPendingRequests: 3),
                 maximumRetainedBytes: 16_384, executeOwnerBatch: { try await gate.execute($0) })
             let first = Task { try await batcher.execute(handles[0]) }
             try await durableCoordinatorObserve { await gate.entries.count == 1 }
@@ -483,13 +494,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
     @Test("same-shard independent rooms own simultaneous real PostgreSQL transactions")
     func durableOwnerRealRoomTransactionsAreIndependent() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let gate = DurableActualTransactionGate()
             let observed = store.observingOwnerTransactions { pid, _, _ in await gate.enter(pid) }
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
-            let batcher = V2DurableSendOperationOwnerBatcher(store: observed, capacityProfile: profile,
-                now: { Date(timeIntervalSince1970: 1_750_000_000) },                 configuration: .init(maximumPendingRequests: 4, fallbackConnectionCapacity: 2), maximumRetainedBytes: 16_384)
+            let batcher = V2DurableSendOperationOwnerBatcher(fixtureStore: observed, connectionCapacity: 2, capacityProfile: profile,
+                now: { Date(timeIntervalSince1970: 1_750_000_000) },                 configuration: .init(maximumPendingRequests: 4), maximumRetainedBytes: 16_384)
             let first = Task { try await batcher.execute(handles[0]) }
             let second = Task { try await batcher.execute(handles[2]) }
             do {
@@ -517,7 +528,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("each room retains its physical backend across confirmed rollback and scalar fallback")
     func durableOwnerPinnedBackendAcrossFallback() async throws {
-        try await withDurableCoordinatorHandles(includeDisjoint: true, complexLast: true) { store, handles in
+        try await withDurableCoordinatorHandles(includeDisjoint: true, complexLast: true) { store, handles, _ in
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             for (index, handle) in [handles[0], handles[2], handles[4], handles[6]].enumerated() {
@@ -559,7 +570,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("physical connection scheduling bypasses logical admission and selects only live rooms after grant")
     func durableOwnerPhysicalConnectionSelection() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let resources = DurablePhysicalConnectionGate()
             let execution = DurableCoordinatorExecutionGate()
             let admission = V2DatabaseWorkAdmissionController(policy: .init(
@@ -569,7 +580,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(await admission.acquire(.foregroundWrite) == .admitted)
             #expect(await admission.acquire(.interactiveRead) == .admitted)
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1), maximumRetainedBytes: 65_536,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
                 resourceDemandLimit: 1,
                 scheduledConnection: { _, body in
                     try await resources.borrow {
@@ -610,12 +621,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("physical connection shutdown waits for actual execution and loan return")
     func durableOwnerPhysicalConnectionDrain() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let resources = DurablePhysicalConnectionGate()
             let execution = DurableCoordinatorExecutionGate()
             await resources.grantAll()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1), maximumRetainedBytes: 65_536,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
                 resourceDemandLimit: 1,
                 scheduledConnection: { _, body in
                     try await resources.borrow {
@@ -640,14 +651,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("returned connection serves another room while finalization retains FIFO and drain", arguments: [false, true])
     func durableOwnerPhysicalPostCommitFinalization(closeDuringFinalization: Bool) async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let resources = DurablePhysicalConnectionGate()
             let execution = DurableCoordinatorExecutionGate()
             let finalization = DurableCoordinatorExecutionGate()
             await resources.grantAll()
             await execution.releaseAll()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1), maximumRetainedBytes: 65_536,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
                 resourceDemandLimit: 1,
                 scheduledConnection: { _, body in
                     try await resources.borrow {
@@ -711,9 +722,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("physical queue rejection remains a retryable pre-BEGIN overload", arguments: [false, true])
     func durableOwnerPhysicalQueueFailure(timeout: Bool) async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1), maximumRetainedBytes: 65_536,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
                 resourceDemandLimit: 1,
                 scheduledConnection: { _, _ in throw timeout ? V2PhysicalDatabaseLoanFailure.timedOut : .queueFull },
                 scheduledExecute: { _, _ in throw V2RoomCallFailure.outcomeUnknown })
@@ -726,10 +737,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("expiry of an unbound ticket resubmits live room demand")
     func durableOwnerPhysicalExpiredTicket() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let attempts = Mutex(0)
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1), maximumRetainedBytes: 65_536,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
                 resourceDemandLimit: 1,
                 scheduledConnection: { _, body in
                     let attempt = attempts.withLock { $0 += 1; return $0 }
@@ -749,7 +760,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("a retained executor cannot execute SQL after its physical loan has returned")
     func durableOwnerRejectsReturnedExecutor() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let captured = Mutex<V2OwnerConnectionExecutor?>(nil)
             try await store.withScheduledSendConnection(deadline: .now + .seconds(5)) { executor in
                 captured.withLock { $0 = executor }
@@ -763,14 +774,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
     @Test("loan cleanup failure cannot lose a settled turn or leave its room occupied")
     func durableOwnerSettledTurnSurvivesLoanCleanupFailure() async throws {
-        try await withDurableCoordinatorHandles { store, handles in
+        try await withDurableCoordinatorHandles { store, handles, _ in
             let resources = DurablePhysicalConnectionGate()
             let execution = DurableCoordinatorExecutionGate()
             let finalized = Mutex(0)
             await resources.grantAll()
             await execution.releaseAll()
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8, fallbackConnectionCapacity: 1), maximumRetainedBytes: 65_536,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
                 resourceDemandLimit: 1,
                 scheduledConnection: { _, body in
                     _ = try await resources.borrow {
@@ -796,7 +807,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     private func withDurableCoordinatorHandles(
         includeDisjoint: Bool = false, complexLast: Bool = false,
         committedMessageObserver: (any V2CommittedMessageBatchObserving)? = nil,
-        _ body: @escaping @Sendable (PostgresV2MessageSendOperationStore, [V2PreparedMessageSendBatch]) async throws -> Void
+        _ body: @escaping @Sendable (PostgresV2MessageSendOperationStore, [V2PreparedMessageSendBatch], V2RoomSendPreparation) async throws -> Void
     ) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -829,9 +840,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             let disjointRooms = extraRooms
+            let policies = v2FixtureRoomPolicyAuthorizations(database: database)
             let store = PostgresV2MessageSendOperationStore(database: database,
-                writes: PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled),
+                writes: PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled).usingPolicyAuthorizations(policies),
                 clock: { now }, committedMessageObserver: committedMessageObserver)
+            let prepare = policies.fixtureSendPreparation(store: store, now: { now })
             try await withRoomActivation(database: database, roomID: roomID) { first in
                 try await withRoomActivation(database: database, roomID: peer) { second in
                     @Sendable func preparedHandles(_ tokens: [V2RoomActivationToken]) async throws {
@@ -845,11 +858,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                     mentions: complexLast && index == tokens.count - 1 ? [.user(.init(uuid: memberTwoUUID))] : [],
                                     limits: .init(maxUTF8Bytes: 64)),
                                     firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
-                                handles.append(try await store.prepareSendBatch([command], token: token,
-                                    deadline: .now + .seconds(30), now: { now }))
+                                handles.append(try await prepare([command], token, .now + .seconds(30)))
                             }
                         }
-                        try await body(store, handles)
+                        try await body(store, handles, prepare)
                     }
                     if includeDisjoint {
                         try await withRoomActivation(database: database, roomID: disjointRooms[0], shardID: "room-local-b") { third in
@@ -954,12 +966,13 @@ private final class DurablePostCommitObserver: V2CommittedMessageBatchObserving,
 
 private extension V2DurableSendOperationOwnerBatcher {
     convenience init(store: PostgresV2MessageSendOperationStore,
+        connectionCapacity: Int,
         configuration: V2SendOperationSchedulingConfiguration,
         maximumRetainedBytes: Int,
         executeOwnerBatch: @escaping @Sendable ([V2PreparedMessageSendBatch]) async throws -> [Result<[V2RoomMessagingResult], any Error>]) {
         self.init(store: store, configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes,
-            resourceDemandLimit: configuration.fallbackConnectionCapacity,
+            resourceDemandLimit: connectionCapacity,
             scheduledConnection: { _, body in
                 try await body(.init(execute: { prepared, _, _, _ in
                     try await executeOwnerBatch([prepared])[0].get()

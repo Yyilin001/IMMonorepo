@@ -87,84 +87,12 @@ public enum V2ReadReceiptRecordResult: Equatable, Sendable {
     case failure(V2ReadReceiptStoreError)
 }
 
-/// 支持批量记录的已读回执存储。
-public protocol V2ReadReceiptBatchStore: V2ReadReceiptStore {
-    /// 批量记录已读回执。
-    ///
-    /// - Parameter requests: 待记录请求列表。
-    /// - Returns: 与输入顺序对应的结果。
-    /// - Throws: 基础设施失败时抛出，领域拒绝以失败结果返回。
-    func recordBatch(
-        _ requests: [V2ReadReceiptRecordRequest]
-    ) async throws -> [V2ReadReceiptRecordResult]
-}
-
-/// 已读回执持久化中属于房间归属的子集。
-///
-/// 群已读游标应与其校验的房间序号、成员历史放在一起；把该能力单独声明，
-/// 可避免路由存储误把属于用户维度的偏好写入房间数据库。
-public protocol V2GroupReadReceiptRecordingStore: Sendable {
-    /// 记录一条群已读回执。
-    ///
-    /// - Parameters:
-    ///   - command: 已读回执命令。
-    ///   - now: 服务端统一授时时刻。
-    /// - Returns: 记录尝试结果。
-    /// - Throws: 持久化失败时抛出。
-    func recordGroup(
-        command: V2RecordReadReceiptCommand,
-        now: Date
-    ) async throws -> V2GroupReadReceiptRecordingAttempt
-}
-
 /// 群已读回执批量记录的单条结果。
 public enum V2GroupReadReceiptBatchResult: Equatable, Sendable {
     /// 归属侧已处理该条回执。
     case success(V2GroupReadReceiptRecordingAttempt)
     /// 该条回执被领域规则拒绝。
     case failure(V2ReadReceiptStoreError)
-}
-
-/// 支持批量记录的群已读回执存储。
-public protocol V2GroupReadReceiptBatchRecordingStore:
-    V2GroupReadReceiptRecordingStore
-{
-    /// 批量记录群已读回执。
-    ///
-    /// - Parameter requests: 待记录请求列表。
-    /// - Returns: 与输入顺序对应的结果。
-    /// - Throws: 基础设施失败时抛出。
-    func recordGroups(
-        _ requests: [V2ReadReceiptRecordRequest]
-    ) async throws -> [V2GroupReadReceiptBatchResult]
-}
-
-public extension V2GroupReadReceiptBatchRecordingStore {
-    /// 逐条记录群已读回执的兼容实现。
-    ///
-    /// 领域拒绝会被捕获为该条的失败结果，不影响同批其他条目；
-    /// 非领域错误仍向上抛出，使调用方能够区分拒绝与故障。
-    ///
-    /// - Parameter requests: 待记录请求列表。
-    /// - Returns: 与输入顺序对应的结果。
-    /// - Throws: 非领域错误时抛出。
-    func recordGroups(
-        _ requests: [V2ReadReceiptRecordRequest]
-    ) async throws -> [V2GroupReadReceiptBatchResult] {
-        var results: [V2GroupReadReceiptBatchResult] = []
-        results.reserveCapacity(requests.count)
-        for request in requests {
-            do {
-                results.append(.success(try await recordGroup(
-                    command: request.command,
-                    now: request.now
-                )))
-            } catch let error as V2ReadReceiptStoreError {
-                results.append(.failure(error))
-            }
-        }
-        return results
-    }
 }
 
 /// 归属侧对一条群已读回执的处理结果。
@@ -226,29 +154,6 @@ public struct V2GroupReadReceiptReaderCandidatePage: Equatable, Sendable {
     }
 }
 
-/// 房间本地的读者候选能力。
-///
-/// 候选结果不包含全局身份信息，也不包含隐私判定，披露与否由用户维度决定。
-public protocol V2GroupReadReceiptReaderCandidateStore: Sendable {
-    /// 分页读取房间本地的读者候选。
-    ///
-    /// - Parameters:
-    ///   - roomID: 目标房间。
-    ///   - messageID: 目标消息。
-    ///   - actorUserID: 发起查询的用户。
-    ///   - cursor: 上一页游标。
-    ///   - pageSize: 本页条数。
-    /// - Returns: 候选分页。
-    /// - Throws: 无资格或持久化失败时抛出。
-    func readerCandidates(
-        roomID: RoomID,
-        messageID: MessageID,
-        actorUserID: UserID,
-        cursor: String?,
-        pageSize: Int
-    ) async throws -> V2GroupReadReceiptReaderCandidatePage
-}
-
 /// 在权威的用户与控制面数据库上解析身份披露。
 ///
 /// 缺失、已停用、未生效或选择不披露的用户会被省略，而不是用默认值补齐。
@@ -265,11 +170,6 @@ public protocol V2ReadReceiptReaderVisibilityStore: Sendable {
         candidateUserIDs: [UserID]
     ) async throws -> [UserID: V2PublicIdentity]
 }
-
-/// 房间归属侧的群已读回执存储组合能力。
-public protocol V2GroupReadReceiptOwnerStore:
-    V2GroupReadReceiptBatchRecordingStore,
-    V2GroupReadReceiptReaderCandidateStore {}
 
 /// 控制面侧的已读回执存储组合能力。
 public protocol V2ReadReceiptControlStore:
@@ -292,21 +192,6 @@ public enum V2ReadReceiptStoreError: Error, Equatable, Sendable {
     case invalidRequest
     /// 持久化记录缺失或字段无法解码。
     case corruptPersistenceState
-}
-
-/// 已读回执的准入接口。
-public protocol V2ReadReceiptAdmission: Sendable {
-    /// 是否接管前台写入准入。
-    var managesForegroundWriteAdmission: Bool { get }
-
-    /// 接受一条已读回执记录请求。
-    ///
-    /// - Parameter request: 待记录请求。
-    /// - Returns: 记录结果。
-    /// - Throws: 准入拒绝、取消或存储失败时抛出。
-    func accept(
-        _ request: V2ReadReceiptRecordRequest
-    ) async throws -> V2ReadReceiptOutcome
 }
 
 /// 只读批处理指标。持有此接口并不获得回执准入权限。

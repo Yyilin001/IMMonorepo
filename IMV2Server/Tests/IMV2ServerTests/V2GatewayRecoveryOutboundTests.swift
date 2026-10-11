@@ -14,12 +14,12 @@ struct V2GatewayRecoveryOutboundTests {
             session: .init(limits: try .init(maximumInFlightRequests: 4),
                 authenticator: RecoveryOutboundAuthenticator(), capabilityProfile: "base",
                 commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: RecoveryOutboundCommandHandler(), registry: V2DeviceConnectionRegistry())
+            handler: RecoveryOutboundCommandHandler(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
         let started = RecoveryOutboundSignal(), release = RecoveryOutboundSignal()
         let cancelled = RecoveryOutboundSignal(), settled = RecoveryOutboundSignal(), finished = RecoveryOutboundSignal()
         let selected = Mutex<V2GatewayScopedNotificationWrite?>(nil)
         defer { release.mark() }
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             scopedNotificationWriter: { write in
                 selected.withLock { $0 = write }; started.mark()
                 return await withTaskCancellationHandler {
@@ -73,12 +73,12 @@ struct V2GatewayRecoveryOutboundTests {
                 authenticator: RecoveryOutboundAuthenticator(expiresAt: Date(timeIntervalSince1970: 11)),
                 capabilityProfile: "base", commandAdmission: V2AllowingGatewayCommandAdmission(),
                 now: { clock.withLock { $0 } }),
-            handler: RecoveryOutboundCommandHandler(), registry: V2DeviceConnectionRegistry())
+            handler: RecoveryOutboundCommandHandler(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
         let selected = RecoveryOutboundSignal(), release = RecoveryOutboundSignal(), settled = RecoveryOutboundSignal()
         defer { release.mark() }
         let accepted = Mutex(false)
         let readyAdmitted = RecoveryOutboundSignal()
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             scopedNotificationWriter: { write in
                 selected.mark()
                 await release.wait()
@@ -120,10 +120,10 @@ struct V2GatewayRecoveryOutboundTests {
             session: .init(limits: try .init(maximumInFlightRequests: 4),
                 authenticator: RecoveryOutboundAuthenticator(), capabilityProfile: "base",
                 commandAdmission: V2AllowingGatewayCommandAdmission()),
-            handler: RecoveryOutboundCommandHandler(), registry: V2DeviceConnectionRegistry())
+            handler: RecoveryOutboundCommandHandler(), registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits))
         let recorder = RecoveryOutboundWireRecorder()
         let readyAdmitted = RecoveryOutboundSignal()
-        #expect(await stream.attachTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
+        #expect(await stream.attachFixtureTransport(deviceRevocationHandler: {}, outboundWriter: { _ in },
             scopedNotificationWriter: { recorder.write($0) }))
         var hello = IMV2Envelope(); hello.requestID = 1
         hello.clientHello.deviceID = "00000000-0000-0000-0000-000000000A02"
