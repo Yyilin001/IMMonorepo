@@ -111,7 +111,10 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
         let transfers = state.withLock { value -> [(Pending, Int, V2PhysicalDatabaseLoanRequest)] in
             guard !value.closed, gates.count > 1 else { return [] }
             var result: [(Pending, Int, V2PhysicalDatabaseLoanRequest)] = []
-            for var pending in value.pending.values where !pending.transferring {
+            var queue = V2IndexedFIFO<UUID, Pending>()
+            swap(&queue, &value.pending)
+            queue.updateEach { pending in
+                guard !pending.transferring else { return }
                 for offset in 0..<gates.count {
                     let index = (value.cursor + offset) % gates.count
                     guard index != pending.index else { continue }
@@ -122,12 +125,12 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
                     guard let request else { continue }
                     // Replacing the record in place must preserve FIFO order.
                     pending.transferring = true
-                    value.pending.update(pending, key: pending.id)
                     value.cursor = (index + 1) % gates.count
                     result.append((pending, index, request))
                     break
                 }
             }
+            swap(&queue, &value.pending)
             return result
         }
         for (pending, index, request) in transfers {

@@ -59,7 +59,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         let deadline =
             V2RoomSQLDeadline.current.map { min($0, prepared.originalDeadline) }
             ?? prepared.originalDeadline
-        let bytes = try JSONEncoder().encode(prepared.commandPayload).count
+        let bytes = prepared.retainedByteBudget
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 do {
@@ -440,7 +440,13 @@ package final class V2PhysicalSendDispatcher: Sendable {
                 availableHeads -= 1
                 let id = UUID()
                 // An unbound ticket must not clip a later room to another room's deadline.
-                let deadline = readyRooms.values.compactMap { queues[$0]?.first?.deadline }.max()!
+                var latestDeadline: ContinuousClock.Instant?
+                readyRooms.forEach { room in
+                    if let deadline = queues[room]?.first?.deadline {
+                        latestDeadline = latestDeadline.map { max($0, deadline) } ?? deadline
+                    }
+                }
+                let deadline = latestDeadline!
                 batchStages[id] = .acquiringConnection
                 let timeline = V2OwnerConnectionTimeline()
                 connectionTimelines[id] = timeline
@@ -577,19 +583,20 @@ package final class V2PhysicalSendDispatcher: Sendable {
             // Expiry traverses once per deadline wake, not on every enqueue.
             for roomID in Array(queues.keys) {
                 guard var queue = queues.removeValue(forKey: roomID) else { continue }
-                for pending in queue.values {
-                    if pending.deadline <= now {
-                        queue.remove(pending.id)
-                        release(pending)
-                        queueExpirations = Self.add(queueExpirations, 1)
-                        effects.append {
-                            pending.continuation.resume(
-                                throwing: V2RoomCallFailure.notAccepted(.deadlineExceeded))
-                        }
-                    } else {
+                queue.removeAll(where: { pending in
+                    if pending.deadline > now {
                         earliest = earliest.map { min($0, pending.deadline) } ?? pending.deadline
+                        return false
                     }
-                }
+                    return true
+                }, onRemove: { pending in
+                    release(pending)
+                    queueExpirations = Self.add(queueExpirations, 1)
+                    effects.append {
+                        pending.continuation.resume(
+                            throwing: V2RoomCallFailure.notAccepted(.deadlineExceeded))
+                    }
+                })
                 queues[roomID] = queue.isEmpty ? nil : queue
                 if queue.isEmpty { readyRooms.remove(roomID) }
             }
@@ -670,7 +677,8 @@ package final class V2PhysicalSendDispatcher: Sendable {
             flushGeneration = nil
             flushWake = nil
             for queue in queues.values {
-                for pending in queue.values {
+                queue.forEach { borrowed in
+                    let pending = copy borrowed
                     release(pending)
                     effects.append {
                         pending.continuation.resume(

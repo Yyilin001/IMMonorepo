@@ -16,15 +16,23 @@ enum V2ActorAuthenticatedBodyFraming {
 
 private struct BodyWriter {
     var bytes: Data
-    init(kind: UInt8) { bytes = Data(V2ActorAuthenticatedBodyFraming.magic + [1, kind]) }
+    init(kind: UInt8) {
+        bytes = Data()
+        bytes.reserveCapacity(256)
+        bytes.append(contentsOf: V2ActorAuthenticatedBodyFraming.magic)
+        bytes.append(1)
+        bytes.append(kind)
+    }
     mutating func integer(_ value: UInt64) {
         var little = value.littleEndian
         withUnsafeBytes(of: &little) { bytes.append(contentsOf: $0) }
     }
-    mutating func identifier(_ value: String) throws {
-        let utf8 = Array(value.utf8)
-        guard (1...128).contains(utf8.count) else { throw V2ActorAuthenticationError.invalidRequest }
-        bytes.append(UInt8(utf8.count)); bytes.append(contentsOf: utf8)
+    mutating func identifier(_ value: consuming String) throws {
+        var value = consume value
+        try value.withUTF8 { utf8 in
+            guard (1...128).contains(utf8.count) else { throw V2ActorAuthenticationError.invalidRequest }
+            bytes.append(UInt8(utf8.count)); bytes.append(contentsOf: utf8)
+        }
     }
     mutating func uuid(_ value: UUID) {
         var tuple = value.uuid
@@ -49,32 +57,40 @@ private struct BodyReader {
             throw V2ActorAuthenticationError.invalidRequest
         }
         self.bytes = bytes
-        try bytes.withUnsafeBytes { raw in
+        try bytes.bytes.withUnsafeBytes { raw in
             guard raw[4] == 1 else { throw V2ActorAuthenticationError.unsupportedVersion }
             guard raw[5] == kind else { throw V2ActorAuthenticationError.invalidRequest }
         }
     }
-    mutating func take(_ count: Int) throws -> Data {
-        guard count >= 0, count <= bytes.count - offset else { throw V2ActorAuthenticationError.invalidRequest }
-        defer { offset += count }
-        return bytes.withUnsafeBytes { Data($0[offset..<(offset + count)]) }
+    mutating func byte() throws -> UInt8 {
+        guard offset < bytes.count else { throw V2ActorAuthenticationError.invalidRequest }
+        defer { offset += 1 }
+        return bytes.bytes.withUnsafeBytes { $0[offset] }
     }
-    mutating func byte() throws -> UInt8 { try take(1).first! }
     mutating func integer() throws -> UInt64 {
         guard bytes.count - offset >= 8 else { throw V2ActorAuthenticationError.invalidRequest }
         defer { offset += 8 }
-        return bytes.withUnsafeBytes { UInt64(littleEndian: $0.loadUnaligned(fromByteOffset: offset, as: UInt64.self)) }
+        return bytes.bytes.withUnsafeBytes { UInt64(littleEndian: $0.loadUnaligned(fromByteOffset: offset, as: UInt64.self)) }
     }
     mutating func identifier() throws -> String {
         let size = Int(try byte())
-        guard (1...128).contains(size), let value = String(data: try take(size), encoding: .utf8) else {
+        guard (1...128).contains(size), size <= bytes.count - offset else {
             throw V2ActorAuthenticationError.invalidRequest
         }
-        return value
+        defer { offset += size }
+        return try bytes.bytes.withUnsafeBytes { raw in
+            guard let value = String(bytes: raw[offset..<(offset + size)], encoding: .utf8) else {
+                throw V2ActorAuthenticationError.invalidRequest
+            }
+            return value
+        }
     }
     mutating func uuid() throws -> UUID {
-        let value = try take(16)
-        return value.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) }
+        guard bytes.count - offset >= 16 else { throw V2ActorAuthenticationError.invalidRequest }
+        defer { offset += 16 }
+        return bytes.bytes.withUnsafeBytes {
+            UUID(uuid: $0.loadUnaligned(fromByteOffset: offset, as: uuid_t.self))
+        }
     }
     mutating func host() throws -> V2ActorHostIdentity {
         try .init(hostID: .init(identifier()), incarnationID: uuid())
@@ -82,8 +98,15 @@ private struct BodyReader {
     mutating func payload<T: Decodable>(_ type: T.Type) throws -> T {
         let size = try integer()
         guard size <= UInt64(bytes.count - offset) else { throw V2ActorAuthenticationError.invalidRequest }
-        let result = try JSONDecoder().decode(type, from: take(Int(size)))
-        guard offset == bytes.count else { throw V2ActorAuthenticationError.invalidRequest }
+        guard Int(size) == bytes.count - offset else { throw V2ActorAuthenticationError.invalidRequest }
+        // JSONDecoder requires Data. Borrow the validated payload only during
+        // its synchronous decode; no temporary payload allocation or escaping view.
+        let result = try bytes.bytes.withUnsafeBytes { raw in
+            let payload = Data(bytesNoCopy: UnsafeMutableRawPointer(mutating: raw.baseAddress!.advanced(by: offset)),
+                count: Int(size), deallocator: .none)
+            return try JSONDecoder().decode(type, from: payload)
+        }
+        offset = bytes.count
         return result
     }
     mutating func version() throws -> Int {

@@ -458,7 +458,7 @@ struct V2GatewayByteStreamTests {
         )
         try V2FrameCodec.validateForEncoding(frame, limits: limits)
         let expected = try V2FrameCodec.encode(frame, limits: limits)
-        let actual = v2GatewayWireBuffer(frame, allocator: .init())
+        let actual = V2GatewayOutboundFrame(frame).buffer
 
         #expect(Data(actual.readableBytesView) == expected)
     }

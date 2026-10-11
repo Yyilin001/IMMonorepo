@@ -47,37 +47,47 @@ public enum V2ZlibFrameCompression {
         maximumInputBytes: Int,
         level: Int32 = defaultCompressionLevel
     ) throws -> Data {
+        try compress(input.bytes, maximumInputBytes: maximumInputBytes, level: level)
+    }
+
+    /// Borrow a contiguous input while zlib produces the independently owned output.
+    public static func compress(
+        _ input: borrowing RawSpan,
+        maximumInputBytes: Int,
+        level: Int32 = defaultCompressionLevel
+    ) throws -> Data {
         guard maximumInputBytes > 0,
               level >= Int32(Z_NO_COMPRESSION),
               level <= Int32(Z_BEST_COMPRESSION)
         else { throw V2FrameCompressionError.invalidConfiguration }
-        guard input.count <= maximumInputBytes else {
+        guard input.byteCount <= maximumInputBytes else {
             throw V2FrameCompressionError.inputTooLarge
         }
 
-        let sourceCount = uLong(input.count)
+        let sourceCount = uLong(input.byteCount)
         let bound = compressBound(sourceCount)
         guard bound <= uLong(Int.max) else {
             throw V2FrameCompressionError.inputTooLarge
         }
-        var output = Data(count: max(1, Int(bound)))
-        var outputCount = bound
-        let status: Int32 = input.withUnsafeBytes { source in
-            output.withUnsafeMutableBytes { destination in
-                compress2(
-                    destination.bindMemory(to: Bytef.self).baseAddress,
-                    &outputCount,
-                    source.bindMemory(to: Bytef.self).baseAddress,
-                    sourceCount,
-                    level
-                )
+        return try initializedData(capacity: max(1, Int(bound))) { output in
+            var outputCount = bound
+            let status: Int32 = input.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { destination, initializedCount in
+                    let status = compress2(
+                        destination.bindMemory(to: Bytef.self).baseAddress,
+                        &outputCount,
+                        source.bindMemory(to: Bytef.self).baseAddress,
+                        sourceCount,
+                        level
+                    )
+                    if status == Z_OK { initializedCount = Int(outputCount) }
+                    return status
+                }
+            }
+            guard status == Z_OK else {
+                throw V2FrameCompressionError.compressionFailed(status)
             }
         }
-        guard status == Z_OK else {
-            throw V2FrameCompressionError.compressionFailed(status)
-        }
-        output.count = Int(outputCount)
-        return output
     }
 
     /// 在固定输出容量与膨胀比限制下解压一帧。
@@ -96,6 +106,16 @@ public enum V2ZlibFrameCompression {
         maximumOutputBytes: Int,
         maximumExpansionRatio: Int = defaultMaximumExpansionRatio
     ) throws -> Data {
+        try decompress(input.bytes, maximumOutputBytes: maximumOutputBytes,
+            maximumExpansionRatio: maximumExpansionRatio)
+    }
+
+    /// Borrow compressed bytes only for this synchronous bounded decode.
+    public static func decompress(
+        _ input: borrowing RawSpan,
+        maximumOutputBytes: Int,
+        maximumExpansionRatio: Int = defaultMaximumExpansionRatio
+    ) throws -> Data {
         guard maximumOutputBytes > 0, maximumExpansionRatio > 0 else {
             throw V2FrameCompressionError.invalidConfiguration
         }
@@ -103,32 +123,50 @@ public enum V2ZlibFrameCompression {
             throw V2FrameCompressionError.invalidCompressedPayload(Int32(Z_DATA_ERROR))
         }
 
-        var output = Data(count: maximumOutputBytes)
-        var outputCount = uLong(maximumOutputBytes)
-        let status: Int32 = input.withUnsafeBytes { source in
-            output.withUnsafeMutableBytes { destination in
-                uncompress(
-                    destination.bindMemory(to: Bytef.self).baseAddress,
-                    &outputCount,
-                    source.bindMemory(to: Bytef.self).baseAddress,
-                    uLong(input.count)
-                )
+        return try initializedData(capacity: maximumOutputBytes) { output in
+            var outputCount = uLong(maximumOutputBytes)
+            let status: Int32 = input.withUnsafeBytes { source in
+                output.withUnsafeMutableBytes { destination, initializedCount in
+                    let status = uncompress(
+                        destination.bindMemory(to: Bytef.self).baseAddress,
+                        &outputCount,
+                        source.bindMemory(to: Bytef.self).baseAddress,
+                        uLong(input.byteCount)
+                    )
+                    if status == Z_OK { initializedCount = Int(outputCount) }
+                    return status
+                }
             }
+            if status == Z_BUF_ERROR {
+                throw V2FrameCompressionError.outputLimitExceeded
+            }
+            guard status == Z_OK else {
+                throw V2FrameCompressionError.invalidCompressedPayload(status)
+            }
+            guard outputCount <= uLong(Int.max) else {
+                throw V2FrameCompressionError.outputLimitExceeded
+            }
+            let decodedCount = Int(outputCount)
+            guard input.byteCount <= Int.max / maximumExpansionRatio,
+                  decodedCount <= input.byteCount * maximumExpansionRatio
+            else { throw V2FrameCompressionError.expansionRatioExceeded }
         }
-        if status == Z_BUF_ERROR {
-            throw V2FrameCompressionError.outputLimitExceeded
-        }
-        guard status == Z_OK else {
-            throw V2FrameCompressionError.invalidCompressedPayload(status)
-        }
-        guard outputCount <= uLong(Int.max) else {
-            throw V2FrameCompressionError.outputLimitExceeded
-        }
-        let decodedCount = Int(outputCount)
-        guard input.count <= Int.max / maximumExpansionRatio,
-              decodedCount <= input.count * maximumExpansionRatio
-        else { throw V2FrameCompressionError.expansionRatioExceeded }
-        output.count = decodedCount
-        return output
+    }
+
+    /// zlib writes into uninitialized capacity. Publish only its initialized
+    /// prefix, transferring the allocation to Data without a second copy.
+    private static func initializedData(
+        capacity: Int,
+        initialize: (inout OutputRawSpan) throws -> Void
+    ) throws -> Data {
+        let pointer = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: MemoryLayout<UInt64>.alignment)
+        var transferred = false
+        defer { if !transferred { pointer.deallocate() } }
+        var output = OutputRawSpan(buffer: UnsafeMutableRawBufferPointer(start: pointer, count: capacity), initializedCount: 0)
+        try initialize(&output)
+        let result = Data(bytesNoCopy: pointer, count: output.byteCount,
+            deallocator: .custom { pointer, _ in pointer.deallocate() })
+        transferred = true
+        return result
     }
 }

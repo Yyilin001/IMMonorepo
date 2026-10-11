@@ -134,4 +134,20 @@ struct V2ZlibFrameCompressionTests {
             )
         }
     }
+    @Test("span inputs honor their slice and initialized outputs own their storage")
+    func spanInputAndOwnedOutput() throws {
+        let payload = Data("bounded-span-message".utf8)
+        let padded = Data([0xFF]) + payload + Data([0xFF])
+        let compressed = try V2ZlibFrameCompression.compress(
+            padded.bytes.extracting(1..<(padded.count - 1)), maximumInputBytes: payload.count)
+        var decoded = try V2ZlibFrameCompression.decompress(
+            compressed.bytes, maximumOutputBytes: 1_048_576)
+        #expect(decoded == payload && decoded.count == payload.count)
+        let retained = decoded
+        decoded[0] = 0
+        #expect(retained == payload && decoded != retained)
+        let empty = try V2ZlibFrameCompression.compress(Data().bytes, maximumInputBytes: 1)
+        #expect(try V2ZlibFrameCompression.decompress(empty.bytes, maximumOutputBytes: 1).isEmpty)
+    }
+
 }

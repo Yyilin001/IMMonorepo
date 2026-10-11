@@ -13,12 +13,33 @@ struct V2IndexedFIFOTests {
         #expect(queue.remove(9) == 9)
         queue.prepend(0, key: 0)
         queue.append(9, key: 9)
-        #expect(queue.values == [0, 1, 2, 3, 5, 6, 7, 8, 9])
+        var visited: [Int] = []
+        queue.forEach { visited.append($0) }
+        #expect(visited == [0, 1, 2, 3, 5, 6, 7, 8, 9])
         for expected in [0, 1, 2, 3, 5, 6, 7, 8, 9] { #expect(queue.removeFirst() == expected) }
         #expect(queue.isEmpty && queue.first == nil && queue.removeFirst() == nil)
         queue.append(12, key: 12)
         #expect(queue.first == 12 && queue.count == 1)
         queue.removeAll()
-        #expect(queue.values.isEmpty && queue.count == 0)
+        #expect(queue.isEmpty && queue.count == 0)
     }
+    @Test("expiry and in-place updates preserve order and permit key reuse")
+    func borrowedTraversalAndExpiry() {
+        var queue = V2IndexedFIFO<Int, Int>()
+        for value in 0..<8 { queue.append(value, key: value) }
+        queue.updateEach { $0 *= 10 }
+        var removed: [Int] = []
+        queue.removeAll(where: { $0 % 20 == 0 }, onRemove: { removed.append($0) })
+        #expect(removed == [0, 20, 40, 60])
+        var remaining: [Int] = []
+        queue.forEach { remaining.append($0) }
+        #expect(remaining == [10, 30, 50, 70])
+        queue.prepend(99, key: 0)
+        #expect(queue.removeFirst() == 99)
+        queue.removeAll(where: { _ in true }, onRemove: { _ in })
+        #expect(queue.isEmpty && queue.first == nil)
+        queue.append(123, key: 0)
+        #expect(queue.removeFirst() == 123)
+    }
+
 }

@@ -536,6 +536,24 @@ public actor V2GatewayByteStream {
         concurrentMessageSendRespond: (@Sendable (V2Frame) async throws -> Void)? = nil,
         respond: (V2Frame) async throws -> Void
     ) async throws {
+        let bufferedConcurrentRespond: (@Sendable (V2GatewayOutboundFrame) async throws -> Void)?
+        if let callback = concurrentMessageSendRespond {
+            bufferedConcurrentRespond = { frame in try await callback(frame.dataFrame) }
+        } else {
+            bufferedConcurrentRespond = nil
+        }
+        try await receiveInboundFrames(inbound.map(V2GatewayInboundFrame.init),
+            authenticationCompleted: authenticationCompleted,
+            concurrentMessageSendRespond: bufferedConcurrentRespond,
+            respond: { frame in try await respond(frame.dataFrame) })
+    }
+
+    func receiveInboundFrames(
+        _ inbound: [V2GatewayInboundFrame],
+        authenticationCompleted: (@Sendable (Bool) async -> Void)? = nil,
+        concurrentMessageSendRespond: (@Sendable (V2GatewayOutboundFrame) async throws -> Void)? = nil,
+        respond: (V2GatewayOutboundFrame) async throws -> Void
+    ) async throws {
         do {
             guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
             for frame in inbound {
@@ -552,7 +570,7 @@ public actor V2GatewayByteStream {
                         throw V2GatewaySessionError.unsupportedCommand
                     }
                     let bytes = frame.flags.contains(.compressed)
-                        ? frameLimits.maximumMessageSendPayloadBytes : frame.payload.count
+                        ? frameLimits.maximumMessageSendPayloadBytes : frame.payloadCount
                     var hasProcessCapacity = false
                     if messageSendTasks.count >= maximumConcurrentMessageSends {
                         await messageSendBudget.recordRejection(.connectionCount)
@@ -568,7 +586,7 @@ public actor V2GatewayByteStream {
                         busy.error.code = "SERVER_BUSY"
                         busy.error.retryable = true
                         busy.error.retryAfterSeconds = 1
-                        try await respond(V2ServerProtobufFrameCodec.encode(busy, frameVersion: frame.version))
+                        try await respond(V2ServerProtobufFrameCodec.encodeBuffered(busy, frameVersion: frame.version))
                         continue
                     }
                     guard !transportClosed, registeredIdentity != nil,
@@ -589,8 +607,8 @@ public actor V2GatewayByteStream {
                             sendTrace?.record("gateway_to_result_ready", from: startedAt)
                             guard canRespondToMessageSend() else { throw CancellationError() }
                             let writeStartedAt = ContinuousClock.now
-                            try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
-                            try await concurrentMessageSendRespond(exchange.response)
+                            try exchange.wireResponse.validate(limits: frameLimits)
+                            try await concurrentMessageSendRespond(exchange.wireResponse)
                             sendTrace?.record("result_ready_to_ack_write", from: writeStartedAt)
                         } catch {
                             closeAfterMessageSendFailure()
@@ -626,8 +644,8 @@ public actor V2GatewayByteStream {
                     response: exchange.responseEnvelope
                 )
                 await endAuthorPresentationSubscription(inbound: exchange.request, response: exchange.responseEnvelope)
-                try V2FrameCodec.validateForEncoding(exchange.response, limits: frameLimits)
-                try await respond(exchange.response)
+                try exchange.wireResponse.validate(limits: frameLimits)
+                try await respond(exchange.wireResponse)
                 if newlyAuthenticated, !transportClosed, registeredIdentity != nil {
                     authenticatedResponseWritten = true
                     await registry.authenticationResponseWritten(connectionID: connectionID)

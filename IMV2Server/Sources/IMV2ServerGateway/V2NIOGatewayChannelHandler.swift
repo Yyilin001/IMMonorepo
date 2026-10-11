@@ -21,7 +21,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     private let foregroundWriteScheduler: V2NIOForegroundWriteScheduler
     private let now: @Sendable () -> NIODeadline
     private let logger = Logger(label: "imv2.gateway.transport")
-    private var decoder: V2FrameDecoder
+    private var decoder: V2NIOInboundFrameDecoder
     private var pending: V2GatewayInboundQueue
     private var processing = false
     /// 通道唯一的请求任务。
@@ -40,7 +40,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     /// 各创建一个 Swift 任务与 actor 等待续期。
     private var foregroundWriter: V2NIOGatewayForegroundWriter?
     private struct PendingResponseWrite {
-        let frame: V2Frame
+        let frame: V2GatewayOutboundFrame
         let promise: EventLoopPromise<Void>
     }
     private var pendingResponseWrite: PendingResponseWrite?
@@ -279,8 +279,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         lastInboundAt = now()
         let buffer = unwrapInboundIn(data)
-        let bytes = Data(buffer.readableBytesView)
-        guard pending.append(bytes) else {
+        guard pending.append(buffer) else {
             close(context: context, reason: .inboundQueueLimit)
             return
         }
@@ -355,13 +354,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         else { return }
         // Decode bounded batches on the channel loop. Partial TCP reads do
         // not create business tasks or cross the actor boundary.
-        var frames: [V2Frame] = []
+        var frames: [V2GatewayInboundFrame] = []
         do {
             repeat {
-                let inbound: Data
+                let inbound: ByteBuffer
                 if needsFrameDrain {
                     needsFrameDrain = false
-                    inbound = Data()
+                    inbound = ByteBuffer()
                 } else {
                     guard let next = pending.popFirst() else { return }
                     inbound = next
@@ -386,7 +385,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             let outcome: V2GatewayProcessingOutcome
             do {
                 try Task.checkCancellation()
-                let writeResponse: @Sendable (V2Frame) async throws -> Void = { response in
+                let writeResponse: @Sendable (V2GatewayOutboundFrame) async throws -> Void = { response in
                     try Task.checkCancellation()
                     try await eventLoop.flatSubmit {
                         boundHandler.value.writeFrameWhenWritable(
@@ -395,7 +394,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         )
                     }.get()
                 }
-                try await stream.receiveDecodedFrames(inboundFrames, authenticationCompleted: { allowsLargeFrames in
+                try await stream.receiveInboundFrames(inboundFrames, authenticationCompleted: { allowsLargeFrames in
                     await withCheckedContinuation { continuation in
                         eventLoop.execute {
                             let handler = boundHandler.value
@@ -482,7 +481,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     }
 
     private func writeFrameWhenWritable(
-        _ frame: V2Frame,
+        _ frame: V2GatewayOutboundFrame,
         context: ChannelHandlerContext
     ) -> EventLoopFuture<Void> {
         let promise = context.eventLoop.makePromise(of: Void.self)
@@ -513,14 +512,11 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     }
 
     private func write(
-        _ frame: V2Frame,
+        _ frame: V2GatewayOutboundFrame,
         promise: EventLoopPromise<Void>,
         context: ChannelHandlerContext
     ) {
-        let buffer = v2GatewayWireBuffer(
-            frame,
-            allocator: context.channel.allocator
-        )
+        let buffer = frame.buffer
         context.writeAndFlush(wrapOutboundOut(buffer), promise: promise)
     }
 
@@ -1011,30 +1007,6 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
     }
 }
 
-/// 把稳定的 18 字节网关头与 protobuf 载荷直接编码进 NIO 持有的存储。
-///
-/// 字节序刻意与 `V2FrameCodec.encode` 保持一致；
-/// 在帧跨越到事件循环之前，校验仍由 `V2GatewayByteStream` 负责。
-///
-/// - Parameters:
-///   - frame: 待编码的帧。
-///   - allocator: NIO 缓冲区分配器。
-/// - Returns: 可直接写入 channel 的缓冲区。
-func v2GatewayWireBuffer(
-    _ frame: V2Frame,
-    allocator: ByteBufferAllocator
-) -> ByteBuffer {
-    var buffer = allocator.buffer(capacity: V2Frame.headerLength + frame.payload.count)
-    buffer.writeInteger(V2Frame.magic, endianness: .big)
-    buffer.writeInteger(frame.version)
-    buffer.writeInteger(frame.flags.rawValue)
-    buffer.writeInteger(frame.command.rawValue, endianness: .big)
-    buffer.writeInteger(frame.requestID, endianness: .big)
-    buffer.writeInteger(UInt32(frame.payload.count), endianness: .big)
-    buffer.writeBytes(frame.payload)
-    return buffer
-}
-
 /// 局限于事件循环的二维接纳队列。
 ///
 /// `CircularBuffer` 让追加/弹出保持摊还 O(1)，
@@ -1043,7 +1015,7 @@ func v2GatewayWireBuffer(
 struct V2GatewayInboundQueue {
     private let maximumBytes: Int
     private let maximumChunks: Int
-    private var chunks: CircularBuffer<Data>
+    private var chunks: CircularBuffer<ByteBuffer>
     private(set) var queuedBytes = 0
 
     init(maximumBytes: Int, maximumChunks: Int) {
@@ -1056,19 +1028,25 @@ struct V2GatewayInboundQueue {
     var isEmpty: Bool { chunks.isEmpty }
     var count: Int { chunks.count }
 
-    mutating func append(_ bytes: Data) -> Bool {
+    mutating func append(_ bytes: ByteBuffer) -> Bool {
         guard chunks.count < maximumChunks,
-              bytes.count <= maximumBytes,
-              queuedBytes <= maximumBytes - bytes.count
+              bytes.readableBytes <= maximumBytes,
+              queuedBytes <= maximumBytes - bytes.readableBytes
         else { return false }
+        var bytes = bytes
+        if bytes.storageCapacity > max(16_384, bytes.readableBytes * 4) {
+            var owned = ByteBufferAllocator().buffer(capacity: bytes.readableBytes)
+            owned.writeBuffer(&bytes)
+            bytes = owned
+        }
         chunks.append(bytes)
-        queuedBytes += bytes.count
+        queuedBytes += bytes.readableBytes
         return true
     }
 
-    mutating func popFirst() -> Data? {
+    mutating func popFirst() -> ByteBuffer? {
         guard let bytes = chunks.popFirst() else { return nil }
-        queuedBytes -= bytes.count
+        queuedBytes -= bytes.readableBytes
         return bytes
     }
 

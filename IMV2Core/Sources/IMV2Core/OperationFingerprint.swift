@@ -19,25 +19,34 @@ public struct V2OperationFingerprint: Equatable, Codable, Sendable {
     public init(kind: V2OperationKind, fields: [V2OperationFingerprintField]) throws {
         guard fields.allSatisfy({ !$0.name.isEmpty }) else { throw V2OperationFingerprintError.emptyFieldName }
         guard Set(fields.map(\.name)).count == fields.count else { throw V2OperationFingerprintError.duplicateField }
-        var bytes = Data()
-        func integer(_ value: UInt64) { var value = value.bigEndian; withUnsafeBytes(of: &value) { bytes.append(contentsOf: $0) } }
-        func data(_ value: Data) { integer(UInt64(value.count)); bytes.append(value) }
-        data(Data("im.v2.operation".utf8)); integer(UInt64(Self.currentVersion)); data(Data(kind.rawValue.utf8))
+        var encoder = OperationFingerprintEncoder(kind: kind)
         for field in fields.sorted(by: { $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) }) {
-            data(Data(field.name.utf8))
+            encoder.string(field.name)
             switch field.value {
-            case .absent: bytes.append(0)
-            case .text(let text): bytes.append(1); data(Data(text.utf8))
-            case .unsigned(let value): bytes.append(2); integer(value)
-            case .signed(let value): bytes.append(3); integer(UInt64(bitPattern: value))
-            case .bytes(let value): bytes.append(4); data(value)
-            case .flag(let flag): bytes.append(5); bytes.append(flag ? 1 : 0)
+            case .absent: encoder.tag(0)
+            case .text(let text): encoder.tag(1); encoder.string(text)
+            case .unsigned(let value): encoder.tag(2); encoder.integer(value)
+            case .signed(let value): encoder.tag(3); encoder.integer(UInt64(bitPattern: value))
+            case .bytes(let value): encoder.tag(4); encoder.data(value)
+            case .flag(let flag): encoder.tag(5); encoder.tag(flag ? 1 : 0)
             case .orderedText(let values):
-                bytes.append(6); integer(UInt64(values.count)); for value in values { data(Data(value.utf8)) }
+                encoder.tag(6); encoder.integer(UInt64(values.count))
+                for value in values { encoder.string(value) }
             }
         }
-        self.version = Self.currentVersion; self.digest = Data(SHA256.hash(data: bytes))
+        self.version = Self.currentVersion; self.digest = encoder.finish()
     }
+
+    /// Fixed schema in the same UTF-8 key order as the generic encoder.
+    init(messageSendIdentity: String, domain: V2SendMessageFingerprint, deadline: UInt64) {
+        var encoder = OperationFingerprintEncoder(kind: .sendMessage)
+        encoder.string("domainFingerprint"); encoder.tag(4); encoder.data(domain.digest)
+        encoder.string("domainFingerprintVersion"); encoder.tag(2); encoder.integer(UInt64(domain.version))
+        encoder.string("firstSubmissionDeadline"); encoder.tag(2); encoder.integer(deadline)
+        encoder.string("identity"); encoder.tag(1); encoder.string(messageSendIdentity)
+        self.version = Self.currentVersion; self.digest = encoder.finish()
+    }
+
     private enum CodingKeys: String, CodingKey { case version, digest }
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -54,4 +63,34 @@ public struct V2OperationFingerprintField: Equatable, Sendable {
     public let name: String
     public let value: Value
     public init(_ name: String, _ value: Value) { self.name = name; self.value = value }
+}
+
+/// Stream the canonical bytes directly into SHA-256; no aggregate Data buffer.
+private struct OperationFingerprintEncoder {
+    private var hasher = SHA256()
+    init(kind: V2OperationKind) {
+        string("im.v2.operation")
+        integer(UInt64(V2OperationFingerprint.currentVersion))
+        string(kind.rawValue)
+    }
+    mutating func tag(_ value: UInt8) {
+        var byte = value
+        withUnsafeBytes(of: &byte) { hasher.update(bufferPointer: $0) }
+    }
+    mutating func integer(_ value: UInt64) {
+        var bytes = value.bigEndian
+        withUnsafeBytes(of: &bytes) { hasher.update(bufferPointer: $0) }
+    }
+    mutating func string(_ value: String) {
+        var value = value
+        value.withUTF8 { bytes in
+            integer(UInt64(bytes.count))
+            hasher.update(bufferPointer: UnsafeRawBufferPointer(bytes))
+        }
+    }
+    mutating func data(_ value: Data) {
+        integer(UInt64(value.count))
+        hasher.update(data: value)
+    }
+    mutating func finish() -> Data { Data(hasher.finalize()) }
 }

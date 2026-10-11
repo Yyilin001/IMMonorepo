@@ -109,7 +109,8 @@ private struct SendMessageFingerprintEncoder {
 
     /// 将一个变体或存在性标记加入摘要。
     mutating func tag(_ value: UInt8) {
-        hasher.update(data: [value])
+        var byte = value
+        withUnsafeBytes(of: &byte) { hasher.update(bufferPointer: $0) }
     }
 
     /// 按固定八字节大端格式写入数量或版本，避免平台字长影响摘要。
@@ -120,9 +121,11 @@ private struct SendMessageFingerprintEncoder {
 
     /// 先写 UTF-8 字节长度，再写完整内容，避免拼接歧义。
     mutating func string(_ value: String) {
-        let bytes = Data(value.utf8)
-        integer(UInt64(bytes.count))
-        hasher.update(data: bytes)
+        var value = value
+        value.withUTF8 { bytes in
+            integer(UInt64(bytes.count))
+            hasher.update(bufferPointer: UnsafeRawBufferPointer(bytes))
+        }
     }
 
     /// 先区分 nil 与存在，再编码字符串，使 nil 与空字符串具有不同摘要。

@@ -128,7 +128,8 @@ struct V2GatewaySessionExchange: Sendable {
     /// 响应内容；预制页面路径仅含页面游标摘要。
     let responseEnvelope: IMV2Envelope
     /// 实际向客户端发送的完整响应帧。
-    let response: V2Frame
+    let wireResponse: V2GatewayOutboundFrame
+    var response: V2Frame { wireResponse.dataFrame }
     /// 明确的终止认证原因；传输层应先发送关联拒绝响应，再结束连接。
     var terminalAuthenticationError: V2GatewayAuthenticationError? = nil
     var authorSample: V2AuthorPresentationPageSample? = nil
@@ -139,7 +140,7 @@ private struct V2GatewaySessionResponse: Sendable {
     /// 用于内部记账的响应内容或摘要。
     let envelope: IMV2Envelope
     /// 待发送的完整响应帧。
-    let frame: V2Frame
+    let frame: V2GatewayOutboundFrame
     /// 明确的终止认证原因；传输层应先发送关联拒绝响应，再结束连接。
     var terminalAuthenticationError: V2GatewayAuthenticationError? = nil
     var authorSample: V2AuthorPresentationPageSample? = nil
@@ -281,6 +282,18 @@ public actor V2GatewaySession {
         captureAuthorSample: Bool = false,
         roomProgress: (@Sendable (IMV2Heartbeat) async -> [IMV2GroupEventProgressState])? = nil
     ) async throws -> V2GatewaySessionExchange {
+        try await receive(V2GatewayInboundFrame(frame), handler: handler,
+            originatingConnectionID: originatingConnectionID, captureAuthorSample: captureAuthorSample,
+            roomProgress: roomProgress)
+    }
+
+    func receive(
+        _ frame: V2GatewayInboundFrame,
+        handler: any V2GatewayCommandHandler,
+        originatingConnectionID: UUID? = nil,
+        captureAuthorSample: Bool = false,
+        roomProgress: (@Sendable (IMV2Heartbeat) async -> [IMV2GroupEventProgressState])? = nil
+    ) async throws -> V2GatewaySessionExchange {
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         let envelope = try decode(frame)
         let response: V2GatewaySessionResponse
@@ -299,7 +312,7 @@ public actor V2GatewaySession {
         return .init(
             request: envelope,
             responseEnvelope: response.envelope,
-            response: response.frame,
+            wireResponse: response.frame,
             terminalAuthenticationError: response.terminalAuthenticationError,
             authorSample: response.authorSample
         )
@@ -314,7 +327,7 @@ public actor V2GatewaySession {
     /// 此入口不返回额外的终止认证错误标记；生产传输层使用内部交换入口统一处理响应后的连接生命周期。
     public func receiveBootstrap(_ frame: V2Frame) async throws -> V2Frame {
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
-        return try await receiveBootstrap(frame, envelope: decode(frame)).frame
+        return try await receiveBootstrap(V2GatewayInboundFrame(frame), envelope: decode(frame)).frame.dataFrame
     }
 
     /// 按已解码载荷执行版本协商或认证。
@@ -323,7 +336,7 @@ public actor V2GatewaySession {
     /// 明确凭证拒绝会先关闭会话状态，再生成关联请求的拒绝帧；其他适配器错误直接传播。
     /// 认证成功需由状态机确认仍处于可完成的阶段，不能因 actor 在等待期间被关闭而重新激活。
     private func receiveBootstrap(
-        _ frame: V2Frame,
+        _ frame: V2GatewayInboundFrame,
         envelope: IMV2Envelope
     ) async throws -> V2GatewaySessionResponse {
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
@@ -338,7 +351,7 @@ public actor V2GatewaySession {
                 throw V2GatewaySessionError.invalidClientHello
             }
             helloDeviceID = deviceID
-            let selected = try state.receiveClientHello(frame, clientSupportedVersions: versions, serverSupportedVersions: IMV2ProtocolVersion.supportedVersions)
+            let selected = try state.receiveClientHello(frame.header, clientSupportedVersions: versions, serverSupportedVersions: IMV2ProtocolVersion.supportedVersions)
             negotiatedMessageSendOperations = messageSendOperationsEnabled && hello.supportsMessageSendOperations
             if supportedFrameCompression == .zlib,
                hello.supportedFrameCompressions.contains(.zlib) {
@@ -363,13 +376,13 @@ public actor V2GatewaySession {
             }
             return try .init(
                 envelope: response,
-                frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: selected)
+                frame: V2ServerProtobufFrameCodec.encodeBuffered(response, frameVersion: selected)
             )
 
         case .authenticate(let request):
             // 预留握手状态或启动异步适配器操作前，先拒绝不可用的时钟。
             _ = try currentServerTime()
-            try state.receiveAuthenticate(frame)
+            try state.receiveAuthenticate(frame.header)
             guard !request.accessToken.isEmpty else { throw V2GatewaySessionError.invalidAuthenticatePayload }
             let deviceID = try DeviceID(request.deviceID)
             guard helloDeviceID == deviceID else {
@@ -394,7 +407,7 @@ public actor V2GatewaySession {
                 response.error.retryable = false
                 return try .init(
                     envelope: response,
-                    frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: frame.version),
+                    frame: V2ServerProtobufFrameCodec.encodeBuffered(response, frameVersion: frame.version),
                     terminalAuthenticationError: .unauthenticated
                 )
             }
@@ -422,7 +435,7 @@ public actor V2GatewaySession {
             response.authenticated.authorPresentationStreamID = authorPresentationStreamID?.uuidString ?? ""
             return try .init(
                 envelope: response,
-                frame: V2ServerProtobufFrameCodec.encode(response, frameVersion: version)
+                frame: V2ServerProtobufFrameCodec.encodeBuffered(response, frameVersion: version)
             )
 
         default:
@@ -441,13 +454,13 @@ public actor V2GatewaySession {
 
     /// Validate a send before the connection owner reserves a concurrent slot.
     /// Over-capacity requests still have to satisfy authentication and wire shape.
-    func validateMessageSendDispatch(_ frame: V2Frame) throws {
+    func validateMessageSendDispatch(_ frame: V2GatewayInboundFrame) throws {
         guard terminalGate.isActive(),
               case .authenticated(let version, _) = state.phase,
               frame.version == version,
               negotiatedMessageSendOperations,
               frame.requestID != 0,
-              frame.payload.count <= maximumMessageSendPayloadBytes,
+              frame.payloadCount <= maximumMessageSendPayloadBytes,
               authenticatedSessionExpiresAt.map({ $0 > now() }) ?? true else {
             throw V2GatewaySessionError.unsupportedCommand
         }
@@ -533,11 +546,11 @@ public actor V2GatewaySession {
     public func receiveAuthenticated(_ frame: V2Frame, handler: any V2GatewayCommandHandler) async throws -> V2Frame {
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         return try await receiveAuthenticated(
-            frame,
+            V2GatewayInboundFrame(frame),
             envelope: decode(frame),
             handler: handler,
             originatingConnectionID: nil
-        ).frame
+        ).frame.dataFrame
     }
 
     /// 校验期限、登记请求关联，并执行准入、心跳或业务处理。
@@ -547,7 +560,7 @@ public actor V2GatewaySession {
     ///
     /// 会话期限在进入准入前检查；本方法不在每个异步挂起点后重新认证。业务执行之后的状态失败不能回滚已经提交的领域事务。
     private func receiveAuthenticated(
-        _ frame: V2Frame,
+        _ frame: V2GatewayInboundFrame,
         envelope: IMV2Envelope,
         handler: any V2GatewayCommandHandler,
         originatingConnectionID: UUID?,
@@ -568,7 +581,7 @@ public actor V2GatewaySession {
         }
         if frame.command == .messageSendOperation || frame.command == .messageSendOperationRecover {
             guard negotiatedMessageSendOperations,
-                  frame.payload.count <= maximumMessageSendPayloadBytes else {
+                  frame.payloadCount <= maximumMessageSendPayloadBytes else {
                 throw V2GatewaySessionError.unsupportedCommand
             }
         }
@@ -582,7 +595,7 @@ public actor V2GatewaySession {
             guard authorPresentationStreamID != nil, UUID(uuidString: request.authorPresentationViewID) != nil,
                   UUID(uuidString: request.roomID) != nil else { throw V2GatewaySessionError.unsupportedCommand }
         }
-        try state.receiveAuthenticatedRequest(frame)
+        try state.receiveAuthenticatedRequest(frame.header)
         do {
             var response: IMV2Envelope
             var preparedFrame: V2Frame?
@@ -675,14 +688,15 @@ public actor V2GatewaySession {
             } else {
                 nil
             }
-            let encoded = try preparedFrame ?? preparedGroupEventPageCache?.frame(
+            let cached = try preparedFrame ?? preparedGroupEventPageCache?.frame(
                 for: response,
                 frameVersion: version,
                 compression: responseCompression,
                 maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
                 compressionThresholdBytes: compressionThresholdBytes,
                 maximumExpansionRatio: maximumCompressionExpansionRatio
-            ) ?? V2ServerProtobufFrameCodec.encode(
+            )
+            let encoded = try cached.map(V2GatewayOutboundFrame.init) ?? V2ServerProtobufFrameCodec.encodeBuffered(
                 response,
                 frameVersion: version,
                 compression: responseCompression,
@@ -744,6 +758,10 @@ public actor V2GatewaySession {
 
     /// 使用当前协商压缩、protobuf 深度与解压预算解码完整帧；传播载荷或资源限制错误。
     private func decode(_ frame: V2Frame) throws -> IMV2Envelope {
+        try decode(V2GatewayInboundFrame(frame))
+    }
+
+    private func decode(_ frame: V2GatewayInboundFrame) throws -> IMV2Envelope {
         return try V2ServerProtobufFrameCodec.decode(
             frame,
             maximumMessageDepth: maximumProtobufMessageDepth,

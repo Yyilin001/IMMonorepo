@@ -1,8 +1,8 @@
 /// Actor-confined FIFO with constant-time head removal and cancellation by key.
-/// Values are copied only for deadline expiry / shutdown traversal.
+/// Traversal borrows values without allocating a snapshot.
 package struct V2IndexedFIFO<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     private struct Node: Sendable {
-        let value: Value
+        var value: Value
         var previous: Key?
         var next: Key?
     }
@@ -12,14 +12,36 @@ package struct V2IndexedFIFO<Key: Hashable & Sendable, Value: Sendable>: Sendabl
     package var count: Int { nodes.count }
     package var isEmpty: Bool { nodes.isEmpty }
     package var first: Value? { head.flatMap { nodes[$0]?.value } }
-    package var values: [Value] {
-        var result: [Value] = []
+    /// Visits in FIFO order without materializing a snapshot. The callback
+    /// cannot mutate this queue while its read access is active.
+    package borrowing func forEach(_ visit: (borrowing Value) throws -> Void) rethrows {
         var key = head
         while let current = key, let node = nodes[current] {
-            result.append(node.value)
+            try visit(node.value)
             key = node.next
         }
-        return result
+    }
+    /// Advance before removal so expired entries can be removed in one pass.
+    package mutating func removeAll(
+        where predicate: (borrowing Value) -> Bool,
+        onRemove: (consuming Value) -> Void
+    ) {
+        var key = head
+        while let current = key, let node = nodes[current] {
+            key = node.next
+            if predicate(node.value), let removed = remove(current) {
+                onRemove(removed)
+            }
+        }
+    }
+    /// Mutate records in order without retaining a copied queue snapshot.
+    package mutating func updateEach(_ visit: (inout Value) -> Void) {
+        var key = head
+        while let current = key, var node = nodes[current] {
+            key = node.next
+            visit(&node.value)
+            nodes[current] = consume node
+        }
     }
     package mutating func append(_ value: Value, key: Key) {
         precondition(nodes[key] == nil)

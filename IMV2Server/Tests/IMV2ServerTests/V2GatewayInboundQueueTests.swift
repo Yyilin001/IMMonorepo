@@ -1,6 +1,7 @@
 @testable import IMV2ServerApplication
 @testable import IMV2ServerContracts
 import Foundation
+import NIOCore
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 import Testing
@@ -34,25 +35,41 @@ struct V2GatewayInboundQueueTests {
     @Test("rejects either byte or chunk overflow without mutating admitted state")
     func enforcesBothBounds() {
         var queue = V2GatewayInboundQueue(maximumBytes: 4, maximumChunks: 2)
-        let oversizedAppend = queue.append(Data(repeating: 0, count: 5))
+        let oversizedAppend = queue.append(ByteBuffer(bytes: [UInt8](repeating: 0, count: 5)))
         #expect(!oversizedAppend)
-        let firstAppend = queue.append(Data([1, 2]))
+        let firstAppend = queue.append(ByteBuffer(bytes: [1, 2]))
         #expect(firstAppend)
-        let secondAppend = queue.append(Data([3, 4]))
+        let secondAppend = queue.append(ByteBuffer(bytes: [3, 4]))
         #expect(secondAppend)
-        let excessChunkAppend = queue.append(Data())
+        let excessChunkAppend = queue.append(ByteBuffer())
         #expect(!excessChunkAppend)
         #expect(queue.count == 2)
         #expect(queue.queuedBytes == 4)
         let first = queue.popFirst()
-        #expect(first == Data([1, 2]))
+        #expect(first == ByteBuffer(bytes: [1, 2]))
         #expect(queue.queuedBytes == 2)
         queue.removeAll()
         #expect(queue.count == 0)
         #expect(queue.queuedBytes == 0)
     }
 
-    private func encoded(_ value: Int) -> Data {
-        withUnsafeBytes(of: UInt64(value).bigEndian) { Data($0) }
+    private func encoded(_ value: Int) -> ByteBuffer {
+        withUnsafeBytes(of: UInt64(value).bigEndian) { ByteBuffer(bytes: $0) }
+    }
+
+    @Test("a tiny COW slice cannot pin an oversized parent allocation")
+    func detachesOversizedSlice() throws {
+        var parent = ByteBufferAllocator().buffer(capacity: 1_048_576)
+        parent.writeBytes([1, 2, 3, 4])
+        let sliceResult = parent.readSlice(length: 4)
+        let slice = try #require(sliceResult)
+        var queue = V2GatewayInboundQueue(maximumBytes: 4, maximumChunks: 1)
+        let appended = queue.append(slice)
+        #expect(appended)
+        let admittedResult = queue.popFirst()
+        let admitted = try #require(admittedResult)
+        #expect(admitted == slice)
+        #expect(admitted.storageCapacity < slice.storageCapacity)
+        #expect(queue.queuedBytes == 0)
     }
 }

@@ -4,15 +4,43 @@ import Foundation
 public struct V2MessageSendOperationCommand:Equatable,Codable,Sendable {
     public let command:V2SendMessageCommand
     public let firstSubmissionDeadlineMilliseconds:UInt64
-    public var identity:V2OperationIdentity { get throws { try .init(accountID:command.senderUserID,scope:.room(command.roomID),operation:.sendMessage(command.clientMessageID)) } }
-    public var fingerprint:V2OperationFingerprint { get throws {
-        try .init(kind:.sendMessage,fields:[.init("identity",.text(identity.storageKey)),.init("domainFingerprintVersion",.unsigned(UInt64(command.fingerprint.version))),.init("domainFingerprint",.bytes(command.fingerprint.digest)),.init("firstSubmissionDeadline",.unsigned(firstSubmissionDeadlineMilliseconds))])
-    } }
+    private let preparedIdentity: V2OperationIdentity
+    private let preparedFingerprint: V2OperationFingerprint
+    /// Conservative admission estimate for owned command fields and container overhead.
+    /// This is a memory budget, not the JSON or protobuf wire size.
+    public let estimatedRetainedBytes: Int
+    public var identity:V2OperationIdentity { get throws { preparedIdentity } }
+    public var fingerprint:V2OperationFingerprint { get throws { preparedFingerprint } }
     public init(command:V2SendMessageCommand,firstSubmissionDeadlineMilliseconds:UInt64) throws {
         try validateMessageOperationDeadline(firstSubmissionDeadlineMilliseconds)
         guard command.forwardedFrom==nil else { throw V2MessageOperationValidationError.invalidKind }
         self.command=command;self.firstSubmissionDeadlineMilliseconds=firstSubmissionDeadlineMilliseconds
-        _ = try identity
+        let identity = try V2OperationIdentity(accountID: command.senderUserID, scope: .room(command.roomID), operation: .sendMessage(command.clientMessageID))
+        self.preparedIdentity = identity
+        self.preparedFingerprint = V2OperationFingerprint(messageSendIdentity: identity.storageKey,
+            domain: command.fingerprint, deadline: firstSubmissionDeadlineMilliseconds)
+        var budget = 512 + MemoryLayout<V2MessageSendOperationCommand>.stride
+        func string(_ value: String) {
+            // Allow for UTF-8/UTF-16 storage and per-string allocation overhead.
+            let (size, overflow) = value.utf8.count.multipliedReportingOverflow(by: 2)
+            let (withOverhead, overheadOverflow) = size.addingReportingOverflow(64)
+            let (sum, sumOverflow) = budget.addingReportingOverflow(withOverhead)
+            budget = overflow || overheadOverflow || sumOverflow ? Int.max : sum
+        }
+        string(command.roomID.rawValue); string(command.senderUserID.rawValue)
+        string(command.clientMessageID.rawValue); string(command.text)
+        for media in command.media { string(media.mediaID.rawValue) }
+        for mention in command.mentions {
+            if case .user(let user) = mention { string(user.rawValue) }
+            else { string("") }
+        }
+        for entity in command.entities { string(entity.linkURL?.absoluteString ?? "") }
+        if let reply = command.replyTo { string(reply.messageID.rawValue) }
+        let containers = command.media.count * MemoryLayout<V2MediaReference>.stride
+            + command.mentions.count * MemoryLayout<V2MentionTarget>.stride
+            + command.entities.count * MemoryLayout<V2MessageEntity>.stride
+        let (total, overflow) = budget.addingReportingOverflow(containers)
+        self.estimatedRetainedBytes = overflow ? Int.max : total
     }
     private enum CodingKeys:String,CodingKey { case command,firstSubmissionDeadlineMilliseconds }
     public init(from decoder:any Decoder) throws {

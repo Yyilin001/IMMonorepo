@@ -8,20 +8,22 @@ extension V2ActorSignedPacket: ClusterBinaryInvocationArgument {
     private static var maximumArgumentBodyBytes: Int { 16_777_216 }
 
     public func encodeClusterInvocationArgument() throws -> Data {
-        let id = Data(signerID.rawValue.utf8)
-        guard id.count <= V2ActorServiceID.maximumUTF8Bytes,
+        var id = signerID.rawValue
+        let idCount = id.utf8.count
+        guard idCount <= V2ActorServiceID.maximumUTF8Bytes,
               body.count <= Self.maximumArgumentBodyBytes, signature.count <= 64 else {
             throw V2ActorAuthenticationError.oversized
         }
         var bytes = Data()
-        bytes.reserveCapacity(17 + id.count + body.count + signature.count)
+        bytes.reserveCapacity(17 + idCount + body.count + signature.count)
         bytes.append(contentsOf: Self.argumentMagic)
         bytes.append(1)
-        for count in [id.count, body.count, signature.count] {
-            var encoded = UInt32(count).littleEndian
+        let counts: InlineArray<3, Int> = [idCount, body.count, signature.count]
+        for index in 0..<3 {
+            var encoded = UInt32(counts[index]).littleEndian
             withUnsafeBytes(of: &encoded) { bytes.append(contentsOf: $0) }
         }
-        bytes.append(id); bytes.append(body); bytes.append(signature)
+        id.withUTF8 { bytes.append(contentsOf: $0) }; bytes.append(body); bytes.append(signature)
         return bytes
     }
 
@@ -30,7 +32,7 @@ extension V2ActorSignedPacket: ClusterBinaryInvocationArgument {
         guard bytes.count >= 17, bytes.count <= 17 + V2ActorServiceID.maximumUTF8Bytes + maximumArgumentBodyBytes + 64 else {
             throw V2ActorAuthenticationError.oversized
         }
-        return try bytes.withUnsafeBytes { raw in
+        return try bytes.bytes.withUnsafeBytes { raw in
             guard raw[4] == 1 else { throw V2ActorAuthenticationError.unsupportedVersion }
             let idCount = Int(UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: 5, as: UInt32.self)))
             let bodyCount = Int(UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: 9, as: UInt32.self)))

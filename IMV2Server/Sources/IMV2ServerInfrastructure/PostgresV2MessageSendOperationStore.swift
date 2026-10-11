@@ -56,7 +56,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         return copy
     }
 
-    package func ownsPreparedBatch(_ prepared: V2PreparedMessageSendBatch) -> Bool {
+    package func ownsPreparedBatch(_ prepared: borrowing V2PreparedMessageSendBatch) -> Bool {
         prepared.owner == preparationOwner
     }
 
@@ -254,7 +254,12 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             }
         }
         V2SendPathTrace.current?.record("prepare_memory_acceptance", from: acceptanceStartedAt)
-        return .init(owner: preparationOwner, commands: request.commands, token: request.token,
+        let retainedByteBudget = request.commands.reduce(0) { total, command in
+            let (sum, overflow) = total.addingReportingOverflow(command.estimatedRetainedBytes)
+            return overflow ? Int.max : sum
+        }
+        return .init(owner: preparationOwner, commands: request.commands,
+            retainedByteBudget: retainedByteBudget, token: request.token,
             preparations: [:], deadline: policies.reduce(deadline) { min($0, $1.deadline) },
             preparationSnapshot: input.preparationSnapshot, policyPreparations: policies, acceptedDirect: accepted)
     }
@@ -296,7 +301,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
     /// in the original transaction; preparation is never a write permission.
     /// Prepared permanent envelopes are immutable and bound to the complete
     /// command identity/fingerprint. Replays require no policy or write transaction.
-    private func preparedReplay(_ prepared: V2PreparedMessageSendBatch) throws -> [V2RoomMessagingResult]? {
+    private func preparedReplay(_ prepared: borrowing V2PreparedMessageSendBatch) throws -> [V2RoomMessagingResult]? {
         guard !prepared.commands.isEmpty, prepared.deadline > .now,
               V2RoomSQLDeadline.current.map({ $0 > .now }) ?? true else { return nil }
         var values: [V2RoomMessagingResult] = []
@@ -443,7 +448,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         }
     }
 
-    package func replayedPreparedBatch(_ prepared: V2PreparedMessageSendBatch) throws -> [V2RoomMessagingResult]? {
+    package func replayedPreparedBatch(_ prepared: borrowing V2PreparedMessageSendBatch) throws -> [V2RoomMessagingResult]? {
         guard ownsPreparedBatch(prepared) else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         return try preparedReplay(prepared)
     }
@@ -458,18 +463,20 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
     /// Commands are immutable across policy promotion. Cache only their identity
     /// material here; live authorization, sequence allocation and timestamps stay
     /// at their existing execution boundaries.
-    package func preparingScheduledCommandPlan(_ prepared: V2PreparedMessageSendBatch) throws -> V2PreparedMessageSendBatch {
+    package func preparingScheduledCommandPlan(_ prepared: consuming V2PreparedMessageSendBatch) throws -> V2PreparedMessageSendBatch {
         guard ownsPreparedBatch(prepared) else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         if prepared.commandPlan != nil { return prepared }
-        var copy = prepared
-        copy.commandPlan = try commandPlan(prepared)
-        return copy
+        let plan = try commandPlan(prepared)
+        var owned = consume prepared
+        owned.commandPlan = plan
+        return owned
     }
 
-    private func commandPlan(_ prepared: V2PreparedMessageSendBatch) throws -> PreparedRoomCommandPlan {
+    private func commandPlan(_ prepared: borrowing V2PreparedMessageSendBatch) throws -> PreparedRoomCommandPlan {
         let commands = prepared.commands
         let keys = try commands.map { try persistenceKey(identity: $0.identity) }
-        guard keys.allSatisfy({ $0.room == prepared.token.roomID.uuidValue }) else {
+        let roomID = prepared.token.roomID.uuidValue
+        guard keys.allSatisfy({ $0.room == roomID }) else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
         let operationKeys = try commands.map { try operationKey(identity: $0.identity) }
@@ -1172,6 +1179,7 @@ public struct V2PreparedMessageSendBatch: Sendable {
     package var originalDeadline: ContinuousClock.Instant { deadline }
     fileprivate let owner: UUID
     fileprivate let commands: [V2MessageSendOperationCommand]
+    package let retainedByteBudget: Int
     fileprivate let token: V2RoomActivationToken
     fileprivate var preparations: [String: PostgresV2RoomWriteStore]
     let deadline: ContinuousClock.Instant
