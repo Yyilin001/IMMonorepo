@@ -111,6 +111,80 @@ struct V2GatewayByteStreamTests {
         #expect(settled.inFlightRequests == 0 && settled.reservedBytes == 0)
         #expect(settled.peakInFlightRequests == 1 && settled.peakReservedBytes == payloadBytes)
     }
+    @Test("send window is reusable before ACK completion while retained writes stay bounded and joinable", arguments: [false, true])
+    func sendWindowReleasesBeforeACK(cancel: Bool) async throws {
+        let version = UInt8(IMV2ProtocolVersion.current)
+        let limits = try V2FrameLimits(maximumPayloadBytes: 4_096, acceptedVersions: [0, version])
+        let budget = V2GatewayMessageSendBudget(maximumBytes: 4_194_304)
+        let stream = V2GatewayByteStream(frameLimits: limits,
+            session: .init(limits: try .init(maximumInFlightRequests: 4),
+                authenticator: ByteStreamAuthFake(), capabilityProfile: "base",
+                commandAdmission: V2AllowingGatewayCommandAdmission()),
+            handler: ImmediateMessageSendHandler(),
+            registry: V2DeviceConnectionRegistry(foregroundFrameLimits: v2FixtureForegroundFrameLimits),
+            messageSendBudget: budget, maximumConcurrentMessageSends: 1)
+        let writes = HeldMessageACKWriter()
+        defer { Task { await writes.release() } }
+        var hello = IMV2Envelope(); hello.requestID = 1
+        hello.clientHello.deviceID = UUID().uuidString
+        hello.clientHello.supportedProtocolVersions = [UInt32(version)]
+        hello.clientHello.supportedCapabilityProfiles = ["base"]
+        hello.clientHello.supportsMessageSendOperations = true
+        _ = try await stream.receive(encoded(hello, version: 0))
+        var auth = IMV2Envelope(); auth.requestID = 2; auth.protocolVersion = UInt32(version)
+        auth.authenticate.accessToken = "opaque"; auth.authenticate.deviceID = hello.clientHello.deviceID
+        _ = try await stream.receive(encoded(auth, version: version))
+        let command = try V2MessageSendOperationCommand(command: .init(
+            roomID: .init("00000000-0000-0000-0000-000000000A03"), senderUserID: .init("user-a"),
+            clientMessageID: .init(uuid: UUID()), text: "held ACK", limits: .init(maxUTF8Bytes: 64)),
+            firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 60_000)
+        var send = IMV2Envelope(); send.protocolVersion = UInt32(version)
+        send.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: command)
+        let rejected = ConcurrentGatewayResponseRecorder()
+        let slowWrite: @Sendable (V2Frame) async throws -> Void = { frame in try await writes.hold(frame) }
+        let ordinaryWrite: @Sendable (V2Frame) async throws -> Void = { frame in await rejected.append(frame) }
+        for id in UInt64(3)...UInt64(4) {
+            send.requestID = id
+            _ = try await stream.receiveFrames(encoded(send, version: version),
+                concurrentMessageSendRespond: slowWrite, respond: ordinaryWrite)
+            for _ in 0..<10_000 {
+                if await writes.count == Int(id - 2) { break }
+                await Task.yield()
+            }
+            try #require(await writes.count == Int(id - 2))
+        }
+        // 两个业务已经完成，写回调仍挂起：句柄和预算必须保留。
+        let held = await budget.metricsSnapshot()
+        #expect(held.inFlightRequests == 2 && held.reservedBytes > 0)
+        #expect(held.rejections[.connectionCount] == 0)
+        send.requestID = 5
+        _ = try await stream.receiveFrames(encoded(send, version: version),
+            concurrentMessageSendRespond: slowWrite, respond: ordinaryWrite)
+        let busy = try V2ServerProtobufFrameCodec.decode(#require(await rejected.all().first))
+        #expect(busy.error.code == "SERVER_BUSY")
+        #expect(await writes.count == 2)
+        if cancel {
+            let closing = Task { try await stream.finish() }
+            for _ in 0..<10_000 {
+                if await writes.cancelled == 2 { break }
+                await Task.yield()
+            }
+            #expect(await writes.cancelled == 2)
+            #expect(await budget.metricsSnapshot().inFlightRequests == 2)
+            await writes.release()
+            try await closing.value
+        } else {
+            await writes.release()
+            for _ in 0..<10_000 {
+                if await budget.inFlightBytes() == 0 { break }
+                await Task.yield()
+            }
+            try await stream.finish()
+        }
+        let settled = await budget.metricsSnapshot()
+        #expect(settled.inFlightRequests == 0 && settled.reservedBytes == 0)
+    }
+
     @Test("NIO notification writes honor connection revocation and required completion", arguments: [0, 1, 2, 3, 4])
     func nioRequiredNotificationWrite(mode: Int) async throws {
         let stream = V2GatewayByteStream(
@@ -1520,5 +1594,37 @@ private actor OriginRecordingCommandFake: V2GatewayCommandHandler {
         response.error.code = "UNAVAILABLE"
         response.error.retryable = true
         return response
+    }
+}
+
+private struct ImmediateMessageSendHandler: V2GatewayCommandHandler {
+    func handle(envelope _: IMV2Envelope, identity _: V2AuthenticatedConnection) async throws -> IMV2Envelope {
+        var response = IMV2Envelope()
+        response.messageSendOperationResult.unresolved = true
+        return response
+    }
+}
+
+private actor HeldMessageACKWriter {
+    private var completions: [CheckedContinuation<Void, Never>] = []
+    private(set) var count = 0
+    private(set) var cancelled = 0
+    private func markCancelled() { cancelled += 1 }
+    func hold(_ frame: V2Frame) async throws {
+        let response = try V2ServerProtobufFrameCodec.decode(frame)
+        guard case .messageSendOperationResult = response.body else {
+            Issue.record("Expected message-send result at held ACK writer"); return
+        }
+        count += 1
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { completions.append($0) }
+        } onCancel: {
+            Task { await self.markCancelled() }
+        }
+        try Task.checkCancellation()
+    }
+    func release() {
+        let pending = completions; completions.removeAll()
+        for completion in pending { completion.resume() }
     }
 }

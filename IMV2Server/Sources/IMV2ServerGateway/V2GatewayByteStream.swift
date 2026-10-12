@@ -405,6 +405,8 @@ public actor V2GatewayByteStream {
     private let messageSendBudget: V2GatewayMessageSendBudget
     private let maximumConcurrentMessageSends: Int
     private let maximumConcurrentMessageSendBytes: Int
+    // 业务执行名额在响应发布前归还；任务句柄和字节预算保留到实际写出结束。
+    private var messageSendExecutingRequests = 0
     private var messageSendTasks: [UInt64: Task<Void, Never>] = [:]
     private var messageSendReservedBytes = 0
 
@@ -572,7 +574,8 @@ public actor V2GatewayByteStream {
                     let bytes = frame.flags.contains(.compressed)
                         ? frameLimits.maximumMessageSendPayloadBytes : frame.payloadCount
                     var hasProcessCapacity = false
-                    if messageSendTasks.count >= maximumConcurrentMessageSends {
+                    if messageSendExecutingRequests >= maximumConcurrentMessageSends
+                        || messageSendTasks.count >= maximumConcurrentMessageSends * 2 {
                         await messageSendBudget.recordRejection(.connectionCount)
                     } else if bytes > maximumConcurrentMessageSendBytes - messageSendReservedBytes {
                         await messageSendBudget.recordRejection(.connectionBytes)
@@ -595,11 +598,13 @@ public actor V2GatewayByteStream {
                         throw V2GatewaySessionError.unsupportedCommand
                     }
                     messageSendReservedBytes += bytes
+                    messageSendExecutingRequests += 1
                     let sendTrace = V2SendPathTrace.enabled && frame.command == .messageSendOperation
                         ? V2SendPathTrace(operations: [], segment: "gateway") : nil
                     messageSendTasks[frame.requestID] = Task { [self] in
                         await V2SendPathTrace.$current.withValue(sendTrace) {
                         defer { sendTrace?.finish() }
+                        var hasExecutionSlot = true
                         do {
                             let startedAt = ContinuousClock.now
                             let exchange = try await session.receive(
@@ -608,12 +613,16 @@ public actor V2GatewayByteStream {
                             guard canRespondToMessageSend() else { throw CancellationError() }
                             let writeStartedAt = ContinuousClock.now
                             try exchange.wireResponse.validate(limits: frameLimits)
+                            // 先释放业务名额，再让 ACK 对客户端可见。慢写仍受总任务和字节预算约束。
+                            messageSendExecutingRequests -= 1
+                            hasExecutionSlot = false
                             try await concurrentMessageSendRespond(exchange.wireResponse)
                             sendTrace?.record("result_ready_to_ack_write", from: writeStartedAt)
                         } catch {
                             closeAfterMessageSendFailure()
                         }
-                        await finishMessageSend(requestID: frame.requestID, bytes: bytes, budget: messageSendBudget)
+                        await finishMessageSend(requestID: frame.requestID, bytes: bytes,
+                            hasExecutionSlot: hasExecutionSlot, budget: messageSendBudget)
                         }
                     }
                     continue
@@ -1485,7 +1494,8 @@ public actor V2GatewayByteStream {
         if let close { Task { await close() } }
     }
 
-    private func finishMessageSend(requestID: UInt64, bytes: Int, budget: V2GatewayMessageSendBudget) async {
+    private func finishMessageSend(requestID: UInt64, bytes: Int, hasExecutionSlot: Bool, budget: V2GatewayMessageSendBudget) async {
+        if hasExecutionSlot { messageSendExecutingRequests -= 1 }
         messageSendTasks.removeValue(forKey: requestID)
         messageSendReservedBytes -= bytes
         await budget.release(bytes)

@@ -248,6 +248,7 @@ def gateway_env(args, kind, database, index, actors, manifest):
         IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(actor/f'{kind}.json'),
         IM_V2_IDLE_TIMEOUT_MS='600000', IM_V2_LOG_LEVEL='notice' if app_canary_enabled(args) else 'warning')
     if kind == 'candidate':
+        values['IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PER_CONNECTION'] = str(getattr(args, 'candidate_message_send_inflight_per_connection', 4))
         values['IM_V2_SEND_PATH_TRACE_MODE'] = getattr(args, 'candidate_send_path_trace_mode', 'sampled')
         if getattr(args, 'candidate_actor_binary_invocations', 'enabled') != 'enabled':
             raise ValueError('candidate Actor transport requires binary invocations')
@@ -1796,6 +1797,12 @@ class ActorPartitionCanary:
         self.persist()
 
 
+def benchmark_message_send_window(args, kind):
+    if getattr(args, 'planned_reconnect_inflight_canary', False):
+        return 1
+    return getattr(args, 'candidate_message_send_inflight_per_connection', 4) if kind == 'candidate' else 8
+
+
 def benchmark_targets_per_connection(*, prefill):
     # Both rounds consume the same frozen two-target credentials. Loader's
     # cardinality guard must remain authoritative even in the prewrite round.
@@ -2015,6 +2022,14 @@ def run_revision(args, kind, actors, counts, manifest):
         authorization_mode = verify_candidate_authorization_mode(args, kind,
             lambda sql: fault_read_query(args, database, sql))
         private_json(directory/'authorization-mode.json', authorization_mode)
+        send_environment = gateway_env(args, kind, database, 0, actors, manifest)
+        server_send_window = int(send_environment.get('IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PER_CONNECTION', '4'))
+        private_json(directory/'send-window.json', dict(
+            serverBusinessWindowPerConnection=server_send_window,
+            serverRetainedTaskLimitPerConnection=server_send_window * 2 if kind == 'candidate' else None,
+            loaderWindowPerConnection=benchmark_message_send_window(args, kind),
+            connectionReservedByteLimit=int(send_environment.get('IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PER_CONNECTION', '4194304')),
+            processReservedByteLimit=int(send_environment.get('IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PROCESS', '67108864'))))
         if app_canary_enabled(args):
             failure_stage = app_canary_selection(args)[0]
             def crash_app_gateway():
@@ -2051,7 +2066,7 @@ def run_revision(args, kind, actors, counts, manifest):
                      '--revision',kind,'--connections',str(count),'--ramp-per-second','200','--ramp-batch-size','32',
                      '--workload-ramp-per-second','16',
                      '--hold-seconds','60','--event-loops','1','--messages-per-second','0',
-                     '--recovery-burst-workers',str(min(128,count)), '--max-inflight-messages-per-connection',str(1 if args.planned_reconnect_inflight_canary else 8),
+                     '--recovery-burst-workers',str(min(128,count)), '--max-inflight-messages-per-connection',str(benchmark_message_send_window(args, kind)),
                      '--message-bytes','128','--targets-per-connection',str(benchmark_targets_per_connection(prefill=prefill)),'--sync-reads','1','--room-log-reads','1',
                      '--room-log-initial-cursor','tail','--room-log-read-trigger','availability_hint',
                      '--peer-topology','ring','--max-rss-mb','1800','--max-failure-percent','0.1',
@@ -2366,6 +2381,8 @@ def main():
                         help='candidate bounded per-connection message SQL shape cache')
     parser.add_argument('--candidate-send-path-trace-mode', choices=('sampled', 'all'), default='sampled',
                         help='candidate detailed diagnostics: stable 1/64 operation sample or all slow requests')
+    parser.add_argument('--candidate-message-send-inflight-per-connection', type=int, choices=range(1, 33), default=4,
+                        help='candidate per-TCP business send window; loader uses the same window (default: 4)')
     parser.add_argument('--candidate-message-write-connections', type=int, default=8,
                         help='candidate-only total message connections per node; divided across selected loops (default: 8)')
     parser.add_argument('--candidate-message-write-pipeline-depth', type=int, choices=(1, 2), default=2,

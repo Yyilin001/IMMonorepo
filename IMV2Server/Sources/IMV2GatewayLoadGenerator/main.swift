@@ -643,6 +643,7 @@ private final class LoadStatistics: @unchecked Sendable {
         var authenticationLatency = LatencyHistogram()
         var heartbeatLatency = LatencyHistogram()
         var messageLatency = LatencyHistogram()
+        var messageEndToEndLatency = LatencyHistogram()
         var syncPullLatency = LatencyHistogram()
         var roomEventPullLatency = LatencyHistogram()
         var readReceiptLatency = LatencyHistogram()
@@ -741,10 +742,11 @@ private final class LoadStatistics: @unchecked Sendable {
         }
     }
     func recordMessageSent() { lock.withLock { state.messagesSent += 1 } }
-    func recordMessageAcknowledged(milliseconds: Double) {
+    func recordMessageAcknowledged(milliseconds: Double, endToEndMilliseconds: Double) {
         lock.withLock {
             state.messagesAcknowledged += 1
             state.messageLatency.record(milliseconds)
+            state.messageEndToEndLatency.record(endToEndMilliseconds)
         }
     }
     func recordMessageSkipped() { lock.withLock { state.messagesSkipped += 1 } }
@@ -1679,7 +1681,8 @@ private struct LoadRun: Sendable {
                         } else {
                             channel = assignments.pick(kind: .send, random: &random)
                         }
-                        channel?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent())
+                        channel?.pipeline.fireUserInboundEventTriggered(ScenarioSendEvent(
+                            scheduledAt: phaseStarted + .nanoseconds(Int64(tick) * tickNanoseconds)))
                     }
                     for _ in 0..<roomLogCount { assignments.pick(kind: .roomLogRead, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioRoomLogReadEvent()) }
                     for _ in 0..<syncCount { assignments.pick(kind: .syncPull, random: &random)?.pipeline.fireUserInboundEventTriggered(ScenarioSyncPullEvent()) }
@@ -2080,7 +2083,10 @@ private struct LoadRun: Sendable {
 }
 
 private struct StartWorkloadEvent: Sendable {}
-private struct ScenarioSendEvent: Sendable {}
+private struct ScenarioSendEvent: Sendable {
+    let scheduledAt: NIODeadline
+    init(scheduledAt: NIODeadline = .now()) { self.scheduledAt = scheduledAt }
+}
 private struct ScenarioRoomLogReadEvent: Sendable {}
 private struct ScenarioSyncPullEvent: Sendable {}
 private struct ScenarioReadReceiptEvent: Sendable {}
@@ -2172,12 +2178,14 @@ private struct LoadMessageSnapshot: Sendable {
     let identity: V2OperationIdentity
     let fingerprint: V2OperationFingerprint
     let sent: NIODeadline
+    let scheduledAt: NIODeadline
     let deadline: NIODeadline
     let attempts: Int
 }
 private struct LoadReconnectSnapshot: Sendable {
     let operations: [LoadMessageSnapshot]
-    let queued: Int
+    let queuedStarts: [NIODeadline]
+    var queued: Int { queuedStarts.count }
     let cursors: [String: UInt64]
     let foregroundRoom: String?
 }
@@ -2491,7 +2499,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "18796f7b594cc7cd2fdf1e77381a5c7d1fa00748f9da52a43d2fcdca9b4f9d6d"
+    static let algorithmSourceSHA256 = "42f89f907009dc572617c583aa4309d211a83f0278dde6009da2a548e409fc72"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     static let maximumMessageWireAttempts = 5
@@ -2550,6 +2558,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let identity: V2OperationIdentity
         let fingerprint: V2OperationFingerprint
         let sent: NIODeadline
+        let scheduledAt: NIODeadline
         let deadline: NIODeadline
         var attempts = 0
         var restoredAfterReconnect = false
@@ -2558,12 +2567,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         var timer: Scheduled<Void>?
         init(snapshot: LoadMessageSnapshot) {
             command = snapshot.command; identity = snapshot.identity; fingerprint = snapshot.fingerprint
-            sent = snapshot.sent; deadline = snapshot.deadline; attempts = snapshot.attempts
+            sent = snapshot.sent; scheduledAt = snapshot.scheduledAt
+            deadline = snapshot.deadline; attempts = snapshot.attempts
             restoredAfterReconnect = true
         }
-        init(command: V2MessageSendOperationCommand, sent: NIODeadline) throws {
+        init(command: V2MessageSendOperationCommand, sent: NIODeadline, scheduledAt: NIODeadline) throws {
             self.command = command; identity = try command.identity; fingerprint = try command.fingerprint
-            self.sent = sent; deadline = sent + .seconds(LoadConnectionHandler.messageOperationTimeoutSeconds)
+            self.sent = sent; self.scheduledAt = scheduledAt
+            deadline = sent + .seconds(LoadConnectionHandler.messageOperationTimeoutSeconds)
         }
     }
     private let reconnectSlot: LoadConnectionSlot?
@@ -2577,7 +2588,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var pendingRequests: [UInt64: PendingRequest] = [:]
     private var heartbeatRequestID: UInt64?
     private var messageRequestIDs: Set<UInt64> = []
-    private var queuedScenarioMessages = 0
+    private var queuedScenarioMessageStarts = CircularBuffer<NIODeadline>()
+    private var queuedScenarioMessages: Int { queuedScenarioMessageStarts.count }
     private var directRoomIDs: [String] = []
     private var nextRoomIndex = 0
     private var nextSyncToken = ""
@@ -2773,7 +2785,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         for task in roomEventRecoveryGraceTasks.values { task.cancel() }
         roomEventRecoveryGraceTasks.removeAll(keepingCapacity: false)
         statistics.recordScenarioMessageQueueAbandoned(count: queuedScenarioMessages)
-        queuedScenarioMessages = 0
+        queuedScenarioMessageStarts.removeAll(keepingCapacity: false)
         readReceiptInFlightRooms.removeAll(keepingCapacity: false)
         readReceiptPendingSequences.removeAll(keepingCapacity: false)
         recoveryDeadlineTask?.cancel()
@@ -2970,7 +2982,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             registered = true
             statistics.recordAuthenticated(milliseconds: (NIODeadline.now() - started).millisecondsDouble)
             if let snapshot = reconnectSlot?.takeSnapshot() {
-                queuedScenarioMessages = snapshot.queued
+                queuedScenarioMessageStarts = CircularBuffer(snapshot.queuedStarts)
                 for _ in 0..<snapshot.queued { statistics.recordMessageTransportEvent("RESTORED_QUEUE") }
                 for entry in snapshot.operations {
                     let id = takeRequestID()
@@ -3200,15 +3212,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             } catch {
                 failAuthentication(error, context: context)
             }
-        case is ScenarioSendEvent:
+        case let scheduled as ScenarioSendEvent:
             guard case .authenticated = stage, workloadStarted, context.channel.isActive else { return }
             statistics.recordScenarioMessageScheduled()
             do {
                 switch scenarioSendDispatch {
                 case .strictPerDevice:
-                    try sendMessage(context: context)
+                    try sendMessage(context: context, scheduledAt: scheduled.scheduledAt)
                 case .boundedClientQueue:
-                    try enqueueScenarioMessage(context: context)
+                    try enqueueScenarioMessage(context: context, scheduledAt: scheduled.scheduledAt)
                 }
             }
             catch {
@@ -3311,13 +3323,13 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 if let wireID = operation.wireRequestID { pendingRequests.removeValue(forKey: wireID) }
                 statistics.recordMessageTransportEvent("TRANSFERRED")
                 return LoadMessageSnapshot(command: operation.command, identity: operation.identity,
-                    fingerprint: operation.fingerprint, sent: operation.sent, deadline: operation.deadline,
+                    fingerprint: operation.fingerprint, sent: operation.sent, scheduledAt: operation.scheduledAt, deadline: operation.deadline,
                     attempts: operation.attempts)
             }
             for _ in 0..<queuedScenarioMessages { statistics.recordMessageTransportEvent("TRANSFERRED_QUEUE") }
-            let snapshot = LoadReconnectSnapshot(operations: operations, queued: queuedScenarioMessages,
+            let snapshot = LoadReconnectSnapshot(operations: operations, queuedStarts: Array(queuedScenarioMessageStarts),
                 cursors: roomEventCursors, foregroundRoom: activeRoomLogRoomID)
-            messageOperations.removeAll(); messageRequestIDs.removeAll(); queuedScenarioMessages = 0
+            messageOperations.removeAll(); messageRequestIDs.removeAll(); queuedScenarioMessageStarts.removeAll(keepingCapacity: false)
             transfer.completion.succeed(snapshot)
         case let probe as ScenarioDrainProbe:
             probe.completion.succeed(.init(
@@ -3653,7 +3665,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
     }
 
-    private func sendMessage(context: ChannelHandlerContext) throws {
+    private func sendMessage(context: ChannelHandlerContext, scheduledAt: NIODeadline? = nil) throws {
         guard !directRoomIDs.isEmpty else { return }
         guard messageRequestIDs.count < maximumInFlightMessagesPerConnection else {
             statistics.recordMessageSkipped(); return
@@ -3668,7 +3680,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             text: messageText, limits: .init(maxUTF8Bytes: 65_536)),
             firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 86_400_000)
         let operationID = takeRequestID()
-        let operation = try MessageOperation(command: command, sent: .now())
+        let sent = NIODeadline.now()
+        let operation = try MessageOperation(command: command, sent: sent, scheduledAt: scheduledAt ?? sent)
         messageOperations[operationID] = operation; messageRequestIDs.insert(operationID)
         statistics.recordMessageSent()
         try emitMessageAttempt(operationID: operationID, action: .submit, context: context)
@@ -3723,7 +3736,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 // Retire the operation before optional room follow-up can throw;
                 // an accepted receipt must never be re-counted as close/unknown.
                 try finishMessage(operationID, failure: nil, drain: false, context: context)
-                statistics.recordMessageAcknowledged(milliseconds: (NIODeadline.now() - operation.sent).millisecondsDouble)
+                let acknowledgedAt = NIODeadline.now()
+                statistics.recordMessageAcknowledged(milliseconds: (acknowledgedAt - operation.sent).millisecondsDouble,
+                    endToEndMilliseconds: (acknowledgedAt - operation.scheduledAt).millisecondsDouble)
                 statistics.recordMessageTransportEvent("ACCEPTED")
                 if operation.restoredAfterReconnect { statistics.recordMessageTransportEvent("RECOVERED_AFTER_RECONNECT") }
                 let roomID = operation.command.command.roomID.rawValue
@@ -3815,17 +3830,17 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     ///
     /// - Parameter context: 目标通道上下文。
     /// - Throws: 发送或写入失败时抛出。
-    private func enqueueScenarioMessage(context: ChannelHandlerContext) throws {
+    private func enqueueScenarioMessage(context: ChannelHandlerContext, scheduledAt: NIODeadline) throws {
         guard !directRoomIDs.isEmpty else { return }
         if messageRequestIDs.count < maximumInFlightMessagesPerConnection {
-            try sendMessage(context: context)
+            try sendMessage(context: context, scheduledAt: scheduledAt)
             return
         }
         guard queuedScenarioMessages < maximumQueuedScenarioMessages else {
             statistics.recordScenarioMessageQueueOverflow()
             return
         }
-        queuedScenarioMessages += 1
+        queuedScenarioMessageStarts.append(scheduledAt)
         statistics.recordScenarioMessageDeferred()
     }
 
@@ -3840,9 +3855,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         while queuedScenarioMessages > 0,
               messageRequestIDs.count < maximumInFlightMessagesPerConnection,
               context.channel.isActive {
-            queuedScenarioMessages -= 1
+            let scheduledAt = queuedScenarioMessageStarts.removeFirst()
             statistics.recordScenarioMessageDequeued()
-            try sendMessage(context: context)
+            try sendMessage(context: context, scheduledAt: scheduledAt)
         }
     }
 
@@ -4517,6 +4532,8 @@ private struct LoadReport: Encodable {
     let authenticationLatency: Percentiles
     let heartbeatLatency: Percentiles
     let messageLatency: Percentiles
+    /// 包含计划调度、客户端队列、网络及重试，直到最终 ACK。
+    let messageEndToEndLatency: Percentiles
     let syncPullLatency: Percentiles
     let roomEventPullLatency: Percentiles
     let readReceiptLatency: Percentiles
@@ -4653,6 +4670,7 @@ private struct LoadReport: Encodable {
         authenticationLatency = state.authenticationLatency.percentiles
         heartbeatLatency = state.heartbeatLatency.percentiles
         messageLatency = state.messageLatency.percentiles
+        messageEndToEndLatency = state.messageEndToEndLatency.percentiles
         syncPullLatency = state.syncPullLatency.percentiles
         roomEventPullLatency = state.roomEventPullLatency.percentiles
         readReceiptLatency = state.readReceiptLatency.percentiles
@@ -4737,6 +4755,8 @@ private struct ScenarioPhaseReport: Encodable {
     let workloadFailed: Int
     let heartbeatLatency: Percentiles
     let messageLatency: Percentiles
+    /// 包含计划调度、客户端队列、网络及重试，直到最终 ACK。
+    let messageEndToEndLatency: Percentiles
     let syncPullLatency: Percentiles
     let roomEventPullLatency: Percentiles
     let readReceiptLatency: Percentiles
@@ -4807,6 +4827,9 @@ private struct ScenarioPhaseReport: Encodable {
             .percentiles
         messageLatency = ended.messageLatency
             .subtracting(started.messageLatency)
+            .percentiles
+        messageEndToEndLatency = ended.messageEndToEndLatency
+            .subtracting(started.messageEndToEndLatency)
             .percentiles
         syncPullLatency = ended.syncPullLatency
             .subtracting(started.syncPullLatency)

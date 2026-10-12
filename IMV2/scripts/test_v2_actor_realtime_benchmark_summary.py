@@ -100,6 +100,22 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                         'IM_V2_SYNC_DATABASE_WORK_LIMIT', 'IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS'):
                 self.assertEqual(one[key], two[key])
 
+    def test_candidate_send_window_is_explicit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Path(directory)
+            (fixture / 'access-token-hmac-key.base64').write_text('test-fixture')
+            args = SimpleNamespace(baseline_checkout=None, fixture=fixture,
+                gateway_port=21453, metrics_port=23464, pg_user='test', pg_host='localhost', pg_port=24533)
+            manifest = dict(userBucket='user-a', shardID='room-a', capacityProfileID='standard', commandWindowLimit=100)
+            for window in (4, 8):
+                args.candidate_message_send_inflight_per_connection = window
+                env = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+                self.assertEqual(env['IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PER_CONNECTION'], str(window))
+                self.assertEqual(benchmark.benchmark_message_send_window(args, 'candidate'), window)
+                self.assertEqual(benchmark.benchmark_message_send_window(args, 'baseline'), 8)
+            args.planned_reconnect_inflight_canary = True
+            self.assertEqual(benchmark.benchmark_message_send_window(args, 'candidate'), 1)
+
     def test_message_transport_and_depth_are_explicit_and_owned(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
