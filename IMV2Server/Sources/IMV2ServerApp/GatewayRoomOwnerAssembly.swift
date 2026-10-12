@@ -52,7 +52,8 @@ struct GatewayRoomOwnerAssembly {
         let invitationIdentities = PostgresV2GroupInvitationIdentityReader(database: database)
         // 逻辑分片分别拥有 bootstrap/转发入口；同址分片共享实际写入者与连接调度资源。
         for storage in configuration.roomShardStorage {
-            guard let owner = roomShardDatabases[storage.shardID] else {
+            guard let owner = roomShardDatabases[storage.shardID],
+                  let sendDatabase = topology.databaseForRole(for: .messageWrite, url: storage.databaseURL) else {
                 throw V2RoomWriteStoreError.corruptPersistenceState
             }
             guard let ownerAdmission = ownerAdmissions.controller(for: storage.databaseURL) else {
@@ -73,7 +74,7 @@ struct GatewayRoomOwnerAssembly {
                     appendStageMetrics: directRoomLogAppendStageMetrics)
                     .usingControlDatabase(directSendControlPool.database)
                 resourcesForOwner = try .init(database: owner,
-                    sendDatabase: topology.databaseForRole(for: .messageWrite, url: storage.databaseURL), writes: write,
+                    sendDatabase: sendDatabase, writes: write,
                     membershipIdentities: membershipIdentities, invitationIdentities: invitationIdentities,
                     invitationSecretIssuer: configuration.groupInviteSecretIssuer,
                     receiptProjectionDelivery: userShardProjectionDelivery,

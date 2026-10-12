@@ -8,6 +8,10 @@ import IMV2ServerContracts
 public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetricsReading, Sendable {
     private let dispatcher: V2PhysicalSendDispatcher
 
+    // Fixed roots may retain the dispatcher while parked, but must not retain
+    // its owner forever. Explicit shutdown remains the awaited drain boundary.
+    deinit { dispatcher.requestShutdown() }
+
     public convenience init(store: PostgresV2MessageSendOperationStore, capacityProfile: V2CapacityProfile,
                 identifiers: V2AcceptanceIDFactory = .init(), now: @escaping @Sendable () -> Date,
                 configuration: V2SendOperationSchedulingConfiguration,
@@ -19,9 +23,7 @@ public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetri
             maximumRetainedBytes: maximumRetainedBytes,
             resourceDemandLimit: capacity,
             scheduledConnection: { deadline, body in
-                try await store.withScheduledSendConnection(deadline: deadline, body)
-            }, startScheduledConnection: { deadline, body in
-                try store.startScheduledSendConnection(deadline: deadline, body)
+                try await store.withMessageWriteConnection(deadline: deadline, pipelineDepth: configuration.pipelineDepth, body)
             }, scheduledExecute: { executor, prepared in
                 try await executor.execute(prepared, capacityProfile, identifiers, now)
             })
@@ -32,11 +34,10 @@ public final class V2DurableSendOperationOwnerBatcher: V2SendOperationOwnerMetri
         configuration: V2SendOperationSchedulingConfiguration,
         maximumRetainedBytes: Int, resourceDemandLimit: Int,
         scheduledConnection: @escaping V2ScheduledSendConnection,
-        startScheduledConnection: V2ScheduledSendConnectionStart? = nil,
         scheduledExecute: @escaping V2ScheduledSendExecution) {
         dispatcher = V2PhysicalSendDispatcher(store: store, configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes, capacity: resourceDemandLimit,
-            borrow: scheduledConnection, startBorrow: startScheduledConnection, execute: scheduledExecute)
+            borrow: scheduledConnection, execute: scheduledExecute)
     }
 
     public func execute(_ prepared: V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult] {

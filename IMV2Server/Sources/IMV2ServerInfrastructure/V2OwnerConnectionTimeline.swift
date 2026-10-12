@@ -4,8 +4,7 @@ import IMV2ActorContracts
 import IMV2ServerApplication
 import IMV2ServerContracts
 
-/// One unbound physical ticket. Records timings without changing scheduling.
-/// Ticket spans before the selected request are clipped in its request trace.
+/// Per-turn SQL timing, or a worker startup/replacement acquisition timeline.
 final class V2OwnerConnectionTimeline: Sendable {
     enum SQLLabel: Sendable { case begin, write, commit }
     @TaskLocal static var current: V2OwnerConnectionTimeline?
@@ -67,13 +66,6 @@ final class V2OwnerConnectionTimeline: Sendable {
         record(.ownerGateRegisteredToCallback, from: registered, to: d.callbackAt)
         if t.wasQueued { record(.ownerGateQueuedCapacityWait, from: t.admittedAt, to: t.grantedAt) }
         if d.transferred { record(.ownerPoolPeerBeforeGate, from: start, to: t.requestedAt) }
-    }
-    func resourceWindow() -> V2OwnerResourceWaitDiagnosis.Window {
-        state.withLock { .init(created: requestedAt, borrowed: $0.markers["driver_entered"],
-            returned: $0.markers["pool_returned"], released: $0.markers["scheduler_release_entered"],
-            taskStarted: $0.markers["ticket_entry_started"] ?? $0.markers["ticket_task_started"], poolRequested: $0.markers["pool_request_started"],
-            assignmentPublished: $0.markers["pool_assignment_published"],
-            assignmentCallback: $0.markers["pool_assignment_callback_entered"], hasAcquisitionMarkers: true) }
     }
     func record(_ stage: V2SendOperationStage, from start: ContinuousClock.Instant, to end: ContinuousClock.Instant = .now) {
         let span = Span(stage: stage, start: start, end: max(start, end))

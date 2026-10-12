@@ -16,9 +16,7 @@ extension V2DurableSendOperationOwnerBatcher {
         self.init(store: store, configuration: configuration,
             maximumRetainedBytes: maximumRetainedBytes, resourceDemandLimit: connectionCapacity,
             scheduledConnection: { deadline, body in
-                try await store.withScheduledSendConnection(deadline: deadline, body)
-            }, startScheduledConnection: { deadline, body in
-                try store.startScheduledSendConnection(deadline: deadline, body)
+                try await store.withMessageWriteConnection(deadline: deadline, body)
             }, scheduledExecute: { executor, prepared in
                 try await executor.execute(prepared, capacityProfile, identifiers, now)
             })
@@ -26,7 +24,8 @@ extension V2DurableSendOperationOwnerBatcher {
 }
 
 func v2FixtureMessageWriteDatabase(_ database: any Database, capacity: Int) throws -> V2EventLoopBalancedDatabase {
-    if let pool = database as? V2EventLoopBalancedDatabase, pool.ordinaryConnectionCapacity != nil { return pool }
+    // The fixture's message budget must not inherit every control-pool slot:
+    // fixed workers retain these slots for their entire lifetime.
     return try .init(databases: [database], loanPolicy: .init(maximumConnections: capacity,
         reservedRenewalConnections: 0, maximumQueued: 128, maximumWait: .seconds(10)),
         sessionTimeouts: .default)

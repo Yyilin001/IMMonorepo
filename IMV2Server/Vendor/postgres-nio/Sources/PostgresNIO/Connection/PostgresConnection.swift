@@ -893,6 +893,19 @@ extension PostgresConnection {
 
 
 extension PostgresConnection {
+    /// Executes one atomic statement in a bounded two-cycle protocol pipeline.
+    /// The caller must exclusively own the connection, use no explicit transaction
+    /// control, and retain its lease until all cycles settle. Results (including
+    /// ordinary SQL errors) are delivered after this cycle's idle ReadyForQuery.
+    /// At most 4 MiB per request, 8 MiB in flight, 64 rows/64 KiB per response.
+    public func independentQuery(_ query: PostgresQuery) -> EventLoopFuture<PostgresIndependentQueryResult> {
+        let result = self.channel.eventLoop.makePromise(of: PostgresIndependentQueryResult.self)
+        self.channel.write(HandlerTask.independentQuery(.init(query: query, promise: result))).whenFailure {
+            _ in result.fail(PostgresIndependentQueryError.notSubmitted)
+        }
+        return result.futureResult
+    }
+
     /// Transaction status from a completed backend ReadyForQuery cycle.
     public enum ReadyForQueryState: Sendable, Equatable {
         case idle

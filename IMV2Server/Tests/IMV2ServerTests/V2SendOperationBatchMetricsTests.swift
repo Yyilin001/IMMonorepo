@@ -4,6 +4,25 @@ import IMV2ServerContracts
 
 @Suite("Durable send operation metrics")
 struct V2SendOperationBatchMetricsTests {
+    @Test("worker occupancy aggregates separately from retained room turns")
+    func persistentWorkerOccupancy() async {
+        var first = V2SendOperationOwnerMetricsSnapshot()
+        first.connectionWorkers = 3; first.idleConnectionWorkers = 2; first.executingConnectionWorkers = 1
+        first.workerConnectionsOpened = 5; first.workerConnectionFailures = 2
+        first.inFlightBatches = 2; first.stages = [.executing: 1, .finalizing: 1]
+        var second = V2SendOperationOwnerMetricsSnapshot()
+        second.connectionWorkers = 2; second.acquiringConnectionWorkers = 1; second.idleConnectionWorkers = 1
+        second.workerConnectionsOpened = 4; second.workerConnectionFailures = 1
+        second.stages = [.executing: 0, .finalizing: 0]
+        let result = await V2AggregatedSendOperationOwnerMetrics(owners: [
+            FixedOwnerMetrics(value: first), FixedOwnerMetrics(value: second)
+        ]).sendOperationOwnerMetricsSnapshot()
+        #expect(result.connectionWorkers == 5 && result.idleConnectionWorkers == 3)
+        #expect(result.executingConnectionWorkers == 1 && result.acquiringConnectionWorkers == 1)
+        #expect(result.workerConnectionsOpened == 9 && result.workerConnectionFailures == 3)
+        #expect(result.inFlightBatches == 2 && result.stages?[.finalizing] == 1)
+    }
+
     @Test("SQL continuation segments retain independent pending ownership across physical owners")
     func sqlContinuationTransitionsAggregate() {
         let first = V2SendOperationBatchMetrics(), second = V2SendOperationBatchMetrics()
@@ -114,4 +133,9 @@ struct V2SendOperationBatchMetricsTests {
             #expect(result.ownerScalarFallbacks[reason] == V2SendOperationOwnerScalarFallbackSnapshot())
         }
     }
+}
+
+private struct FixedOwnerMetrics: V2SendOperationOwnerMetricsReading {
+    let value: V2SendOperationOwnerMetricsSnapshot
+    func sendOperationOwnerMetricsSnapshot() async -> V2SendOperationOwnerMetricsSnapshot { value }
 }

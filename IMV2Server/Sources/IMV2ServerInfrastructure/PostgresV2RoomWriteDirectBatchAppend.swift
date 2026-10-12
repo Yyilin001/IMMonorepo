@@ -13,11 +13,12 @@ enum PlainDirectRoomLogBatchWritePath {
         implicitConnection: V2BorrowedRoomConnection? = nil,
         metrics: V2SendOperationBatchMetrics? = nil
     ) async throws {
-        let completionCTE = roomLogSendCompletionCTE(isGroup: false,
-            recipientFromInput: inputs.allSatisfy({ $0.directRecipientID != nil }), metadataFromInput: true)
         guard !inputs.isEmpty, inputs.count <= 256 else {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
+        let completionCTE = roomLogSendCompletionCTE(isGroup: false,
+            recipientFromInput: inputs.allSatisfy({ $0.directRecipientID != nil }), metadataFromInput: true,
+            persistRoomEvents: inputs.contains { $0.roomSequence != $0.timelineSequence })
         let metadata = Dictionary(V2SendSuccessMetadata.current.map {
             ("\($0.room):\($0.sender):\($0.operation)", $0)
         }, uniquingKeysWith: { first, _ in first })

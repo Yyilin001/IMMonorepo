@@ -224,7 +224,13 @@ struct V2VaporMetricsRoutesTests {
                 value.retainedBytes = 4096
                 value.queuedTurns = 3
                 value.inFlightBatches = 2
-                value.stages = [.acquiringConnection: 1, .executing: 1]
+                value.stages = [.finalizing: 1, .executing: 1]
+                value.connectionWorkers = 6
+                value.acquiringConnectionWorkers = 1
+                value.idleConnectionWorkers = 3
+                value.executingConnectionWorkers = 2
+                value.workerConnectionsOpened = 9
+                value.workerConnectionFailures = 3
                 value.batchesStarted = 19
                 value.batchesCompleted = 17
                 value.commandsSubmitted = 211
@@ -489,11 +495,16 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_sync_wake_pending_users 6"))
             #expect(body.contains("im_v2_sync_wake_in_flight_users 2"))
             #expect(body.contains("im_v2_sync_wake_coalesced_total 7"))
+            #expect(body.contains("im_v2_message_write_workers{state=\"idle\"} 3"))
+            #expect(body.contains("im_v2_message_write_workers{state=\"acquiring\"} 1"))
+            #expect(body.contains("im_v2_message_write_workers{state=\"executing\"} 2"))
+            #expect(body.contains("im_v2_message_write_connections_opened_total 9"))
+            #expect(body.contains("im_v2_message_write_connection_failures_total 3"))
             #expect(body.contains("im_v2_send_operation_owner_retained_items 11"))
             #expect(body.contains("im_v2_send_operation_owner_retained_bytes 4096"))
             #expect(body.contains("im_v2_send_operation_owner_queued_turns 3"))
             #expect(body.contains("im_v2_send_operation_owner_in_flight_batches 2"))
-            #expect(body.contains("im_v2_send_operation_owner_batch_roots{stage=\"acquiring_connection\"} 1"))
+            #expect(body.contains("im_v2_send_operation_owner_batch_roots{stage=\"finalizing\"} 1"))
             #expect(body.contains("im_v2_send_operation_owner_batch_roots{stage=\"executing\"} 1"))
             #expect(!body.contains("im_v2_send_operation_preparation_owner_batch_roots"))
             #expect(body.contains("im_v2_send_operation_owner_batches_started_total 19"))

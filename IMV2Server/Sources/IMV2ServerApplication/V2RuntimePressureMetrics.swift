@@ -436,7 +436,7 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             ("stage_duration_sum", "counter", "Milliseconds of completed observed stage intervals; not SQL statement counts or message latency."),
             ("stage_duration_count", "counter", "Completed observed stage intervals."),
             ("stage_duration_max", "gauge", "Lifetime maximum completed observed stage interval in milliseconds."),
-            ("held_duration_sum", "counter", "Milliseconds from loan grant until actual future settlement, including driver wait and transaction finalization."),
+            ("held_duration_sum", "counter", "Milliseconds from loan grant until actual future settlement. Persistent message workers retain an entire connection session; use owner_worker_busy for execution time."),
             ("held_duration_count", "counter", "Granted observed loans whose actual database future settled."),
             ("held_duration_max", "gauge", "Lifetime maximum grant-to-actual-settlement duration in milliseconds."),
             ("sql_duration_sum", "counter", "Milliseconds of completed actual SQL futures by fixed phase; concurrent futures may overlap, so this cannot be added to held wall-clock duration."),
@@ -512,6 +512,21 @@ public func v2RenderPrometheusRuntimePressureMetrics(
             let name = "\(prefix)\(suffix)"
             lines.append(contentsOf: ["# HELP \(name) \(help)", "# TYPE \(name) counter", "\(name) \(value)"])
         }
+    }
+    if let owner = snapshot.sendOperationOwnerBatching {
+        lines.append(contentsOf: [
+            "# HELP im_v2_message_write_workers Fixed worker sessions; a held lease is not SQL utilization.",
+            "# TYPE im_v2_message_write_workers gauge",
+            "im_v2_message_write_workers{state=\"acquiring\"} \(owner.acquiringConnectionWorkers)",
+            "im_v2_message_write_workers{state=\"idle\"} \(owner.idleConnectionWorkers)",
+            "im_v2_message_write_workers{state=\"executing\"} \(owner.executingConnectionWorkers)",
+            "# HELP im_v2_message_write_connections_opened_total Actual worker connection sessions opened, including replacements.",
+            "# TYPE im_v2_message_write_connections_opened_total counter",
+            "im_v2_message_write_connections_opened_total \(owner.workerConnectionsOpened)",
+            "# HELP im_v2_message_write_connection_failures_total Worker acquisition or connection-session failures.",
+            "# TYPE im_v2_message_write_connection_failures_total counter",
+            "im_v2_message_write_connection_failures_total \(owner.workerConnectionFailures)"
+        ])
     }
     if let operations = snapshot.sendOperationBatching {
         lines.append("# HELP im_v2_policy_memory_events_total Bounded policy state lookup and object/fact retention events.")

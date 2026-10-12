@@ -73,6 +73,7 @@ enum DatabaseEdgeProbe {
         let resources = V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: 1),
             logger: Logger(label: "imv2.va.database-edge.\(name)"), ownsEventLoopGroup: true)
         var startedApplication: V2RoomActorApplication?
+        var owners: [String: V2RoomServerOwnerResources] = [:]
         do {
             let controlID = DatabaseID(string: "control")
             resources.databases.use(try .postgres(url: required("VA_DB_EDGE_CONTROL_URL"),
@@ -81,7 +82,6 @@ enum DatabaseEdgeProbe {
                 loanPolicy: .init(maximumConnections: 4, reservedRenewalConnections: 1,
                                   maximumQueued: 32, maximumWait: .seconds(5)))
             var databases: [String: any Database] = [:]
-            var owners: [String: V2RoomServerOwnerResources] = [:]
             for slot in ["a", "b"] where !host || name == "host-\(slot)" {
                 let identifier = DatabaseID(string: "owner-\(slot)")
                 resources.databases.use(try .postgres(url: required("VA_DB_EDGE_OWNER_\(slot.uppercased())_URL"),
@@ -91,6 +91,14 @@ enum DatabaseEdgeProbe {
                                       maximumQueued: 32, maximumWait: .seconds(5)))
                 databases["room-\(slot)"] = database
                 if host {
+                    let sendIdentifier = DatabaseID(string: "message-write-\(slot)")
+                    resources.databases.use(try .postgres(
+                        url: required("VA_DB_EDGE_OWNER_\(slot.uppercased())_URL"),
+                        maxConnectionsPerEventLoop: 1), as: sendIdentifier)
+                    let sendDatabase = try V2EventLoopBalancedDatabase(
+                        databases: [resources.database(sendIdentifier)],
+                        loanPolicy: .init(maximumConnections: 1, reservedRenewalConnections: 0,
+                            maximumQueued: 32, maximumWait: .seconds(5)))
                     let policyOwners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control),
                         dispatcher: .init(database: control, projectionDelivery: Shadow()))
                     let authorizations = V2RoomPolicyAuthorizationService(roomDatabase: database,
@@ -99,7 +107,7 @@ enum DatabaseEdgeProbe {
                         strangerMessagePolicy: try .init(maximumMessagesPerWindow: 1000, window: 86_400),
                         contentReviewMode: .disabled)
                         .usingControlDatabase(control).usingPolicyAuthorizations(authorizations)
-                    owners["room-\(slot)"] = try .init(database: database, writes: writes,
+                    owners["room-\(slot)"] = try .init(database: database, sendDatabase: sendDatabase, writes: writes,
                         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
                         invitationSecretIssuer: try invitationSecretIssuer(),
@@ -144,6 +152,7 @@ enum DatabaseEdgeProbe {
                 throw Failure.invalid("incomplete drain")
             }
             startedApplication = nil
+            for owner in owners.values { await owner.shutdownDurableSendOperations() }
             try await resources.shutdown()
             try marker("\(name)-stopped.json", true)
         } catch {
@@ -154,6 +163,7 @@ enum DatabaseEdgeProbe {
                     throw V2RoomActorApplicationError.incompleteShutdown
                 }
             }
+            for owner in owners.values { await owner.shutdownDurableSendOperations() }
             try? await resources.shutdown()
             throw error
         }

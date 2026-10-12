@@ -5,6 +5,7 @@ import IMV2ActorContracts
 import IMV2Core
 @testable import IMV2ServerInfrastructure
 import SQLKit
+import FluentPostgresDriver
 import Synchronization
 import Testing
 
@@ -24,167 +25,226 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("synchronous loan registration keeps caller context while settlement and finalization stay global")
-    func durableOwnerDirectLoanRegistration() async throws {
+    @Test("persistent worker reuses one connection and keeps SQL on its loop while room finalization uses the caller")
+    func durableOwnerPersistentConnectionExecutor() async throws {
         let resources = makeV2DatabaseTestResources()
         let loop = resources.eventLoopGroup.next(), executor = V2DatabaseEventLoopTaskExecutor(loop)
         do {
             try await withDurableCoordinatorHandles { store, handles, _ in
-                let entries = Mutex(0)
+                let loans = Mutex(0), turns = Mutex(0), finalizers = Mutex(0)
                 let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                    configuration: .init(maximumPendingRequests: 8),
-                    maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
-                    scheduledConnection: { _, _ in Issue.record("Direct registration must not use the async entry"); return nil },
-                    startScheduledConnection: { _, body in
-                        #expect(V2OwnerRegistrationTestContext.marker == 73)
-                        #expect(!loop.inEventLoop)
-                        entries.withLock { $0 += 1 }
-                        let returned = V2ScheduledSendLoanReturn.current?.takeCallback()
-                        let promise = loop.makePromise(of: V2ScheduledSendOutcome?.self)
-                        Task(executorPreference: executor) {
-                            do {
-                                let value = try await body(.init(finalize: {
-                                    #expect(!loop.inEventLoop)
-                                    #expect(V2OwnerRegistrationTestContext.marker == 0)
-                                }, execute: { _, _, _, _ in [] }))
-                                returned?()
-                                promise.succeed(value)
-                            } catch { returned?(); promise.fail(error) }
+                    configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
+                    resourceDemandLimit: 1, scheduledConnection: { _, body in
+                        loans.withLock { $0 += 1 }
+                        try await withTaskExecutorPreference(executor) {
+                            try await body(.init(finalize: {
+                                #expect(!loop.inEventLoop)
+                                #expect(V2OwnerRegistrationTestContext.marker == 73)
+                                finalizers.withLock { $0 += 1 }
+                            }, execute: { prepared, _, _, _ in
+                                #expect(loop.inEventLoop)
+                                turns.withLock { $0 += 1 }
+                                return prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
+                            }))
                         }
-                        return .init {
-                            #expect(!loop.inEventLoop)
-                            return try await promise.futureResult.get()
-                        }
-                    }, scheduledExecute: { _, prepared in
-                        #expect(loop.inEventLoop)
-                        return prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
+                    }, scheduledExecute: { turn, prepared in
+                        try await turn.execute(prepared, try self.forwardImportTestProfile(), .init(), Date.init)
                     })
-                _ = try await V2OwnerRegistrationTestContext.$marker.withValue(73) {
-                    try await batcher.execute(handles[0])
+                for handle in handles {
+                    _ = try await V2OwnerRegistrationTestContext.$marker.withValue(73) { try await batcher.execute(handle) }
                 }
+                let snapshot = await batcher.sendOperationOwnerMetricsSnapshot()
+                #expect(loans.withLock { $0 } == 1)
+                #expect(turns.withLock { $0 } == handles.count)
+                #expect(finalizers.withLock { $0 } == handles.count)
+                #expect(snapshot.connectionWorkers == 1 && snapshot.idleConnectionWorkers == 1)
+                #expect(snapshot.inFlightBatches == 0)
                 await batcher.shutdown()
-                #expect(entries.withLock { $0 } == 1)
-                #expect(batcher.pressureSnapshot().retainedItems == 0)
-                #expect(batcher.pressureSnapshot().inFlightBatches == 0)
+                #expect(await batcher.sendOperationOwnerMetricsSnapshot().connectionWorkers == 0)
             }
             try await resources.shutdown()
         } catch { try? await resources.shutdown(); throw error }
     }
 
-    @Test("an inline unbound loan failure settles before resubmitting its ready room")
-    func durableOwnerDirectLoanFailure() async throws {
+    @Test("releasing the dispatcher owner closes an idle persistent worker without a retained root leak")
+    func durableOwnerPersistentOwnerRelease() async throws {
         try await withDurableCoordinatorHandles { store, handles, _ in
-            let entries = Mutex(0)
-            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8),
-                maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
-                scheduledConnection: { _, _ in Issue.record("Unexpected async fallback"); return nil },
-                startScheduledConnection: { _, _ in
-                    let count = entries.withLock { $0 += 1; return $0 }
-                    #expect(count == 1)
-                    V2ScheduledSendLoanReturn.current?.notify()
-                    return .init { throw V2RoomCallFailure.notAccepted(.unavailable) }
-                }, scheduledExecute: { _, _ in Issue.record("No connection was borrowed"); return [] })
-            await #expect(throws: V2RoomCallFailure.notAccepted(.unavailable)) {
-                _ = try await batcher.execute(handles[0])
-            }
-            await batcher.shutdown()
-            #expect(entries.withLock { $0 } == 1)
-            #expect(batcher.pressureSnapshot().retainedItems == 0)
-            #expect(batcher.pressureSnapshot().inFlightBatches == 0)
+            let returned = Mutex(false)
+            var batcher: V2DurableSendOperationOwnerBatcher? = .init(store: store,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
+                resourceDemandLimit: 1, scheduledConnection: { _, body in
+                    defer { returned.withLock { $0 = true } }
+                    try await body(.init(execute: { prepared, _, _, _ in
+                        prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
+                    }))
+                }, scheduledExecute: { turn, prepared in
+                    try await turn.execute(prepared, try self.forwardImportTestProfile(), .init(), Date.init)
+                })
+            _ = try await batcher!.execute(handles[0])
+            #expect(!returned.withLock { $0 })
+            batcher = nil
+            try await durableCoordinatorObserve { returned.withLock { $0 } }
         }
     }
 
-    @Test("acquisition and finalization stay global while the physical body uses its selected loop")
-    func acquisitionExecutorBoundary() async throws {
-        let resources = makeV2DatabaseTestResources()
-        let loop = resources.eventLoopGroup.next()
-        let taskExecutor = V2DatabaseEventLoopTaskExecutor(loop)
-        do {
-            try await withDurableCoordinatorHandles { store, handles, _ in
-                let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                    configuration: .init(maximumPendingRequests: 8),
-                    maximumRetainedBytes: 65_536, resourceDemandLimit: 1,
-                    scheduledConnection: { _, body in
-                        let acquisitionOnLoop = loop.inEventLoop
-                        #expect(!acquisitionOnLoop)
-                        return try await withTaskExecutorPreference(taskExecutor) {
-                            try await body(.init(finalize: {
-                                let onDatabaseLoop = loop.inEventLoop
-                                #expect(!onDatabaseLoop)
-                            }, execute: { _, _, _, _ in [] }))
-                        }
-                    }, scheduledExecute: { _, prepared in
-                        #expect(loop.inEventLoop)
-                        return prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
-                    })
-                _ = try await batcher.execute(handles[0])
-                await batcher.shutdown()
-                #expect(batcher.pressureSnapshot().retainedItems == 0)
-            }
-            try await resources.shutdown()
-        } catch { try await resources.shutdown(); throw error }
-    }
-    @Test("physical return and selection progress before borrower resumption and room finalization", arguments: [false, true])
-    func durableOwnerPhysicalDispatchProgress(delayBorrowerResume: Bool) async throws {
+    @Test("connection replacement retries establishment without replaying a completed room turn")
+    func durableOwnerPersistentConnectionReplacement() async throws {
         try await withDurableCoordinatorHandles { store, handles, _ in
-            let resources = DurablePhysicalConnectionGate(), execution = DurableCoordinatorExecutionGate()
-            let finalization = DurableCoordinatorExecutionGate(), borrowerResume = DurableCoordinatorExecutionGate()
-            await resources.grantAll()
+            let sessions = Mutex(0), executed = Mutex<[String]>([])
             let batcher = V2DurableSendOperationOwnerBatcher(store: store,
                 configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
-                resourceDemandLimit: 1,
-                scheduledConnection: { _, body in
-                    let outcome = try await resources.borrow {
-                        try await body(.init(finalize: { _ = try? await finalization.execute([handles[0]]) },
-                            execute: { prepared, _, _, _ in try await execution.execute([prepared])[0].get() }))
+                resourceDemandLimit: 1, scheduledConnection: { _, body in
+                    let index = sessions.withLock { $0 += 1; return $0 }
+                    try await body(.init(confirmIdle: {
+                        if index == 1 { return false }
+                        return true
+                    }, execute: { prepared, _, _, _ in
+                        executed.withLock { $0.append(contentsOf: prepared.commandPayload.map { $0.command.text }) }
+                        return prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
+                    }))
+                }, scheduledExecute: { turn, prepared in
+                    try await turn.execute(prepared, try self.forwardImportTestProfile(), .init(), Date.init)
+                })
+            _ = try await batcher.execute(handles[0])
+            _ = try await batcher.execute(handles[2])
+            await batcher.shutdown()
+            #expect(sessions.withLock { $0 } == 2)
+            #expect(executed.withLock { $0 } == ["a1", "b1"])
+            #expect(batcher.pressureSnapshot().retainedItems == 0)
+        }
+    }
+
+    @Test("shutdown cancels an establishing worker after queued cancellation without opening a transaction")
+    func durableOwnerPersistentAcquisitionDrain() async throws {
+        try await withDurableCoordinatorHandles { store, handles, _ in
+            let gate = DurablePhysicalConnectionGate()
+            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
+                resourceDemandLimit: 1, scheduledConnection: { _, body in
+                    try await gate.borrow { try await body(.init(execute: { _, _, _, _ in
+                        Issue.record("Cancelled queued work must not execute"); return []
+                    })) }
+                }, scheduledExecute: { _, _ in Issue.record("No transaction expected"); return [] })
+            let waiting = Task { try await batcher.execute(handles[0]) }
+            try await durableCoordinatorObserve { await gate.waitingCount == 1 }
+            waiting.cancel()
+            _ = await waiting.result
+            #expect(batcher.pressureSnapshot().retainedItems == 0)
+            await batcher.shutdown()
+            #expect(await gate.waitingCount == 0)
+            #expect(await batcher.sendOperationOwnerMetricsSnapshot().connectionWorkers == 0)
+        }
+    }
+
+    @Test("real PostgreSQL worker shares one backend across independent rooms and independent post-commit collectors")
+    func durableOwnerPersistentRealBackendReuse() async throws {
+        let observer = DurablePostCommitObserver()
+        try await withDurableCoordinatorHandles(committedMessageObserver: observer) { store, handles, _ in
+            let pids = Mutex<[Int32]>([])
+            let observed = store.observingOwnerTransactions { pid, _, _ in pids.withLock { $0.append(pid) } }
+            let profile = try self.forwardImportTestProfile()
+            let batcher = V2DurableSendOperationOwnerBatcher(fixtureStore: observed, connectionCapacity: 1,
+                capacityProfile: profile, now: { Date(timeIntervalSince1970: 1_750_000_000) },
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536)
+            for handle in [handles[0], handles[2], handles[1], handles[3]] {
+                let values = try await batcher.execute(handle)
+                #expect(values.count == 1)
+            }
+            #expect(Set(pids.withLock { $0 }).count == 1)
+            #expect(observer.count == 4)
+            let metrics = await batcher.sendOperationOwnerMetricsSnapshot()
+            #expect(metrics.workerConnectionsOpened == 1 && metrics.batchesCompleted == 4)
+            await batcher.shutdown()
+        }
+    }
+
+    @Test("idle PostgreSQL socket loss wakes and replaces the worker before another message arrives")
+    func durableOwnerPersistentIdleConnectionLoss() async throws {
+        guard let url = ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"] else { return }
+        let control = makeV2DatabaseTestResources()
+        do {
+            control.databases.use(try .postgres(url: url), as: .psql, isDefault: true)
+            let sql = try #require(control.database(.psql) as? SQLDatabase)
+            try await withDurableCoordinatorHandles { store, handles, _ in
+                let pids = Mutex<[Int32]>([])
+                let observed = store.observingOwnerTransactions { pid, _, _ in pids.withLock { $0.append(pid) } }
+                let batcher = V2DurableSendOperationOwnerBatcher(fixtureStore: observed, connectionCapacity: 1,
+                    capacityProfile: try self.forwardImportTestProfile(), now: { Date(timeIntervalSince1970: 1_750_000_000) },
+                    configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536)
+                do {
+                    _ = try await batcher.execute(handles[0])
+                    let firstPID = try #require(pids.withLock { $0.first })
+                    try await sql.raw("SELECT pg_terminate_backend(\(bind: firstPID))").run()
+                    try await durableCoordinatorObserve {
+                        let metrics = await batcher.sendOperationOwnerMetricsSnapshot()
+                        return metrics.workerConnectionsOpened == 2 && metrics.idleConnectionWorkers == 1
                     }
-                    if delayBorrowerResume {
-                        // Models the real pool callback preceding the suspended borrower's resumption.
-                        V2ScheduledSendLoanReturn.current?.notify()
-                        _ = try? await borrowerResume.execute([handles[0]])
+                    _ = try await batcher.execute(handles[2])
+                    #expect(Set(pids.withLock { $0 }).count == 2)
+                    #expect(await batcher.sendOperationOwnerMetricsSnapshot().workerConnectionFailures == 1)
+                    await batcher.shutdown()
+                } catch { await batcher.shutdown(); throw error }
+            }
+            try await control.shutdown()
+        } catch { try? await control.shutdown(); throw error }
+    }
+
+    @Test("real committed memory completion survives caller cancellation while the same connection serves a peer")
+    func durableOwnerPersistentCancelledFinalization() async throws {
+        let observer = DurablePostCommitObserver()
+        try await withDurableCoordinatorHandles(committedMessageObserver: observer) { store, handles, _ in
+            let finalization = DurableCoordinatorExecutionGate(), index = Mutex(0)
+            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
+                resourceDemandLimit: 1, scheduledConnection: { deadline, body in
+                    try await store.withMessageWriteConnection(deadline: deadline) { connection in
+                        try await body(.init(isUsable: connection.isUsable, observeClose: connection.observeClose,
+                            confirmIdle: connection.confirmIdle, makeTurn: {
+                                let turn = connection.makeTurn()
+                                let first = index.withLock { $0 += 1; return $0 == 1 }
+                                return .init(finalize: {
+                                    if first { _ = try? await finalization.execute([handles[0]]) }
+                                    await turn.finalize()
+                                }, execute: turn.execute)
+                            }))
                     }
-                    return outcome
-                }, scheduledExecute: { executor, prepared in
-                    try await executor.execute(prepared, try self.forwardImportTestProfile(), .init(), Date.init)
+                }, scheduledExecute: { turn, prepared in
+                    try await turn.execute(prepared, try self.forwardImportTestProfile(), .init(),
+                        { Date(timeIntervalSince1970: 1_750_000_000) })
                 })
             let first = Task { try await batcher.execute(handles[0]) }
-            try await durableCoordinatorObserve { await execution.entries.count == 1 }
-            let same = Task { try await batcher.execute(handles[1]) }
-            let peer = Task { try await batcher.execute(handles[2]) }
-            try await durableCoordinatorObserve { batcher.pressureSnapshot().queuedTurns == 2 }
             do {
-                await execution.release(0)
-                try await durableCoordinatorObserve(deadline: .now + .milliseconds(500)) { await execution.entries.count == 2 }
-                #expect(await resources.returned == 1)
-                #expect(await execution.entries[1] == handles[2].commandPayload.map { $0.command.text })
-                #expect(batcher.pressureSnapshot().occupiedRooms == 2)
-                await borrowerResume.releaseAll(); await execution.releaseAll(); await finalization.releaseAll()
-                _ = try await first.value; _ = try await peer.value; _ = try await same.value
+                try await durableCoordinatorObserve { await finalization.entries.count == 1 }
+                first.cancel()
+                #expect(observer.count == 0)
+                _ = try await batcher.execute(handles[2])
+                #expect(observer.count == 1)
+                #expect(batcher.pressureSnapshot().occupiedRooms == 1)
+                #expect(await batcher.sendOperationOwnerMetricsSnapshot().workerConnectionsOpened == 1)
+                await finalization.releaseAll()
+                _ = try await first.value
+                #expect(observer.count == 2)
                 await batcher.shutdown()
-                #expect(batcher.pressureSnapshot().retainedItems == 0)
             } catch {
-                await borrowerResume.releaseAll(); await execution.releaseAll(); await finalization.releaseAll()
-                first.cancel(); same.cancel(); peer.cancel()
-                await batcher.shutdown()
-                _ = await first.result; _ = await same.result; _ = await peer.result
+                await finalization.releaseAll(); await batcher.shutdown(); _ = await first.result
                 throw error
             }
         }
     }
 
-    @Test("a granted unbound ticket does not clip the selected room transaction deadline")
+    @Test("a worker acquisition deadline does not clip independent room transaction deadlines")
     func durableOwnerSelectedRoomOwnsDeadline() async throws {
         let observer = DurablePostCommitObserver()
         try await withDurableCoordinatorHandles(committedMessageObserver: observer) { store, handles, _ in
             let finalizer = Mutex<(@Sendable () async -> Void)?>(nil)
-            try await store.withScheduledSendConnection(deadline: .now + .seconds(1)) { executor in
+            try await store.withMessageWriteConnection(deadline: .now + .seconds(1)) { executor in
                 try await Task.sleep(for: .milliseconds(1_100))
-                let results = try await executor.execute(handles[0], try self.forwardImportTestProfile(),
+                let turn = executor.makeTurn()
+                let results = try await turn.execute(handles[0], try self.forwardImportTestProfile(),
                     .init(), { Date(timeIntervalSince1970: 1_750_000_000) })
                 #expect(!results.isEmpty)
                 #expect(observer.count == 0)
-                finalizer.withLock { $0 = executor.finalize }
+                finalizer.withLock { $0 = turn.finalize }
             }
             #expect(observer.count == 0)
             let finish = try #require(finalizer.withLock { $0 })
@@ -367,7 +427,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("queued deadlines release only queued budget while actual quota ownership is held", arguments: [false, true])
+    @Test("queued deadlines release only queued budget while an actual room execution is held", arguments: [false, true])
     func durableOwnerCoordinatorQueuedDeadlineWhileBusy(occupiedRoom: Bool) async throws {
         try await withDurableCoordinatorHandles { store, handles, prepare in
             let gate = DurableCoordinatorExecutionGate()
@@ -568,57 +628,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("physical connection scheduling bypasses logical admission and selects only live rooms after grant")
-    func durableOwnerPhysicalConnectionSelection() async throws {
-        try await withDurableCoordinatorHandles { store, handles, _ in
-            let resources = DurablePhysicalConnectionGate()
-            let execution = DurableCoordinatorExecutionGate()
-            let admission = V2DatabaseWorkAdmissionController(policy: .init(
-                maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
-                maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
-                maximumInteractiveReadQueued: 1, maximumSyncQueued: 1, timeout: .seconds(5)))
-            #expect(await admission.acquire(.foregroundWrite) == .admitted)
-            #expect(await admission.acquire(.interactiveRead) == .admitted)
-            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
-                resourceDemandLimit: 1,
-                scheduledConnection: { _, body in
-                    try await resources.borrow {
-                        try await body(.init { prepared, _, _, _ in try await execution.execute([prepared])[0].get() })
-                    }
-                },
-                scheduledExecute: { executor, prepared in
-                    try await executor.execute(prepared, try self.forwardImportTestProfile(), .init(), Date.init)
-                })
-            let cancelled = Task { try await batcher.execute(handles[0]) }
-            try await durableCoordinatorObserve { await resources.waitingCount == 1 }
-            #expect(batcher.pressureSnapshot().occupiedRooms == 0)
-            cancelled.cancel()
-            _ = await cancelled.result
-            try await durableCoordinatorObserve { await resources.waitingCount == 0 }
-            let live = Task { try await batcher.execute(handles[2]) }
-            do {
-                try await durableCoordinatorObserve { await resources.waitingCount == 1 }
-                #expect(await admission.snapshot().foregroundWrite.queued == 0)
-                #expect(batcher.pressureSnapshot().occupiedRooms == 0)
-                await resources.grantAll()
-                try await durableCoordinatorObserve { await execution.entries.count == 1 }
-                #expect(await execution.entries[0] == handles[2].commandPayload.map { $0.command.text })
-                await execution.releaseAll()
-                _ = try await live.value
-                await batcher.shutdown()
-                #expect(await resources.returned == 1)
-                #expect(batcher.pressureSnapshot().retainedItems == 0)
-                await admission.release(.foregroundWrite); await admission.release(.interactiveRead)
-            } catch {
-                live.cancel(); await resources.grantAll(); await execution.releaseAll()
-                await batcher.shutdown(); _ = await live.result
-                await admission.release(.foregroundWrite); await admission.release(.interactiveRead)
-                throw error
-            }
-        }
-    }
-
     @Test("physical connection shutdown waits for actual execution and loan return")
     func durableOwnerPhysicalConnectionDrain() async throws {
         try await withDurableCoordinatorHandles { store, handles, _ in
@@ -649,7 +658,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("returned connection serves another room while finalization retains FIFO and drain", arguments: [false, true])
+    @Test("persistent connection serves another room while finalization retains FIFO and drain", arguments: [false, true])
     func durableOwnerPhysicalPostCommitFinalization(closeDuringFinalization: Bool) async throws {
         try await withDurableCoordinatorHandles { store, handles, _ in
             let resources = DurablePhysicalConnectionGate()
@@ -676,13 +685,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             var otherRoom: Task<[V2RoomMessagingResult], any Error>?
             do {
                 try await durableCoordinatorObserve { await finalization.entries.count == 1 }
-                #expect(await resources.returned == 1)
+                #expect(await resources.returned == 0)
                 #expect(batcher.pressureSnapshot().occupiedRooms == 1)
                 #expect(await batcher.sendOperationOwnerMetricsSnapshot().batchesCompleted == 0)
                 sameRoom = Task { try await batcher.execute(handles[1]) }
                 otherRoom = Task { try await batcher.execute(handles[2]) }
                 try await durableCoordinatorObserve { await finalization.entries.count == 2 }
-                #expect(await resources.returned == 2)
+                #expect(await resources.returned == 0)
                 #expect(await execution.entries.count == 2)
                 #expect(await execution.entries[1] == handles[2].commandPayload.map { $0.command.text })
                 await finalization.release(1)
@@ -735,39 +744,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         }
     }
 
-    @Test("expiry of an unbound ticket resubmits live room demand")
-    func durableOwnerPhysicalExpiredTicket() async throws {
-        try await withDurableCoordinatorHandles { store, handles, _ in
-            let attempts = Mutex(0)
-            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
-                configuration: .init(maximumPendingRequests: 8), maximumRetainedBytes: 65_536,
-                resourceDemandLimit: 1,
-                scheduledConnection: { _, body in
-                    let attempt = attempts.withLock { $0 += 1; return $0 }
-                    if attempt == 1 { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-                    return try await store.withScheduledSendConnection(deadline: .now + .seconds(5), body)
-                }, scheduledExecute: { executor, prepared in
-                    try await executor.execute(prepared, try self.forwardImportTestProfile(), .init(),
-                        { Date(timeIntervalSince1970: 1_750_000_000) })
-                })
-            let results = try await batcher.execute(handles[0])
-            #expect(!results.isEmpty)
-            await batcher.shutdown()
-            #expect(attempts.withLock { $0 } == 2)
-            #expect(batcher.pressureSnapshot().retainedItems == 0)
-        }
-    }
-
     @Test("a retained executor cannot execute SQL after its physical loan has returned")
     func durableOwnerRejectsReturnedExecutor() async throws {
         try await withDurableCoordinatorHandles { store, handles, _ in
             let captured = Mutex<V2OwnerConnectionExecutor?>(nil)
-            try await store.withScheduledSendConnection(deadline: .now + .seconds(5)) { executor in
+            try await store.withMessageWriteConnection(deadline: .now + .seconds(5)) { executor in
                 captured.withLock { $0 = executor }
             }
             let returned = try #require(captured.withLock { $0 })
             await #expect(throws: V2RoomCallFailure.notAccepted(.unavailable)) {
-                try await returned.execute(handles[0], try self.forwardImportTestProfile(), .init(), Date.init)
+                try await returned.makeTurn().execute(handles[0], try self.forwardImportTestProfile(), .init(), Date.init)
             }
         }
     }
@@ -798,9 +784,95 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(!first.isEmpty && !second.isEmpty)
             await batcher.shutdown()
             #expect(finalized.withLock { $0 } == 2)
-            #expect(await resources.returned == 2)
+            #expect(await resources.returned == 1)
             #expect(batcher.pressureSnapshot().occupiedRooms == 0)
             #expect(batcher.pressureSnapshot().retainedItems == 0)
+        }
+    }
+
+    @Test("two permanent lanes accept a late second room while preserving same-room FIFO")
+    func durableOwnerPipelineLanes() async throws {
+        try await withDurableCoordinatorHandles { store, handles, _ in
+            let gate = DurableCoordinatorExecutionGate(), finalizers = DurableCoordinatorExecutionGate()
+            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                configuration: .init(maximumPendingRequests: 8, pipelineDepth: 2), maximumRetainedBytes: 65_536,
+                resourceDemandLimit: 1, scheduledConnection: { _, body in
+                    try await body(.init(isUsable: { true }, observeClose: { _ in {} }, confirmIdle: {
+                        Issue.record("independent cycle must not wait for connection-wide barrier"); return false
+                    }, makeTurn: {
+                        .init(finalize: { _ = try? await finalizers.execute([handles[0]]) }, execute: { prepared, _, _, _ in
+                            try await gate.execute([prepared])[0].get()
+                        })
+                    }, independentlySettledTurns: true))
+                }, scheduledExecute: { turn, prepared in
+                    try await turn.execute(prepared, try self.forwardImportTestProfile(), .init(), Date.init)
+                })
+            let first = Task { try await batcher.execute(handles[0]) }
+            var second: Task<[V2RoomMessagingResult], any Error>?, same: Task<[V2RoomMessagingResult], any Error>?
+            do {
+                try await durableCoordinatorObserve { await gate.entries.count == 1 }
+                second = Task { try await batcher.execute(handles[2]) }
+                same = Task { try await batcher.execute(handles[1]) }
+                try await durableCoordinatorObserve { await gate.entries.count == 2 }
+                #expect(await gate.entries == [["a1"], ["b1"]])
+                await gate.release(0)
+                try await durableCoordinatorObserve { await finalizers.entries.count == 1 }
+                #expect(await gate.entries.count == 2) // a2 still waits for a1 memory finalization
+                await finalizers.releaseAll()
+                try await durableCoordinatorObserve { await gate.entries.count == 3 }
+                #expect(await gate.entries[2] == ["a2"])
+                await gate.releaseAll()
+                _ = try await first.value; _ = try await second!.value; _ = try await same!.value
+                await batcher.shutdown()
+                #expect(batcher.pressureSnapshot().retainedItems == 0)
+                #expect(await batcher.sendOperationOwnerMetricsSnapshot().workerConnectionsOpened == 1)
+            } catch {
+                await gate.releaseAll(); await finalizers.releaseAll(); await batcher.shutdown()
+                _ = await first.result; _ = await second?.result; _ = await same?.result
+                throw error
+            }
+        }
+    }
+
+    @Test("pipeline uses another idle connection before filling a busy connection's second lane")
+    func durableOwnerPipelineUsesIdleConnections() async throws {
+        try await withDurableCoordinatorHandles(includeDisjoint: true) { store, handles, _ in
+            let serial = Mutex(0), held = Mutex(false), selected = Mutex<[Int]>([])
+            let gate = DurableCoordinatorExecutionGate()
+            let batcher = V2DurableSendOperationOwnerBatcher(store: store,
+                configuration: .init(maximumPendingRequests: 8, pipelineDepth: 2), maximumRetainedBytes: 65_536,
+                resourceDemandLimit: 2, scheduledConnection: { _, body in
+                    let connectionID = serial.withLock { $0 += 1; return $0 }
+                    try await body(.init(isUsable: { true }, observeClose: { _ in {} }, confirmIdle: { true }, makeTurn: {
+                        .init(finalize: {}, execute: { prepared, _, _, _ in
+                            if held.withLock({ $0 }) {
+                                selected.withLock { $0.append(connectionID) }
+                                return try await gate.execute([prepared])[0].get()
+                            }
+                            return prepared.commandPayload.map { _ in .sendOperation(.unresolved) }
+                        })
+                    }, independentlySettledTurns: true))
+                }, scheduledExecute: { turn, prepared in
+                    try await turn.execute(prepared, try self.forwardImportTestProfile(), .init(), Date.init)
+                })
+            _ = try await batcher.execute(handles[6])
+            try await durableCoordinatorObserve { await batcher.sendOperationOwnerMetricsSnapshot().idleConnectionWorkers == 2 }
+            held.withLock { $0 = true }
+            let first = Task { try await batcher.execute(handles[0]) }
+            var second: Task<[V2RoomMessagingResult], any Error>?
+            do {
+                try await durableCoordinatorObserve { await gate.entries.count == 1 }
+                second = Task { try await batcher.execute(handles[2]) }
+                try await durableCoordinatorObserve { await gate.entries.count == 2 }
+                #expect(Set(selected.withLock { $0 }).count == 2)
+                await gate.releaseAll()
+                _ = try await first.value; _ = try await second!.value
+                await batcher.shutdown()
+            } catch {
+                await gate.releaseAll(); await batcher.shutdown()
+                _ = await first.result; _ = await second?.result
+                throw error
+            }
         }
     }
 
@@ -987,4 +1059,15 @@ private extension V2DurableSendOperationOwnerBatcher {
 
 private enum V2OwnerRegistrationTestContext {
     @TaskLocal static var marker: Int = 0
+}
+
+private extension V2OwnerConnectionExecutor {
+    init(finalize: @escaping @Sendable () async -> Void = {},
+        isUsable: @escaping @Sendable () -> Bool = { true },
+        confirmIdle: @escaping @Sendable () async -> Bool = { true },
+        execute: @escaping @Sendable (V2PreparedMessageSendBatch, V2CapacityProfile,
+            V2AcceptanceIDFactory, @escaping @Sendable () -> Date) async throws -> [V2RoomMessagingResult]) {
+        self.init(isUsable: isUsable, observeClose: { _ in {} }, confirmIdle: confirmIdle,
+            makeTurn: { .init(finalize: finalize, execute: execute) })
+    }
 }

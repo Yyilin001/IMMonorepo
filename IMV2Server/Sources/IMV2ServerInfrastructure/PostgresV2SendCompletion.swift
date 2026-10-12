@@ -7,7 +7,8 @@ import SQLKit
 
 func roomLogSendCompletionCTE(
     isGroup: Bool, acceptedSource: String = "input", membershipColumn: String = "membership_revision",
-    recipientFromInput: Bool = false, metadataFromInput: Bool = false
+    recipientFromInput: Bool = false, metadataFromInput: Bool = false,
+    persistRoomEvents: Bool
 ) -> String {
     let groupMode = isGroup ? "'large'::text" : "NULL::text"
     let recipient = isGroup ? "NULL::uuid" : recipientFromInput ? "input.direct_recipient_id" : """
@@ -23,7 +24,8 @@ func roomLogSendCompletionCTE(
     // 消息变更会推进事件流，但不分配新的时间线条目。两个游标分叉时，
     // 保留完整的已接受事件，不强制套用消息行格式的序号相等约束。
     // 已接受事件以完成锁定和分配的 CTE 为来源，绝不从旧快照重新读取房间。
-    return """
+    // 序号一致的批次全部由消息行承载事件，省掉空 INSERT 及其语句级触发器。
+    let eventCTE = persistRoomEvents ? """
     , event_insert AS (
         INSERT INTO im_v2.room_events
             (event_id, room_id, room_sequence, event_type, actor_user_id, payload,
@@ -52,6 +54,9 @@ func roomLogSendCompletionCTE(
         WHERE message.accepted_event_storage = 'room_event'
         RETURNING event_id
     )
+    """ : ""
+    return """
+    \(eventCTE)
     \(metadataCTE)
     , completion_insert AS (
         INSERT INTO im_v2.message_send_completions

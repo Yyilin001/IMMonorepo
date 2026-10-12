@@ -17,6 +17,12 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     /// The context is captured in `handlerAdded` and released` in `handlerRemoved`
     private var handlerContext: ChannelHandlerContext?
     private var rowStream: PSQLRowStream?
+    private let independentPipeline: IndependentQueryPipeline
+    private enum DeferredOperation {
+        case task(HandlerTask, EventLoopPromise<Void>?)
+        case gracefulShutdown(EventLoopPromise<Void>?)
+    }
+    private var deferredOrdinaryTasks: [DeferredOperation] = []
     private var decoder: NIOSingleStepByteToMessageProcessor<PostgresBackendMessageDecoder>
     private var encoder: PostgresFrontendMessageEncoder!
     private let configuration: PostgresConnection.InternalConfiguration
@@ -34,6 +40,8 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         self.state = ConnectionStateMachine(requireBackendKeyData: configuration.options.requireBackendKeyData)
         self.eventLoop = eventLoop
         self.configuration = configuration
+        self.independentPipeline = IndependentQueryPipeline(cacheCapacity: configuration.options.preparedQueryCacheCapacity,
+            sqlPrefixes: configuration.options.preparedQuerySQLPrefixes)
         self.configureSSLCallback = configureSSLCallback
         self.logger = logger
         self.decoder = NIOSingleStepByteToMessageProcessor(PostgresBackendMessageDecoder())
@@ -78,11 +86,14 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
         }
 
         self.logger.trace("Channel inactive.")
+        independentPipeline.failUnconfirmed()
         let action = self.state.closed()
         self.run(action, with: context)
+        drainOrdinaryTasks(context: context)
     }
     
     func errorCaught(context: ChannelHandlerContext, error: any Error) {
+        independentPipeline.failUnconfirmed()
         self.logger.debug("Channel error caught.", metadata: [.error: "\(error)"])
         let action = self.state.errorHappened(.connectionError(underlying: error))
         self.run(action, with: context)
@@ -104,6 +115,17 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     }
 
     private func handleMessage(_ message: PostgresBackendMessage, context: ChannelHandlerContext) {
+        switch independentPipeline.receive(message) {
+        case .pass: break
+        case .consumed:
+            if !independentPipeline.hasPending { drainOrdinaryTasks(context: context) }
+            return
+        case .close:
+            independentPipeline.failUnconfirmed()
+            self.run(self.state.errorHappened(.connectionError(underlying: PostgresIndependentQueryError.outcomeUnknown)), with: context)
+            drainOrdinaryTasks(context: context)
+            return
+        }
         self.logger.trace("Backend message received", metadata: [.message: "\(message)"])
         let action: ConnectionStateMachine.ConnectionAction
 
@@ -171,6 +193,19 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
             promise.succeed()
         case .failPromise(let promise, error: let error):
             promise.fail(error)
+        }
+    }
+
+    private func drainOrdinaryTasks(context: ChannelHandlerContext) {
+        guard !independentPipeline.hasPending, !deferredOrdinaryTasks.isEmpty else { return }
+        let pending = deferredOrdinaryTasks
+        deferredOrdinaryTasks.removeAll()
+        for operation in pending {
+            switch operation {
+            case .task(let task, let promise): write(context: context, data: NIOAny(task), promise: promise)
+            case .gracefulShutdown(let promise):
+                triggerUserOutboundEvent(context: context, event: PSQLOutgoingEvent.gracefulShutdown, promise: promise)
+            }
         }
     }
 
@@ -252,9 +287,27 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
     
     func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         let handlerTask = self.unwrapOutboundIn(data)
+        if case .independentQuery(let query) = handlerTask {
+            defer { promise?.succeed(()) }
+            guard self.state.isIdleForIndependentQuery, deferredOrdinaryTasks.isEmpty,
+                  context.channel.isWritable, let packet = independentPipeline.enqueue(query) else {
+                query.promise.fail(PostgresIndependentQueryError.notSubmitted)
+                return
+            }
+            context.writeAndFlush(self.wrapOutboundOut(packet), promise: nil)
+            return
+        }
+        if independentPipeline.hasPending {
+            // Includes ReadyForQuery barriers: they must not acknowledge a later
+            // cycle as if it were the earlier room's commit confirmation.
+            deferredOrdinaryTasks.append(.task(handlerTask, promise))
+            return
+        }
         let psqlTask: PSQLTask
 
         switch handlerTask {
+        case .independentQuery:
+            preconditionFailure("independent query handled above")
         case .confirmReadyForQuery(let confirmation):
             defer { promise?.succeed(()) }
             psqlTask = .confirmReadyForQuery(confirmation)
@@ -340,6 +393,10 @@ final class PostgresChannelHandler: ChannelDuplexHandler {
             self.run(action, with: context)
 
         case PSQLOutgoingEvent.gracefulShutdown:
+            if independentPipeline.hasPending {
+                deferredOrdinaryTasks.append(.gracefulShutdown(promise))
+                return
+            }
             let action = self.state.gracefulClose(promise)
             self.run(action, with: context)
 

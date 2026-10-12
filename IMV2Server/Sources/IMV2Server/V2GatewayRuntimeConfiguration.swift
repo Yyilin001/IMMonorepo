@@ -65,6 +65,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public static let defaultRoomLogRetentionWindowSeconds: TimeInterval = 30 * 24 * 60 * 60
 
     public let databaseURL: String
+    /// Explicit canonical database URL -> local message-write socket mapping.
+    public let messageWriteUnixSockets: [String: String]
+    public let messageWritePipelineDepth: Int
     public let databasePolicy: V2PostgresRuntimePolicy
     public let databaseWorkloadPoolBudget: V2PostgresWorkloadPoolBudget
     public let databaseWorkloadPoolIsolationEnabled: Bool
@@ -269,11 +272,39 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
 
     /// Only bounds retained work; physical write connections determine concurrency.
     public func durableSendSchedulingConfiguration() -> V2SendOperationSchedulingConfiguration {
-        .init(maximumPendingRequests: directRoomLogAppendMaximumPendingRequests)
+        .init(maximumPendingRequests: directRoomLogAppendMaximumPendingRequests, pipelineDepth: messageWritePipelineDepth)
+    }
+
+    /// Persistent message workers require an exclusive message-write pool;
+    /// occupying the general foreground pool would starve initialization/control.
+    public func requirePersistentMessageWritePool() throws {
+        guard databaseWorkloadPoolIsolationEnabled else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED")
+        }
+        guard databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop > 0 else {
+            throw V2GatewayRuntimeConfigurationError.missing("IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP")
+        }
     }
 
     public init(environment: any V2RuntimeEnvironment) throws {
         databaseURL = try v2RequiredEnvironmentValue("IM_V2_DATABASE_URL", environment: environment)
+        if let raw = Self.optional("IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON", environment: environment) {
+            guard let data = raw.data(using: .utf8),
+                  let paths = try? JSONDecoder().decode([String: String].self, from: data),
+                  !paths.isEmpty, paths.count <= 64,
+                  paths.allSatisfy({ !$0.key.isEmpty && $0.value.hasPrefix("/")
+                      && !$0.value.utf8.contains(0) && $0.value.utf8.count <= 103 }) else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON")
+            }
+            messageWriteUnixSockets = paths
+        } else { messageWriteUnixSockets = [:] }
+        if let raw = Self.optional("IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH", environment: environment) {
+            guard let depth = Int(raw), (1...2).contains(depth) else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH")
+            }
+            messageWritePipelineDepth = depth
+        } else { messageWritePipelineDepth = 2 }
+
         databasePolicy = try .init(environment: environment)
         databaseWorkloadPoolBudget = try .init(environment: environment)
         databaseWorkloadPoolIsolationEnabled = try Self.explicitBoolean(
@@ -903,6 +934,10 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         let (dedicatedConnections, dedicatedTotalOverflow) = databaseNonMessagePoolEventLoopThreads.multipliedReportingOverflow(by: dedicatedPerLoop)
         guard !baseOverflow, !dedicatedOverflow, !dedicatedTotalOverflow else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")
+        }
+        let messageDatabaseURLs = Set([databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL))
+        guard Set(messageWriteUnixSockets.keys).isSubset(of: messageDatabaseURLs) else {
+            throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON")
         }
         try databasePolicy.validate(
             databaseURLs: [databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL),

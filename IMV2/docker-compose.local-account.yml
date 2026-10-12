@@ -157,10 +157,10 @@ services:
       IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL: https://localhost:8443
       IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES: 52428800
       IM_V2_DATABASE_URL: postgres://im_v2:${IM_V2_LOCAL_POSTGRES_PASSWORD}@postgres:5432/im_v2
-      # The gateway has foreground command/sync work plus durable fan-out in
-      # one process. One connection per event loop can deadlock that mix.
-      IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 8
-      IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP: 1
+      # Message writes use 4 dedicated EventLoops with 2 connections each.
+      # Other workload connection budgets stay unchanged.
+      IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP: 9
+      IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP: 2
       IM_V2_DATABASE_FOREGROUND_CONNECTIONS_PER_EVENT_LOOP: 2
       IM_V2_DATABASE_SYNC_CONNECTIONS_PER_EVENT_LOOP: 1
       IM_V2_DATABASE_DELIVERY_CONNECTIONS_PER_EVENT_LOOP: 1

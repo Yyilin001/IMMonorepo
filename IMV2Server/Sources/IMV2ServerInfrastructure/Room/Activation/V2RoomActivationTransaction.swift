@@ -258,6 +258,7 @@ struct V2BorrowedRoomConnection: Sendable {
     let physical: PostgresConnection
     let taskExecutor: V2DatabaseEventLoopTaskExecutor
     let isUsable: @Sendable () -> Bool
+    var independentlyConfirmed = false
 }
 
 enum V2BorrowedRoomConnectionScope {
@@ -302,10 +303,23 @@ func v2ExecuteSingleStatementRoomWrite<Value: Sendable>(
             let confirmationTimer = metrics?.startStage(.ownerCommit)
             let status: PostgresConnection.ReadyForQueryState
             do {
-                status = try await connection.physical.confirmReadyForQuery().get()
+                if connection.independentlyConfirmed {
+                    // The dedicated query future finishes at its own Sync. A
+                    // connection-wide barrier here would also wait for other rooms.
+                    if case .failure(let error) = result, let rejected = error as? PostgresIndependentQueryError {
+                        switch rejected {
+                        case .notSubmitted:
+                            state.confirmRollback()
+                            throw rejected
+                        case .outcomeUnknown: throw V2RoomTransactionOutcomeUnknown()
+                        }
+                    }
+                    status = .idle
+                } else { status = try await connection.physical.confirmReadyForQuery().get() }
                 confirmationTimer?.finish()
             } catch {
                 confirmationTimer?.finish()
+                if case PostgresIndependentQueryError.notSubmitted = error { throw error }
                 state.stop(.rollbackFailure)
                 throw V2RoomTransactionOutcomeUnknown()
             }

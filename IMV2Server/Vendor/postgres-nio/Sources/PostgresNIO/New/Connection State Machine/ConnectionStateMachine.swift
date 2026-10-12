@@ -582,6 +582,12 @@ struct ConnectionStateMachine {
         }
     }
     
+    var isIdleForIndependentQuery: Bool {
+        guard case .readyForQuery(let context) = state, context.transactionState == .idle,
+              taskQueue.isEmpty, case .notQuiescing = quiescingState else { return false }
+        return true
+    }
+
     mutating func enqueue(task: PSQLTask) -> ConnectionAction {
         let psqlErrror: PSQLError
 

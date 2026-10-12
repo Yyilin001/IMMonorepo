@@ -2,6 +2,7 @@ import Logging
 import NIOCore
 
 enum HandlerTask: Sendable {
+    case independentQuery(IndependentQueryContext)
     case confirmReadyForQuery(EventLoopPromise<PostgresConnection.ReadyForQueryState>)
     case extendedQuery(ExtendedQueryContext)
     case closeCommand(CloseCommandContext)

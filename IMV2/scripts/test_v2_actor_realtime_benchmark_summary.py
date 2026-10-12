@@ -61,10 +61,14 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
             fixture = Path(directory)
             (fixture / 'access-token-hmac-key.base64').write_text('test-fixture')
             args = SimpleNamespace(baseline_checkout=None, fixture=fixture,
-                gateway_port=21453, metrics_port=23464, pg_user='test', pg_host='localhost', pg_port=24533,
-                candidate_message_write_connections=4,
-                candidate_event_loop_threads=1)
+                gateway_port=21453, metrics_port=23464, pg_user='test', pg_host='localhost', pg_port=24533)
             manifest = dict(userBucket='user-a', shardID='room-a', capacityProfileID='standard', commandWindowLimit=100)
+            defaults = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(defaults['IM_V2_DATABASE_EVENT_LOOP_THREADS'], '4')
+            self.assertEqual(defaults['IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP'], '2')
+            self.assertEqual(defaults['IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS'], '1')
+            args.candidate_message_write_connections = 4
+            args.candidate_event_loop_threads = 1
             one = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
             self.assertEqual(one['IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP'], '4')
             args.candidate_event_loop_threads = 2
@@ -91,9 +95,30 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
             for role in ('FOREGROUND', 'SYNC', 'DELIVERY', 'PROJECTION', 'MAINTENANCE'):
                 key = f'IM_V2_DATABASE_{role}_CONNECTIONS_PER_EVENT_LOOP'
                 self.assertEqual(one[key], two[key])
+                self.assertEqual(defaults[key], two[key])
             for key in ('IM_V2_USER_PROJECTION_CONCURRENCY', 'IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT',
                         'IM_V2_SYNC_DATABASE_WORK_LIMIT', 'IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS'):
                 self.assertEqual(one[key], two[key])
+
+    def test_message_transport_and_depth_are_explicit_and_owned(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'access-token-hmac-key.base64').write_text('test-fixture')
+            args = SimpleNamespace(baseline_checkout=None, fixture=root,
+                output_dir=Path('/tmp/imv2-socket-test'), kind='candidate', shared_postgres=False,
+                gateway_port=21453, metrics_port=23464, pg_user='test', pg_host='localhost', pg_port=24533,
+                candidate_message_write_transport='unix', candidate_message_write_pipeline_depth=1)
+            manifest = dict(userBucket='user-a', shardID='room-a', capacityProfileID='standard', commandWindowLimit=100)
+            values = benchmark.gateway_env(args, 'candidate', 'test_database', 0, root, manifest)
+            self.assertEqual(values['IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH'], '1')
+            mapping = json.loads(values['IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON'])
+            self.assertEqual(mapping, {values['IM_V2_DATABASE_URL']: '/tmp/imv2-socket-test/pg-socket/.s.PGSQL.24533'})
+            args.shared_postgres = True
+            with self.assertRaises(ValueError): benchmark.candidate_message_write_socket(args)
+            args.candidate_message_write_transport = 'tcp'
+            self.assertIsNone(benchmark.candidate_message_write_socket(args))
+            values = benchmark.gateway_env(args, 'candidate', 'test_database', 0, root, manifest)
+            self.assertNotIn('IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON', values)
 
     def test_selected_memory_path_requires_durable_startup_evidence(self):
         args = SimpleNamespace()

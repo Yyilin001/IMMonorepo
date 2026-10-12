@@ -12,7 +12,14 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case policyOwnerStateFacts = "policy_owner_state_facts"
     case ownerConnectionAcquire = "owner_connection_acquire"
     case roomQueueWait = "room_queue_wait"
+    /// Prepared turn admission to start on a persistent connection worker.
     case ownerReadyWait = "owner_ready_wait"
+    /// Confirmed idle connection time, including periods without executable rooms.
+    case ownerWorkerIdle = "owner_worker_idle"
+    /// Idle connection with executable work to actual worker turn start.
+    case ownerWorkerDispatchGap = "owner_worker_dispatch_gap"
+    /// Turn execution through backend idle confirmation; excludes room finalization.
+    case ownerWorkerBusy = "owner_worker_busy"
     case ownerSelectRoom = "owner_select_room"
     case ownerTicketTaskWait = "owner_ticket_task_wait"
     /// Scheduling selection to synchronous registration of the actual loan.
@@ -193,16 +200,22 @@ public protocol V2SendOperationBatchMetricsReading: Sendable {
     func sendOperationBatchMetricsSnapshot() -> V2SendOperationBatchMetricsSnapshot
 }
 
-/// Fixed lifecycle stages of retained owner roots, not SQL transaction counts.
+/// Lifecycle stages of retained room turns, excluding connection worker sessions.
 public enum V2SendOperationOwnerBatchStage: String, CaseIterable, Hashable, Sendable {
-    case acquiringConnection = "acquiring_connection"
     case executing = "executing"
+    case finalizing = "finalizing"
 }
 
 /// Physical-owner coordinator cohorts, distinct from individual room turns.
 /// Started cohorts include owner admission; completed means its actual executor
 /// (or admission rejection) has settled, irrespective of commit outcome.
 public struct V2SendOperationOwnerMetricsSnapshot: Equatable, Sendable {
+    public var connectionWorkers = 0
+    public var acquiringConnectionWorkers = 0
+    public var idleConnectionWorkers = 0
+    public var executingConnectionWorkers = 0
+    public var workerConnectionsOpened: UInt64 = 0
+    public var workerConnectionFailures: UInt64 = 0
     public var retainedItems = 0
     public var retainedBytes = 0
     public var queuedTurns = 0

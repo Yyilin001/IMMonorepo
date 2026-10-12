@@ -147,6 +147,10 @@ enum VirtualActorBusinessProbe {
         resources.databases.use(.postgres(configuration: postgres,
                                                maxConnectionsPerEventLoop: 4),
                                 as: .psql, isDefault: true)
+        if host != nil {
+            resources.databases.use(.postgres(configuration: postgres, maxConnectionsPerEventLoop: 1),
+                as: .init(string: "message-write"), isDefault: false)
+        }
         let database = try V2EventLoopBalancedDatabase(databases: [resources.database(.psql)],
             loanPolicy: .init(maximumConnections: 4, reservedRenewalConnections: 1,
                               maximumQueued: 32, maximumWait: .seconds(5)))
@@ -171,6 +175,7 @@ enum VirtualActorBusinessProbe {
         let (resources, database, sql) = try databaseResources(host: actorConfiguration.hostIdentity)
         V2ProcessTerminationSignal.install()
         var startedApplication: V2RoomActorApplication?
+        var startedOwner: V2RoomServerOwnerResources?
         do {
         guard try await sql.raw("SELECT 1 AS value").first(decoding: CountRow.self)?.value == 1 else {
             throw ProbeError.unexpectedResponse("PostgreSQL unavailable")
@@ -184,7 +189,11 @@ enum VirtualActorBusinessProbe {
             contentReviewMode: .disabled).usingPolicyAuthorizations(policyAuthorizations)
         let capacity = try V2CapacityProfile(id: "standard", limits: .init(
             maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 3))
-        let owner = try V2RoomServerOwnerResources(database: database, writes: writes,
+        let sendDatabase = try V2EventLoopBalancedDatabase(
+            databases: [resources.database(.init(string: "message-write"))],
+            loanPolicy: .init(maximumConnections: 1, reservedRenewalConnections: 0,
+                maximumQueued: 32, maximumWait: .seconds(5)))
+        let owner = try V2RoomServerOwnerResources(database: database, sendDatabase: sendDatabase, writes: writes,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
             invitationSecretIssuer: try invitationSecretIssuer(),
@@ -193,6 +202,7 @@ enum VirtualActorBusinessProbe {
             contentReviewMode: .disabled, queryBatchConfiguration: .init(),
             committedMessageObserver: crashAfterCommit ? CrashAfterCommit(directory: try evidence(".").standardizedFileURL) : nil)
             .usingPolicyAuthorizations(policyAuthorizations)
+        startedOwner = owner
         let factory = try V2RoomServerActivationFactory(owners: ["room-a": owner],
                                                         safetyActorUserID: senderID)
         let application = try await V2RoomActorApplication.start(
@@ -213,6 +223,7 @@ enum VirtualActorBusinessProbe {
             throw V2RoomActorApplicationError.incompleteShutdown
         }
         startedApplication = nil
+        await owner.shutdownDurableSendOperations()
         try await resources.shutdown()
         try marker(prefix + "-stopped")
         print("G4_NATIVE_HOST_RETIRED")
@@ -223,6 +234,7 @@ enum VirtualActorBusinessProbe {
                     throw V2RoomActorApplicationError.incompleteShutdown
                 }
             }
+            await startedOwner?.shutdownDurableSendOperations()
             try? await resources.shutdown()
             throw error
         }

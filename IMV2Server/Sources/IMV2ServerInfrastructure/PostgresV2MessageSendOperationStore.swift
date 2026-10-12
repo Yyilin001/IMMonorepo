@@ -35,6 +35,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         roomAcceptance.invalidate(token)
     }
     private var pinnedOwnerConnection: V2BorrowedRoomConnection?
+    private var messageConnectionGate: V2MessageWriteConnectionGate?
     private var pinnedOwnerConnectionIsUsable: (@Sendable () -> Bool)?
     private var ownerTransactionObserver: (@Sendable (Int32, Bool, Int) async throws -> Void)?
     /// Opt in only when database and writes read the same physical owner.
@@ -384,6 +385,41 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         }
         let deadline = V2RoomSQLDeadline.current.map { min($0, prepared.deadline) } ?? prepared.deadline
         return try await V2RoomSQLDeadline.withDeadline(deadline) {
+            if let gate = messageConnectionGate, let connection = pinnedOwnerConnection {
+                let simple = !writes.contentReviewMode.enqueuesJobs && prepared.commands.allSatisfy {
+                    $0.command.media.isEmpty && $0.command.mentions.isEmpty && $0.command.replyTo == nil && $0.command.forwardedFrom == nil
+                }
+                let keys = try prepared.commands.map { try operationKey(identity: $0.identity) }
+                if simple, Set(keys).count == keys.count, ownerTransactionObserver == nil {
+                    let fast = try await gate.withAccess(shared: true) {
+                        var copy = self
+                        copy.pinnedOwnerConnection = .init(borrowed: connection.borrowed, control: connection.control,
+                            sql: V2IndependentRoomSQLDatabase(base: connection.sql, connection: connection.physical),
+                            physical: connection.physical, taskExecutor: connection.taskExecutor,
+                            isUsable: connection.isUsable, independentlyConfirmed: true)
+                        return try await copy.executeSingleStatementRoomTurn(prepared,
+                            capacityProfile: capacityProfile, identifiers: identifiers, now: now)
+                    }
+                    if let fast { return fast }
+                }
+                return try await gate.withAccess(shared: false) {
+                    var copy = self
+                    copy.messageConnectionGate = nil
+                    let outcome: Result<[V2RoomMessagingResult], any Error>
+                    do { outcome = .success(try await copy.executePreparedRoomSend(prepared,
+                        capacityProfile: capacityProfile, identifiers: identifiers, now: now)) }
+                    catch { outcome = .failure(error) }
+                    do {
+                        guard try await connection.physical.confirmReadyForQuery().get() == .idle else {
+                            throw V2RoomTransactionOutcomeUnknown()
+                        }
+                    } catch {
+                        try? await connection.physical.close().get()
+                        if case .success = outcome { throw V2RoomTransactionOutcomeUnknown() }
+                    }
+                    return try outcome.get()
+                }
+            }
             let complex = writes.contentReviewMode.enqueuesJobs || prepared.commands.contains {
                 !$0.command.media.isEmpty || !$0.command.mentions.isEmpty || $0.command.replyTo != nil || $0.command.forwardedFrom != nil
             }
@@ -486,37 +522,47 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             successMetadata: try commands.map { try V2SendSuccessMetadata.Prepared($0) })
     }
 
-    package func withScheduledSendConnection<Value: Sendable>(deadline: ContinuousClock.Instant,
+    package var scheduledSendMetrics: V2SendOperationBatchMetrics? { sendOperationMetrics }
+
+    /// Lease once for the worker session. Acquisition timeout ends at driver
+    /// entry; each independent turn installs its own absolute SQL deadline.
+    package func withMessageWriteConnection<Value: Sendable>(deadline: ContinuousClock.Instant, pipelineDepth: Int = 1,
         _ body: @escaping @Sendable (V2OwnerConnectionExecutor) async throws -> Value
     ) async throws -> Value {
-        let started = try startScheduledSendConnection(deadline: deadline, body)
-        return try await started.finish()
-    }
-
-    package func startScheduledSendConnection<Value: Sendable>(deadline: ContinuousClock.Instant,
-        _ body: @escaping @Sendable (V2OwnerConnectionExecutor) async throws -> Value
-    ) throws -> V2StartedRoomConnection<Value> {
-        let finalization = V2OwnerPostCommitWork()
-        let timeline = V2OwnerConnectionTimeline.current
-        let enteredAt = ContinuousClock.now
-        timeline?.mark("store_borrow_entered", at: enteredAt)
-        if let started = timeline?.marker("ticket_task_started") {
-            timeline?.record(.ownerTaskToStoreEnter, from: started, to: enteredAt)
-        }
-        V2OwnerConnectionTimeline.current?.configure(sendOperationMetrics)
-        return try v2StartOwnerBatchConnection(database: database, deadline: deadline,
+        try await v2WithOwnerBatchConnection(database: database, deadline: deadline,
             metrics: sendOperationMetrics, acquisitionOnly: true, interrupted: { _ in }) { borrowed, isUsable in
-            var copy = self
-            copy.database = borrowed
-            copy.pinnedOwnerConnectionIsUsable = isUsable
-            copy.pinnedOwnerConnection = V2BorrowedRoomConnectionScope.current
-            copy.postCommitWork = finalization
-            let pinned = copy
-            return try await body(.init(finalize: { await finalization.finish() }, execute: { prepared, capacity, identifiers, now in
-                guard isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-                return try await pinned.executePreparedRoomSend(prepared,
-                    capacityProfile: capacity, identifiers: identifiers, now: now)
-            }))
+            guard let connection = V2BorrowedRoomConnectionScope.current else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
+            }
+            let source = self
+            let gate = pipelineDepth > 1 ? V2MessageWriteConnectionGate() : nil
+            return try await body(.init(isUsable: isUsable, observeClose: { callback in
+                let observation = V2MessageWriteConnectionCloseObservation(callback)
+                connection.physical.closeFuture.whenComplete { _ in observation.notify() }
+                return { observation.disarm() }
+            }, confirmIdle: {
+                guard isUsable() else { return false }
+                do {
+                    if try await connection.physical.confirmReadyForQuery().get() == .idle { return true }
+                } catch { }
+                // Failed/unknown transaction state must never reach another room.
+                try? await connection.physical.close().get()
+                return false
+            }, makeTurn: {
+                let finalization = V2OwnerPostCommitWork()
+                var copy = source
+                copy.database = borrowed
+                copy.pinnedOwnerConnectionIsUsable = isUsable
+                copy.pinnedOwnerConnection = connection
+                copy.postCommitWork = finalization
+                copy.messageConnectionGate = gate
+                let pinned = copy
+                return .init(finalize: { await finalization.finish() }, execute: { prepared, capacity, identifiers, now in
+                    guard isUsable() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+                    return try await pinned.executePreparedRoomSend(prepared,
+                        capacityProfile: capacity, identifiers: identifiers, now: now)
+                })
+            }, independentlySettledTurns: pipelineDepth > 1, taskExecutor: connection.taskExecutor))
         }
     }
 
@@ -610,6 +656,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             return values
         } catch {
             roomAcceptance.invalidate(prepared.token)
+            if case PostgresIndependentQueryError.notSubmitted = error { return nil }
             // The runner exposes raw constraint failures only after an idle
             // confirmation proved the failed statement has settled. A stale
             // cursor is eligible only when all durable mutation counts were zero.

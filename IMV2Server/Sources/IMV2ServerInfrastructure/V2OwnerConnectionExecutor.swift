@@ -4,11 +4,22 @@ import IMV2ServerContracts
 import IMV2ActorContracts
 import IMV2Core
 import Synchronization
+import _Concurrency
 
-/// `execute` is bound to a borrowed connection and must remain inside the pool body.
-/// Retain only `finalize`, and await it after the physical loan returns, before ACK.
+/// Scoped to one exclusively owned physical connection. Each turn gets its own
+/// execution copy and post-commit collector; none of these captures may escape
+/// the connection callback except the connection-free finalization action.
 package struct V2OwnerConnectionExecutor: Sendable {
-    package var finalize: @Sendable () async -> Void = {}
+    package let isUsable: @Sendable () -> Bool
+    package let observeClose: @Sendable (@escaping @Sendable () -> Void) -> @Sendable () -> Void
+    package let confirmIdle: @Sendable () async -> Bool
+    package let makeTurn: @Sendable () -> V2OwnerConnectionTurn
+    package var independentlySettledTurns = false
+    package var taskExecutor: (any TaskExecutor)? = nil
+}
+
+package struct V2OwnerConnectionTurn: Sendable {
+    package let finalize: @Sendable () async -> Void
     package let execute: @Sendable (V2PreparedMessageSendBatch, V2CapacityProfile,
         V2AcceptanceIDFactory, @escaping @Sendable () -> Date) async throws -> [V2RoomMessagingResult]
 }
@@ -16,21 +27,19 @@ package struct V2OwnerConnectionExecutor: Sendable {
 public typealias V2RoomSendPreparation = @Sendable ([V2MessageSendOperationCommand],
     V2RoomActivationToken, ContinuousClock.Instant) async throws -> V2PreparedMessageSendBatch
 
+/// One lease for an entire worker session, not one message or room transaction.
 package typealias V2ScheduledSendConnection = @Sendable (ContinuousClock.Instant,
-    @escaping @Sendable (V2OwnerConnectionExecutor) async throws -> V2ScheduledSendOutcome?) async throws -> V2ScheduledSendOutcome?
-package typealias V2ScheduledSendConnectionStart = @Sendable (ContinuousClock.Instant,
-    @escaping @Sendable (V2OwnerConnectionExecutor) async throws -> V2ScheduledSendOutcome?) throws -> V2StartedRoomConnection<V2ScheduledSendOutcome?>
-package typealias V2ScheduledSendExecution = @Sendable (V2OwnerConnectionExecutor,
+    @escaping @Sendable (V2OwnerConnectionExecutor) async throws -> Void) async throws -> Void
+package typealias V2ScheduledSendExecution = @Sendable (V2OwnerConnectionTurn,
     V2PreparedMessageSendBatch) async throws -> [V2RoomMessagingResult]
 
-/// Carries a settled turn through physical loan return without an actor handoff.
+/// Delivered to the already waiting room task after the database cycle settles.
+/// Finalization carries no borrowed database and never releases room ordering early.
 package struct V2ScheduledSendOutcome: Sendable {
     let result: Result<[V2RoomMessagingResult], any Error>
     let finalize: @Sendable () async -> Void
-    let settle: @Sendable (Result<[V2RoomMessagingResult], any Error>) async -> Void
 }
 
-/// Stores only post-commit memory/notification work, never a borrowed database.
 package final class V2OwnerPostCommitWork: Sendable {
     private let actions = Mutex<[@Sendable () async -> Void]>([])
     package func append(_ action: @escaping @Sendable () async -> Void) { actions.withLock { $0.append(action) } }
@@ -40,21 +49,17 @@ package final class V2OwnerPostCommitWork: Sendable {
             value.removeAll()
             return pending
         }
+        // These nonthrowing memory/notification actions must finish even when the
+        // room task's caller has cancelled after a confirmed durable commit.
         for action in pending { await action() }
     }
 }
 
-/// Invoked on actual pool settlement, before resuming the suspended borrower.
-/// Physical pools notify synchronously. The dispatcher also settles calls
-/// rejected before a loan exists; injected test borrowers use that same boundary.
-package final class V2ScheduledSendLoanReturn: Sendable {
-    @TaskLocal package static var current: V2ScheduledSendLoanReturn?
+/// The physical close future retains only this disarmable callback, never the
+/// dispatcher after its worker has released the connection scope.
+package final class V2MessageWriteConnectionCloseObservation: Sendable {
     private let callback: Mutex<(@Sendable () -> Void)?>
     package init(_ callback: @escaping @Sendable () -> Void) { self.callback = Mutex(callback) }
-    /// Only the outer borrowing call claims the callback. Nested work cannot
-    /// release its owner's scheduling position by returning a different loan.
-    package func takeCallback() -> (@Sendable () -> Void)? {
-        callback.withLock { value in let action = value; value = nil; return action }
-    }
-    package func notify() { takeCallback()?() }
+    package func notify() { callback.withLock { value in let result = value; value = nil; return result }?() }
+    package func disarm() { callback.withLock { $0 = nil } }
 }

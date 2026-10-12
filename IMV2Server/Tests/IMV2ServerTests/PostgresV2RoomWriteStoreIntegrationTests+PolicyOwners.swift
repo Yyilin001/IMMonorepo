@@ -267,11 +267,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                                 #expect(owner.eventLoop.inEventLoop)
                                 transactions.withLock { $0 += 1 }
                             }
-                            let (value, finalize) = try await checked.withScheduledSendConnection(
+                            let (value, finalize) = try await checked.withMessageWriteConnection(
                                 deadline: V2RoomSQLDeadline.current ?? (.now + .seconds(5))) { connection in
-                                let value = try await connection.execute(prepared, profile, .init(), Date.init)
+                                let turn = connection.makeTurn()
+                                let value = try await turn.execute(prepared, profile, .init(), Date.init)
                                 #expect(owner.eventLoop.inEventLoop)
-                                return (value, connection.finalize)
+                                return (value, turn.finalize)
                             }
                             await finalize()
                             #expect(transactions.withLock { $0 } > 0)

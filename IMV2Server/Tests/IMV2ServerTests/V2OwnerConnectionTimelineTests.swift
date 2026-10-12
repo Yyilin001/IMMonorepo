@@ -33,36 +33,6 @@ struct V2OwnerConnectionTimelineTests {
         #expect(stages[.ownerGateQueuedCapacityWait]?.totalMilliseconds == 5)
         #expect(stages[.ownerPoolPeerBeforeGate]?.totalMilliseconds == 2)
     }
-    @Test("resource snapshot exposes real acquisition boundaries on the same ticket")
-    func acquisitionSnapshot() {
-        let timeline = V2OwnerConnectionTimeline(), start = ContinuousClock.now
-        timeline.mark("ticket_task_started", at: start)
-        timeline.mark("pool_request_started", at: start + .milliseconds(1))
-        timeline.mark("pool_assignment_published", at: start + .milliseconds(2))
-        timeline.mark("pool_assignment_callback_entered", at: start + .milliseconds(4))
-        timeline.mark("driver_entered", at: start + .milliseconds(5))
-        let window = timeline.resourceWindow()
-        #expect(window.hasAcquisitionMarkers)
-        #expect(window.taskStarted == start)
-        #expect(window.poolRequested == start + .milliseconds(1))
-        #expect(window.assignmentPublished == start + .milliseconds(2))
-        #expect(window.assignmentCallback == start + .milliseconds(4))
-        #expect(window.borrowed == start + .milliseconds(5))
-    }
-    @Test("direct registration determines the resource phase independently of its later settlement task")
-    func directRegistrationBoundary() {
-        let timeline = V2OwnerConnectionTimeline(), start = ContinuousClock.now
-        timeline.mark("ticket_entry_started", at: start)
-        timeline.mark("pool_request_started", at: start + .milliseconds(1))
-        timeline.mark("driver_entered", at: start + .milliseconds(2))
-        timeline.mark("pool_returned", at: start + .milliseconds(3))
-        timeline.mark("ticket_task_started", at: start + .milliseconds(20))
-        let window = timeline.resourceWindow()
-        #expect(window.taskStarted == start)
-        #expect(window.borrowed == start + .milliseconds(2))
-        #expect(window.returned == start + .milliseconds(3))
-        #expect(window.pendingCategory(at: start + .microseconds(500)) == "pool_request")
-    }
     @Test("late recorder binding preserves ticket time and SQL gaps are distinct from future time")
     func completedIntervals() {
         let metrics = V2SendOperationBatchMetrics(), timeline = V2OwnerConnectionTimeline()

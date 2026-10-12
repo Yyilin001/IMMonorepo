@@ -28,7 +28,8 @@ struct GatewayDatabaseTopology {
     let maintenanceUserShardStorage: V2StaticUserShardStorageRegistry
 
     func databaseForRole(for role: V2PostgresWorkloadPoolBudget.Role, url: String) -> (any Database)? {
-        databasesByRole[role]?[url] ?? databasesByRole[.foreground]?[url]
+        if role == .messageWrite { return databasesByRole[.messageWrite]?[url] }
+        return databasesByRole[role]?[url] ?? databasesByRole[.foreground]?[url]
     }
 
     /// Counts each actual composed pool once; facades share the same gates.
@@ -82,6 +83,7 @@ struct GatewayDatabaseTopology {
         logger: Logger,
         actorConfiguration: V2RoomActorApplicationConfiguration
     ) async throws -> Self {
+        try configuration.requirePersistentMessageWritePool()
         let applicationName = actorConfiguration.hostIdentity.map(V2ActorPostgresSessionIdentity.applicationName)
         let workloads = resources
         let resources = workloads.control
@@ -132,6 +134,7 @@ struct GatewayDatabaseTopology {
                         applicationName: applicationName,
                         maximumConnectionsPerEventLoop: capacity,
                         sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil,
+                        unixSocketPath: role == .messageWrite ? configuration.messageWriteUnixSockets[url] : nil,
                         prepareRoomQueries: (role == .messageWrite || role == .foreground || role == .sync)
                             && ProcessInfo.processInfo.environment["IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED"] != "false"
                     ),
@@ -302,9 +305,16 @@ private func postgresDatabaseConfiguration(
     applicationName: String?,
     maximumConnectionsPerEventLoop: Int,
     sessionTimeouts: V2RoomActivationSQLTimeouts? = nil,
+    unixSocketPath: String? = nil,
     prepareRoomQueries: Bool = false
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
+    if let unixSocketPath {
+        configuration.coreConfiguration = .init(unixSocketPath: unixSocketPath,
+            username: configuration.coreConfiguration.username,
+            password: configuration.coreConfiguration.password,
+            database: configuration.coreConfiguration.database)
+    }
     if let applicationName {
         configuration.coreConfiguration.options.additionalStartupParameters.removeAll { $0.0 == "application_name" }
         configuration.coreConfiguration.options.additionalStartupParameters.append(("application_name", applicationName))

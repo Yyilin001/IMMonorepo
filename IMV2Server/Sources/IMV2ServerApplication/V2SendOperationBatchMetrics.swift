@@ -298,6 +298,12 @@ public struct V2AggregatedSendOperationOwnerMetrics: V2SendOperationOwnerMetrics
         var stagesSupported = !owners.isEmpty
         for owner in owners {
             let item = await owner.sendOperationOwnerMetricsSnapshot()
+            result.connectionWorkers += item.connectionWorkers
+            result.acquiringConnectionWorkers += item.acquiringConnectionWorkers
+            result.idleConnectionWorkers += item.idleConnectionWorkers
+            result.executingConnectionWorkers += item.executingConnectionWorkers
+            result.workerConnectionsOpened = V2SendOperationBatchMetrics.add(result.workerConnectionsOpened, item.workerConnectionsOpened)
+            result.workerConnectionFailures = V2SendOperationBatchMetrics.add(result.workerConnectionFailures, item.workerConnectionFailures)
             result.retainedItems += item.retainedItems
             result.retainedBytes += item.retainedBytes
             result.queuedTurns += item.queuedTurns

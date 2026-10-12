@@ -208,6 +208,16 @@ def verify_fixture(path):
     return manifest
 
 
+def candidate_message_write_socket(args):
+    if getattr(args, 'candidate_message_write_transport', 'tcp') == 'tcp':
+        return None
+    if args.kind != 'candidate' or args.shared_postgres:
+        raise ValueError('Unix message writes require an owned candidate-only PostgreSQL cluster')
+    path = args.output_dir / 'pg-socket' / f'.s.PGSQL.{args.pg_port}'
+    if len(str(path).encode('utf-8')) > 103:
+        raise ValueError('owned PostgreSQL Unix socket path exceeds 103 bytes')
+    return path
+
 def gateway_env(args, kind, database, index, actors, manifest):
     values = {}
     defaults_checkout = args.baseline_checkout or ROOT
@@ -243,9 +253,14 @@ def gateway_env(args, kind, database, index, actors, manifest):
             raise ValueError('candidate Actor transport requires binary invocations')
         values['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'] = 'true'
         values['IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED'] = 'true' if getattr(args, 'candidate_message_write_prepared_queries', 'enabled') == 'enabled' else 'false'
+        values['IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH'] = str(getattr(args, 'candidate_message_write_pipeline_depth', 2))
+        socket = candidate_message_write_socket(args)
+        values.pop('IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON', None)
+        if socket is not None:
+            values['IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON'] = json.dumps({values['IM_V2_DATABASE_URL']: str(socket)})
         # Keep non-message workload roles fixed; the dedicated policy pool can vary independently.
-        node_message_connections = getattr(args, 'candidate_message_write_connections', 4)
-        loops = getattr(args, 'candidate_event_loop_threads', 1)
+        node_message_connections = getattr(args, 'candidate_message_write_connections', 8)
+        loops = getattr(args, 'candidate_event_loop_threads', 4)
         message_connections = node_message_connections // loops
         values.update(IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP=str(getattr(args, 'candidate_policy_control_connections', 4)),
                       IM_V2_DATABASE_EVENT_LOOP_THREADS=str(loops),
@@ -2343,16 +2358,20 @@ def main():
     parser.add_argument('--loader-binary',required=True,type=Path,help='one Release binary used for both revisions')
     parser.add_argument('--nats-binary',type=Path,default=Path('/opt/homebrew/bin/nats-server'))
     parser.add_argument('--kind',choices=('baseline','candidate','both'),default='both')
-    parser.add_argument('--candidate-event-loop-threads', type=int, choices=(1, 2), default=1,
-                        help='candidate infrastructure/message EventLoops; non-message pools keep one loop')
+    parser.add_argument('--candidate-event-loop-threads', type=int, choices=(1, 2, 3, 4), default=4,
+                        help='candidate message EventLoops (default: 4); non-message pools keep one loop')
     parser.add_argument('--candidate-actor-binary-invocations', choices=('enabled',), default='enabled',
                         help='Actor Protobuf transport requires binary distributed invocation framing')
     parser.add_argument('--candidate-message-write-prepared-queries', choices=('enabled', 'disabled'), default='enabled',
                         help='candidate bounded per-connection message SQL shape cache')
     parser.add_argument('--candidate-send-path-trace-mode', choices=('sampled', 'all'), default='sampled',
                         help='candidate detailed diagnostics: stable 1/64 operation sample or all slow requests')
-    parser.add_argument('--candidate-message-write-connections', type=int, default=4,
-                        help='candidate-only total message connections per node; divided across selected loops (default: 4)')
+    parser.add_argument('--candidate-message-write-connections', type=int, default=8,
+                        help='candidate-only total message connections per node; divided across selected loops (default: 8)')
+    parser.add_argument('--candidate-message-write-pipeline-depth', type=int, choices=(1, 2), default=2,
+                        help='bounded independent SQL cycles per real write connection; 1 disables pipelining')
+    parser.add_argument('--candidate-message-write-transport', choices=('tcp', 'unix'), default='tcp',
+                        help='message-write pool transport; unix requires candidate-only owned PostgreSQL')
     parser.add_argument('--candidate-policy-control-connections', type=int, default=4,
                         help='candidate-only policy control connections per node (one control loop); default: 4')
     parser.add_argument('--candidate-authorization-mode', choices=('memory',), default='memory',
@@ -2407,6 +2426,7 @@ def main():
             setattr(args,name,getattr(args,name).resolve())
     for name in ('app_xctestrun','app_derived_data','app_trusted_ca','app_tls_certificate','app_tls_key'):
         if getattr(args,name) is not None: setattr(args,name,getattr(args,name).resolve())
+    candidate_message_write_socket(args)
     scenario_phases = [] if app_canary_enabled(args) else json.loads(args.scenario.read_text())['phases']
     measured = [phase['name'] for phase in scenario_phases if phase.get('messagesPerSecond',0)>0]
     if args.measurement_phase is None and not app_canary_enabled(args):
@@ -2486,6 +2506,8 @@ def main():
                   candidatePolicyControlConnectionsPerNode=args.candidate_policy_control_connections,
                   candidateMessageWriteConnectionsPerEventLoop=args.candidate_message_write_connections // args.candidate_event_loop_threads,
                   candidateMessageWriteConnectionsPerNode=args.candidate_message_write_connections,
+                  candidateMessageWritePipelineDepth=args.candidate_message_write_pipeline_depth,
+                  candidateMessageWriteDatabaseTransport=args.candidate_message_write_transport,
                   candidateEventLoopThreads=args.candidate_event_loop_threads,
                   candidateDBTaskExecutor='event_loop',
                   candidateSendPathTraceMode=args.candidate_send_path_trace_mode,
@@ -2527,8 +2549,12 @@ def main():
         pg_directory=args.output_dir/'postgres'
         run_command([str(args.pg_bin_directory/'initdb'),'-D',str(pg_directory),'--auth=trust',
                      '--username',args.pg_user,'--no-locale'],args.output_dir/'postgres-init.log')
+        socket = candidate_message_write_socket(args)
+        if socket is not None:
+            socket.parent.mkdir(mode=0o700)
+        socket_directory = str(socket.parent).replace("'", "''") if socket is not None else ''
         (pg_directory/'postgresql.auto.conf').write_text("listen_addresses = '127.0.0.1'\n"
-                     +f"port = {args.pg_port}\nmax_connections = 320\nunix_socket_directories = ''\n")
+                     +f"port = {args.pg_port}\nmax_connections = 320\nunix_socket_directories = '{socket_directory}'\n")
         run_command([str(args.pg_bin_directory/'pg_ctl'),'-D',str(pg_directory),'-l',
                      str(args.output_dir/'postgres.log'),'-w','start'],args.output_dir/'postgres-start.log')
         pg_started=True

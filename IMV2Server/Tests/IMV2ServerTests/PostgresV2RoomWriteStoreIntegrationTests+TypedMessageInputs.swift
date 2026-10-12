@@ -8,6 +8,80 @@ import SQLKit
 import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("Plain direct append skips empty event statements and preserves divergent events and realtime heads",
+          arguments: ["aligned", "diverged", "mixed"])
+    func plainDirectEventStatementSelection(mode: String) async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { _, owner, _, sql, _ in
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+                .deletingLastPathComponent().deletingLastPathComponent()
+            let journal = try String(contentsOf: root.appending(path: "IMV2/sql/realtime-change-journal.sql"), encoding: .utf8)
+            for statement in postgresStatements(in: journal) where !statement.isEmpty && statement != "BEGIN" && statement != "COMMIT" {
+                try await sql.raw("\(unsafeRaw: statement)").run()
+            }
+            try await sql.raw("CREATE TABLE im_v2.test_event_statements (inserted_rows bigint NOT NULL)").run()
+            try await sql.raw("""
+                CREATE FUNCTION im_v2.test_capture_event_statement() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    INSERT INTO im_v2.test_event_statements SELECT count(*) FROM test_new_events;
+                    RETURN NULL;
+                END $$
+                """).run()
+            try await sql.raw("""
+                CREATE TRIGGER test_capture_event_statement AFTER INSERT ON im_v2.room_events
+                REFERENCING NEW TABLE AS test_new_events FOR EACH STATEMENT
+                EXECUTE FUNCTION im_v2.test_capture_event_statement()
+                """).run()
+            let now = Date(), fingerprint = try V2SendMessageFingerprint(version: 3, digest: Data(repeating: 7, count: 32))
+            var inputs: [PlainRoomLogMessageInput] = []
+            for ordinal in 0..<2 {
+                let room = UUID(), diverged = mode == "diverged" || (mode == "mixed" && ordinal == 1)
+                try await insertSummaryFixtureRoom(on: sql, room: room, kind: "direct", sequence: 10,
+                    revision: 1, lastEventAt: now, createdAt: now)
+                try await sql.raw("UPDATE im_v2.rooms SET timeline_sequence=\(bind: diverged ? 9 : 10) WHERE room_id=\(bind: room)").run()
+                inputs.append(.init(ordinal: ordinal, roomID: room, messageID: UUID(), eventID: UUID(),
+                    senderID: senderUUID, clientMessageID: UUID(), persistsRoomAdmission: false,
+                    roomSequence: 11, timelineSequence: diverged ? 10 : 11, commandWindowUsed: 0,
+                    text: "event selection \(ordinal)", entities: [], replyToMessageID: nil,
+                    forwardedFromMessageID: nil, forwardedFromUserID: nil, membershipRevision: 1,
+                    fingerprint: fingerprint, createdAtPostgresMicroseconds: 1_000_000,
+                    runtimeGuard: .init(capacityProfileID: "standard"), directRecipientID: memberTwoUUID))
+            }
+            let batch = inputs
+            try await v2WithRoomActivationTransaction(database: owner, deadline: .now + .seconds(5)) { borrowed in
+                try await PlainDirectRoomLogBatchWritePath.persist(inputs: batch, sql: borrowed as! any SQLDatabase)
+            }
+            struct Statement: Decodable { let inserted_rows: Int64 }
+            let statements = try await sql.raw("SELECT inserted_rows FROM im_v2.test_event_statements").all(decoding: Statement.self)
+            #expect(statements.map(\.inserted_rows) == (mode == "aligned" ? [] : [mode == "mixed" ? 1 : 2]))
+            struct Stored: Decodable {
+                let storage: String, message_event: UUID?, completion_event: UUID, persisted_event: UUID?
+                let fingerprint: Data, room_sequence: Int64, timeline_sequence: Int64, head_sequence: Int64
+            }
+            for input in batch {
+                let stored = try #require(try await sql.raw("""
+                    SELECT m.accepted_event_storage AS storage, m.accepted_event_id AS message_event,
+                           c.event_id AS completion_event, e.event_id AS persisted_event,
+                           c.request_fingerprint AS fingerprint, r.room_sequence, r.timeline_sequence,
+                           h.room_sequence AS head_sequence
+                    FROM im_v2.messages m JOIN im_v2.message_send_completions c USING(message_id)
+                    JOIN im_v2.rooms r ON r.room_id=m.room_id
+                    JOIN im_v2.realtime_dirty_room_heads h ON h.room_id=m.room_id
+                    LEFT JOIN im_v2.room_events e ON e.event_id=c.event_id
+                    WHERE m.message_id=\(bind: input.messageID)
+                    """).first(decoding: Stored.self))
+                let aligned = input.roomSequence == input.timelineSequence
+                #expect(stored.storage == (aligned ? "message_row" : "room_event"))
+                #expect(stored.message_event == (aligned ? input.eventID : nil))
+                #expect(stored.persisted_event == (aligned ? nil : input.eventID))
+                #expect(stored.completion_event == input.eventID)
+                #expect(stored.fingerprint == fingerprint.digest)
+                #expect(stored.room_sequence == input.roomSequence)
+                #expect(stored.timeline_sequence == input.timelineSequence)
+                #expect(stored.head_sequence == input.roomSequence)
+            }
+        }
+    }
+
     @Test("Typed message inputs preserve full batches, binary fingerprints, text, entities and microseconds")
     func typedPlainDirectMessageInputs() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { control, owner, _, sql, _ in

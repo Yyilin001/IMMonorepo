@@ -33,7 +33,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
                 timeout: .seconds(1)))
-            let ownerResources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
+            let sendDatabase = try v2FixtureMessageWriteDatabase(database, capacity: 1)
+            let ownerResources = try V2RoomServerOwnerResources(database: database, sendDatabase: sendDatabase, writes: writes,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -137,16 +138,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(recovered.messageID == receipt.messageID)
                 #expect(try await count("im_v2.messages", on: sql) == 1)
                 #expect(await successor.stop(deadline: .now + .seconds(10)).completed)
+                await ownerResources.shutdownDurableSendOperations()
                 let loans = database.loanMetricsSnapshot()
                 #expect((loans.classes[.activation]?.granted ?? 0) == 2)
                 #expect((loans.classes[.ordinary]?.granted ?? 0) > 0)
                 #expect(loans.classes.values.allSatisfy { $0.inFlight == 0 && $0.queued == 0 })
-                for source in [V2DatabaseLoanSource.durableOwner, .groupEventSubscribe, .roomRecovery, .lifecycle] {
+                for source in [V2DatabaseLoanSource.groupEventSubscribe, .roomRecovery, .lifecycle] {
                     let observed = try #require(loans.observations[source])
                     #expect(observed.actualHeldCount > 0)
                     #expect((observed.stages[.sql]?.count ?? 0) > 0)
                     #expect(observed.stages.values.allSatisfy { $0.active == 0 })
                 }
+                let messageLoans = sendDatabase.loanMetricsSnapshot()
+                #expect(messageLoans.classes.values.allSatisfy { $0.inFlight == 0 && $0.queued == 0 })
+                let messageWork = try #require(messageLoans.observations[.durableOwner])
+                #expect(messageWork.actualHeldCount > 0 && (messageWork.stages[.sql]?.count ?? 0) > 0)
                 #expect((loans.observations[.groupEventSubscribe]?.sqlPhases[.fence]?.count ?? 0) > 0)
                 #expect((loans.observations[.groupEventSubscribe]?.sqlPhases[.readBody]?.count ?? 0) > 0)
                 let sqlContinuations = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations
@@ -156,6 +162,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } catch {
                 _ = await first.stop(deadline: .now + .seconds(10))
                 _ = await next?.stop(deadline: .now + .seconds(10))
+                await ownerResources.shutdownDurableSendOperations()
                 await database.shutdownLoans()
                 throw error
             }

@@ -48,7 +48,7 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         return copy
     }
 
-    public init(database: any Database, sendDatabase: (any Database)? = nil, writes: PostgresV2RoomWriteStore,
+    public init(database: any Database, sendDatabase: any Database, writes: PostgresV2RoomWriteStore,
                 membershipIdentities: any V2MembershipIdentitySnapshotValidating,
                 invitationIdentities: any V2GroupInvitationIdentityReading,
                 invitationSecretIssuer: V2GroupInviteSecretIssuer,
@@ -81,7 +81,7 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         // Opt in only when writes and database share the physical owner.
         self.durableSendSchedulingConfiguration = durableSendSchedulingConfiguration
         self.database = database
-        self.sendDatabase = sendDatabase ?? database
+        self.sendDatabase = sendDatabase
         self.activationInitializationDatabase = (database as? V2EventLoopBalancedDatabase)?
             .usingLoanClass(.activation) ?? database
         self.mutations = .init(database:database,contentReviewMode:contentReviewMode,identities:membershipIdentities,committedMessageObserver:facts)

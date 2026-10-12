@@ -7,6 +7,25 @@ import IMV2Core
 import Testing
 
 struct V2GatewayRuntimeConfigurationTests {
+    @Test("persistent message workers reject a shared pool and require an explicit write budget")
+    func persistentMessageWritePoolRequired() throws {
+        var values = runtimeValues
+        var config = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(throws: V2GatewayRuntimeConfigurationError.missing("IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP")) {
+            try config.requirePersistentMessageWritePool()
+        }
+        values["IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED"] = "false"
+        config = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED")) {
+            try config.requirePersistentMessageWritePool()
+        }
+        values["IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED"] = "true"
+        values["IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP"] = "1"
+        values["IM_V2_DATABASE_MAX_CONNECTIONS_PER_EVENT_LOOP"] = "9"
+        config = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        try config.requirePersistentMessageWritePool()
+    }
+
     @Test("online room coverage limits are independent of socket admission")
     func onlineDeliveryCapacity() throws {
         var values = runtimeValues
@@ -965,6 +984,39 @@ struct V2GatewayRuntimeConfigurationTests {
         values["IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP"] = "0"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
+    @Test("message pipeline and Unix transport are bounded and keep canonical shard identity")
+    func messagePipelineConfiguration() throws {
+        let defaults = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(runtimeValues))
+        #expect(defaults.messageWritePipelineDepth == 2)
+        #expect(defaults.messageWriteUnixSockets.isEmpty)
+        for depth in [1, 2] {
+            var values = runtimeValues
+            values["IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH"] = String(depth)
+            #expect(try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+                .durableSendSchedulingConfiguration().pipelineDepth == depth)
+        }
+        for raw in ["0", "3", "invalid"] {
+            var values = runtimeValues; values["IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH"] = raw
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_PIPELINE_DEPTH")) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+            }
+        }
+        var values = runtimeValues
+        let url = values["IM_V2_DATABASE_URL"]!
+        let mapping = [url: "/tmp/.s.PGSQL.5432"]
+        values["IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON"] = String(decoding: try JSONEncoder().encode(mapping), as: UTF8.self)
+        let sockets = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(sockets.databaseURL == defaults.databaseURL)
+        #expect(sockets.messageWriteUnixSockets == mapping)
+        for mapping in [[url: "relative"], [url: "/" + String(repeating: "a", count: 103)],
+            [url: "/tmp/\u{0}bad"], ["postgres://unknown/db": "/tmp/socket"], [:]] {
+            values["IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON"] = String(decoding: try JSONEncoder().encode(mapping), as: UTF8.self)
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON")) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+            }
         }
     }
 

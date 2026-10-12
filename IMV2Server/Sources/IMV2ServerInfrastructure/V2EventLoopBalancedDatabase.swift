@@ -228,7 +228,6 @@ public final class V2EventLoopBalancedDatabase: Database, SQLDatabase, Sendable,
         if let started = timeline?.marker("physical_borrow_entered") {
             timeline?.record(.ownerPhysicalToPoolRequest, from: started, to: requestedAt)
         }
-        let loanReturned = V2ScheduledSendLoanReturn.current?.takeCallback()
         let caller = V2DatabaseLoanObservationContext.source
         let source = caller != .other ? caller : observationSource ??
             (loanClass == .activation ? .lifecycle : loanClass == .renewal ? .renewal : .other)
@@ -259,7 +258,6 @@ public final class V2EventLoopBalancedDatabase: Database, SQLDatabase, Sendable,
                     actual.whenComplete { result in
                         lease.release()
                         timeline?.mark("pool_returned")
-                        loanReturned?()
                         // Only the terminal Sendable result crosses the facade.
                         // Connection assignment and SQL never wait on that loop.
                         completion.completeWith(result)
