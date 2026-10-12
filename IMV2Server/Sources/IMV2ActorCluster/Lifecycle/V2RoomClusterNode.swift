@@ -81,6 +81,7 @@ public actor V2RoomClusterNode {
     private let policyMutations: (any V2PolicyMutationServing)?
     private let policyOwnership: (any V2PolicyOwnershipServing)?
     private let forwardPairs: (any V2RoomForwardPairServing)?
+    private let placementDrain: (any V2ActorPlacementDraining)?
 
     public init(configuration: V2RoomClusterNodeConfiguration, identity: V2ActorHostIdentity,
                 host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,
@@ -89,7 +90,8 @@ public actor V2RoomClusterNode {
                 runtimeConfiguration: V2RoomRuntimeConfiguration,
                 policyOwnership: (any V2PolicyOwnershipServing)? = nil,
                 policyMutations: (any V2PolicyMutationServing)? = nil,
-                forwardPairs: (any V2RoomForwardPairServing)? = nil) {
+                forwardPairs: (any V2RoomForwardPairServing)? = nil,
+                placementDrain: (any V2ActorPlacementDraining)? = nil) {
         self.configuration = configuration
         self.identity = identity
         self.host = host
@@ -100,6 +102,7 @@ public actor V2RoomClusterNode {
         self.policyOwnership = policyOwnership
         self.policyMutations = policyMutations
         self.forwardPairs = forwardPairs
+        self.placementDrain = placementDrain
     }
 
     public func start() async throws -> V2RoomClusterHostDescriptor {
@@ -111,7 +114,7 @@ public actor V2RoomClusterNode {
         settings.threadPoolSize = configuration.threadPoolSize
         settings.serialization.binaryDistributedInvocations = true
         // 集群成员关系只用于发现。对等节点超时不能让本进程
-        // 放弃或认领受数据库围栏保护的房间激活。
+        // 放弃或认领由已提交归属和原生生命周期管理的房间激活。
         settings.downingStrategy = .none
         settings.onDownAction = .none
         // 分布式 Codable 序列化器会再次对 SignedPacket.body 进行 base64 编码。
@@ -140,7 +143,7 @@ public actor V2RoomClusterNode {
             maximumInboundRequests: runtimeConfiguration.maximumActivationWaitersPerHost,
             localGeneration: generation,
             actorSystem: system, policyOwnership: policyOwnership, policyMutations: policyMutations,
-            forwardPairs: forwardPairs
+            forwardPairs: forwardPairs, placementDrain: placementDrain
         )
         self.inbound = inbound
         self.localGeneration = generation

@@ -46,15 +46,6 @@ struct V2RoomActivationCommitAckLossTests {
             try await fixture.installSchema(on: sql)
             try await fixture.seedRoom(on: sql)
 
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let hostIdentity = V2ActorHostIdentity(hostID: try .init("ack-loss-host"),
-                incarnationID: UUID())
-            guard case .acquired(let lease) = try await leases.acquire(roomID: roomID,
-                owner: owner, host: hostIdentity, duration: .init(30_000)) else {
-                throw V2CommitAckLossTestError.activationUnavailable
-            }
-            let scope = try V2RoomActivationWriteScope(tokens: [lease.token])
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let operationID = UUID(), messageID = UUID(), eventID = UUID()
             let command = try V2SendMessageCommand(roomID: roomID, senderUserID: senderID,
@@ -63,16 +54,18 @@ struct V2RoomActivationCommitAckLossTests {
             let profile = try fixture.forwardImportTestProfile()
             let identifiers = V2AcceptanceIdentifiers(messageID: .init(uuid: messageID),
                 eventID: .init(uuid: eventID))
-            let throughProxy = PostgresV2RoomWriteStore(database: proxied.database(.psql))
-                .usingActivationScope(scope)
-
-            // The proxy forwards the full successful transaction to PostgreSQL,
-            // observes its COMMIT CommandComplete, then discards that ACK before
-            // the production borrowed-connection primitive can receive it.
+            // The real native room lane observes the uncertain result. Its
+            // physical work settles and the Host retires before a fresh scope
+            // recovers the same durable operation from PostgreSQL.
             await #expect(throws: V2RoomTransactionOutcomeUnknown.self) {
-                _ = try await V2RoomSQLDeadline.withDeadline(.now + .seconds(5)) {
-                    try await throughProxy.accept(command: command, capacityProfile: profile,
-                        identifiers: identifiers, now: now)
+                try await withRoomActivation(database: database, roomID: roomID) { token in
+                    let scope = try V2RoomActivationWriteScope(tokens: [token])
+                    let throughProxy = PostgresV2RoomWriteStore(database: proxied.database(.psql))
+                        .usingActivationScope(scope)
+                    _ = try await V2RoomSQLDeadline.withDeadline(.now + .seconds(5)) {
+                        try await throughProxy.accept(command: command, capacityProfile: profile,
+                            identifiers: identifiers, now: now)
+                    }
                 }
             }
             #expect(proxy.observedSuccessfulCommit)
@@ -89,10 +82,12 @@ struct V2RoomActivationCommitAckLossTests {
 
             // A fresh independent client replays the same durable operation ID.
             // New executor-minted IDs cannot create a second message or event.
-            let replay = try await PostgresV2RoomWriteStore(database: database)
-                .usingActivationScope(scope).accept(command: command, capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())),
-                    now: now.addingTimeInterval(1))
+            let replay = try await withRoomActivation(database: database, roomID: roomID) { token in
+                try await PostgresV2RoomWriteStore(database: database)
+                    .usingActivationScope(.init(tokens: [token])).accept(command: command, capacityProfile: profile,
+                        identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())),
+                        now: now.addingTimeInterval(1))
+            }
             guard case .idempotent(let recovered) = replay else {
                 throw V2CommitAckLossTestError.replayNotIdempotent
             }
@@ -100,7 +95,6 @@ struct V2RoomActivationCommitAckLossTests {
             #expect(try await fixture.count("im_v2.message_send_completions", on: sql) == 1)
             #expect(try await fixture.count("im_v2.messages", on: sql) == 1)
             #expect(try await fixture.count("im_v2.room_events", on: sql) == 1)
-            #expect(try await leases.release(token: lease.token))
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             schemaInstalled = false
@@ -120,6 +114,5 @@ struct V2RoomActivationCommitAckLossTests {
 }
 
 private enum V2CommitAckLossTestError: Error {
-    case activationUnavailable
     case replayNotIdempotent
 }

@@ -519,7 +519,7 @@ struct V2RoomWriteSelectedOwnerGuard {
             throw V2ActorContractError.invalidConfiguration("message policy execution required")
         }
         guard let activationScope, try activationScope.token(for: roomID) == execution.activation else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         try await execution.requireActive(roomID: roomID, senderID: senderID, clientMessageID: clientMessageID, sql: sql)
     }

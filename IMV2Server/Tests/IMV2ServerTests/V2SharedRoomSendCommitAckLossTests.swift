@@ -25,7 +25,7 @@ struct V2SharedRoomSendCommitAckLossTests {
         let direct = makeV2DatabaseTestResources()
         let proxied = makeV2DatabaseTestResources()
         var schemaInstalled = false
-        var ownerExecutor: V2DurableSendOperationOwnerBatcher?
+        let ownerExecutor = Mutex<V2DurableSendOperationOwnerBatcher?>(nil)
         do {
             direct.databases.use(try .postgres(url: directURL, maxConnectionsPerEventLoop: 3),
                 as: .psql, isDefault: true)
@@ -51,12 +51,8 @@ struct V2SharedRoomSendCommitAckLossTests {
             let secondRoom = RoomID(uuid: UUID())
             try await seedPeerRoom(secondRoom, on: sql)
 
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("shared-ack-loss-host"),
-                incarnationID: UUID())
-            let firstToken = try await acquire(roomID, leases: leases, owner: owner, host: host)
-            let secondToken = try await acquire(secondRoom, leases: leases, owner: owner, host: host)
+            try await withRoomActivation(database: database, roomID: roomID) { firstToken in
+            try await withRoomActivation(database: database, roomID: secondRoom) { secondToken in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let profile = try fixture.forwardImportTestProfile()
             let first = try preparedSend(token: firstToken, text: "first", profile: profile, now: now)
@@ -88,7 +84,8 @@ struct V2SharedRoomSendCommitAckLossTests {
                 identifiers: .init(makeUUID: { identifiers.withLock { $0.removeFirst() } }),
                 now: { now }, configuration: .init(maximumPendingRequests: 4),
                 maximumRetainedBytes: 16_384)
-            ownerExecutor = dispatcher
+            ownerExecutor.withLock { $0 = dispatcher }
+            do {
             await #expect(throws: V2RoomTransactionOutcomeUnknown.self) { try await dispatcher.execute(firstHandle) }
             #expect(proxy.observedSuccessfulCommit)
             // The same dispatcher can execute another room after returning the failed connection.
@@ -123,18 +120,22 @@ struct V2SharedRoomSendCommitAckLossTests {
             #expect(try await fixture.count("im_v2.messages", on: sql) == 2)
             #expect(try await fixture.count("im_v2.message_send_completions", on: sql) == 2)
             #expect(try await fixture.count("im_v2.room_events", on: sql) == 2)
-            #expect(try await leases.release(token: firstToken))
-            #expect(try await leases.release(token: secondToken))
-
             await dispatcher.shutdown()
-            ownerExecutor = nil
+            ownerExecutor.withLock { $0 = nil }
+            } catch {
+                await dispatcher.shutdown()
+                ownerExecutor.withLock { $0 = nil }
+                throw error
+            }
+            }
+            }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             schemaInstalled = false
             try await proxied.shutdown()
             try await direct.shutdown()
             try await proxy.shutdown()
         } catch {
-            await ownerExecutor?.shutdown()
+            await ownerExecutor.withLock { $0 }?.shutdown()
             if schemaInstalled, let sql = direct.database(.psql) as? any SQLDatabase {
                 try? await sql.raw("DROP SCHEMA IF EXISTS im_v2 CASCADE").run()
             }
@@ -143,16 +144,6 @@ struct V2SharedRoomSendCommitAckLossTests {
             try? await proxy.shutdown()
             throw error
         }
-    }
-
-    private func acquire(_ room: RoomID, leases: PostgresV2RoomActivationStore,
-                         owner: V2RoomDataOwner, host: V2ActorHostIdentity) async throws
-        -> V2RoomActivationToken {
-        guard case .acquired(let lease) = try await leases.acquire(roomID: room,
-            owner: owner, host: host, duration: .init(30_000)) else {
-            throw V2SharedAckLossTestError.activationUnavailable
-        }
-        return lease.token
     }
 
     private func preparedSend(token: V2RoomActivationToken, text: String,
@@ -201,6 +192,5 @@ struct V2SharedRoomSendCommitAckLossTests {
 }
 
 private enum V2SharedAckLossTestError: Error {
-    case activationUnavailable
     case replayNotIdempotent
 }

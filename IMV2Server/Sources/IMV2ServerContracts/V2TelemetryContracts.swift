@@ -255,7 +255,7 @@ public enum V2MessageSendFailureReason: String, CaseIterable, Hashable, Sendable
     case staleActivation = "stale_activation"
     case notReady = "not_ready"
     case retired
-    case leaseLost = "lease_lost"
+    case authorityLost = "lease_lost"
     case unavailable
     case overloaded
     case deadlineExceeded = "deadline_exceeded"

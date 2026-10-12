@@ -13,10 +13,10 @@ import Testing
 
 @Suite(.serialized, .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
 struct V2RoomProfileCohortPostgresTests {
-    @Test("one room statement isolates 50 viewers, rejects invalid cohorts and fences stale activations")
+    @Test("one room statement isolates 50 viewers, rejects invalid cohorts and fences stale data owners")
     func independentViewers() async throws {
-        try await withRoom { database, sql, token, requests in
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: token)
+        try await withRoom { database, sql, token, lifetime, requests in
+            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: token, lifetime: lifetime)
             let results = try await executor.executeProfileVisibilityBatch(requests)
             try verify(results, requests: requests, token: token)
             await #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
@@ -38,8 +38,8 @@ struct V2RoomProfileCohortPostgresTests {
             #expect(changed[0] == .notVisible)
             guard case .profilesVisible(let futureMember) = changed[1] else { throw CohortFailure.unexpectedResult }
             #expect(futureMember.membershipRevision == 4 && futureMember.request == requests[47])
-            #expect(try await PostgresV2RoomActivationStore(database: database).release(token: token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: token.roomID.uuidValue!)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 _ = try await executor.executeProfileVisibilityBatch(requests)
             }
         }
@@ -47,7 +47,7 @@ struct V2RoomProfileCohortPostgresTests {
 
     @Test("production lane and factory execute 100 target items under one database admission")
     func productionComposition() async throws {
-        try await withRoom { database, _, token, requests in
+        try await withRoom { database, _, token, lifetime, requests in
             let writes = PostgresV2RoomWriteStore(database: database)
             let admission = V2DatabaseWorkAdmissionController(policy: .init(
                 maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
@@ -63,7 +63,11 @@ struct V2RoomProfileCohortPostgresTests {
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(), databaseWorkAdmission: admission)
             let factory = try V2RoomServerActivationFactory(owners: [token.owner.shardID: owner.usingFixturePolicyAuthorizations(endpoint: token.owner.shardID)], safetyActorUserID: nil)
             let executor = factory.runtimeFactory().make(token)
-            try await executor.restore(.now + .seconds(10))
+            let restorationDeadline = ContinuousClock.now + .seconds(10)
+            try await executor.restore(.init(token: token, deadline: restorationDeadline,
+                                             lifetime: lifetime, check: {
+                try await lifetime.withPin(deadline: restorationDeadline) { _ in }
+            }))
             let configuration = try V2RoomRuntimeConfiguration()
             let budget = V2RoomCommandBudget(configuration: configuration)
             let lane = V2RoomTurnLane<V2RoomRequest, V2RoomResponse>(token: token,
@@ -127,7 +131,7 @@ struct V2RoomProfileCohortPostgresTests {
         #expect(observations.count == 1)
     }
 
-    private func withRoom(_ body: (any Database, any SQLDatabase, V2RoomActivationToken,
+    private func withRoom(_ body: @escaping @Sendable (any Database, any SQLDatabase, V2RoomActivationToken, V2RoomActivationLifetime,
                                   [V2ActorProfileVisibilityBatchWire]) async throws -> Void) async throws {
         let resources = makeV2DatabaseTestResources()
         do {
@@ -149,19 +153,15 @@ struct V2RoomProfileCohortPostgresTests {
                 try await sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES(\(bind: user.uuidValue!),\(bind: handle),'Cohort user',clock_timestamp(),clock_timestamp())").run()
                 try await sql.raw("INSERT INTO im_v2.room_member_nicknames(room_id,user_id,nickname,revision,updated_at) VALUES(\(bind: room.uuidValue!),\(bind: user.uuidValue!),'Cohort nickname',1,clock_timestamp())").run()
             }
-            let leases = PostgresV2RoomActivationStore(database: database)
-            guard case .acquired(let grant) = try await leases.acquire(roomID: room,
-                owner: .init(shardID: "profile-cohort", epoch: 0),
-                host: .init(hostID: .init("profile-cohort-host"), incarnationID: UUID()), duration: .init(30_000))
-            else { throw CohortFailure.unexpectedResult }
             let requests = actors.enumerated().map { index, actor in
                 V2ActorProfileVisibilityBatchWire(roomID: room, actorUserID: actor,
                     roomKind: index == 49 ? .direct : (index.isMultiple(of: 2) ? .group : .memberRoom),
                     targetUserIDs: [target, departed])
             }
-            do { try await body(database, sql, grant.token, requests) }
-            catch { _ = try? await leases.release(token: grant.token); throw error }
-            _ = try? await leases.release(token: grant.token)
+            try await withRoomActivationLifetime(database: database, roomID: room,
+                                         shardID: "profile-cohort") { token, lifetime in
+                try await body(database, sql, token, lifetime, requests)
+            }
             try await resources.shutdown()
         } catch { try? await resources.shutdown(); throw error }
     }

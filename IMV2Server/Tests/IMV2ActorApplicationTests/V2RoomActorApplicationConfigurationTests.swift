@@ -18,7 +18,7 @@ struct V2RoomActorApplicationConfigurationTests {
     }
 
     @Test func roleMismatchFailsBeforeOpeningSecrets() throws {
-        let document = V2RoomActorApplicationConfiguration.Document(name: "gateway", address: "localhost",
+        let document = V2RoomActorApplicationConfiguration.Document(placementControl: .init(port: 7338, threadPoolSize: 1, localVoterID: nil, storagePaths: [:], voters: []), name: "gateway", address: "localhost",
             port: 7337, threadPoolSize: 1, serviceID: "gateway", hostID: nil,
             signingKeyPath: "/does-not-exist", certificatePath: "/does-not-exist",
             privateKeyPath: "/does-not-exist", trustRootPath: "/does-not-exist", services: [], peers: [], realtimePeers: [])
@@ -39,7 +39,11 @@ struct V2RoomActorApplicationConfigurationTests {
             #expect((configuration.hostIdentity != nil) == isHost)
             #expect(configuration.signer.serviceID.rawValue == name)
             #expect(configuration.discovery.peers.count == 1)
-            #expect(configuration.realtimePeers.count == 2)
+            #expect(configuration.placementControl.roles.count == 3)
+            #expect(configuration.placementControl.identity == nil)
+            #expect(configuration.placementControl.storagePaths.isEmpty)
+            #expect(configuration.hostIdentity?.incarnationID == (isHost ? configuration.placementControl.processIncarnation : nil))
+            #expect(configuration.realtimePeers.count == (isHost ? 1 : 2))
             #expect(configuration.realtimePeers.contains { $0.nodeID == name && $0.serviceID == name })
             #expect(configuration.runtime.batchWait.rawValue == 25)
             let derived = try V2RoomActorApplicationConfiguration(
@@ -101,6 +105,32 @@ struct V2RoomActorApplicationConfigurationTests {
         wrongEndpoint["policyPlacement"] = ["revision": 1, "partitionCount": 1,
             "owners": [["hostID": hostID, "endpoint": "unconfigured", "partitions": [0]]]]
         #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) { try load(wrongEndpoint) }
+    }
+
+    @Test("Control configuration is mandatory and cannot reuse room endpoints or change voter bindings",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_ROOM_ACTOR_TEST_DEPLOYMENT_DIRECTORY"] != nil))
+    func fixedControlBoundaries() throws {
+        let root = try #require(ProcessInfo.processInfo.environment["IMV2_ROOM_ACTOR_TEST_DEPLOYMENT_DIRECTORY"])
+        let bytes = try Data(contentsOf: URL(fileURLWithPath: root + "/gateway/configuration.json"))
+        let original = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        func load(_ value: [String: Any]) throws -> V2RoomActorApplicationConfiguration {
+            let doc = try JSONDecoder().decode(V2RoomActorApplicationConfiguration.Document.self,
+                from: JSONSerialization.data(withJSONObject: value))
+            return try .init(document: doc, hostsRooms: true, configuredShardIDs: ["rooms-primary"])
+        }
+        var missing = original; missing.removeValue(forKey: "placementControl")
+        #expect(throws: DecodingError.self) { try load(missing) }
+        let originalControl = try #require(original["placementControl"] as? [String: Any])
+        var control = originalControl, changed = original
+        control["port"] = original["port"]; changed["placementControl"] = control
+        #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) { try load(changed) }
+        control = originalControl
+        var voters = try #require(control["voters"] as? [[String: Any]])
+        voters[1]["hostID"] = voters[0]["hostID"]; control["voters"] = voters; changed["placementControl"] = control
+        #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) { try load(changed) }
+        control = originalControl; control["storagePaths"] = ["rooms-primary": "/tmp/unexpected-voter.pb"]
+        changed["placementControl"] = control
+        #expect(throws: V2RoomActorApplicationConfigurationError.invalidConfiguration) { try load(changed) }
     }
 
     private struct FileEnvironment: V2RuntimeEnvironment {

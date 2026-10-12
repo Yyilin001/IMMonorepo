@@ -77,7 +77,7 @@ public struct V2ActorTrustStore: Sendable {
         return service.serviceID
     }
 
-    func configuredService(_ id: V2ActorServiceID) throws -> V2ActorTrustedService {
+    package func configuredService(_ id: V2ActorServiceID) throws -> V2ActorTrustedService {
         guard let peer = services[id] else { throw V2ActorAuthenticationError.unknownService }
         return peer
     }

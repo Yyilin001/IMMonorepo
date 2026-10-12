@@ -8,7 +8,7 @@ public enum V2RealtimePublicationBackpressure: Error, Equatable, Sendable {
 }
 
 public enum V2RealtimeDirectoryError: Error, Equatable, Sendable {
-    case invalidInput, corruptPersistenceState, capacityExceeded, incarnationConflict, leaseLost, revisionConflict, wrongOwner
+    case invalidInput, corruptPersistenceState, capacityExceeded, incarnationConflict, authorityLost, revisionConflict, wrongOwner
 }
 
 public struct V2UserSyncWake: Equatable, Sendable {

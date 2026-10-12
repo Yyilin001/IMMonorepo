@@ -25,6 +25,986 @@ fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobu
   typealias Version = _2
 }
 
+/// Infrequent placement control records. They never carry message bodies.
+package nonisolated struct Im_Actor_V1_PlacementOwner: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var host: Im_Actor_V1_HostIdentity {
+    get {_host ?? Im_Actor_V1_HostIdentity()}
+    set {_host = newValue}
+  }
+  /// Returns true if `host` has been explicitly set.
+  package var hasHost: Bool {self._host != nil}
+  /// Clears the value of `host`. Subsequent reads from it will return its default value.
+  package mutating func clearHost() {self._host = nil}
+
+  package var epoch: UInt64 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _host: Im_Actor_V1_HostIdentity? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementTransfer: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var id: Data = Data()
+
+  package var successor: Im_Actor_V1_HostIdentity {
+    get {_successor ?? Im_Actor_V1_HostIdentity()}
+    set {_successor = newValue}
+  }
+  /// Returns true if `successor` has been explicitly set.
+  package var hasSuccessor: Bool {self._successor != nil}
+  /// Clears the value of `successor`. Subsequent reads from it will return its default value.
+  package mutating func clearSuccessor() {self._successor = nil}
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _successor: Im_Actor_V1_HostIdentity? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementSlot: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var owner: Im_Actor_V1_PlacementOwner {
+    get {_owner ?? Im_Actor_V1_PlacementOwner()}
+    set {_owner = newValue}
+  }
+  /// Returns true if `owner` has been explicitly set.
+  package var hasOwner: Bool {self._owner != nil}
+  /// Clears the value of `owner`. Subsequent reads from it will return its default value.
+  package mutating func clearOwner() {self._owner = nil}
+
+  package var transfer: Im_Actor_V1_PlacementTransfer {
+    get {_transfer ?? Im_Actor_V1_PlacementTransfer()}
+    set {_transfer = newValue}
+  }
+  /// Returns true if `transfer` has been explicitly set.
+  package var hasTransfer: Bool {self._transfer != nil}
+  /// Clears the value of `transfer`. Subsequent reads from it will return its default value.
+  package mutating func clearTransfer() {self._transfer = nil}
+
+  package var retired: Bool = false
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _owner: Im_Actor_V1_PlacementOwner? = nil
+  fileprivate var _transfer: Im_Actor_V1_PlacementTransfer? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementHostRegistration: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var host: Im_Actor_V1_HostIdentity {
+    get {_host ?? Im_Actor_V1_HostIdentity()}
+    set {_host = newValue}
+  }
+  /// Returns true if `host` has been explicitly set.
+  package var hasHost: Bool {self._host != nil}
+  /// Clears the value of `host`. Subsequent reads from it will return its default value.
+  package mutating func clearHost() {self._host = nil}
+
+  package var retired: Bool = false
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _host: Im_Actor_V1_HostIdentity? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementSnapshot: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var clusterID: Data = Data()
+
+  package var revision: UInt64 = 0
+
+  package var slots: [Im_Actor_V1_PlacementSlot] = []
+
+  package var hosts: [Im_Actor_V1_PlacementHostRegistration] = []
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var kind: Im_Actor_V1_PlacementCommand.Kind = .unspecified
+
+  package var partition: UInt32 = 0
+
+  package var expected: Im_Actor_V1_PlacementOwner {
+    get {_expected ?? Im_Actor_V1_PlacementOwner()}
+    set {_expected = newValue}
+  }
+  /// Returns true if `expected` has been explicitly set.
+  package var hasExpected: Bool {self._expected != nil}
+  /// Clears the value of `expected`. Subsequent reads from it will return its default value.
+  package mutating func clearExpected() {self._expected = nil}
+
+  package var transfer: Im_Actor_V1_PlacementTransfer {
+    get {_transfer ?? Im_Actor_V1_PlacementTransfer()}
+    set {_transfer = newValue}
+  }
+  /// Returns true if `transfer` has been explicitly set.
+  package var hasTransfer: Bool {self._transfer != nil}
+  /// Clears the value of `transfer`. Subsequent reads from it will return its default value.
+  package mutating func clearTransfer() {self._transfer = nil}
+
+  package var transferID: Data = Data()
+
+  package var previousHost: Im_Actor_V1_HostIdentity {
+    get {_previousHost ?? Im_Actor_V1_HostIdentity()}
+    set {_previousHost = newValue}
+  }
+  /// Returns true if `previousHost` has been explicitly set.
+  package var hasPreviousHost: Bool {self._previousHost != nil}
+  /// Clears the value of `previousHost`. Subsequent reads from it will return its default value.
+  package mutating func clearPreviousHost() {self._previousHost = nil}
+
+  package var successorHost: Im_Actor_V1_HostIdentity {
+    get {_successorHost ?? Im_Actor_V1_HostIdentity()}
+    set {_successorHost = newValue}
+  }
+  /// Returns true if `successorHost` has been explicitly set.
+  package var hasSuccessorHost: Bool {self._successorHost != nil}
+  /// Clears the value of `successorHost`. Subsequent reads from it will return its default value.
+  package mutating func clearSuccessorHost() {self._successorHost = nil}
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package nonisolated enum Kind: SwiftProtobuf.Enum, Swift.CaseIterable {
+    package typealias RawValue = Int
+    case unspecified // = 0
+    case beginTransfer // = 1
+    case completeTransfer // = 2
+    case cancelTransfer // = 3
+    case retireHost // = 4
+    case registerHost // = 5
+    case UNRECOGNIZED(Int)
+
+    package init() {
+      self = .unspecified
+    }
+
+    package init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .beginTransfer
+      case 2: self = .completeTransfer
+      case 3: self = .cancelTransfer
+      case 4: self = .retireHost
+      case 5: self = .registerHost
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    package var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .beginTransfer: return 1
+      case .completeTransfer: return 2
+      case .cancelTransfer: return 3
+      case .retireHost: return 4
+      case .registerHost: return 5
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    package static let allCases: [Im_Actor_V1_PlacementCommand.Kind] = [
+      .unspecified,
+      .beginTransfer,
+      .completeTransfer,
+      .cancelTransfer,
+      .retireHost,
+      .registerHost,
+    ]
+
+  }
+
+  package init() {}
+
+  fileprivate var _expected: Im_Actor_V1_PlacementOwner? = nil
+  fileprivate var _transfer: Im_Actor_V1_PlacementTransfer? = nil
+  fileprivate var _previousHost: Im_Actor_V1_HostIdentity? = nil
+  fileprivate var _successorHost: Im_Actor_V1_HostIdentity? = nil
+}
+
+/// Fixed-three-voter state lives on stable local storage, independently of rooms.
+/// A bootstrap or CAS command applied only from the committed Raft prefix.
+package nonisolated struct Im_Actor_V1_PlacementRaftOperation: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var bootstrapSnapshot: Data = Data()
+
+  package var requestID: Data = Data()
+
+  package var expectedSnapshot: Data = Data()
+
+  package var command: Data = Data()
+
+  package var originRevision: UInt64 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+/// A compact application checkpoint retains successful command identities.
+/// Replaying these commands from genesis reconstructs historical ACK results.
+package nonisolated struct Im_Actor_V1_PlacementRaftCheckpointReceipt: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var requestID: Data = Data()
+
+  package var command: Data = Data()
+
+  package var revision: UInt64 = 0
+
+  package var originRevision: UInt64 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftApplicationCheckpoint: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var appliedIndex: UInt64 = 0
+
+  package var genesisSnapshot: Data = Data()
+
+  package var receipts: [Im_Actor_V1_PlacementRaftCheckpointReceipt] = []
+
+  package var bootstrapDigest: Data = Data()
+
+  package var pinnedReceipts: [Im_Actor_V1_PlacementRaftCheckpointReceipt] = []
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftEntry: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var term: UInt64 = 0
+
+  package var payload: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftState: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var voterIds: [String] = []
+
+  package var currentTerm: UInt64 = 0
+
+  package var votedFor: String {
+    get {_votedFor ?? String()}
+    set {_votedFor = newValue}
+  }
+  /// Returns true if `votedFor` has been explicitly set.
+  package var hasVotedFor: Bool {self._votedFor != nil}
+  /// Clears the value of `votedFor`. Subsequent reads from it will return its default value.
+  package mutating func clearVotedFor() {self._votedFor = nil}
+
+  package var entries: [Im_Actor_V1_PlacementRaftEntry] = []
+
+  package var commitIndex: UInt64 = 0
+
+  package var localVoterID: String = String()
+
+  package var snapshotIndex: UInt64 = 0
+
+  package var snapshotTerm: UInt64 = 0
+
+  package var applicationCheckpoint: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _votedFor: String? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftVoteRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var candidate: String = String()
+
+  package var term: UInt64 = 0
+
+  package var lastIndex: UInt64 = 0
+
+  package var lastTerm: UInt64 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftVoteReply: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var term: UInt64 = 0
+
+  package var granted: Bool = false
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftAppendRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var leader: String = String()
+
+  package var term: UInt64 = 0
+
+  package var previousIndex: UInt64 = 0
+
+  package var previousTerm: UInt64 = 0
+
+  package var entries: [Im_Actor_V1_PlacementRaftEntry] = []
+
+  package var leaderCommit: UInt64 = 0
+
+  package var readID: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftAppendReply: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var term: UInt64 = 0
+
+  package var accepted: Bool = false
+
+  package var matchedIndex: UInt64 = 0
+
+  package var readID: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+/// Portable lifecycle evidence signed only after native physical completion.
+package nonisolated struct Im_Actor_V1_PlacementDrainCertificate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var kind: Im_Actor_V1_PlacementDrainCertificate.Kind = .unspecified
+
+  package var groupID: Data = Data()
+
+  package var shardID: String = String()
+
+  package var host: Im_Actor_V1_HostIdentity {
+    get {_host ?? Im_Actor_V1_HostIdentity()}
+    set {_host = newValue}
+  }
+  /// Returns true if `host` has been explicitly set.
+  package var hasHost: Bool {self._host != nil}
+  /// Clears the value of `host`. Subsequent reads from it will return its default value.
+  package mutating func clearHost() {self._host = nil}
+
+  package var partition: UInt32 = 0
+
+  package var epoch: UInt64 = 0
+
+  package var transferID: Data = Data()
+
+  package var registrationPrevious: Im_Actor_V1_HostIdentity {
+    get {_registrationPrevious ?? Im_Actor_V1_HostIdentity()}
+    set {_registrationPrevious = newValue}
+  }
+  /// Returns true if `registrationPrevious` has been explicitly set.
+  package var hasRegistrationPrevious: Bool {self._registrationPrevious != nil}
+  /// Clears the value of `registrationPrevious`. Subsequent reads from it will return its default value.
+  package mutating func clearRegistrationPrevious() {self._registrationPrevious = nil}
+
+  package var registrationRequestID: Data = Data()
+
+  package var exclusionRequestID: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package nonisolated enum Kind: SwiftProtobuf.Enum, Swift.CaseIterable {
+    package typealias RawValue = Int
+    case unspecified // = 0
+    case partition // = 1
+    case host // = 2
+    case excludedHost // = 3
+    case UNRECOGNIZED(Int)
+
+    package init() {
+      self = .unspecified
+    }
+
+    package init?(rawValue: Int) {
+      switch rawValue {
+      case 0: self = .unspecified
+      case 1: self = .partition
+      case 2: self = .host
+      case 3: self = .excludedHost
+      default: self = .UNRECOGNIZED(rawValue)
+      }
+    }
+
+    package var rawValue: Int {
+      switch self {
+      case .unspecified: return 0
+      case .partition: return 1
+      case .host: return 2
+      case .excludedHost: return 3
+      case .UNRECOGNIZED(let i): return i
+      }
+    }
+
+    // The compiler won't synthesize support with the UNRECOGNIZED case.
+    package static let allCases: [Im_Actor_V1_PlacementDrainCertificate.Kind] = [
+      .unspecified,
+      .partition,
+      .host,
+      .excludedHost,
+    ]
+
+  }
+
+  package init() {}
+
+  fileprivate var _host: Im_Actor_V1_HostIdentity? = nil
+  fileprivate var _registrationPrevious: Im_Actor_V1_HostIdentity? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementSignedCertificate: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var signerID: String = String()
+
+  package var body: Data = Data()
+
+  package var signature: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftWriteRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var operation: Data = Data()
+
+  package var evidence: Im_Actor_V1_PlacementSignedCertificate {
+    get {_evidence ?? Im_Actor_V1_PlacementSignedCertificate()}
+    set {_evidence = newValue}
+  }
+  /// Returns true if `evidence` has been explicitly set.
+  package var hasEvidence: Bool {self._evidence != nil}
+  /// Clears the value of `evidence`. Subsequent reads from it will return its default value.
+  package mutating func clearEvidence() {self._evidence = nil}
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _evidence: Im_Actor_V1_PlacementSignedCertificate? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftWriteReply: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var snapshot: Data = Data()
+
+  package var leaderHint: String = String()
+
+  package var rejection: UInt32 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftReadRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var includeArchiveUsage: Bool = false
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftArchiveUsage: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var receipts: UInt64 = 0
+
+  package var bytes: UInt64 = 0
+
+  package var reservedReceipts: UInt64 = 0
+
+  package var reservedBytes: UInt64 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+/// Local supervisor intent, never a process-exclusion certificate.
+package nonisolated struct Im_Actor_V1_RoomHostRecoveryOperation: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var hostID: String = String()
+
+  package var incarnationID: Data = Data()
+
+  package var operationID: Data = Data()
+
+  package var completed: Bool = false
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_RoomHostRecoveryJournal: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var version: UInt32 = 0
+
+  package var supervisorID: String = String()
+
+  package var hostIds: [String] = []
+
+  package var operations: [Im_Actor_V1_RoomHostRecoveryOperation] = []
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_RoomHostRecoveryJournalFile: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var journal: Data = Data()
+
+  package var sha256: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_DockerRoomHostBinding: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var hostID: String = String()
+
+  package var incarnationID: Data = Data()
+
+  package var containerID: String = String()
+
+  package var startedAt: String = String()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_DockerRoomHostInventory: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var version: UInt32 = 0
+
+  package var supervisorID: String = String()
+
+  package var daemonID: String = String()
+
+  package var socketPath: String = String()
+
+  package var hostIds: [String] = []
+
+  package var bindings: [Im_Actor_V1_DockerRoomHostBinding] = []
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_DockerRoomHostInventoryFile: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var inventory: Data = Data()
+
+  package var sha256: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_RoomHostStartupHello: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var hostID: String = String()
+
+  package var incarnationID: Data = Data()
+
+  package var launchToken: Data = Data()
+
+  package var supervisorID: String = String()
+
+  package var serviceID: String = String()
+
+  package var processID: Int64 = 0
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_RoomHostStartupRelease: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var helloSha256: Data = Data()
+
+  package var supervisorID: String = String()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_DockerRoomHostLaunch: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var version: UInt32 = 0
+
+  package var supervisorID: String = String()
+
+  package var daemonID: String = String()
+
+  package var socketPath: String = String()
+
+  package var hostID: String = String()
+
+  package var serviceID: String = String()
+
+  package var gateDirectory: String = String()
+
+  package var launchToken: Data = Data()
+
+  package var createRequest: Data = Data()
+
+  package var containerID: String = String()
+
+  package var startedAt: String = String()
+
+  package var incarnationID: Data = Data()
+
+  package var released: Bool = false
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_DockerRoomHostLaunchFile: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var launch: Data = Data()
+
+  package var sha256: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftReadReply: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var snapshot: Data = Data()
+
+  package var leaderHint: String = String()
+
+  package var archiveUsage: Im_Actor_V1_PlacementRaftArchiveUsage {
+    get {_archiveUsage ?? Im_Actor_V1_PlacementRaftArchiveUsage()}
+    set {_archiveUsage = newValue}
+  }
+  /// Returns true if `archiveUsage` has been explicitly set.
+  package var hasArchiveUsage: Bool {self._archiveUsage != nil}
+  /// Clears the value of `archiveUsage`. Subsequent reads from it will return its default value.
+  package mutating func clearArchiveUsage() {self._archiveUsage = nil}
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+
+  fileprivate var _archiveUsage: Im_Actor_V1_PlacementRaftArchiveUsage? = nil
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftSnapshotChunk: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var leader: String = String()
+
+  package var term: UInt64 = 0
+
+  package var transferID: Data = Data()
+
+  package var snapshotIndex: UInt64 = 0
+
+  package var snapshotTerm: UInt64 = 0
+
+  package var digest: Data = Data()
+
+  package var totalBytes: UInt32 = 0
+
+  package var offset: UInt32 = 0
+
+  package var chunk: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftSnapshotReply: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var groupID: Data = Data()
+
+  package var term: UInt64 = 0
+
+  package var transferID: Data = Data()
+
+  package var snapshotIndex: UInt64 = 0
+
+  package var accepted: Bool = false
+
+  package var nextOffset: UInt32 = 0
+
+  package var installed: Bool = false
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftRequest: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var body: Im_Actor_V1_PlacementRaftRequest.OneOf_Body? = nil
+
+  package var vote: Im_Actor_V1_PlacementRaftVoteRequest {
+    get {
+      if case .vote(let v)? = body {return v}
+      return Im_Actor_V1_PlacementRaftVoteRequest()
+    }
+    set {body = .vote(newValue)}
+  }
+
+  package var append: Im_Actor_V1_PlacementRaftAppendRequest {
+    get {
+      if case .append(let v)? = body {return v}
+      return Im_Actor_V1_PlacementRaftAppendRequest()
+    }
+    set {body = .append(newValue)}
+  }
+
+  package var snapshot: Im_Actor_V1_PlacementRaftSnapshotChunk {
+    get {
+      if case .snapshot(let v)? = body {return v}
+      return Im_Actor_V1_PlacementRaftSnapshotChunk()
+    }
+    set {body = .snapshot(newValue)}
+  }
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package nonisolated enum OneOf_Body: Equatable, Sendable {
+    case vote(Im_Actor_V1_PlacementRaftVoteRequest)
+    case append(Im_Actor_V1_PlacementRaftAppendRequest)
+    case snapshot(Im_Actor_V1_PlacementRaftSnapshotChunk)
+
+  }
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftReply: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var body: Im_Actor_V1_PlacementRaftReply.OneOf_Body? = nil
+
+  package var vote: Im_Actor_V1_PlacementRaftVoteReply {
+    get {
+      if case .vote(let v)? = body {return v}
+      return Im_Actor_V1_PlacementRaftVoteReply()
+    }
+    set {body = .vote(newValue)}
+  }
+
+  package var append: Im_Actor_V1_PlacementRaftAppendReply {
+    get {
+      if case .append(let v)? = body {return v}
+      return Im_Actor_V1_PlacementRaftAppendReply()
+    }
+    set {body = .append(newValue)}
+  }
+
+  package var snapshot: Im_Actor_V1_PlacementRaftSnapshotReply {
+    get {
+      if case .snapshot(let v)? = body {return v}
+      return Im_Actor_V1_PlacementRaftSnapshotReply()
+    }
+    set {body = .snapshot(newValue)}
+  }
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package nonisolated enum OneOf_Body: Equatable, Sendable {
+    case vote(Im_Actor_V1_PlacementRaftVoteReply)
+    case append(Im_Actor_V1_PlacementRaftAppendReply)
+    case snapshot(Im_Actor_V1_PlacementRaftSnapshotReply)
+
+  }
+
+  package init() {}
+}
+
+package nonisolated struct Im_Actor_V1_PlacementRaftFile: Sendable {
+  // SwiftProtobuf.Message conformance is added in an extension below. See the
+  // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
+  // methods supported on all messages.
+
+  package var format: UInt32 = 0
+
+  package var state: Data = Data()
+
+  package var digest: Data = Data()
+
+  package var unknownFields = SwiftProtobuf.UnknownStorage()
+
+  package init() {}
+}
+
 /// Closed Swift Codable contracts carried as typed Protobuf values. No JSON
 /// text or base64 is embedded. Keys preserve the domain's CodingKeys; changing
 /// an enum case or key is an internal protocol change requiring joint rollout.
@@ -2742,6 +3722,1903 @@ package nonisolated struct Im_Actor_V1_HotShardReply: Sendable {
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
 fileprivate nonisolated let _protobuf_package = "im.actor.v1"
+
+nonisolated extension Im_Actor_V1_PlacementOwner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementOwner"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}host\0\u{1}epoch\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._host) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.epoch) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._host {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.epoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.epoch, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementOwner, rhs: Im_Actor_V1_PlacementOwner) -> Bool {
+    if lhs._host != rhs._host {return false}
+    if lhs.epoch != rhs.epoch {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementTransfer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementTransfer"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}successor\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.id) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._successor) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.id.isEmpty {
+      try visitor.visitSingularBytesField(value: self.id, fieldNumber: 1)
+    }
+    try { if let v = self._successor {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementTransfer, rhs: Im_Actor_V1_PlacementTransfer) -> Bool {
+    if lhs.id != rhs.id {return false}
+    if lhs._successor != rhs._successor {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementSlot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementSlot"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}owner\0\u{1}transfer\0\u{1}retired\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._owner) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._transfer) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.retired) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._owner {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    try { if let v = self._transfer {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    if self.retired != false {
+      try visitor.visitSingularBoolField(value: self.retired, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementSlot, rhs: Im_Actor_V1_PlacementSlot) -> Bool {
+    if lhs._owner != rhs._owner {return false}
+    if lhs._transfer != rhs._transfer {return false}
+    if lhs.retired != rhs.retired {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementHostRegistration: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementHostRegistration"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}host\0\u{1}retired\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularMessageField(value: &self._host) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.retired) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    try { if let v = self._host {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    } }()
+    if self.retired != false {
+      try visitor.visitSingularBoolField(value: self.retired, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementHostRegistration, rhs: Im_Actor_V1_PlacementHostRegistration) -> Bool {
+    if lhs._host != rhs._host {return false}
+    if lhs.retired != rhs.retired {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementSnapshot"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cluster_id\0\u{1}revision\0\u{1}slots\0\u{1}hosts\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.clusterID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.slots) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.hosts) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.clusterID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.clusterID, fieldNumber: 1)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 2)
+    }
+    if !self.slots.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.slots, fieldNumber: 3)
+    }
+    if !self.hosts.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.hosts, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementSnapshot, rhs: Im_Actor_V1_PlacementSnapshot) -> Bool {
+    if lhs.clusterID != rhs.clusterID {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.slots != rhs.slots {return false}
+    if lhs.hosts != rhs.hosts {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementCommand"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}partition\0\u{1}expected\0\u{1}transfer\0\u{3}transfer_id\0\u{3}previous_host\0\u{3}successor_host\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularUInt32Field(value: &self.partition) }()
+      case 3: try { try decoder.decodeSingularMessageField(value: &self._expected) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._transfer) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.transferID) }()
+      case 6: try { try decoder.decodeSingularMessageField(value: &self._previousHost) }()
+      case 7: try { try decoder.decodeSingularMessageField(value: &self._successorHost) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 1)
+    }
+    if self.partition != 0 {
+      try visitor.visitSingularUInt32Field(value: self.partition, fieldNumber: 2)
+    }
+    try { if let v = self._expected {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    } }()
+    try { if let v = self._transfer {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    if !self.transferID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.transferID, fieldNumber: 5)
+    }
+    try { if let v = self._previousHost {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 6)
+    } }()
+    try { if let v = self._successorHost {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementCommand, rhs: Im_Actor_V1_PlacementCommand) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.partition != rhs.partition {return false}
+    if lhs._expected != rhs._expected {return false}
+    if lhs._transfer != rhs._transfer {return false}
+    if lhs.transferID != rhs.transferID {return false}
+    if lhs._previousHost != rhs._previousHost {return false}
+    if lhs._successorHost != rhs._successorHost {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementCommand.Kind: SwiftProtobuf._ProtoNameProviding {
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0UNSPECIFIED\0\u{1}BEGIN_TRANSFER\0\u{1}COMPLETE_TRANSFER\0\u{1}CANCEL_TRANSFER\0\u{1}RETIRE_HOST\0\u{1}REGISTER_HOST\0")
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftOperation"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}bootstrap_snapshot\0\u{3}request_id\0\u{3}expected_snapshot\0\u{1}command\0\u{3}origin_revision\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.bootstrapSnapshot) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.requestID) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.expectedSnapshot) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.command) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.originRevision) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.bootstrapSnapshot.isEmpty {
+      try visitor.visitSingularBytesField(value: self.bootstrapSnapshot, fieldNumber: 1)
+    }
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.requestID, fieldNumber: 2)
+    }
+    if !self.expectedSnapshot.isEmpty {
+      try visitor.visitSingularBytesField(value: self.expectedSnapshot, fieldNumber: 3)
+    }
+    if !self.command.isEmpty {
+      try visitor.visitSingularBytesField(value: self.command, fieldNumber: 4)
+    }
+    if self.originRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.originRevision, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftOperation, rhs: Im_Actor_V1_PlacementRaftOperation) -> Bool {
+    if lhs.bootstrapSnapshot != rhs.bootstrapSnapshot {return false}
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.expectedSnapshot != rhs.expectedSnapshot {return false}
+    if lhs.command != rhs.command {return false}
+    if lhs.originRevision != rhs.originRevision {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftCheckpointReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftCheckpointReceipt"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}command\0\u{1}revision\0\u{3}origin_revision\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.requestID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.command) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.originRevision) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.requestID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.requestID, fieldNumber: 1)
+    }
+    if !self.command.isEmpty {
+      try visitor.visitSingularBytesField(value: self.command, fieldNumber: 2)
+    }
+    if self.revision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.revision, fieldNumber: 3)
+    }
+    if self.originRevision != 0 {
+      try visitor.visitSingularUInt64Field(value: self.originRevision, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftCheckpointReceipt, rhs: Im_Actor_V1_PlacementRaftCheckpointReceipt) -> Bool {
+    if lhs.requestID != rhs.requestID {return false}
+    if lhs.command != rhs.command {return false}
+    if lhs.revision != rhs.revision {return false}
+    if lhs.originRevision != rhs.originRevision {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftApplicationCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftApplicationCheckpoint"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{3}applied_index\0\u{3}genesis_snapshot\0\u{1}receipts\0\u{3}bootstrap_digest\0\u{3}pinned_receipts\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.appliedIndex) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.genesisSnapshot) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.receipts) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.bootstrapDigest) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.pinnedReceipts) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if self.appliedIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.appliedIndex, fieldNumber: 2)
+    }
+    if !self.genesisSnapshot.isEmpty {
+      try visitor.visitSingularBytesField(value: self.genesisSnapshot, fieldNumber: 3)
+    }
+    if !self.receipts.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.receipts, fieldNumber: 4)
+    }
+    if !self.bootstrapDigest.isEmpty {
+      try visitor.visitSingularBytesField(value: self.bootstrapDigest, fieldNumber: 5)
+    }
+    if !self.pinnedReceipts.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.pinnedReceipts, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftApplicationCheckpoint, rhs: Im_Actor_V1_PlacementRaftApplicationCheckpoint) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.appliedIndex != rhs.appliedIndex {return false}
+    if lhs.genesisSnapshot != rhs.genesisSnapshot {return false}
+    if lhs.receipts != rhs.receipts {return false}
+    if lhs.bootstrapDigest != rhs.bootstrapDigest {return false}
+    if lhs.pinnedReceipts != rhs.pinnedReceipts {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftEntry"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}term\0\u{1}payload\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.term) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.payload) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.term != 0 {
+      try visitor.visitSingularUInt64Field(value: self.term, fieldNumber: 1)
+    }
+    if !self.payload.isEmpty {
+      try visitor.visitSingularBytesField(value: self.payload, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftEntry, rhs: Im_Actor_V1_PlacementRaftEntry) -> Bool {
+    if lhs.term != rhs.term {return false}
+    if lhs.payload != rhs.payload {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftState"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{3}voter_ids\0\u{3}current_term\0\u{3}voted_for\0\u{1}entries\0\u{3}commit_index\0\u{3}local_voter_id\0\u{3}snapshot_index\0\u{3}snapshot_term\0\u{3}application_checkpoint\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeRepeatedStringField(value: &self.voterIds) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.currentTerm) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self._votedFor) }()
+      case 5: try { try decoder.decodeRepeatedMessageField(value: &self.entries) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.commitIndex) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.localVoterID) }()
+      case 8: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotIndex) }()
+      case 9: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotTerm) }()
+      case 10: try { try decoder.decodeSingularBytesField(value: &self.applicationCheckpoint) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if !self.voterIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.voterIds, fieldNumber: 2)
+    }
+    if self.currentTerm != 0 {
+      try visitor.visitSingularUInt64Field(value: self.currentTerm, fieldNumber: 3)
+    }
+    try { if let v = self._votedFor {
+      try visitor.visitSingularStringField(value: v, fieldNumber: 4)
+    } }()
+    if !self.entries.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.entries, fieldNumber: 5)
+    }
+    if self.commitIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.commitIndex, fieldNumber: 6)
+    }
+    if !self.localVoterID.isEmpty {
+      try visitor.visitSingularStringField(value: self.localVoterID, fieldNumber: 7)
+    }
+    if self.snapshotIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotIndex, fieldNumber: 8)
+    }
+    if self.snapshotTerm != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotTerm, fieldNumber: 9)
+    }
+    if !self.applicationCheckpoint.isEmpty {
+      try visitor.visitSingularBytesField(value: self.applicationCheckpoint, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftState, rhs: Im_Actor_V1_PlacementRaftState) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.voterIds != rhs.voterIds {return false}
+    if lhs.currentTerm != rhs.currentTerm {return false}
+    if lhs._votedFor != rhs._votedFor {return false}
+    if lhs.entries != rhs.entries {return false}
+    if lhs.commitIndex != rhs.commitIndex {return false}
+    if lhs.localVoterID != rhs.localVoterID {return false}
+    if lhs.snapshotIndex != rhs.snapshotIndex {return false}
+    if lhs.snapshotTerm != rhs.snapshotTerm {return false}
+    if lhs.applicationCheckpoint != rhs.applicationCheckpoint {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftVoteRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftVoteRequest"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}candidate\0\u{1}term\0\u{3}last_index\0\u{3}last_term\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.candidate) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.term) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.lastIndex) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.lastTerm) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if !self.candidate.isEmpty {
+      try visitor.visitSingularStringField(value: self.candidate, fieldNumber: 2)
+    }
+    if self.term != 0 {
+      try visitor.visitSingularUInt64Field(value: self.term, fieldNumber: 3)
+    }
+    if self.lastIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.lastIndex, fieldNumber: 4)
+    }
+    if self.lastTerm != 0 {
+      try visitor.visitSingularUInt64Field(value: self.lastTerm, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftVoteRequest, rhs: Im_Actor_V1_PlacementRaftVoteRequest) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.candidate != rhs.candidate {return false}
+    if lhs.term != rhs.term {return false}
+    if lhs.lastIndex != rhs.lastIndex {return false}
+    if lhs.lastTerm != rhs.lastTerm {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftVoteReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftVoteReply"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}term\0\u{1}granted\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.term) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.granted) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if self.term != 0 {
+      try visitor.visitSingularUInt64Field(value: self.term, fieldNumber: 2)
+    }
+    if self.granted != false {
+      try visitor.visitSingularBoolField(value: self.granted, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftVoteReply, rhs: Im_Actor_V1_PlacementRaftVoteReply) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.term != rhs.term {return false}
+    if lhs.granted != rhs.granted {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftAppendRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftAppendRequest"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}leader\0\u{1}term\0\u{3}previous_index\0\u{3}previous_term\0\u{1}entries\0\u{3}leader_commit\0\u{3}read_id\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.leader) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.term) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.previousIndex) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.previousTerm) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.entries) }()
+      case 7: try { try decoder.decodeSingularUInt64Field(value: &self.leaderCommit) }()
+      case 8: try { try decoder.decodeSingularBytesField(value: &self.readID) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if !self.leader.isEmpty {
+      try visitor.visitSingularStringField(value: self.leader, fieldNumber: 2)
+    }
+    if self.term != 0 {
+      try visitor.visitSingularUInt64Field(value: self.term, fieldNumber: 3)
+    }
+    if self.previousIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.previousIndex, fieldNumber: 4)
+    }
+    if self.previousTerm != 0 {
+      try visitor.visitSingularUInt64Field(value: self.previousTerm, fieldNumber: 5)
+    }
+    if !self.entries.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.entries, fieldNumber: 6)
+    }
+    if self.leaderCommit != 0 {
+      try visitor.visitSingularUInt64Field(value: self.leaderCommit, fieldNumber: 7)
+    }
+    if !self.readID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.readID, fieldNumber: 8)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftAppendRequest, rhs: Im_Actor_V1_PlacementRaftAppendRequest) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.leader != rhs.leader {return false}
+    if lhs.term != rhs.term {return false}
+    if lhs.previousIndex != rhs.previousIndex {return false}
+    if lhs.previousTerm != rhs.previousTerm {return false}
+    if lhs.entries != rhs.entries {return false}
+    if lhs.leaderCommit != rhs.leaderCommit {return false}
+    if lhs.readID != rhs.readID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftAppendReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftAppendReply"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}term\0\u{1}accepted\0\u{3}matched_index\0\u{3}read_id\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.term) }()
+      case 3: try { try decoder.decodeSingularBoolField(value: &self.accepted) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.matchedIndex) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.readID) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if self.term != 0 {
+      try visitor.visitSingularUInt64Field(value: self.term, fieldNumber: 2)
+    }
+    if self.accepted != false {
+      try visitor.visitSingularBoolField(value: self.accepted, fieldNumber: 3)
+    }
+    if self.matchedIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.matchedIndex, fieldNumber: 4)
+    }
+    if !self.readID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.readID, fieldNumber: 5)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftAppendReply, rhs: Im_Actor_V1_PlacementRaftAppendReply) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.term != rhs.term {return false}
+    if lhs.accepted != rhs.accepted {return false}
+    if lhs.matchedIndex != rhs.matchedIndex {return false}
+    if lhs.readID != rhs.readID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementDrainCertificate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementDrainCertificate"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{3}group_id\0\u{3}shard_id\0\u{1}host\0\u{1}partition\0\u{1}epoch\0\u{3}transfer_id\0\u{3}registration_previous\0\u{3}registration_request_id\0\u{3}exclusion_request_id\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularEnumField(value: &self.kind) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.shardID) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._host) }()
+      case 5: try { try decoder.decodeSingularUInt32Field(value: &self.partition) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.epoch) }()
+      case 7: try { try decoder.decodeSingularBytesField(value: &self.transferID) }()
+      case 8: try { try decoder.decodeSingularMessageField(value: &self._registrationPrevious) }()
+      case 9: try { try decoder.decodeSingularBytesField(value: &self.registrationRequestID) }()
+      case 10: try { try decoder.decodeSingularBytesField(value: &self.exclusionRequestID) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if self.kind != .unspecified {
+      try visitor.visitSingularEnumField(value: self.kind, fieldNumber: 1)
+    }
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 2)
+    }
+    if !self.shardID.isEmpty {
+      try visitor.visitSingularStringField(value: self.shardID, fieldNumber: 3)
+    }
+    try { if let v = self._host {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    if self.partition != 0 {
+      try visitor.visitSingularUInt32Field(value: self.partition, fieldNumber: 5)
+    }
+    if self.epoch != 0 {
+      try visitor.visitSingularUInt64Field(value: self.epoch, fieldNumber: 6)
+    }
+    if !self.transferID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.transferID, fieldNumber: 7)
+    }
+    try { if let v = self._registrationPrevious {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 8)
+    } }()
+    if !self.registrationRequestID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.registrationRequestID, fieldNumber: 9)
+    }
+    if !self.exclusionRequestID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.exclusionRequestID, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementDrainCertificate, rhs: Im_Actor_V1_PlacementDrainCertificate) -> Bool {
+    if lhs.kind != rhs.kind {return false}
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.shardID != rhs.shardID {return false}
+    if lhs._host != rhs._host {return false}
+    if lhs.partition != rhs.partition {return false}
+    if lhs.epoch != rhs.epoch {return false}
+    if lhs.transferID != rhs.transferID {return false}
+    if lhs._registrationPrevious != rhs._registrationPrevious {return false}
+    if lhs.registrationRequestID != rhs.registrationRequestID {return false}
+    if lhs.exclusionRequestID != rhs.exclusionRequestID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementDrainCertificate.Kind: SwiftProtobuf._ProtoNameProviding {
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0UNSPECIFIED\0\u{1}PARTITION\0\u{1}HOST\0\u{1}EXCLUDED_HOST\0")
+}
+
+nonisolated extension Im_Actor_V1_PlacementSignedCertificate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementSignedCertificate"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}signer_id\0\u{1}body\0\u{1}signature\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.signerID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.body) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.signature) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.signerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.signerID, fieldNumber: 1)
+    }
+    if !self.body.isEmpty {
+      try visitor.visitSingularBytesField(value: self.body, fieldNumber: 2)
+    }
+    if !self.signature.isEmpty {
+      try visitor.visitSingularBytesField(value: self.signature, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementSignedCertificate, rhs: Im_Actor_V1_PlacementSignedCertificate) -> Bool {
+    if lhs.signerID != rhs.signerID {return false}
+    if lhs.body != rhs.body {return false}
+    if lhs.signature != rhs.signature {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftWriteRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftWriteRequest"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}operation\0\u{1}evidence\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.operation) }()
+      case 2: try { try decoder.decodeSingularMessageField(value: &self._evidence) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.operation.isEmpty {
+      try visitor.visitSingularBytesField(value: self.operation, fieldNumber: 1)
+    }
+    try { if let v = self._evidence {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftWriteRequest, rhs: Im_Actor_V1_PlacementRaftWriteRequest) -> Bool {
+    if lhs.operation != rhs.operation {return false}
+    if lhs._evidence != rhs._evidence {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftWriteReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftWriteReply"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}snapshot\0\u{3}leader_hint\0\u{1}rejection\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.snapshot) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.leaderHint) }()
+      case 4: try { try decoder.decodeSingularUInt32Field(value: &self.rejection) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if !self.snapshot.isEmpty {
+      try visitor.visitSingularBytesField(value: self.snapshot, fieldNumber: 2)
+    }
+    if !self.leaderHint.isEmpty {
+      try visitor.visitSingularStringField(value: self.leaderHint, fieldNumber: 3)
+    }
+    if self.rejection != 0 {
+      try visitor.visitSingularUInt32Field(value: self.rejection, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftWriteReply, rhs: Im_Actor_V1_PlacementRaftWriteReply) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.snapshot != rhs.snapshot {return false}
+    if lhs.leaderHint != rhs.leaderHint {return false}
+    if lhs.rejection != rhs.rejection {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftReadRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftReadRequest"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{3}include_archive_usage\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularBoolField(value: &self.includeArchiveUsage) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if self.includeArchiveUsage != false {
+      try visitor.visitSingularBoolField(value: self.includeArchiveUsage, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftReadRequest, rhs: Im_Actor_V1_PlacementRaftReadRequest) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.includeArchiveUsage != rhs.includeArchiveUsage {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftArchiveUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftArchiveUsage"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}receipts\0\u{1}bytes\0\u{3}reserved_receipts\0\u{3}reserved_bytes\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt64Field(value: &self.receipts) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.bytes) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.reservedReceipts) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.reservedBytes) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.receipts != 0 {
+      try visitor.visitSingularUInt64Field(value: self.receipts, fieldNumber: 1)
+    }
+    if self.bytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.bytes, fieldNumber: 2)
+    }
+    if self.reservedReceipts != 0 {
+      try visitor.visitSingularUInt64Field(value: self.reservedReceipts, fieldNumber: 3)
+    }
+    if self.reservedBytes != 0 {
+      try visitor.visitSingularUInt64Field(value: self.reservedBytes, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftArchiveUsage, rhs: Im_Actor_V1_PlacementRaftArchiveUsage) -> Bool {
+    if lhs.receipts != rhs.receipts {return false}
+    if lhs.bytes != rhs.bytes {return false}
+    if lhs.reservedReceipts != rhs.reservedReceipts {return false}
+    if lhs.reservedBytes != rhs.reservedBytes {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_RoomHostRecoveryOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".RoomHostRecoveryOperation"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}incarnation_id\0\u{3}operation_id\0\u{1}completed\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.hostID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.incarnationID) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.operationID) }()
+      case 4: try { try decoder.decodeSingularBoolField(value: &self.completed) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.hostID.isEmpty {
+      try visitor.visitSingularStringField(value: self.hostID, fieldNumber: 1)
+    }
+    if !self.incarnationID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.incarnationID, fieldNumber: 2)
+    }
+    if !self.operationID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.operationID, fieldNumber: 3)
+    }
+    if self.completed != false {
+      try visitor.visitSingularBoolField(value: self.completed, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_RoomHostRecoveryOperation, rhs: Im_Actor_V1_RoomHostRecoveryOperation) -> Bool {
+    if lhs.hostID != rhs.hostID {return false}
+    if lhs.incarnationID != rhs.incarnationID {return false}
+    if lhs.operationID != rhs.operationID {return false}
+    if lhs.completed != rhs.completed {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_RoomHostRecoveryJournal: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".RoomHostRecoveryJournal"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}supervisor_id\0\u{3}host_ids\0\u{1}operations\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.version) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.supervisorID) }()
+      case 3: try { try decoder.decodeRepeatedStringField(value: &self.hostIds) }()
+      case 4: try { try decoder.decodeRepeatedMessageField(value: &self.operations) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.version != 0 {
+      try visitor.visitSingularUInt32Field(value: self.version, fieldNumber: 1)
+    }
+    if !self.supervisorID.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorID, fieldNumber: 2)
+    }
+    if !self.hostIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.hostIds, fieldNumber: 3)
+    }
+    if !self.operations.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.operations, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_RoomHostRecoveryJournal, rhs: Im_Actor_V1_RoomHostRecoveryJournal) -> Bool {
+    if lhs.version != rhs.version {return false}
+    if lhs.supervisorID != rhs.supervisorID {return false}
+    if lhs.hostIds != rhs.hostIds {return false}
+    if lhs.operations != rhs.operations {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_RoomHostRecoveryJournalFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".RoomHostRecoveryJournalFile"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}journal\0\u{1}sha256\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.journal) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.sha256) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.journal.isEmpty {
+      try visitor.visitSingularBytesField(value: self.journal, fieldNumber: 1)
+    }
+    if !self.sha256.isEmpty {
+      try visitor.visitSingularBytesField(value: self.sha256, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_RoomHostRecoveryJournalFile, rhs: Im_Actor_V1_RoomHostRecoveryJournalFile) -> Bool {
+    if lhs.journal != rhs.journal {return false}
+    if lhs.sha256 != rhs.sha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_DockerRoomHostBinding: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostBinding"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}incarnation_id\0\u{3}container_id\0\u{3}started_at\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.hostID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.incarnationID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.containerID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.startedAt) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.hostID.isEmpty {
+      try visitor.visitSingularStringField(value: self.hostID, fieldNumber: 1)
+    }
+    if !self.incarnationID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.incarnationID, fieldNumber: 2)
+    }
+    if !self.containerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.containerID, fieldNumber: 3)
+    }
+    if !self.startedAt.isEmpty {
+      try visitor.visitSingularStringField(value: self.startedAt, fieldNumber: 4)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_DockerRoomHostBinding, rhs: Im_Actor_V1_DockerRoomHostBinding) -> Bool {
+    if lhs.hostID != rhs.hostID {return false}
+    if lhs.incarnationID != rhs.incarnationID {return false}
+    if lhs.containerID != rhs.containerID {return false}
+    if lhs.startedAt != rhs.startedAt {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_DockerRoomHostInventory: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostInventory"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}supervisor_id\0\u{3}daemon_id\0\u{3}socket_path\0\u{3}host_ids\0\u{1}bindings\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.version) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.supervisorID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.socketPath) }()
+      case 5: try { try decoder.decodeRepeatedStringField(value: &self.hostIds) }()
+      case 6: try { try decoder.decodeRepeatedMessageField(value: &self.bindings) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.version != 0 {
+      try visitor.visitSingularUInt32Field(value: self.version, fieldNumber: 1)
+    }
+    if !self.supervisorID.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorID, fieldNumber: 2)
+    }
+    if !self.daemonID.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonID, fieldNumber: 3)
+    }
+    if !self.socketPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.socketPath, fieldNumber: 4)
+    }
+    if !self.hostIds.isEmpty {
+      try visitor.visitRepeatedStringField(value: self.hostIds, fieldNumber: 5)
+    }
+    if !self.bindings.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.bindings, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_DockerRoomHostInventory, rhs: Im_Actor_V1_DockerRoomHostInventory) -> Bool {
+    if lhs.version != rhs.version {return false}
+    if lhs.supervisorID != rhs.supervisorID {return false}
+    if lhs.daemonID != rhs.daemonID {return false}
+    if lhs.socketPath != rhs.socketPath {return false}
+    if lhs.hostIds != rhs.hostIds {return false}
+    if lhs.bindings != rhs.bindings {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_DockerRoomHostInventoryFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostInventoryFile"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}inventory\0\u{1}sha256\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.inventory) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.sha256) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.inventory.isEmpty {
+      try visitor.visitSingularBytesField(value: self.inventory, fieldNumber: 1)
+    }
+    if !self.sha256.isEmpty {
+      try visitor.visitSingularBytesField(value: self.sha256, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_DockerRoomHostInventoryFile, rhs: Im_Actor_V1_DockerRoomHostInventoryFile) -> Bool {
+    if lhs.inventory != rhs.inventory {return false}
+    if lhs.sha256 != rhs.sha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_RoomHostStartupHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".RoomHostStartupHello"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}incarnation_id\0\u{3}launch_token\0\u{3}supervisor_id\0\u{3}service_id\0\u{3}process_id\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularStringField(value: &self.hostID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.incarnationID) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.launchToken) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.supervisorID) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.serviceID) }()
+      case 6: try { try decoder.decodeSingularInt64Field(value: &self.processID) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.hostID.isEmpty {
+      try visitor.visitSingularStringField(value: self.hostID, fieldNumber: 1)
+    }
+    if !self.incarnationID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.incarnationID, fieldNumber: 2)
+    }
+    if !self.launchToken.isEmpty {
+      try visitor.visitSingularBytesField(value: self.launchToken, fieldNumber: 3)
+    }
+    if !self.supervisorID.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorID, fieldNumber: 4)
+    }
+    if !self.serviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.serviceID, fieldNumber: 5)
+    }
+    if self.processID != 0 {
+      try visitor.visitSingularInt64Field(value: self.processID, fieldNumber: 6)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_RoomHostStartupHello, rhs: Im_Actor_V1_RoomHostStartupHello) -> Bool {
+    if lhs.hostID != rhs.hostID {return false}
+    if lhs.incarnationID != rhs.incarnationID {return false}
+    if lhs.launchToken != rhs.launchToken {return false}
+    if lhs.supervisorID != rhs.supervisorID {return false}
+    if lhs.serviceID != rhs.serviceID {return false}
+    if lhs.processID != rhs.processID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_RoomHostStartupRelease: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".RoomHostStartupRelease"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}hello_sha256\0\u{3}supervisor_id\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.helloSha256) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.supervisorID) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.helloSha256.isEmpty {
+      try visitor.visitSingularBytesField(value: self.helloSha256, fieldNumber: 1)
+    }
+    if !self.supervisorID.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorID, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_RoomHostStartupRelease, rhs: Im_Actor_V1_RoomHostStartupRelease) -> Bool {
+    if lhs.helloSha256 != rhs.helloSha256 {return false}
+    if lhs.supervisorID != rhs.supervisorID {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_DockerRoomHostLaunch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostLaunch"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}supervisor_id\0\u{3}daemon_id\0\u{3}socket_path\0\u{3}host_id\0\u{3}service_id\0\u{3}gate_directory\0\u{3}launch_token\0\u{3}create_request\0\u{3}container_id\0\u{3}started_at\0\u{3}incarnation_id\0\u{1}released\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.version) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.supervisorID) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.daemonID) }()
+      case 4: try { try decoder.decodeSingularStringField(value: &self.socketPath) }()
+      case 5: try { try decoder.decodeSingularStringField(value: &self.hostID) }()
+      case 6: try { try decoder.decodeSingularStringField(value: &self.serviceID) }()
+      case 7: try { try decoder.decodeSingularStringField(value: &self.gateDirectory) }()
+      case 8: try { try decoder.decodeSingularBytesField(value: &self.launchToken) }()
+      case 9: try { try decoder.decodeSingularBytesField(value: &self.createRequest) }()
+      case 10: try { try decoder.decodeSingularStringField(value: &self.containerID) }()
+      case 11: try { try decoder.decodeSingularStringField(value: &self.startedAt) }()
+      case 12: try { try decoder.decodeSingularBytesField(value: &self.incarnationID) }()
+      case 13: try { try decoder.decodeSingularBoolField(value: &self.released) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.version != 0 {
+      try visitor.visitSingularUInt32Field(value: self.version, fieldNumber: 1)
+    }
+    if !self.supervisorID.isEmpty {
+      try visitor.visitSingularStringField(value: self.supervisorID, fieldNumber: 2)
+    }
+    if !self.daemonID.isEmpty {
+      try visitor.visitSingularStringField(value: self.daemonID, fieldNumber: 3)
+    }
+    if !self.socketPath.isEmpty {
+      try visitor.visitSingularStringField(value: self.socketPath, fieldNumber: 4)
+    }
+    if !self.hostID.isEmpty {
+      try visitor.visitSingularStringField(value: self.hostID, fieldNumber: 5)
+    }
+    if !self.serviceID.isEmpty {
+      try visitor.visitSingularStringField(value: self.serviceID, fieldNumber: 6)
+    }
+    if !self.gateDirectory.isEmpty {
+      try visitor.visitSingularStringField(value: self.gateDirectory, fieldNumber: 7)
+    }
+    if !self.launchToken.isEmpty {
+      try visitor.visitSingularBytesField(value: self.launchToken, fieldNumber: 8)
+    }
+    if !self.createRequest.isEmpty {
+      try visitor.visitSingularBytesField(value: self.createRequest, fieldNumber: 9)
+    }
+    if !self.containerID.isEmpty {
+      try visitor.visitSingularStringField(value: self.containerID, fieldNumber: 10)
+    }
+    if !self.startedAt.isEmpty {
+      try visitor.visitSingularStringField(value: self.startedAt, fieldNumber: 11)
+    }
+    if !self.incarnationID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.incarnationID, fieldNumber: 12)
+    }
+    if self.released != false {
+      try visitor.visitSingularBoolField(value: self.released, fieldNumber: 13)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_DockerRoomHostLaunch, rhs: Im_Actor_V1_DockerRoomHostLaunch) -> Bool {
+    if lhs.version != rhs.version {return false}
+    if lhs.supervisorID != rhs.supervisorID {return false}
+    if lhs.daemonID != rhs.daemonID {return false}
+    if lhs.socketPath != rhs.socketPath {return false}
+    if lhs.hostID != rhs.hostID {return false}
+    if lhs.serviceID != rhs.serviceID {return false}
+    if lhs.gateDirectory != rhs.gateDirectory {return false}
+    if lhs.launchToken != rhs.launchToken {return false}
+    if lhs.createRequest != rhs.createRequest {return false}
+    if lhs.containerID != rhs.containerID {return false}
+    if lhs.startedAt != rhs.startedAt {return false}
+    if lhs.incarnationID != rhs.incarnationID {return false}
+    if lhs.released != rhs.released {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_DockerRoomHostLaunchFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostLaunchFile"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}launch\0\u{1}sha256\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.launch) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.sha256) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.launch.isEmpty {
+      try visitor.visitSingularBytesField(value: self.launch, fieldNumber: 1)
+    }
+    if !self.sha256.isEmpty {
+      try visitor.visitSingularBytesField(value: self.sha256, fieldNumber: 2)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_DockerRoomHostLaunchFile, rhs: Im_Actor_V1_DockerRoomHostLaunchFile) -> Bool {
+    if lhs.launch != rhs.launch {return false}
+    if lhs.sha256 != rhs.sha256 {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftReadReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftReadReply"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}snapshot\0\u{3}leader_hint\0\u{3}archive_usage\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.snapshot) }()
+      case 3: try { try decoder.decodeSingularStringField(value: &self.leaderHint) }()
+      case 4: try { try decoder.decodeSingularMessageField(value: &self._archiveUsage) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if !self.snapshot.isEmpty {
+      try visitor.visitSingularBytesField(value: self.snapshot, fieldNumber: 2)
+    }
+    if !self.leaderHint.isEmpty {
+      try visitor.visitSingularStringField(value: self.leaderHint, fieldNumber: 3)
+    }
+    try { if let v = self._archiveUsage {
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 4)
+    } }()
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftReadReply, rhs: Im_Actor_V1_PlacementRaftReadReply) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.snapshot != rhs.snapshot {return false}
+    if lhs.leaderHint != rhs.leaderHint {return false}
+    if lhs._archiveUsage != rhs._archiveUsage {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftSnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftSnapshotChunk"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}leader\0\u{1}term\0\u{3}transfer_id\0\u{3}snapshot_index\0\u{3}snapshot_term\0\u{1}digest\0\u{3}total_bytes\0\u{1}offset\0\u{1}chunk\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularStringField(value: &self.leader) }()
+      case 3: try { try decoder.decodeSingularUInt64Field(value: &self.term) }()
+      case 4: try { try decoder.decodeSingularBytesField(value: &self.transferID) }()
+      case 5: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotIndex) }()
+      case 6: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotTerm) }()
+      case 7: try { try decoder.decodeSingularBytesField(value: &self.digest) }()
+      case 8: try { try decoder.decodeSingularUInt32Field(value: &self.totalBytes) }()
+      case 9: try { try decoder.decodeSingularUInt32Field(value: &self.offset) }()
+      case 10: try { try decoder.decodeSingularBytesField(value: &self.chunk) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if !self.leader.isEmpty {
+      try visitor.visitSingularStringField(value: self.leader, fieldNumber: 2)
+    }
+    if self.term != 0 {
+      try visitor.visitSingularUInt64Field(value: self.term, fieldNumber: 3)
+    }
+    if !self.transferID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.transferID, fieldNumber: 4)
+    }
+    if self.snapshotIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotIndex, fieldNumber: 5)
+    }
+    if self.snapshotTerm != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotTerm, fieldNumber: 6)
+    }
+    if !self.digest.isEmpty {
+      try visitor.visitSingularBytesField(value: self.digest, fieldNumber: 7)
+    }
+    if self.totalBytes != 0 {
+      try visitor.visitSingularUInt32Field(value: self.totalBytes, fieldNumber: 8)
+    }
+    if self.offset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.offset, fieldNumber: 9)
+    }
+    if !self.chunk.isEmpty {
+      try visitor.visitSingularBytesField(value: self.chunk, fieldNumber: 10)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftSnapshotChunk, rhs: Im_Actor_V1_PlacementRaftSnapshotChunk) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.leader != rhs.leader {return false}
+    if lhs.term != rhs.term {return false}
+    if lhs.transferID != rhs.transferID {return false}
+    if lhs.snapshotIndex != rhs.snapshotIndex {return false}
+    if lhs.snapshotTerm != rhs.snapshotTerm {return false}
+    if lhs.digest != rhs.digest {return false}
+    if lhs.totalBytes != rhs.totalBytes {return false}
+    if lhs.offset != rhs.offset {return false}
+    if lhs.chunk != rhs.chunk {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftSnapshotReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftSnapshotReply"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}term\0\u{3}transfer_id\0\u{3}snapshot_index\0\u{1}accepted\0\u{3}next_offset\0\u{1}installed\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularBytesField(value: &self.groupID) }()
+      case 2: try { try decoder.decodeSingularUInt64Field(value: &self.term) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.transferID) }()
+      case 4: try { try decoder.decodeSingularUInt64Field(value: &self.snapshotIndex) }()
+      case 5: try { try decoder.decodeSingularBoolField(value: &self.accepted) }()
+      case 6: try { try decoder.decodeSingularUInt32Field(value: &self.nextOffset) }()
+      case 7: try { try decoder.decodeSingularBoolField(value: &self.installed) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if !self.groupID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.groupID, fieldNumber: 1)
+    }
+    if self.term != 0 {
+      try visitor.visitSingularUInt64Field(value: self.term, fieldNumber: 2)
+    }
+    if !self.transferID.isEmpty {
+      try visitor.visitSingularBytesField(value: self.transferID, fieldNumber: 3)
+    }
+    if self.snapshotIndex != 0 {
+      try visitor.visitSingularUInt64Field(value: self.snapshotIndex, fieldNumber: 4)
+    }
+    if self.accepted != false {
+      try visitor.visitSingularBoolField(value: self.accepted, fieldNumber: 5)
+    }
+    if self.nextOffset != 0 {
+      try visitor.visitSingularUInt32Field(value: self.nextOffset, fieldNumber: 6)
+    }
+    if self.installed != false {
+      try visitor.visitSingularBoolField(value: self.installed, fieldNumber: 7)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftSnapshotReply, rhs: Im_Actor_V1_PlacementRaftSnapshotReply) -> Bool {
+    if lhs.groupID != rhs.groupID {return false}
+    if lhs.term != rhs.term {return false}
+    if lhs.transferID != rhs.transferID {return false}
+    if lhs.snapshotIndex != rhs.snapshotIndex {return false}
+    if lhs.accepted != rhs.accepted {return false}
+    if lhs.nextOffset != rhs.nextOffset {return false}
+    if lhs.installed != rhs.installed {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftRequest"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}vote\0\u{1}append\0\u{1}snapshot\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try {
+        var v: Im_Actor_V1_PlacementRaftVoteRequest?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .vote(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .vote(v)
+        }
+      }()
+      case 2: try {
+        var v: Im_Actor_V1_PlacementRaftAppendRequest?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .append(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .append(v)
+        }
+      }()
+      case 3: try {
+        var v: Im_Actor_V1_PlacementRaftSnapshotChunk?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .snapshot(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .snapshot(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    switch self.body {
+    case .vote?: try {
+      guard case .vote(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    }()
+    case .append?: try {
+      guard case .append(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case .snapshot?: try {
+      guard case .snapshot(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftRequest, rhs: Im_Actor_V1_PlacementRaftRequest) -> Bool {
+    if lhs.body != rhs.body {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftReply"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}vote\0\u{1}append\0\u{1}snapshot\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try {
+        var v: Im_Actor_V1_PlacementRaftVoteReply?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .vote(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .vote(v)
+        }
+      }()
+      case 2: try {
+        var v: Im_Actor_V1_PlacementRaftAppendReply?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .append(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .append(v)
+        }
+      }()
+      case 3: try {
+        var v: Im_Actor_V1_PlacementRaftSnapshotReply?
+        var hadOneofValue = false
+        if let current = self.body {
+          hadOneofValue = true
+          if case .snapshot(let m) = current {v = m}
+        }
+        try decoder.decodeSingularMessageField(value: &v)
+        if let v = v {
+          if hadOneofValue {try decoder.handleConflictingOneOf()}
+          self.body = .snapshot(v)
+        }
+      }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    // The use of inline closures is to circumvent an issue where the compiler
+    // allocates stack space for every if/case branch local when no optimizations
+    // are enabled. https://github.com/apple/swift-protobuf/issues/1034 and
+    // https://github.com/apple/swift-protobuf/issues/1182
+    switch self.body {
+    case .vote?: try {
+      guard case .vote(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
+    }()
+    case .append?: try {
+      guard case .append(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
+    }()
+    case .snapshot?: try {
+      guard case .snapshot(let v)? = self.body else { preconditionFailure() }
+      try visitor.visitSingularMessageField(value: v, fieldNumber: 3)
+    }()
+    case nil: break
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftReply, rhs: Im_Actor_V1_PlacementRaftReply) -> Bool {
+    if lhs.body != rhs.body {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
+
+nonisolated extension Im_Actor_V1_PlacementRaftFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+  package static let protoMessageName: String = _protobuf_package + ".PlacementRaftFile"
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}format\0\u{1}state\0\u{1}digest\0")
+
+  package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
+    while let fieldNumber = try decoder.nextFieldNumber() {
+      // The use of inline closures is to circumvent an issue where the compiler
+      // allocates stack space for every case branch when no optimizations are
+      // enabled. https://github.com/apple/swift-protobuf/issues/1034
+      switch fieldNumber {
+      case 1: try { try decoder.decodeSingularUInt32Field(value: &self.format) }()
+      case 2: try { try decoder.decodeSingularBytesField(value: &self.state) }()
+      case 3: try { try decoder.decodeSingularBytesField(value: &self.digest) }()
+      default: break
+      }
+    }
+  }
+
+  package func traverse<V: SwiftProtobuf.Visitor>(visitor: inout V) throws {
+    if self.format != 0 {
+      try visitor.visitSingularUInt32Field(value: self.format, fieldNumber: 1)
+    }
+    if !self.state.isEmpty {
+      try visitor.visitSingularBytesField(value: self.state, fieldNumber: 2)
+    }
+    if !self.digest.isEmpty {
+      try visitor.visitSingularBytesField(value: self.digest, fieldNumber: 3)
+    }
+    try unknownFields.traverse(visitor: &visitor)
+  }
+
+  package static func ==(lhs: Im_Actor_V1_PlacementRaftFile, rhs: Im_Actor_V1_PlacementRaftFile) -> Bool {
+    if lhs.format != rhs.format {return false}
+    if lhs.state != rhs.state {return false}
+    if lhs.digest != rhs.digest {return false}
+    if lhs.unknownFields != rhs.unknownFields {return false}
+    return true
+  }
+}
 
 nonisolated extension Im_Actor_V1_Value: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".Value"

@@ -243,7 +243,7 @@ func v2PackedGroupEventPulls(_ inputs: [V2GroupEventPullBatchInput],
         throw V2GroupEventLogError.invalidRequest
     }
     let values = try inputs.map { input -> Input in
-        guard let token = tokens[RoomID(uuid: input.roomID)] else { throw V2RoomActivationLeaseError.activationChanged }
+        guard let token = tokens[RoomID(uuid: input.roomID)] else { throw V2RoomActorStateError.activationChanged }
         let header = try V2ActorRoomLogPageWire(roomID: token.roomID, events: [],
             nextRoomSequence: UInt64(Int64.max), hasMore: true,
             logTrimmedThroughRoomSequence: UInt64(Int64.max)).protobufResponseByteCount()
@@ -269,15 +269,8 @@ func v2PackedGroupEventPulls(_ inputs: [V2GroupEventPullBatchInput],
                 WHEN room.room_id IS NULL THEN 'room_not_found'
                 WHEN room.room_shard_id IS DISTINCT FROM input.owner_shard
                   OR room.owner_epoch IS DISTINCT FROM input.owner_epoch THEN 'owner_changed'
-                WHEN lease.room_id IS NULL OR lease.activation_epoch IS DISTINCT FROM input.activation_epoch
-                  OR lease.owner_shard_id IS DISTINCT FROM input.owner_shard
-                  OR lease.owner_epoch IS DISTINCT FROM input.owner_epoch
-                  OR lease.host_id IS DISTINCT FROM input.host_id
-                  OR lease.host_incarnation_id IS DISTINCT FROM input.incarnation THEN 'activation_changed'
-                WHEN lease.expires_at IS NULL OR lease.expires_at <= observed.observed_at THEN 'lease_expired'
             END AS failure
             FROM input CROSS JOIN observed LEFT JOIN im_v2.rooms room USING(room_id)
-            LEFT JOIN im_v2.room_activation_leases lease USING(room_id)
         ), valid AS MATERIALIZED (SELECT * FROM authority WHERE failure IS NULL),
         pages AS MATERIALIZED (
             SELECT valid.ordinal, page.* FROM valid CROSS JOIN LATERAL (\(page)) page
@@ -319,10 +312,8 @@ func v2PackedGroupEventPulls(_ inputs: [V2GroupEventPullBatchInput],
             hints[ordinal] = try row.decode(column: "byte_bound", as: Int.self)
             if let failure = try row.decode(column: "failure", as: String?.self) {
                 failures[ordinal] = switch failure {
-                case "room_not_found": V2RoomActivationLeaseError.roomNotFound
-                case "owner_changed": V2RoomActivationLeaseError.ownerChanged
-                case "activation_changed": V2RoomActivationLeaseError.activationChanged
-                case "lease_expired": V2RoomActivationLeaseError.leaseExpired
+                case "room_not_found": V2RoomActorStateError.roomNotFound
+                case "owner_changed": V2RoomActorStateError.ownerChanged
                 default: V2GroupEventLogError.corruptPersistenceState
                 }
             } else { metadata[ordinal] = try row.decode(model: V2GroupEventPullMetadata.self) }

@@ -48,13 +48,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 receiptProjectionDelivery: SuccessfulProjectionDelivery(), capacityProfile: profile,
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init()).usingPolicyAuthorizations(policies)
-            let leases = try V2RoomServerLeaseStore(databases: ["room-b": owner])
+            let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "room-b") { nativeControl in
+            let placement = try await nativeControl.register(identity, shard: "room-b")
             let configuration = try V2RoomRuntimeConfiguration()
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(
-                identity: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()), leaseStore: leases,
+                identity: identity, placement: placement,
                 configuration: configuration, budget: .init(configuration: configuration), classify: { $0.turnSchedulingClass },
                 factory: try V2RoomServerActivationFactory(owners: ["room-b": resources], safetyActorUserID: senderID).runtimeFactory())
             await host.start()
+            @Sendable func stopHost() async throws {
+                let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                try await placement.retireAfterDrain(proof, shards: ["room-b"])
+            }
             var hidden = false
             do {
                 try await V2PostgresSessionReadiness.verify(database: sendDatabase, timeouts: .default)
@@ -82,17 +88,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(receipt.outcome == .rejected(.directPolicyDenied))
                 #expect(try await owners.cachedSnapshots(scopes: [.stranger(memberTwoUUID)]) == nil)
                 #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: opened.roomID.uuidValue!)").first(decoding: RepliedCount.self)?.value == 4)
-                #expect(await host.stop(deadline: .now + .seconds(10)).completed)
+                try await stopHost()
                 await resources.shutdownDurableSendOperations()
-                await leases.shutdownLifecycle(); await leases.shutdownRenewals()
                 await policies.shutdown(); await owners.shutdown()
             } catch {
                 if hidden { try? await controlSQL.raw("ALTER TABLE im_v2.stranger_reply_hidden RENAME TO user_stranger_message_preferences").run() }
-                _ = await host.stop(deadline: .now + .seconds(10))
+                try await stopHost()
                 await resources.shutdownDurableSendOperations()
-                await leases.shutdownLifecycle(); await leases.shutdownRenewals()
                 await policies.shutdown(); await owners.shutdown()
                 throw error
+            }
             }
         }
     }

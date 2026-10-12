@@ -54,7 +54,7 @@ public struct PostgresV2ForwardInboxStore: Sendable {
         if let selected {
             guard selected.owner.shardID == intent.targetShardID,
                   selected.owner.epoch == intent.targetEpoch else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
         }
         try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,

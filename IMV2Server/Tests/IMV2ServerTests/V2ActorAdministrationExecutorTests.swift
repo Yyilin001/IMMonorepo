@@ -31,7 +31,7 @@ struct V2ActorAdministrationExecutorTests {
             token: token, capacityProfile: profile, membershipIdentities: IdentityReader())
         let foreign = V2RoomAdministrationCommand.groupNickname(.init(roomID: otherRoom,
             actorUserID: actor, operationID: .init(uuid: UUID()), expectedRevision: nil, nickname: "Alice"))
-        await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+        await #expect(throws: V2RoomActorStateError.activationChanged) {
             _ = try await executor.executeUser(foreign)
         }
         let trusted = V2RoomAdministrationCommand.trustedSafety(.init(roomID: room,
@@ -42,7 +42,7 @@ struct V2ActorAdministrationExecutorTests {
         }
         let query = V2RoomAdministrationQuery.groupNicknames(.init(roomID: otherRoom,
             actorUserID: actor, afterUserID: nil, limit: 10))
-        await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+        await #expect(throws: V2RoomActorStateError.activationChanged) {
             _ = try await executor.execute(query)
         }
         try await resources.shutdown()
@@ -63,8 +63,8 @@ struct V2ActorAdministrationExecutorTests {
         }
         #expect(V2ActorAdministrationFailureWire(domainError: CancellationError()) == nil)
         #expect(V2ActorAdministrationFailureWire(domainError: V2RoomTransactionOutcomeUnknown()) == nil)
-        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomActivationLeaseError.outcomeUnknown) == nil)
-        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomActivationLeaseError.leaseExpired) == nil)
+        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomActorStateError.outcomeUnknown) == nil)
+        #expect(V2ActorAdministrationFailureWire(domainError: V2RoomActorStateError.activationChanged) == nil)
         #expect(V2ActorAdministrationFailureWire(domainError: V2RoomOwnerFenceError.ownerChanged) == nil)
         #expect(throws: V2RevisionValidationError.outOfRange) {
             _ = try V2ActorAdministrationFailureWire.profile(.revisionConflict(current: UInt64.max)).domainError()

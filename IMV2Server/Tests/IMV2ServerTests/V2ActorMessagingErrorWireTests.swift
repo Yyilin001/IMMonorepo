@@ -35,7 +35,7 @@ struct V2ActorMessagingErrorWireTests {
     @Test("unknown COMMIT, lease failures and cancellation never become domain results")
     func infrastructureIsNotDomain() {
         #expect(V2ActorMessagingErrorWire(domainError: V2RoomTransactionOutcomeUnknown()) == nil)
-        #expect(V2ActorMessagingErrorWire(domainError: V2RoomActivationLeaseError.leaseExpired) == nil)
+        #expect(V2ActorMessagingErrorWire(domainError: V2RoomActorStateError.activationChanged) == nil)
         #expect(V2ActorMessagingErrorWire(domainError: V2RoomCallFailure.outcomeUnknown) == nil)
         #expect(V2ActorMessagingErrorWire(domainError: CancellationError()) == nil)
     }

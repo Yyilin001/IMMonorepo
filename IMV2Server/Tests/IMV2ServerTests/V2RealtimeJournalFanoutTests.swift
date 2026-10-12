@@ -56,7 +56,7 @@ struct V2RealtimeJournalFanoutTests {
         let fanout = try fixture.makeFanout(receiver)
         _ = try await fanout.apply(sourceID: "room", lease: fixture.lease, batch: fixture.batch(through: 3))
         let next = fixture.batch(through: 4)
-        await #expect(throws: V2RealtimeJournalError.leaseLost) {
+        await #expect(throws: V2RealtimeJournalError.authorityLost) {
             _ = try await fanout.apply(sourceID: "room", lease: fixture.lease, batch: next)
         }
         _ = try await fanout.apply(sourceID: "room", lease: fixture.lease, batch: next)
@@ -124,7 +124,7 @@ private actor FanoutReceiver {
         batches.append(batch)
         if gateway.identity.nodeID == "slow" {
             slowCalls += 1
-            if failSlowOnce { failSlowOnce = false; throw V2RealtimeJournalError.leaseLost }
+            if failSlowOnce { failSlowOnce = false; throw V2RealtimeJournalError.authorityLost }
         } else { fastCalls += 1 }
         switch batch.payload {
         case .changes(_, let through, _):

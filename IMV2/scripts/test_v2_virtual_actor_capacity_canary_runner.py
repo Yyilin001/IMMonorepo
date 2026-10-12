@@ -17,7 +17,8 @@ from assess_v2_virtual_actor_capacity import read_run
 from virtual_actor_capacity_measurement import MeasurementFailure
 
 from test_v2_virtual_actor_capacity_canary import (
-    CAPACITY_NOFILE, CADDY_IMAGE, CanaryFailure, install_account_services,
+    CAPACITY_NOFILE, CADDY_IMAGE, IMAGE, PLACEMENT_VOTERS, CanaryFailure, install_account_services,
+    install_placement_services,
     capture_detached_loader_open_file_limits,
     capture_pid1_open_file_limits, capture_project_diagnostics,
     capture_runtime_provenance, measurement_service_settings,
@@ -32,6 +33,34 @@ PREPARE = HERE / "prepare_v2_virtual_actor_capacity_fixture.py"
 
 
 class CanaryRunnerPreflightTests(unittest.TestCase):
+    def test_native_placement_keeps_three_separate_durable_voters(self) -> None:
+        original = {"services": {name: {"environment": {}, "restart": "on-failure",
+            "ports": ["7336:7336"], "volumes": [
+                {"source": name, "target": "/run/im-v2-room-actor", "read_only": True},
+                {"source": name + "/placement", "target": "/run/im-v2-room-actor/placement"}]}
+            for name in PLACEMENT_VOTERS}}
+        services = {"gateway": {"depends_on": {"owner00": {"condition": "service_healthy"}}},
+                    "account": {"depends_on": {"postgres": {"condition": "service_healthy"}}}}
+        install_placement_services(document=original, services=services,
+            runtime=Path("/owned/products"), shards=["room-a", "room-b"])
+        for name in PLACEMENT_VOTERS:
+            voter = services[name]
+            self.assertEqual(voter["image"], IMAGE)
+            self.assertEqual(voter["command"], ["/run/va-products/IMV2PlacementControlApp"])
+            self.assertEqual(voter["environment"]["IMV2_PLACEMENT_SHARD_IDS"], "room-a,room-b")
+            self.assertEqual(voter["volumes"][:2], original["services"][name]["volumes"])
+            self.assertNotIn("ports", voter)
+            self.assertNotIn("restart", voter)
+            self.assertIn("restart", original["services"][name])
+            for application in ("gateway", "account"):
+                self.assertEqual(services[application]["depends_on"][name]["condition"], "service_healthy")
+        self.assertIn("owner00", services["gateway"]["depends_on"])
+        self.assertIn("postgres", services["account"]["depends_on"])
+        del original["services"]["placement-c"]
+        with self.assertRaises(CanaryFailure):
+            install_placement_services(document=original, services=services,
+                runtime=Path("/owned/products"), shards=["room-a"])
+
     def test_http_send_stack_shares_fixture_routes_and_keeps_account_private(self) -> None:
         keys = ("IM_V2_DATABASE_URL", "IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64",
                 "IM_V2_CAPACITY_PROFILE_ID", "IM_V2_MAX_ELIGIBLE_MEMBERS",
@@ -112,6 +141,7 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parsed(["--measurement-workload", "fault", "--measurement-connections", "100"])
             formal = parsed(["--measurement-workload", "fault", "--measurement-connections", "100",
+                             "--measurement-main-revision", "1" * 40,
                              "--measurement-freeze-file", str(freeze)])
             self.assertEqual(result_mode(formal, {}), "measurement")
             self.assertTrue(formal_sampling_eligible(
@@ -280,7 +310,7 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             release = root / "release"
             release.mkdir()
             products = {}
-            for name in ("IMV2ServerApp", "IMV2AccountServerApp", "IMV2GatewayLoadGenerator"):
+            for name in ("IMV2ServerApp", "IMV2AccountServerApp", "IMV2PlacementControlApp", "IMV2GatewayLoadGenerator"):
                 path = release / name
                 path.write_bytes(b"\x7fELF" + name.encode())
                 path.chmod(0o700)
@@ -309,6 +339,9 @@ class CanaryRunnerPreflightTests(unittest.TestCase):
             self.assertEqual(passed.returncode, 0, passed.stderr)
             self.assertIn("VA_CAPACITY_CANARY_PREFLIGHT_OK", passed.stdout)
             self.assertFalse((root / "evidence").exists())
+            (release / "IMV2PlacementControlApp").write_bytes(b"\x7fELFstale-control")
+            self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
+            (release / "IMV2PlacementControlApp").write_bytes(b"\x7fELFIMV2PlacementControlApp")
             (release / "IMV2ServerApp").write_bytes(b"\x7fELFchanged")
             self.assertNotEqual(subprocess.run(command, capture_output=True).returncode, 0)
             (release / "IMV2ServerApp").write_bytes(b"\x7fELFIMV2ServerApp")

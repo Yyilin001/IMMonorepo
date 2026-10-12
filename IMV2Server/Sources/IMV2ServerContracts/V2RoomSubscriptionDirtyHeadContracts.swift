@@ -25,4 +25,4 @@ public struct V2RoomSubscriptionDirtyPage: Sendable {
     public let nextCursor: V2RoomSubscriptionDirtyCursor?
     public init(changes: [V2RoomSubscriptionDirtyHead], nextCursor: V2RoomSubscriptionDirtyCursor?) { self.changes = changes; self.nextCursor = nextCursor }
 }
-public typealias V2RoomSubscriptionDirtyChanges = @Sendable (V2ActorHostIdentity, V2RoomSubscriptionDirtyCursor?, Int, ContinuousClock.Instant) async throws -> V2RoomSubscriptionDirtyPage
+public typealias V2RoomSubscriptionDirtyChanges = @Sendable ([V2RoomActivationToken], V2RoomSubscriptionDirtyCursor?, Int, ContinuousClock.Instant) async throws -> V2RoomSubscriptionDirtyPage

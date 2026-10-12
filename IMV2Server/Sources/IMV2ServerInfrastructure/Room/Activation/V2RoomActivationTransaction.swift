@@ -53,7 +53,7 @@ func v2WithRoomActivationTransactionWithContext<Value: Sendable>(
         sendOperationMetrics: sendOperationMetrics, measureConnectionAcquire: measureConnectionAcquire,
         pinnedConnection: pinnedConnection
     ) { borrowed, context in
-        guard let context else { throw V2RoomActivationLeaseError.activationChanged }
+        guard let context else { throw V2RoomActorStateError.activationChanged }
         return try await body(borrowed, context)
     }
 }
@@ -516,33 +516,6 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         lifecycle = Mutex(Lifecycle())
     }
 
-    /// Uses this transaction's owned connection and already installed LOCAL
-    /// timeouts. No caller-provided connection can bypass timeout setup.
-    func requireDurableOwnersAndActivations(tokens: [V2RoomActivationToken],
-        operations: [V2DurableOwnerBatchOperationKey]? = nil) async throws {
-        try lifecycle.withLock { lifecycle in
-            guard lifecycle.active, !lifecycle.inUse, !lifecycle.used else {
-                throw V2RoomActivationLeaseError.activationChanged
-            }
-            lifecycle.inUse = true
-            lifecycle.used = true
-        }
-        defer {
-            lifecycle.withLock { $0.inUse = false }
-        }
-        do {
-            if let operations {
-                try await v2RequireDurableOperationAndActivationLocks(keys: operations, tokens: tokens, sql: sql)
-            } else {
-                try await v2RequireDurableOwnerBatchActivations(tokens: tokens, sql: sql,
-                    timeouts: configuredTimeouts, configureTimeouts: false)
-            }
-        } catch {
-            V2RoomSQLContinuationObservation.current?.finishWithoutDispatch()
-            throw error
-        }
-    }
-
     /// 此一次性操作只使用外围物理事务提供的 SQL 连接。
     /// 事务主体返回前必须等待所有 SQL 完成；若仍有未结束的操作，
     /// invalidate 会关闭连接，避免 COMMIT 和后续复用。
@@ -559,7 +532,7 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         }
         try lifecycle.withLock { lifecycle in
             guard lifecycle.active, !lifecycle.inUse, !lifecycle.used else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
             lifecycle.inUse = true
             lifecycle.used = true
@@ -577,7 +550,7 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             return
         }
         let orderedRooms = Set(roomIDs).sorted { $0.uuidString < $1.uuidString }
-        guard !orderedRooms.isEmpty else { throw V2RoomActivationLeaseError.activationChanged }
+        guard !orderedRooms.isEmpty else { throw V2RoomActorStateError.activationChanged }
         if let expectedRoutes,
            !orderedRooms.allSatisfy({ expectedRoutes[$0] != nil }) {
             throw V2RoomOwnerFenceError.ownerChanged
@@ -595,7 +568,7 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             ORDER BY room_id FOR NO KEY UPDATE
             """), decoding: V2ConfiguredRoomOwnerRow.self, source: .configuredFenceRooms)
         // 保持普通写入路径的错误优先级：先检查类型，再检查路由行数和所有者，
-        // 最后检查精确激活令牌及租约。
+        // 最后核对当前轮次令牌的数据 Owner。
         if let expectedKinds,
            rows.contains(where: { row in
                expectedKinds[row.roomID].map { $0 != row.kind } ?? false
@@ -605,7 +578,7 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         guard rows.count == orderedRooms.count,
               Set(rows.map(\.roomID)) == Set(orderedRooms) else {
             if expectedRoutes != nil { throw V2RoomOwnerFenceError.ownerChanged }
-            throw V2RoomActivationLeaseError.roomNotFound
+            throw V2RoomActorStateError.roomNotFound
         }
         if let expectedRoutes,
            rows.contains(where: { row in
@@ -620,40 +593,19 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             guard let row = rowsByRoom[room],
                   row.shardID == token.owner.shardID,
                   row.epoch == token.owner.epoch else {
-                throw V2RoomActivationLeaseError.ownerChanged
+                throw V2RoomActorStateError.ownerChanged
             }
             return (room, token)
         }
-        if timeouts != configuredTimeouts {
-            // 完整默认路径：重新设置 LOCAL 限制，独立加锁并校验房间记录，
-            // 再检查租约和数据库时钟。
-            try await v2RequireRoomActivations(tokens: orderedTokens.map { $0.1 },
-                                               sql: sql, timeouts: timeouts)
-            return
-        }
-        var leases: [(V2RoomActivationToken, V2RoomActivationPersistenceRow?)] = []
-        for (room, token) in orderedTokens {
-            let row = try await v2RoomSQLObservedFirst(sql.raw("""
-                SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
-                FROM im_v2.room_activation_leases WHERE room_id = \(bind: room) FOR UPDATE
-                """), decoding: V2RoomActivationPersistenceRow.self, source: .configuredFenceLeases)
-            leases.append((token, row))
-        }
-        // clock_timestamp 必须在取得所有房间锁和租约锁后调用；
-        // 等锁期间可能越过过期时间，而 now() 固定在事务开始时。
-        let observed = try await v2RoomActivationDatabaseClock(sql: sql)
-        for (token, row) in leases {
-            guard let row, row.matches(token) else {
-                throw V2RoomActivationLeaseError.activationChanged
-            }
-            guard let expiresAt = row.expiresAt, expiresAt > observed else {
-                throw V2RoomActivationLeaseError.leaseExpired
-            }
-        }
+        // The scope is owned by an accepted Actor turn. Its lifecycle cannot
+        // complete while this transaction is outstanding; only data-owner
+        // identity is checked in SQL. No second activation row or clock query.
+        _ = orderedTokens
+
     }
 
     /// 主键查询最多返回一行，因此无须构造多房间加锁方案，
-    /// 也能保持相同的房间锁与租约锁顺序。
+    /// 并保持与集合路径相同的数据 Owner 校验。
     private func requireSingleOwnerAndActivation(
         roomID: UUID,
         expectedRoutes: [UUID: V2RoomShardRoute]?,
@@ -668,13 +620,13 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
             WHERE room_id = \(bind: roomID) FOR NO KEY UPDATE
             """), decoding: V2ConfiguredRoomOwnerRow.self, source: .configuredFenceRooms)
         // 保持集合路径的错误优先级：类型、记录是否存在及选定路由，
-        // 然后才是不可变令牌和当前租约。
+        // 然后核对当前轮次令牌的数据 Owner。
         if let room, let kind = expectedKinds?[roomID], kind != room.kind {
             throw V2RoomWriteStoreError.corruptPersistenceState
         }
         guard let room, room.roomID == roomID else {
             if expectedRoutes != nil { throw V2RoomOwnerFenceError.ownerChanged }
-            throw V2RoomActivationLeaseError.roomNotFound
+            throw V2RoomActorStateError.roomNotFound
         }
         if let route = expectedRoutes?[roomID],
            (route.shardID != room.shardID || route.epoch != room.epoch) {
@@ -683,20 +635,9 @@ final class V2ConfiguredRoomFenceContext: @unchecked Sendable {
         let token = try scope.token(for: roomID)
         guard room.shardID == token.owner.shardID,
               room.epoch == token.owner.epoch else {
-            throw V2RoomActivationLeaseError.ownerChanged
+            throw V2RoomActorStateError.ownerChanged
         }
-        let lease = try await v2RoomSQLObservedFirst(sql.raw("""
-            SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
-            FROM im_v2.room_activation_leases WHERE room_id = \(bind: roomID) FOR UPDATE
-            """), decoding: V2RoomActivationPersistenceRow.self, source: .configuredFenceLeases)
-        // 取得两把锁后才读取数据库时钟。
-        let observed = try await v2RoomActivationDatabaseClock(sql: sql)
-        guard let lease, lease.matches(token) else {
-            throw V2RoomActivationLeaseError.activationChanged
-        }
-        guard let expiresAt = lease.expiresAt, expiresAt > observed else {
-            throw V2RoomActivationLeaseError.leaseExpired
-        }
+
     }
 
     fileprivate func invalidate() {

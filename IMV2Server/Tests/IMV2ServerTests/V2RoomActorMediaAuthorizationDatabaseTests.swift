@@ -46,32 +46,27 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 media: [.init(mediaID: mediaID)])) else {
                 throw V2ForwardInboxError.corruptPersistenceState
             }
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("d5-media-host"), incarnationID: UUID())
-            guard case .acquired(let grant) = try await leases.acquire(roomID: room,
-                owner: owner, host: host, duration: try .init(30_000)) else {
-                throw V2RoomActivationLeaseError.activationChanged
-            }
-            let query = V2RoomMediaAuthorizationQuery.messageVisibility(.init(roomID: room,
-                messageID: message.messageID, mediaID: mediaID,
-                actorUserID: UserID(uuid: memberTwoUUID)))
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database,
-                token: grant.token)
-            guard case .visible(let snapshot) = try await executor.execute(query) else {
-                throw V2MediaStoreError.downloadNotAuthorized
-            }
-            #expect(snapshot.mediaID == mediaID && snapshot.uploadSessionID == sessionID)
-            #expect(snapshot.membershipRevision == 0 && snapshot.contentRevision == 1)
-            try await sql.raw("""
-                UPDATE im_v2.message_media_references SET revoked_at = CURRENT_TIMESTAMP
-                WHERE message_id = \(bind: message.messageID.uuidValue!)
-                  AND media_id = \(bind: mediaID.uuidValue!)
-                """).run()
-            #expect(try await executor.execute(query) == .notVisible)
-            #expect(try await leases.release(token: grant.token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                _ = try await executor.execute(query)
+            try await withRoomActivationLifetime(database: database, roomID: room) { token, lifetime in
+                let query = V2RoomMediaAuthorizationQuery.messageVisibility(.init(roomID: room,
+                    messageID: message.messageID, mediaID: mediaID,
+                    actorUserID: UserID(uuid: memberTwoUUID)))
+                let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database,
+                    token: token, lifetime: lifetime)
+                guard case .visible(let snapshot) = try await executor.execute(query) else {
+                    throw V2MediaStoreError.downloadNotAuthorized
+                }
+                #expect(snapshot.mediaID == mediaID && snapshot.uploadSessionID == sessionID)
+                #expect(snapshot.membershipRevision == 0 && snapshot.contentRevision == 1)
+                try await sql.raw("""
+                    UPDATE im_v2.message_media_references SET revoked_at = CURRENT_TIMESTAMP
+                    WHERE message_id = \(bind: message.messageID.uuidValue!)
+                      AND media_id = \(bind: mediaID.uuidValue!)
+                    """).run()
+                #expect(try await executor.execute(query) == .notVisible)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind:room.uuidValue!)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                    _ = try await executor.execute(query)
+                }
             }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()

@@ -56,7 +56,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let store = try recoveryTestStore(database: database, now: now)
             try await installRecoveryTailFailure(on: sql)
             let operation = ClientMessageID(uuid: UUID())
-            func command(_ text: String, id: ClientMessageID) throws -> V2MessageSendOperationCommand {
+            @Sendable func command(_ text: String, id: ClientMessageID) throws -> V2MessageSendOperationCommand {
                 try .init(command: .init(roomID: roomID, senderUserID: senderID,
                     clientMessageID: id, text: text, limits: .init(maxUTF8Bytes: 64)),
                     firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)

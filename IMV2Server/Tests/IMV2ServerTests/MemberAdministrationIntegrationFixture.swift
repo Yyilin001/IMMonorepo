@@ -15,7 +15,7 @@ func applyAdmittedMemberFixture(database:any Database,command:V2ModerationComman
     guard let sql=database as? any SQLDatabase,let room=command.roomID.uuidValue,let actor=command.actorUserID.uuidValue,let operation=command.operationID.uuidValue,let target=command.targetUserID else { throw V2ModerationStoreError.corruptPersistenceState }
     if let ownerRoute { try await v2RequireRoomOwner(roomID:room,route:ownerRoute,sql:sql) }
     let route=try #require(try await sql.raw("SELECT room_shard_id,route_epoch FROM im_v2.room_owner_routes WHERE room_id=\(bind:room)").first(decoding:MemberFixtureRoute.self))
-    func perform(_ token:V2RoomActivationToken) async throws -> V2ModerationOutcome {
+    @Sendable func perform(_ token:V2RoomActivationToken) async throws -> V2ModerationOutcome {
         let prior=try await sql.raw("SELECT admission::text AS payload FROM im_v2.member_administration_admissions WHERE actor_user_id=\(bind:actor) AND operation_id=\(bind:operation)").first(decoding:MemberFixturePayload.self)
         let context=try prior.map { try JSONDecoder().decode(V2MemberAdministrationAdmission.self,from:Data($0.payload.utf8)) }
         let revision=try #require(try await sql.raw("SELECT membership_revision AS value FROM im_v2.rooms WHERE room_id=\(bind:room)").first(decoding:MemberFixtureRevision.self)).value

@@ -9,7 +9,7 @@ import SQLKit
 import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("special account audit rejects old activation before replay or new audit writes",
+    @Test("special account audit rejects stale data owners before replay or new audit writes",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func activationSpecialAccountAudit() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
@@ -32,30 +32,26 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     customerUserID: .init(uuid: memberTwoUUID), text: "notice"),
                 account: .init(userID: senderID, stableKey: "actor_notice", kind: .system),
                 roomID: roomID, outcome: outcome)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("audit-host"), incarnationID: UUID())
-            guard case .acquired(let first) = try await leases.acquire(roomID: roomID, owner: owner,
-                host: host, duration: .init(30_000)) else { Issue.record("first lease"); return }
-            let old = try V2RoomSpecialAccountAuditExecutor(token: first.token,
-                store: .init(database: database), now: { now })
-            #expect(try await old.execute(wire) == .recorded)
-            #expect(try await leases.release(token: first.token))
-            guard case .acquired(let next) = try await leases.acquire(roomID: roomID, owner: owner,
-                host: host, duration: .init(30_000)) else { Issue.record("successor lease"); return }
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                try await old.execute(wire)
+            try await withRoomActivation(database: database, roomID: roomID) { token in
+                let old = try V2RoomSpecialAccountAuditExecutor(token: token,
+                    store: .init(database: database), now: { now })
+                #expect(try await old.execute(wire) == .recorded)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomUUID)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                    try await old.execute(wire)
+                }
             }
-            let current = try V2RoomSpecialAccountAuditExecutor(token: next.token,
-                store: .init(database: database), now: { now })
-            #expect(try await current.execute(wire) == .recorded)
-            #expect(try await count("im_v2.special_account_message_operations", on: sql) == 1)
-            #expect(try await count("im_v2.special_account_message_audit", on: sql) == 1)
-            #expect(try await leases.release(token: next.token))
+            try await withRoomActivation(database: database, roomID: roomID, epoch: 1) { token in
+                let current = try V2RoomSpecialAccountAuditExecutor(token: token,
+                    store: .init(database: database), now: { now })
+                #expect(try await current.execute(wire) == .recorded)
+                #expect(try await count("im_v2.special_account_message_operations", on: sql) == 1)
+                #expect(try await count("im_v2.special_account_message_audit", on: sql) == 1)
+            }
         }
     }
 
-    @Test("message mutations fence before replay and preserve successor operations",
+    @Test("message mutations check data ownership before replay and preserve successor operations",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"),
           arguments: ["edit", "withdraw", "reaction"])
     func activationMessageMutation(_ kind: String) async throws {
@@ -66,11 +62,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0).accept(command: request.command,
                 capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: now)
             guard case .accepted(let message) = seed else { Issue.record("seed"); return }
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("mutation-host"), incarnationID: UUID())
-            guard case .acquired(let first) = try await leases.acquire(roomID: roomID,
-                owner: owner, host: host, duration: .init(30_000)) else { Issue.record("lease"); return }
             let operation = UUID()
             let execute: @Sendable (V2RoomActivationWriteScope) async throws -> Void = { scope in
                 let executor = try V2RoomMessagingExecutor(token: scope.token(for: roomUUID),
@@ -94,58 +85,52 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 if case .failure(let failure) = result { Issue.record("unexpected domain failure: \(failure)") }
             }
-            let firstScope = try V2RoomActivationWriteScope(tokens: [first.token])
-            try await execute(firstScope)
-            #expect(try await leases.release(token: first.token))
-            guard case .acquired(let next) = try await leases.acquire(roomID: roomID,
-                owner: owner, host: host, duration: .init(30_000)) else { Issue.record("successor"); return }
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) { try await execute(firstScope) }
-            try await execute(.init(tokens: [next.token]))
-            let table = kind == "reaction" ? "message_reaction_receipts" : "message_mutation_receipts"
-            #expect(try await count("im_v2." + table, on: sql) == 1)
-            #expect(try await leases.release(token: next.token))
+            try await withRoomActivation(database: database, roomID: roomID) { token in
+                let oldScope = try V2RoomActivationWriteScope(tokens: [token])
+                try await execute(oldScope)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomUUID)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { try await execute(oldScope) }
+            }
+            try await withRoomActivation(database: database, roomID: roomID, epoch: 1) { token in
+                try await execute(.init(tokens: [token]))
+                let table = kind == "reaction" ? "message_reaction_receipts" : "message_mutation_receipts"
+                #expect(try await count("im_v2." + table, on: sql) == 1)
+            }
         }
     }
 
-    @Test("activation-fenced sender rejects old writes and replay after successor acquires",
+    @Test("native sender rejects stale data owners and recovers the durable result",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func activationFencedSendAndReplay() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("sender-host"), incarnationID: UUID())
-            guard case .acquired(let first) = try await leases.acquire(roomID: roomID,
-                owner: owner, host: host, duration: .init(30_000)) else {
-                Issue.record("initial activation unavailable"); return
-            }
             let base = PostgresV2RoomWriteStore(database: database)
-            let old = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
-                store: base, shardID: "room-a", epoch: 0, activationToken: first.token)
             let request = try activationWriteRequest(text: "first", now: now)
-            let accepted = try await old.accept(command: request.command, capacityProfile: request.capacityProfile,
-                identifiers: request.identifiers, now: now)
-            guard case .accepted(let original) = accepted else { Issue.record("send not accepted"); return }
-            #expect(try await leases.release(token: first.token))
-            guard case .acquired(let next) = try await leases.acquire(roomID: roomID,
-                owner: owner, host: host, duration: .init(30_000)) else {
-                Issue.record("successor unavailable"); return
-            }
-            let fresh = try activationWriteRequest(text: "stale", now: now)
-            for input in [request, fresh] {
-                await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                    try await old.accept(command: input.command, capacityProfile: input.capacityProfile,
-                        identifiers: input.identifiers, now: now)
+            let original = try await withRoomActivation(database: database, roomID: roomID) { token in
+                let old = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: base, shardID: "room-a", epoch: 0, activationToken: token)
+                let accepted = try await old.accept(command: request.command, capacityProfile: request.capacityProfile,
+                    identifiers: request.identifiers, now: now)
+                let original = try #require(accepted.acceptanceReceipt)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomUUID)").run()
+                let fresh = try activationWriteRequest(text: "stale", now: now)
+                for input in [request, fresh] {
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                        try await old.accept(command: input.command, capacityProfile: input.capacityProfile,
+                            identifiers: input.identifiers, now: now)
+                    }
                 }
+                return original
             }
-            let successor = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
-                store: base, shardID: "room-a", epoch: 0, activationToken: next.token)
-            let replay = try await successor.accept(command: request.command, capacityProfile: request.capacityProfile,
-                identifiers: request.identifiers, now: now)
-            guard case .idempotent(let recovered) = replay else { Issue.record("replay not recovered"); return }
-            #expect(recovered.messageID == original.messageID)
-            #expect(try await count("im_v2.messages", on: sql) == 1)
-            #expect(try await leases.release(token: next.token))
+            try await withRoomActivation(database: database, roomID: roomID, epoch: 1) { token in
+                let successor = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: base, shardID: "room-a", epoch: 1, activationToken: token)
+                let replay = try await successor.accept(command: request.command, capacityProfile: request.capacityProfile,
+                    identifiers: request.identifiers, now: now)
+                guard case .idempotent(let recovered) = replay else { Issue.record("replay not recovered"); return }
+                #expect(recovered.messageID == original.messageID)
+                #expect(try await count("im_v2.messages", on: sql) == 1)
+            }
         }
     }
 

@@ -46,21 +46,45 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             ])
             let runtime = try V2RoomRuntimeConfiguration(), authentication = try V2ActorAuthenticationLimits()
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let leases = try V2RoomServerLeaseStore(databases: ["room-a": database])
+            // Distinct rooms can share a shard while belonging to different
+            // committed partitions. Select a noncolliding partition count.
+            var partitionOwners: [V2ActorHostIdentity] = []
+            for count in 2...4096 {
+                let candidate = try V2ActorPlacementSnapshot(clusterID: UUID(), revision: 1,
+                    slots: (0..<count).map { _ in .init(owner: .init(host: identity, epoch: 1), transfer: nil) })
+                if candidate.partition(for: sourceRoom) != candidate.partition(for: opened.roomID) {
+                    partitionOwners = Array(repeating: identity, count: count)
+                    if splitHosts { partitionOwners[candidate.partition(for: sourceRoom)] = sourceIdentity }
+                    break
+                }
+            }
+            guard !partitionOwners.isEmpty else { throw V2ActorPlacementError.invalidConfiguration }
+            let control = try await V2NativePlacementTestControl.open(hosts: [identity, sourceIdentity],
+                initialHost: identity, shardID: "room-a", partitionOwners: partitionOwners)
+            let placement: V2RoomActorPlacementRuntime
+            let sourcePlacement: V2RoomActorPlacementRuntime
+            do {
+                placement = try await control.register(identity, shard: "room-a")
+                sourcePlacement = try await control.register(sourceIdentity, shard: "room-a")
+                try await placement.refresh()
+            } catch {
+                try? await control.close()
+                throw error
+            }
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
                 dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
                 policyOwners: owners, endpoint: "room-a", maximumRooms: 2)
-            let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity, leaseStore: leases,
+            let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity, placement: placement,
                 configuration: runtime, budget: .init(configuration: runtime), classify: { $0.turnSchedulingClass },
-                factory: .init { token in .init(restore: { _ in }, execute: { _ in .rolledBack(.invalidRequest) },
+                factory: .init { token in .init(restore: { context in try await context.validate() }, execute: { _ in .rolledBack(.invalidRequest) },
                     invalidateReservation: { _ in }, close: {
                         do { await policies.retire(token: token) }
                         catch { Issue.record("Policy registration retirement failed") }
                     }) })
-            let sourceHost = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: sourceIdentity, leaseStore: leases,
+            let sourceHost = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: sourceIdentity, placement: sourcePlacement,
                 configuration: runtime, budget: .init(configuration: runtime), classify: { $0.turnSchedulingClass },
-                factory: .init { token in .init(restore: { _ in }, execute: { _ in .rolledBack(.invalidRequest) },
+                factory: .init { token in .init(restore: { context in try await context.validate() }, execute: { _ in .rolledBack(.invalidRequest) },
                     invalidateReservation: { _ in }, close: {
                         do { await policies.retire(token: token) }
                         catch { Issue.record("Policy registration retirement failed") }
@@ -91,9 +115,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let hostClient = V2RoomClusterClient(system: system, signer: hostSigner, trust: trust,
                 limits: authentication, configuration: runtime)
             let routes = try await V2DeploymentRoomShardRouter.load(database: database)
-            let directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: routes), leases: leases,
+            let directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: routes), placement: placement,
                 hosts: hostClient, transport: hostClient, configuration: runtime)
             let coordinator = V2RoomReservationCoordinator(operations: await directory.reservationOperations(), configuration: runtime)
+            @Sendable func stopHosts() async throws {
+                let stopped = await host.stop(deadline: .now + .seconds(30))
+                let sourceStopped = await sourceHost.stop(deadline: .now + .seconds(30))
+                guard let proof = stopped.proof, let sourceProof = sourceStopped.proof else {
+                    throw V2PlacementRaftError.incompleteShutdown
+                }
+                try await placement.retireAfterDrain(proof, shards: ["room-a"])
+                try await sourcePlacement.retireAfterDrain(sourceProof, shards: ["room-a"])
+            }
             var phase = "activation"
             do {
                 await host.start()
@@ -202,21 +235,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     try await client.forwardPair(next, token: token, deadline: .now + .seconds(5))
                 }
                 #expect(await coordinator.activePairCount() == 0)
-                await inbound.stop(); _ = await host.stop(deadline: .now + .seconds(10))
-                await sourceInbound.stop(); _ = await sourceHost.stop(deadline: .now + .seconds(10))
+                await inbound.stop(); await sourceInbound.stop()
+                try await stopHosts()
                 #expect(await directory.quiesce(deadline: .now + .seconds(10)))
                 #expect(await hostClient.quiesce(deadline: .now + .seconds(10)))
-                await policies.shutdown(); await owners.shutdown(); await leases.shutdownLifecycle()
+                await policies.shutdown(); await owners.shutdown(); try await control.close()
                 await routes.shutdown()
                 try await callerSystem.shutdown().wait(); try await sourceSystem.shutdown().wait(); try await system.shutdown().wait()
             } catch {
                 Issue.record("Remote forward pair failed during \(phase)")
                 await replies.release()
-                await pairs.close(); await inbound.stop(); _ = await host.stop(deadline: .now + .seconds(10))
-                await sourceInbound.stop(); _ = await sourceHost.stop(deadline: .now + .seconds(10))
+                await pairs.close(); await inbound.stop(); await sourceInbound.stop()
+                try await stopHosts()
                 _ = await directory.quiesce(deadline: .now + .seconds(10))
                 _ = await hostClient.quiesce(deadline: .now + .seconds(10))
-                await policies.shutdown(); await owners.shutdown(); await leases.shutdownLifecycle()
+                await policies.shutdown(); await owners.shutdown(); try await control.close()
                 await routes.shutdown()
                 try? await callerSystem.shutdown().wait(); try? await sourceSystem.shutdown().wait(); try? await system.shutdown().wait(); throw error
             }

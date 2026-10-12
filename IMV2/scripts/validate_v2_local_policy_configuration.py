@@ -38,6 +38,41 @@ def validate(root: Path) -> None:
                 required |= {"policyRegistration"}
             if not required.issubset(services.get(service, {}).get("permissions", [])):
                 raise ValueError(f"{name} does not authorize {service}'s policy calls")
+    validate_placement(root, documents)
+
+
+def validate_placement(root: Path, documents: dict) -> None:
+    names = ("placement-a", "placement-b", "placement-c")
+    voters = documents["gateway"].get("placementControl", {}).get("voters")
+    if not isinstance(voters, list) or len(voters) != 3:
+        raise ValueError("local actors require three independent placement voters")
+    if ({item.get("serviceID") for item in voters} != set(names)
+            or len({item.get("hostID") for item in voters}) != 3
+            or any(not item.get("hostID") or item.get("address") != item.get("serviceID")
+                   or item.get("port") != 7336 or item.get("shardIDs") != ["rooms-primary"] for item in voters)):
+        raise ValueError("placement voter identities, endpoints or shards are inconsistent")
+    identities = {item["serviceID"]: item["hostID"] for item in voters}
+    for name in names:
+        document = json.loads((root / name / "configuration.json").read_text(encoding="utf-8"))
+        if document.get("serviceID") != name or document.get("hostID") is not None or "policyPlacement" in document:
+            raise ValueError("placement voter must be an independent control-only process")
+        documents[name] = document
+    for name, document in documents.items():
+        control = document.get("placementControl", {})
+        if control.get("voters") != voters:
+            raise ValueError(f"{name} uses a different placement quorum")
+        if name in names:
+            if (control.get("localVoterID") != identities[name] or control.get("port") != 7336
+                    or control.get("storagePaths") != {"rooms-primary": "/run/im-v2-room-actor/placement/0.pb"}):
+                raise ValueError(f"{name} has inconsistent durable voter configuration")
+        elif control.get("localVoterID") is not None or control.get("storagePaths") != {}:
+            raise ValueError("room applications must not own voting files")
+        services = {item["id"]: item for item in document.get("services", [])}
+        for voter in names:
+            service = services.get(voter, {})
+            if (service.get("hostIDs") != [identities[voter]]
+                    or not {"placementVote", "placementRead"}.issubset(service.get("permissions", []))):
+                raise ValueError(f"{name} does not trust the fixed placement voter")
 
 
 def main() -> None:
@@ -48,10 +83,9 @@ def main() -> None:
         validate(args.directory)
     except (OSError, ValueError, KeyError, TypeError):
         # Configuration includes key paths and identities. Keep diagnostics bounded.
-        parser.exit(1, "Local policy configuration is incomplete or inconsistent. "
-                    "Retained legacy configurations are not rewritten automatically; "
-                    "prepare a separate configuration directory with gateway, account, operator "
-                    "and --policy-partitions 16 before switching the local stack.\n")
+        parser.exit(1, "Local Actor configuration is incomplete or inconsistent. "
+                    "Generate a fresh directory with gateway, account, operator, three independent "
+                    "--placement-voter nodes and --policy-partitions 16.\n")
 
 
 if __name__ == "__main__":

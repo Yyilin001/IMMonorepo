@@ -20,13 +20,13 @@ public struct V2RoomActivationWriteScope: Sendable {
         self.reliesOnRuntimeLifecycle = reliesOnRuntimeLifecycle
         guard !tokens.isEmpty, tokens.count <= 128,
               Set(tokens.map { $0.owner.shardID }).count == 1 else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         var entries: [UUID: V2RoomActivationToken] = [:]
         for token in tokens {
             guard let room = token.roomID.uuidValue,
                   entries.updateValue(token, forKey: room) == nil else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
         }
         byRoom = entries
@@ -34,7 +34,7 @@ public struct V2RoomActivationWriteScope: Sendable {
 
     func token(for roomID: UUID) throws -> V2RoomActivationToken {
         guard let token = byRoom[roomID] else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         return token
     }

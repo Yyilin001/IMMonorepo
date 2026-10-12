@@ -7,6 +7,8 @@ import SQLKit
 public enum V2PostgresSessionReadinessError: Error, Equatable, Sendable {
     /// 当前数据库适配器不支持 SQL 查询。
     case unsupportedDatabase
+    /// A proxy or server did not preserve the native Host session marker.
+    case applicationNameMismatch
     /// 服务端实际生效的超时参数与期望策略不一致，参数为期望值。
     case policyMismatch(
         statementTimeoutMilliseconds: Int,
@@ -34,21 +36,24 @@ public enum V2PostgresSessionReadiness {
     ///   ``V2PostgresSessionReadinessError/policyMismatch(statementTimeoutMilliseconds:lockTimeoutMilliseconds:idleTransactionTimeoutMilliseconds:)``。
     public static func verify(
         database: any Database,
-        policy: V2PostgresRuntimePolicy
+        policy: V2PostgresRuntimePolicy,
+        applicationName: String? = nil
     ) async throws {
         try await verify(database: database,
             statementMilliseconds: policy.statementTimeoutMilliseconds,
             lockMilliseconds: policy.lockTimeoutMilliseconds,
-            idleMilliseconds: policy.idleTransactionTimeoutMilliseconds)
+            idleMilliseconds: policy.idleTransactionTimeoutMilliseconds, applicationName: applicationName)
     }
 
-    public static func verify(database: any Database, timeouts: V2RoomActivationSQLTimeouts) async throws {
+    public static func verify(database: any Database, timeouts: V2RoomActivationSQLTimeouts,
+                              applicationName: String? = nil) async throws {
         try await verify(database: database, statementMilliseconds: timeouts.statementMilliseconds,
-            lockMilliseconds: timeouts.lockMilliseconds, idleMilliseconds: timeouts.idleTransactionMilliseconds)
+            lockMilliseconds: timeouts.lockMilliseconds, idleMilliseconds: timeouts.idleTransactionMilliseconds,
+            applicationName: applicationName)
     }
 
     private static func verify(database: any Database, statementMilliseconds: Int,
-        lockMilliseconds: Int, idleMilliseconds: Int) async throws {
+        lockMilliseconds: Int, idleMilliseconds: Int, applicationName: String?) async throws {
         guard let sql = database as? any SQLDatabase else {
             throw V2PostgresSessionReadinessError.unsupportedDatabase
         }
@@ -58,7 +63,8 @@ public enum V2PostgresSessionReadiness {
                    (SELECT setting::integer FROM pg_settings WHERE name = 'lock_timeout')
                        AS lock_timeout_ms,
                    (SELECT setting::integer FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout')
-                       AS idle_transaction_timeout_ms
+                       AS idle_transaction_timeout_ms,
+                   current_setting('application_name') AS application_name
             """).first(decoding: V2PostgresSessionSettings.self),
               settings.statementTimeoutMilliseconds == statementMilliseconds,
               settings.lockTimeoutMilliseconds == lockMilliseconds,
@@ -70,6 +76,9 @@ public enum V2PostgresSessionReadiness {
                 idleTransactionTimeoutMilliseconds: idleMilliseconds
             )
         }
+        if let applicationName, settings.applicationName != applicationName {
+            throw V2PostgresSessionReadinessError.applicationNameMismatch
+        }
     }
 }
 
@@ -77,10 +86,12 @@ private struct V2PostgresSessionSettings: Decodable {
     let statementTimeoutMilliseconds: Int
     let lockTimeoutMilliseconds: Int
     let idleTransactionTimeoutMilliseconds: Int
+    let applicationName: String
 
     enum CodingKeys: String, CodingKey {
         case statementTimeoutMilliseconds = "statement_timeout_ms"
         case lockTimeoutMilliseconds = "lock_timeout_ms"
         case idleTransactionTimeoutMilliseconds = "idle_transaction_timeout_ms"
+        case applicationName = "application_name"
     }
 }

@@ -8,6 +8,7 @@ one of exactly two physical owner databases is unavailable.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from typing import Any
@@ -15,34 +16,22 @@ from typing import Any
 from virtual_actor_capacity_measurement import MeasurementFailure
 
 
-LEASE_COUNTS_SQL = """
-SELECT json_build_object(
- 'rows', count(*),
- 'live', count(*) FILTER (WHERE expires_at > clock_timestamp()),
- 'released', count(*) FILTER (WHERE expires_at IS NULL),
- 'reacquired', count(*) FILTER (WHERE activation_epoch > 1),
- 'maximumEpoch', coalesce(max(activation_epoch), 0))
-FROM im_v2.room_activation_leases;
-"""
-
-
-def validate_cold_retirement(before: dict[str, dict], after: dict[str, dict]) -> dict:
-    """Require actual release facts, not merely a 480-second elapsed interval."""
-    if before.keys() != after.keys() or not before:
-        raise MeasurementFailure("cold owner observations changed")
-    for key in before:
-        if before[key]["rows"] != 0:
-            raise MeasurementFailure("cold fixture already had activation history")
-        if after[key]["rows"] < before[key]["rows"]:
-            raise MeasurementFailure("cold activation history disappeared")
-    released = sum(row["released"] for row in after.values())
-    activated = sum(row["rows"] for row in after.values())
-    if activated <= 0 or released <= 0:
-        raise MeasurementFailure("cold workload did not observe actual idle lease release")
-    return {"activatedRooms": activated, "releasedRoomsAtEnd": released,
-            "reacquiredRooms": sum(row["reacquired"] for row in after.values()),
-            "defaultIdleTimeoutSeconds": 300,
-            "before": before, "after": after}
+def validate_cold_retirement(before: dict[str, float], after: dict[str, float]) -> dict:
+    """Require completed native idle drains, not a lease row or elapsed time."""
+    names = ("im_v2_room_actor_active_rooms", "im_v2_room_actor_completed_idle_retirements_total")
+    if any(name not in state or not isinstance(state[name], (int, float)) or
+           isinstance(state[name], bool) or not math.isfinite(state[name]) or
+           state[name] < 0 or state[name] != int(state[name])
+           for state in (before, after) for name in names):
+        raise MeasurementFailure("native cold lifecycle observations are missing or invalid")
+    active, retired = names
+    completed = int(after[retired] - before[retired])
+    reduction = int(before[active] - after[active])
+    if completed <= 0 or reduction <= 0 or completed < reduction:
+        raise MeasurementFailure("cold workload did not complete native idle retirement")
+    return {"scope": "native-host-completed-idle-drain", "completedIdleRetirements": completed,
+            "activeRoomsAtCooldownStart": int(before[active]), "activeRoomsAtEnd": int(after[active]),
+            "defaultIdleTimeoutSeconds": 300}
 
 
 def validate_fault_unavailable_results(phases: list[dict]) -> None:

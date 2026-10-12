@@ -1,11 +1,6 @@
 import Foundation
 
 public enum V2SendOperationStage: String, CaseIterable, Sendable {
-    case receiptPreflight = "receipt_preflight"
-    case authorizationRoute = "authorization_route"
-    case authorizationControl = "authorization_control"
-    /// Memory policy preparation: actual preflight SQL, excluding admission wait.
-    case preparationOwnerRead = "preparation_owner_read"
     /// One cold snapshot's complete owner state fetch, including remote RPC.
     case policyOwnerState = "policy_owner_state"
     case policyOwnerMemoryProbe = "policy_owner_memory_probe"
@@ -15,8 +10,6 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case policyOwnerStateTransaction = "policy_owner_state_transaction"
     /// Fact locks and reads inside state initialization; absent on validated reuse.
     case policyOwnerStateFacts = "policy_owner_state_facts"
-    /// Durable registration after state fetch; excludes room lease installation.
-    case policySnapshotRegistration = "policy_snapshot_registration"
     case ownerConnectionAcquire = "owner_connection_acquire"
     case roomQueueWait = "room_queue_wait"
     case ownerReadyWait = "owner_ready_wait"
@@ -53,7 +46,6 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case policySnapshotSQLFuture = "policy_snapshot_sql_future"
     case policySnapshotSQLResume = "policy_snapshot_sql_resume"
     case ownerDriverCallbackTaskWait = "owner_driver_callback_task_wait"
-    case ownerBorrowedWatchdogJoin = "owner_borrowed_watchdog_join"
     case ownerBeforeFirstSQL = "owner_before_first_sql"
     case ownerAfterBeginGap = "owner_after_begin_gap"
     case ownerAfterWriteGap = "owner_after_write_gap"
@@ -88,9 +80,6 @@ public enum V2SendOperationStage: String, CaseIterable, Sendable {
     case ownerPolicy = "owner_policy"
     case ownerMessagePersistence = "owner_message_persistence"
     case ownerProjection = "owner_projection"
-    case ownerProof = "owner_proof"
-    case ownerReceiptPersistence = "owner_receipt_persistence"
-    case ownerAdmission = "owner_admission"
 }
 
 public struct V2SendOperationStageMetricsSnapshot: Equatable, Sendable {
@@ -138,14 +127,8 @@ public struct V2SendOperationAdmissionHandoffSnapshot: Equatable, Sendable {
 /// Fixed SQL boundaries observed while the actual transaction retains its locks.
 public enum V2RoomSQLContinuationSource: String, CaseIterable, Sendable {
     case durableFenceRooms = "durable_fence_rooms"
-    case durableFenceLeases = "durable_fence_leases"
-    case durableFenceCombined = "durable_fence_combined"
     case configuredFenceRooms = "configured_fence_rooms"
-    case configuredFenceLeases = "configured_fence_leases"
     case scalarFenceRooms = "scalar_fence_rooms"
-    case scalarFenceLeases = "scalar_fence_leases"
-    case lifecycleRooms = "lifecycle_rooms"
-    case lifecycleLeases = "lifecycle_leases"
 }
 
 /// Independent segments from actual observed SQL settlement through its Swift

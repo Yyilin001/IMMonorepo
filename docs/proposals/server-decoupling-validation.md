@@ -131,21 +131,14 @@ CI 另外显式配置 `IMV2_ACTOR_TRANSACTION_*`、`ACTOR_HOST_G2_*`、`ACTOR_PA
 
 随后使用同一源码和探针增加 `--database-restart` 复跑，证据 `~/.codex/virtual-actor-builds/server-decoupling-20260930-db-edge-restart-run/result.json` 为 `passed=true`、`cleanupErrors=[]`。owner-a PostgreSQL 容器在保留数据和三个 Actor 进程的条件下实际停止、重启，`pg_postmaster_start_time()` 改变；故障期间另一 owner 继续处理，恢复后的 caller 重放只有一份持久结果，原租约保持有效。该轮也重跑并通过 control/owner 两次断链。专用 Colima profile 在运行后关闭。
 
-```sh
-# G4：caller 先起，独立 Host SIGKILL、租约到期、替代 Host 接管与幂等重放。
-mkdir -p "$HOME/.cache/imv2-g4/swiftpm" "$HOME/.cache/imv2-g4/evidence"
-DOCKER_CONTEXT=default VA_G4_MODE=linux VA_G4_LINUX_CLIENT_FIRST=1 \
-VA_G4_LINUX_SCRATCH_DIR="$HOME/.cache/imv2-g4/swiftpm" \
-VA_G4_LINUX_RUN_ROOT="$HOME/.cache/imv2-g4/evidence" \
-bash IMV2/scripts/test_v2_virtual_actor_business_probe.sh
+当前 G4 入口验证原生正常退役、新 incarnation 注册和持久消息重放；不提供旧 `VA_G4_MODE`、租约到期或强杀接管模式。必须使用独立的新 PostgreSQL 数据目录和结果目录：
 
-# G6：双 Host、peer-only 网络分区和旧 token 围栏。
-mkdir -p "$HOME/.cache/imv2-g6/swiftpm" "$HOME/.cache/imv2-g6/evidence"
-DOCKER_CONTEXT=default VA_G6_MODE=linux \
-VA_G6_LINUX_SCRATCH_DIR="$HOME/.cache/imv2-g6/swiftpm" \
-VA_G6_LINUX_RUN_ROOT="$HOME/.cache/imv2-g6/evidence" \
-python3 IMV2/scripts/test_v2_virtual_actor_multihost_probe.py
+```sh
+bash IMV2/scripts/test_v2_virtual_actor_business_probe.sh \
+  --postgres-bin "<PostgreSQL 工具目录>" --artifact-dir "<新的结果目录>"
 ```
+
+旧 G6 启动器已删除：它依赖已移除的房间租约表和探针模式，不能用于原生 Actor。历史双 Host、网络分区和 pause/接管/unpause 结果仅作为历史记录；对应原生网络分区、实例排除与崩溃接管验收仍须完成，不能用正常停机重放代替。
 
 [应用栈 runner](../../IMV2/scripts/test_v2_virtual_actor_application_stack.py)使用 Linux Release 产品和独立 Compose project，包含 Account HTTPS、Gateway TLS/protobuf、Operator 与房间 HTTP 冒烟。`--scratch-dir` 为源码外独占目录；如使用预编译产品，需同时传 `--products-dir`、`--products-metadata`，runner 会核对源码、lockfile 和各产品 SHA-256。
 

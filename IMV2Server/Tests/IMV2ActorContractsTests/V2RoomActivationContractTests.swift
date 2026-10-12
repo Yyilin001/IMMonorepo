@@ -57,39 +57,30 @@ struct V2RoomActivationContractTests {
         #expect(!restarted.isNewer(than: token))
     }
 
-    @Test("leases reject expired or invalid database observations")
-    func leaseValidation() throws {
-        let token = try makeToken()
-        let now = Date(timeIntervalSince1970: 1_000)
-        #expect(throws: V2ActorContractError.invalidLeaseTimestamp) {
-            try V2RoomActivationLease(token: token, databaseObservedAt: now, expiresAt: now)
+    @Test("placement epochs fence process counters and exact incarnations")
+    func placementIdentityBounds() throws {
+        let host = try makeToken().host
+        for epoch: UInt64 in [0, V2RoomActorPlacementGrant.maximumEpoch + 1] {
+            #expect(throws: V2ActorContractError.invalidEpoch) {
+                try V2RoomActorPlacementGrant(host: host, epoch: epoch)
+            }
         }
-        #expect(throws: V2ActorContractError.invalidLeaseTimestamp) {
-            try V2RoomActivationLease(
-                token: token, databaseObservedAt: now,
-                expiresAt: Date(timeIntervalSince1970: .infinity)
-            )
-        }
-        #expect(throws: V2ActorContractError.invalidLeaseTimestamp) {
-            try V2RoomActivationLease(
-                token: token, databaseObservedAt: now, expiresAt: now.addingTimeInterval(3_601)
-            )
-        }
-        let lease = try V2RoomActivationLease(
-            token: token, databaseObservedAt: now, expiresAt: now.addingTimeInterval(30)
-        )
-        #expect(try JSONDecoder().decode(
-            V2RoomActivationLease.self, from: JSONEncoder().encode(lease)
-        ) == lease)
-        var encoded = try #require(JSONSerialization.jsonObject(
-            with: JSONEncoder().encode(lease)
-        ) as? [String: Any])
-        encoded["expiresAt"] = encoded["databaseObservedAt"]
-        #expect(throws: V2ActorContractError.invalidLeaseTimestamp) {
-            try JSONDecoder().decode(
-                V2RoomActivationLease.self, from: JSONSerialization.data(withJSONObject: encoded)
-            )
-        }
+        let grant = try V2RoomActorPlacementGrant(host: host, epoch: 1)
+        #expect(throws: V2ActorContractError.invalidEpoch) { try grant.activationEpoch(counter: 0) }
+        let first = try makeToken(activationEpoch: grant.activationEpoch(counter: 1).rawValue)
+        let reopened = try makeToken(activationEpoch: grant.activationEpoch(counter: 2).rawValue)
+        #expect(grant.matches(first))
+        #expect(grant.matches(reopened))
+        #expect(reopened.isNewer(than: first))
+        #expect(!grant.matches(try makeToken(activationEpoch: Int64(1) << 32)))
+        #expect(!grant.matches(try makeToken(activationEpoch: first.activationEpoch.rawValue, incarnation: UUID())))
+        let successor = try V2RoomActorPlacementGrant(host: host, epoch: 2)
+        #expect(!successor.matches(first))
+        let successorEpoch = try successor.activationEpoch(counter: 1)
+        let previousMaximum = try grant.activationEpoch(counter: .max)
+        #expect(successorEpoch.rawValue > previousMaximum.rawValue)
+        let maximum = try V2RoomActorPlacementGrant(host: host, epoch: V2RoomActorPlacementGrant.maximumEpoch)
+        #expect(try maximum.activationEpoch(counter: .max).rawValue == Int64.max)
     }
 
     @Test("unknown completion retries only capabilities with durable identity")
@@ -124,7 +115,7 @@ struct V2RoomActivationContractTests {
         }
     }
 
-    @Test("configuration rejects unbounded admission and impossible renewal budgets")
+    @Test("configuration rejects unbounded admission and impossible deadline relationships")
     func configurationBounds() throws {
         let configuration = try V2RoomRuntimeConfiguration()
         #expect(configuration.maximumConcurrentRestores <= configuration.maximumActiveRooms)
@@ -136,9 +127,6 @@ struct V2RoomActivationContractTests {
         }
         #expect(throws: (any Error).self) {
             try V2RoomRuntimeConfiguration(maximumRequestBytes: 8 * 1_024 * 1_024)
-        }
-        #expect(throws: (any Error).self) {
-            try V2RoomRuntimeConfiguration(renewalIntervalMilliseconds: 29_000)
         }
         #expect(throws: (any Error).self) {
             try V2RoomRuntimeConfiguration(transactionTimeoutMilliseconds: 29_000)

@@ -1406,18 +1406,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let pair = V2ActorForwardPairWire(actorUserID: actor, operationID: .init(uuid: UUID()),
                 source: try .init(roomID: sourceRoom, messageID: source.messageID, revision: .init(1)),
                 targetRoomID: target.roomID)
-            let leases = PostgresV2RoomActivationStore(database: owner)
-            let host = V2ActorHostIdentity(hostID: try .init("forward-stage-test"), incarnationID: UUID())
-            @Sendable func activate(_ room: RoomID, epoch: Int64) async throws -> V2RoomActivationToken {
-                guard case .acquired(let grant) = try await leases.acquire(roomID: room,
-                    owner: .init(shardID: "room-b", epoch: epoch), host: host, duration: .init(30_000)) else {
-                    throw V2RoomActivationLeaseError.activationChanged
-                }
-                return grant.token
-            }
-            let sourceToken = try await activate(sourceRoom, epoch: 0)
-            let targetToken = try await activate(target.roomID, epoch: 0)
-            let originalTokens = [sourceToken, targetToken]
             try await withFixturePolicyOwners(database: control,
                 projectionDelivery: SuccessfulProjectionDelivery()) { owners in
                 @Sendable func execute(_ tokens: [V2RoomActivationToken]) async throws -> V2ActorForwardMessageResultWire {
@@ -1435,55 +1423,57 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         throw error
                     }
                 }
-                var committed: V2ActorForwardMessageResultWire?
-                if afterAcceptance {
-                    // Commit the real message and pair result, then discard the response as a lost ACK.
-                    committed = try await execute(originalTokens)
-                    #expect(committed?.errorCode == nil && committed?.messageID != nil)
+                let prior = try await withRoomActivations(database: owner,
+                    roomIDs: [sourceRoom, target.roomID], shardID: "room-b") { originalTokens in
+                    var committed: V2ActorForwardMessageResultWire?
+                    if afterAcceptance {
+                        // Commit the real message and pair result, then discard the response as a lost ACK.
+                        committed = try await execute(originalTokens)
+                        #expect(committed?.errorCode == nil && committed?.messageID != nil)
+                    }
+                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: changing.uuidValue!)").run()
+                    try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: changing.uuidValue!)").run()
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                        _ = try await execute(originalTokens)
+                    }
+                    #expect(try await count("im_v2.messages", on: sql) == (afterAcceptance ? 2 : 1))
+                    #expect(try await count("im_v2.message_forward_operations", on: sql) == (afterAcceptance ? 1 : 0))
+                    #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NOT NULL", on: sql)
+                        == (afterAcceptance ? 1 : 0))
+                    return (committed, originalTokens)
                 }
-                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: changing.uuidValue!)").run()
-                try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: changing.uuidValue!)").run()
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
-                    _ = try await execute(originalTokens)
+                let committed = prior.0, originalTokens = prior.1
+                let replacementOwners: [RoomID: V2RoomDataOwner] = [
+                    sourceRoom: try .init(shardID: "room-b", epoch: changed == "source" ? 1 : 0),
+                    target.roomID: try .init(shardID: "room-b", epoch: changed == "target" ? 1 : 0)
+                ]
+                try await withRoomActivations(database: owner, owners: replacementOwners) { replacementTokens in
+                    let accepted = try await execute(replacementTokens)
+                    #expect(accepted.errorCode == nil && accepted.messageID != nil)
+                    if let committed { #expect(accepted == committed) }
+                    let stableClient = try #require(try await sql.raw("SELECT target_client_message_id::text AS value FROM im_v2.message_forward_operations")
+                        .first(decoding: StringValueRow.self)).value
+                    let repeats = try await withThrowingTaskGroup(of: V2ActorForwardMessageResultWire.self) { group in
+                        for _ in 0..<8 { group.addTask { try await execute(replacementTokens) } }
+                        var results: [V2ActorForwardMessageResultWire] = []
+                        for try await result in group { results.append(result) }
+                        return results
+                    }
+                    #expect(repeats.count == 8 && repeats.allSatisfy { $0 == accepted })
+                    #expect(try await count("im_v2.messages", on: sql) == 2)
+                    #expect(try await count("im_v2.message_send_completions", on: sql) == 2)
+                    #expect(try await count("im_v2.message_forward_operations", on: sql) == 1)
+                    #expect(try await sql.raw("SELECT target_client_message_id::text AS value FROM im_v2.message_forward_operations")
+                        .first(decoding: StringValueRow.self)?.value == stableClient)
+                    #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NOT NULL", on: sql) == 1)
+                    // Success recovery retains the original pair after later source edits.
+                    try await sql.raw("UPDATE im_v2.messages SET content_revision=2 WHERE message_id=\(bind: source.messageID.uuidValue!)").run()
+                    #expect(try await execute(replacementTokens) == accepted)
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                        _ = try await execute(originalTokens)
+                    }
+                    try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
                 }
-                #expect(try await count("im_v2.messages", on: sql) == (afterAcceptance ? 2 : 1))
-                #expect(try await count("im_v2.message_forward_operations", on: sql) == (afterAcceptance ? 1 : 0))
-                #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NOT NULL", on: sql)
-                    == (afterAcceptance ? 1 : 0))
-                for token in originalTokens {
-                    let released = try await leases.release(token: token)
-                    // A token belonging to a retired owner cannot release its replacement's lease.
-                    #expect(released == (token.roomID != changing))
-                }
-                let replacementSource = try await activate(sourceRoom, epoch: changed == "source" ? 1 : 0)
-                let replacementTarget = try await activate(target.roomID, epoch: changed == "target" ? 1 : 0)
-                let replacementTokens = [replacementSource, replacementTarget]
-                let accepted = try await execute(replacementTokens)
-                #expect(accepted.errorCode == nil && accepted.messageID != nil)
-                if let committed { #expect(accepted == committed) }
-                let stableClient = try #require(try await sql.raw("SELECT target_client_message_id::text AS value FROM im_v2.message_forward_operations")
-                    .first(decoding: StringValueRow.self)).value
-                let repeats = try await withThrowingTaskGroup(of: V2ActorForwardMessageResultWire.self) { group in
-                    for _ in 0..<8 { group.addTask { try await execute(replacementTokens) } }
-                    var results: [V2ActorForwardMessageResultWire] = []
-                    for try await result in group { results.append(result) }
-                    return results
-                }
-                #expect(repeats.count == 8 && repeats.allSatisfy { $0 == accepted })
-                #expect(try await count("im_v2.messages", on: sql) == 2)
-                #expect(try await count("im_v2.message_send_completions", on: sql) == 2)
-                #expect(try await count("im_v2.message_forward_operations", on: sql) == 1)
-                #expect(try await sql.raw("SELECT target_client_message_id::text AS value FROM im_v2.message_forward_operations")
-                    .first(decoding: StringValueRow.self)?.value == stableClient)
-                #expect(try await count("im_v2.message_forward_operations WHERE result_message_id IS NOT NULL", on: sql) == 1)
-                // Success recovery retains the original pair after later source edits.
-                try await sql.raw("UPDATE im_v2.messages SET content_revision=2 WHERE message_id=\(bind: source.messageID.uuidValue!)").run()
-                #expect(try await execute(replacementTokens) == accepted)
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
-                    _ = try await execute(originalTokens)
-                }
-                for token in replacementTokens { #expect(try await leases.release(token: token)) }
-                try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
             }
         }
     }
@@ -1542,7 +1532,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 try .init(operationID: .init(uuid: UUID()), sources: [.init(roomID: sourceRoom, messageID: source.messageID, revision: .init(1))], targetRoomIDs: [target.roomID])
             }
             let original = try command()
-            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
+            await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
             #expect(try await count("im_v2.messages", on: ownerSQL) == 1)
             #expect(try await count("im_v2.message_forward_operations", on: ownerSQL) == 0)
             try #require(try await count("im_v2.messages", on: ownerSQL) == 1)
@@ -1553,17 +1543,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
             try await sql.raw("UPDATE im_v2.room_owner_routes SET route_epoch=1 WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
             for input in [original, try command()] {
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await cached.forward(actorUserID: .init(uuid: memberTwoUUID), command: input) }
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await cached.forward(actorUserID: .init(uuid: memberTwoUUID), command: input) }
             }
             #expect(try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) == accepted)
             #expect(try await count("im_v2.messages", on: ownerSQL) == 2)
             #expect(try await count("im_v2.message_forward_operations", on: ownerSQL) == 1)
             #expect(try await count("im_v2.message_forward_operations", on: sql) == 0)
             try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='retired' WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
-            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
+            await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await routed(database: owner).forward(actorUserID: .init(uuid: memberTwoUUID), command: original) }
             try await ownerSQL.raw("UPDATE im_v2.rooms SET room_shard_id='room-b' WHERE room_id=\(bind: changingRoom.uuidValue!)").run()
             let wrong = try routed(database: control)
-            await #expect(throws: V2RoomActivationLeaseError.roomNotFound) {
+            await #expect(throws: V2RoomActorStateError.roomNotFound) {
                 _ = try await wrong.forward(actorUserID: .init(uuid: memberTwoUUID), command: original)
             }
             let barrier = InviteImportTestBarrier()
@@ -1586,7 +1576,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 #expect(waiting)
                 await barrier.release(); try await holder.value
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await queued.value }
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await queued.value }
             } catch {
                 await barrier.release(); _ = try? await holder.value; _ = try? await queued.value
                 throw error
@@ -1665,7 +1655,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     FROM im_v2.rooms WHERE room_id=\(bind: room.uuidValue!)
                     """).run()
             }
-            func request(_ user: UserID, _ sequence: UInt64, roomID: RoomID? = nil) throws -> V2ReadReceiptRecordRequest {
+            @Sendable func request(_ user: UserID, _ sequence: UInt64, roomID: RoomID? = nil) throws -> V2ReadReceiptRecordRequest {
                 .init(command: try .init(roomID: roomID ?? room, actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: sequence), now: now)
             }
             let first = try request(.init(uuid: memberTwoUUID), 1)

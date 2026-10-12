@@ -9,6 +9,7 @@ command -v jq >/dev/null && command -v shasum >/dev/null || {
 }
 jq -e '.schemaVersion == 1 and
   .status == "configuration-frozen-measurements-pending" and
+  .baselineRevisionPolicy == "explicit-native-placement-revision" and
   .measurement.loaderWorkers == 1 and
   .measurement.latencyScope == "single-process-phase-samples" and
   .measurement.minimumRunsPerRevision == 3 and

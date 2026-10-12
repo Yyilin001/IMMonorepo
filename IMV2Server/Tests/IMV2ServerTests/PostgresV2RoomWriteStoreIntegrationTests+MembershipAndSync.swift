@@ -703,12 +703,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
                 store: PostgresV2RoomWriteStore(database: resources.database(.psql)), shardID: "room-a", epoch: 0), capacityProfile: try .init(id: "standard", limits: profile), limits: try .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await send.send(.init(roomID: roomID, actorUserID: senderID, clientMessageID: clientMessageID, text: "react to me")) else { Issue.record("expected accepted message"); return }
-            guard case .acquired(let lease)=try await PostgresV2RoomActivationStore(database:resources.database(.psql)).acquire(roomID:roomID,owner:.init(shardID:"room-a",epoch:0),host:.init(hostID:.init("reaction-events"),incarnationID:UUID()),duration:.init(30_000)) else { throw CancellationError() }
+            try await withRoomActivation(database: resources.database(.psql), roomID: roomID) { token in
             let reaction=PostgresV2MessageReactionOperationStore(database:resources.database(.psql),clock:{now})
             let request=try V2MessageReactionOperationCommand(command:.init(roomID:roomID,actorUserID:senderID,operationID:.init(uuid:UUID()),messageID:message.messageID,reaction:"👍",action:.add),expectedReactionRevision:0,firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)
-            let first=try await reaction.change(request,token:lease.token,capacityProfile:.init(id:"standard",limits:profile),eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1))
+            let first=try await reaction.change(request,token:token,capacityProfile:.init(id:"standard",limits:profile),eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1))
             guard case .receipt(let original)=first,case .committed(let commit)=original.outcome,let change=commit.event else { throw CancellationError() }
-            let replay=try await reaction.change(request,token:lease.token,capacityProfile:.init(id:"standard",limits:profile),eventID:.init(uuid:UUID()),now:now.addingTimeInterval(2))
+            let replay=try await reaction.change(request,token:token,capacityProfile:.init(id:"standard",limits:profile),eventID:.init(uuid:UUID()),now:now.addingTimeInterval(2))
 
             let reactionState = try #require(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.message_reactions WHERE message_id = \(bind: UUID(uuidString: message.messageID.rawValue)!) AND actor_user_id = \(bind: senderUUID) AND reaction = '👍'").first(decoding: CountRow.self))
             let event = try #require(try await sql.raw("SELECT event_type, payload->>'message_id' AS message_id, payload->>'reaction' AS reaction, payload->>'action' AS action FROM im_v2.room_events WHERE event_id = \(bind: UUID(uuidString: change.eventID.rawValue)!)").first(decoding: ReactionEventRow.self))
@@ -724,7 +724,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await count("im_v2.message_reaction_receipts", on: sql) == 1)
 
             let removal=try V2MessageReactionOperationCommand(command:.init(roomID:roomID,actorUserID:senderID,operationID:.init(uuid:UUID()),messageID:message.messageID,reaction:"👍",action:.remove),expectedReactionRevision:1,firstSubmissionDeadlineMilliseconds:UInt64(now.timeIntervalSince1970*1000)+60_000)
-            guard case .receipt(let removedReceipt)=try await reaction.change(removal,token:lease.token,capacityProfile:.init(id:"standard",limits:profile),eventID:.init(uuid:UUID()),now:now.addingTimeInterval(4)),case .committed(let removedCommit)=removedReceipt.outcome,let removed=removedCommit.event else { throw CancellationError() }
+            guard case .receipt(let removedReceipt)=try await reaction.change(removal,token:token,capacityProfile:.init(id:"standard",limits:profile),eventID:.init(uuid:UUID()),now:now.addingTimeInterval(4)),case .committed(let removedCommit)=removedReceipt.outcome,let removed=removedCommit.event else { throw CancellationError() }
             #expect(try await count("im_v2.message_reactions", on: sql) == 0)
             let removedEvent = try #require(try await sql.raw("SELECT event_type, payload->>'message_id' AS message_id, payload->>'reaction' AS reaction, payload->>'action' AS action FROM im_v2.room_events WHERE event_id = \(bind: removed.eventID.uuidValue!)").first(decoding: ReactionEventRow.self))
             #expect(removedEvent.action == "remove")
@@ -734,6 +734,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(withdrawn.roomSequence > removed.roomSequence)
             #expect(withdrawn.messageRevision == 2)
             #expect(try await count("im_v2.user_sync_log", on: sql) == 0)
+            }
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run(); try await resources.shutdown()
         } catch {

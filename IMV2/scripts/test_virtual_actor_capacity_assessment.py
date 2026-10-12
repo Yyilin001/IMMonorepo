@@ -6,8 +6,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from assess_v2_virtual_actor_capacity import MAIN, MeasurementFailure, assess, budgets, read_run
-from virtual_actor_capacity_measurement import MEASUREMENT_SEMANTICS_VERSION
+from assess_v2_virtual_actor_capacity import MeasurementFailure, assess, budgets, read_run
+from virtual_actor_capacity_measurement import MEASUREMENT_SEMANTICS_VERSION, resource_scope
+
+
+MAIN = "1" * 40
 
 
 class AssessmentTests(unittest.TestCase):
@@ -17,7 +20,7 @@ class AssessmentTests(unittest.TestCase):
                   "serverCPUSecondsPerAcceptedUnit": .0001,
                   "serverPeakRSSBytes": 100 * 1024 * 1024}
         main = {"result": {"source": {"sourceSHA": MAIN}}, "measurements": values}
-        limits = budgets([main, main, main])
+        limits = budgets([main, main, main], main_revision=MAIN)
         self.assertEqual(limits["acceptedUnitsPerSecondMinimum"], 900)
         candidate = {"measurements": {**values, "acceptedUnitsPerSecond": 899,
                                       "p99Milliseconds": 100},
@@ -28,7 +31,7 @@ class AssessmentTests(unittest.TestCase):
         self.assertIn("peak_outstanding_commands", failed)
         other = {**main, "result": {"source": {"sourceSHA": "a" * 40}}}
         with self.assertRaises(MeasurementFailure):
-            budgets([main, main, other])
+            budgets([main, main, other], main_revision=MAIN)
         candidate["measurements"].pop("serverPeakRSSBytes")
         with self.assertRaises(MeasurementFailure):
             assess(candidate, limits)
@@ -48,13 +51,17 @@ class AssessmentTests(unittest.TestCase):
                                "loader": {"cpuUsageUsec": 10000000,
                                           "sampledPeakProcessRSSBytes": 2048}},
                 "sql": {"owner00": {"allStatementCalls": 60000}},
-                "metricsCounterDeltas": {}, "metricsSampledMaximum": {}}
+                "metricsCounterDeltas": {}, "metricsSampledMaximum": {
+                    "im_v2_room_actor_peak_outstanding_commands": 0,
+                    "im_v2_room_actor_peak_outstanding_bytes": 0}}
+            for name in ("placement-a", "placement-b", "placement-c"):
+                phase["containers"][name] = {"cpuUsageUsec": 0, "sampledPeakProcessRSSBytes": 128}
             phase_path = root / "measurement-steady.json"
             result = {"passed": True, "mode": "measurement", "source": {"sourceSHA": MAIN},
                       "formalSamplingEligible": True,
                       "measurement": {"scenario": {"workload": "hot",
                          "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION,
-                         "resourceScope": ["gateway", "account", "caddy"]}, "phaseFiles": {}}}
+                         "resourceScope": list(resource_scope("hot"))}, "phaseFiles": {}}}
 
             def save():
                 phase_path.write_text(json.dumps(phase))
@@ -65,8 +72,16 @@ class AssessmentTests(unittest.TestCase):
             read = read_run(root)
             self.assertEqual(read["measurements"]["acceptedUnitsPerSecond"], 100)
             self.assertEqual(read["measurements"]["serverCPUSecondsPerAcceptedUnit"], 45 / 30000)
-            self.assertEqual(read["measurements"]["serverPeakRSSBytes"], 5632)
+            self.assertEqual(read["measurements"]["serverPeakRSSBytes"], 6016)
             self.assertIsNone(read_run(root)["meanPhysicalSendBatchSize"])
+            # Native baselines cannot skip Actor peaks under any revision.
+            missing_key = "im_v2_room_actor_peak_outstanding_commands"
+            phase["metricsSampledMaximum"].pop(missing_key)
+            save()
+            with self.assertRaises(MeasurementFailure):
+                read_run(root)
+            phase["metricsSampledMaximum"][missing_key] = 0
+            save()
             result["formalSamplingEligible"] = False
             save()
             with self.assertRaises(MeasurementFailure):

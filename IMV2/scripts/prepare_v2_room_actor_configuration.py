@@ -44,9 +44,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--host", action="append", type=node, required=True, dest="hosts")
+    parser.add_argument("--placement-voter", action="append", type=node, required=True, dest="voters",
+                        help="Exactly three independent control nodes, name=DNS:port")
     parser.add_argument("--caller", action="append", type=node, default=[], dest="callers")
     parser.add_argument("--worker-caller", action="append", default=[],
                         help="Caller identity also running authorized room maintenance/safety workers")
+    parser.add_argument("--exclusion-supervisor", action="append", default=[],
+                        help="Explicit caller with only placement read/write/exclusion authority")
     parser.add_argument("--shards", required=True, help="Comma separated configured shard IDs")
     parser.add_argument("--user-buckets", default="users-primary", help="Comma separated authorized user owner buckets")
     parser.add_argument("--mount-root", help="Path of this node's own directory inside its container")
@@ -54,7 +58,9 @@ def main() -> None:
                         help="Memory policy owner partition count: power of two (1..4096); default 16")
     parser.add_argument("--policy-endpoint", help="Configured shard alias used for the policy control RPC")
     args = parser.parse_args()
-    nodes = args.hosts + args.callers
+    if len(args.voters) != 3:
+        parser.error("exactly three placement voters are required")
+    nodes = args.hosts + args.callers + args.voters
     shards = args.shards.split(",")
     user_buckets = args.user_buckets.split(",")
     if not 1 <= len(user_buckets) <= 256 or len(set(user_buckets)) != len(user_buckets) or any(
@@ -67,6 +73,9 @@ def main() -> None:
         parser.error("node identities/endpoints and shard IDs must be unique, nonempty and bounded")
     if not set(args.worker_caller).issubset({n[0] for n in args.callers}):
         parser.error("worker-caller must name an explicitly configured caller")
+    if (not set(args.exclusion_supervisor).issubset({n[0] for n in args.callers})
+            or set(args.exclusion_supervisor).intersection(args.worker_caller)):
+        parser.error("exclusion-supervisor must be a dedicated caller, not a worker")
     count = args.policy_partitions
     if count < 1 or count > 4096 or count & (count - 1) or len(args.hosts) > count:
         parser.error("policy partitions must be a power of two (1..4096), with at least one per host")
@@ -88,6 +97,18 @@ def main() -> None:
             "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     host_names = {item[0] for item in args.hosts}
     host_ids = {name: str(uuid.uuid4()) for name in host_names}
+    voter_names = {item[0] for item in args.voters}
+    voter_ids = {name: str(uuid.uuid4()) for name in voter_names}
+    occupied = {(address, port) for _, address, port in nodes}
+    client_ports = {}
+    for name, address, port in args.hosts + args.callers:
+        candidate = port + 1
+        while candidate <= 65535 and (address, candidate) in occupied:
+            candidate += 1
+        if candidate > 65535:
+            parser.error("no free control-client port following this endpoint")
+        client_ports[name] = candidate
+        occupied.add((address, candidate))
     services = []
     for name, address, _ in nodes:
         directory = root / name
@@ -123,8 +144,15 @@ def main() -> None:
         permissions += ["policyMutation"]
         if name in host_names:
             permissions += ["policyRegistration"]
+        permissions += ["placementRead"]
+        if name in host_names:
+            permissions += ["placementWrite"]
+        if name in voter_names:
+            permissions = ["placementVote", "placementRead", "realtimePublish", "realtimeReceive"]
+        if name in args.exclusion_supervisor:
+            permissions = ["placementRead", "placementWrite", "placementExclude"]
         services.append(dict(id=name, publicKeyBase64=base64.b64encode(public_der[-32:]).decode(),
-                             permissions=permissions, hostIDs=[host_ids[name]] if name in host_names else [],
+                             permissions=permissions, hostIDs=[host_ids[name]] if name in host_names else ([voter_ids[name]] if name in voter_names else []),
                              shardIDs=shards, userBucketIDs=user_buckets, gatewayNodeIDs=[name]))
     peers = [dict(hostID=host_ids[name], serviceID=name, address=address, port=port,
                   shardIDs=shards, maximumRooms=10000) for name, address, port in args.hosts]
@@ -137,21 +165,31 @@ def main() -> None:
         dict(hostID=host_ids[name], endpoint=args.policy_endpoint or shards[0],
              partitions=list(range(index, args.policy_partitions, len(ordered_hosts))))
         for index, name in enumerate(ordered_hosts)])
+    control_peers = [dict(hostID=voter_ids[name], serviceID=name, address=address, port=port, shardIDs=shards)
+                     for name, address, port in args.voters]
     for name, address, port in nodes:
         directory = root / name
         visible = Path(args.mount_root) if args.mount_root else directory
         # Caller configurations retain their required local identity. Gateway
         # hosts share only the Gateway voter roster; callers do not vote there.
-        local_realtime_peers = realtime_peers if name in host_names else realtime_peers + [
+        local_realtime_peers = realtime_peers if name in host_names or name in args.exclusion_supervisor else realtime_peers + [
             dict(nodeID=name, serviceID=name, address=address, port=port)]
         document = dict(name="imv2-room-actors", address=address,
             port=port, threadPoolSize=2, serviceID=name, hostID=host_ids.get(name),
             signingKeyPath=str(visible / "signing.key"), certificatePath=str(visible / "tls.pem"),
             privateKeyPath=str(visible / "tls.key"), trustRootPath=str(visible / "ca.pem"),
             services=services, peers=peers, realtimePeers=local_realtime_peers)
-        document["policyPlacement"] = placement
+        storage_paths = {}
+        if name in voter_names:
+            (directory / "placement").mkdir(mode=0o700)
+            storage_paths = {shard: str(visible / "placement" / (str(index) + ".pb"))
+                             for index, shard in enumerate(shards)}
+        document["placementControl"] = dict(port=port if name in voter_names else client_ports[name],
+            threadPoolSize=1, localVoterID=voter_ids.get(name), storagePaths=storage_paths, voters=control_peers)
+        if name not in voter_names and name not in args.exclusion_supervisor:
+            document["policyPlacement"] = placement
         write_json(directory / "configuration.json", document)
-    write_json(root / "topology.json", dict(hosts=args.hosts, callers=args.callers, shards=shards, hostIDs=host_ids, policyPlacement=placement))
+    write_json(root / "topology.json", dict(hosts=args.hosts, callers=args.callers, voters=args.voters, shards=shards, hostIDs=host_ids, voterIDs=voter_ids, policyPlacement=placement, exclusionSupervisors=args.exclusion_supervisor))
     print(f"Created {len(nodes)} local/test node configurations in {root}")
     print("Mount only each process's own node directory; keep the CA private key outside application containers.")
 

@@ -4,7 +4,7 @@ import IMV2Core
 import Testing
 @testable import IMV2ActorRuntime
 
-@Suite("Logical room references resolve through the owner and lease")
+@Suite("Logical room references resolve through committed placement")
 struct V2RoomDirectoryTests {
     @Test("forward pair retries preserve command identity and prior unknown outcomes", arguments: [false, true])
     func forwardPairRetryIdentity(unknownThenForbidden: Bool) async throws {
@@ -104,7 +104,7 @@ struct V2RoomDirectoryTests {
             if !slowCold {
                 #expect(await fixture.transport.lookups.isEmpty)
                 #expect(await fixture.owners.calls == 0)
-                #expect(await fixture.leases.locates == 0)
+
             } else {
                 #expect(await fixture.owners.calls == 2)
                 #expect(observation.recoveryStages[.coldCallerWait]?.completed == 2)
@@ -152,7 +152,7 @@ struct V2RoomDirectoryTests {
             let room = RoomID(uuid: UUID())
             let host = V2ActorHostIdentity(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             let token = V2RoomActivationToken(roomID: room, owner: fixture.owner,
-                activationEpoch: try .init(1), host: host)
+                activationEpoch: try .init(0x100000001), host: host)
             await fixture.directory.remember(token)
             await fixture.transport.configureRecoveryGate(gate, host: host)
             queries.append(.init(roomID: room, actorUserID: user, kind: .state))
@@ -238,7 +238,7 @@ struct V2RoomDirectoryTests {
 
     @Test("cached operations preserve identity through unknown replies and drain actual hot calls")
     func cachedOperationAvoidsLocationWork() async throws {
-        let fixture = try Fixture(existingLease: true)
+        let fixture = try Fixture()
         await fixture.directory.remember(fixture.token)
         await fixture.transport.configureCached(available: true, failures: [.outcomeUnknown])
         let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
@@ -251,7 +251,7 @@ struct V2RoomDirectoryTests {
             deadline: .now + .seconds(2))
         #expect(await fixture.transport.invoked == [command, command, recovery])
         #expect(await fixture.owners.calls == 0)
-        #expect(await fixture.leases.locates == 0)
+
         #expect(await fixture.transport.lookups.isEmpty)
         #expect(await fixture.directory.snapshot().pending == 0)
         let metrics = await fixture.directory.callMetricsSnapshot()
@@ -270,7 +270,7 @@ struct V2RoomDirectoryTests {
 
     @Test("a bounded hot RPC leaves the original deadline available for same-ID recovery")
     func cachedAttemptDeadlineLeavesRecoveryBudget() async throws {
-        let fixture = try Fixture(existingLease: true, callTimeoutMilliseconds: 50)
+        let fixture = try Fixture(callTimeoutMilliseconds: 50)
         await fixture.directory.remember(fixture.token)
         await fixture.transport.configureCached(available: true)
         await fixture.transport.timeoutNextCachedCall()
@@ -281,13 +281,13 @@ struct V2RoomDirectoryTests {
         let budgets = await fixture.transport.cachedBudgets
         #expect(budgets.count == 2)
         #expect(budgets.allSatisfy { $0 > .zero && $0 <= .milliseconds(50) })
-        #expect(await fixture.leases.locates == 0)
+
         #expect(await fixture.directory.callMetricsSnapshot().cachedResponses == 1)
     }
 
     @Test("a late cached failure cannot revoke a reinstalled identical token")
     func cachedCallRevisionPreventsABA() async throws {
-        let fixture = try Fixture(existingLease: true)
+        let fixture = try Fixture()
         let gate = Gate()
         await fixture.directory.remember(fixture.token)
         await fixture.transport.configureCached(available: true, gate: gate,
@@ -301,75 +301,27 @@ struct V2RoomDirectoryTests {
         _ = try await old.value
         #expect(await fixture.directory.callMetricsSnapshot().locationInvalidations == 0)
         #expect(await fixture.directory.snapshot().cached == 1)
-        #expect(await fixture.transport.activations == 0)
-    }
-
-    @Test("demand recovery waits for the valid lease and reuses its original activation")
-    func recoveryWaitsWithoutRepeatedLeaseReadsOrAcquire() async throws {
-        let fixture = try Fixture(existingLease: true)
-        await fixture.transport.setLookupAvailable(false)
-        await fixture.transport.configureLookupFailures([.notAccepted(.deadlineExceeded)])
-        let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
-        let recovering = Task { try await fixture.directory.room(fixture.room).call(command,
-            principal: .user(user), deadline: .now + .seconds(2)) }
-        try await waitUntil {
-            let metrics = await fixture.directory.callMetricsSnapshot()
-            return metrics.waitingForLeaseRooms == 1 && metrics.recoveryWaits >= 1
-        }
-        #expect(await fixture.leases.locates == 1)
-        #expect(await fixture.transport.activations == 0)
-        await fixture.transport.setLookupAvailable(true)
-        _ = try await recovering.value
-        #expect(await fixture.leases.locates == 1)
-        #expect(await fixture.transport.activations == 0)
-        #expect(await fixture.transport.invokedTokens == [fixture.token])
-        #expect(await fixture.directory.callMetricsSnapshot().waitingForLeaseRooms == 0)
-    }
-
-    @Test("expired demand recovery reads authoritative absence before activating a new epoch")
-    func expiredLeaseRecoveryKeepsOperationIdentity() async throws {
-        let fixture = try Fixture(existingLease: true)
-        let shortLease = try V2RoomActivationLease(token: fixture.token,
-            databaseObservedAt: Date(timeIntervalSince1970: 1_000),
-            expiresAt: Date(timeIntervalSince1970: 1_000.050))
-        // The first authoritative observation is still valid; only the next
-        // SQL observation reports absence. The old incarnation throws staleActivation,
-        // and no local timer alone grants ownership.
-        await fixture.leases.setLease(shortLease, removeAfterRead: true)
-        await fixture.directory.remember(fixture.token)
-        await fixture.transport.setLookupAvailable(false)
-        let replacement = V2RoomActivationToken(roomID: fixture.room, owner: fixture.owner,
-            activationEpoch: try .init(2), host: fixture.host)
-        await fixture.transport.configureRecoveryActivation(replacement)
-        let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
-        _ = try await fixture.directory.room(fixture.room).call(command, principal: .user(user),
-            deadline: .now + .seconds(2))
-        #expect(await fixture.leases.locates == 2)
         #expect(await fixture.transport.activations == 1)
-        #expect(await fixture.transport.invoked == [command])
-        #expect(await fixture.transport.invokedTokens == [replacement])
-        #expect(await fixture.directory.callMetricsSnapshot().recoveryWaits >= 1)
-        #expect(await fixture.directory.snapshot().active == 0)
     }
 
-    @Test("a failed cache probe is not repeated before authoritative lease confirmation")
+    @Test("a failed cache probe resolves once on the designated owner")
     func failedCacheProbeRunsOncePerRevision() async throws {
-        let fixture = try Fixture(existingLease: true)
+        let fixture = try Fixture()
         await fixture.directory.remember(fixture.token)
         await fixture.transport.configureLookupFailures([.notAccepted(.notReady)])
         let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
         _ = try await fixture.directory.room(fixture.room).call(command, principal: .user(user),
             deadline: .now + .seconds(2))
-        // One cache probe, then one required authoritative lease confirmation.
+        // One cache probe, then one confirmation after activation on the designated owner.
         #expect(await fixture.transport.lookups.map(\.token) == [fixture.token, fixture.token])
-        #expect(await fixture.leases.locates == 1)
-        #expect(await fixture.transport.activations == 0)
+
+        #expect(await fixture.transport.activations == 1)
         #expect(await fixture.transport.invoked == [command])
     }
 
     @Test("a failed old probe does not suppress a reinstalled identical cache token")
     func failedCacheProbeDoesNotSuppressNewRevision() async throws {
-        let fixture = try Fixture(existingLease: true)
+        let fixture = try Fixture()
         let gate = Gate()
         await fixture.directory.remember(fixture.token)
         await fixture.transport.configureLookupFailures([.notAccepted(.notReady)], gate: gate)
@@ -381,52 +333,22 @@ struct V2RoomDirectoryTests {
         await gate.open()
         _ = try await calling.value
         #expect(await fixture.transport.lookups.map(\.token) == [fixture.token, fixture.token])
-        #expect(await fixture.leases.locates == 0)
+
         #expect(await fixture.transport.activations == 0)
         #expect(await fixture.transport.invoked == [command])
     }
 
-    @Test("cold placement distributes rooms and survives candidate reorder and host restart")
-    func stableColdPlacement() async throws {
-        let owner = try V2RoomDataOwner(shardID: "shard-a", epoch: 0)
-        let identities = try (1...3).map { index in
-            try V2ActorHostIdentity(hostID: V2ActorHostID(String(format: "00000000-0000-0000-0000-%012d", index)), incarnationID: UUID())
-        }
-        func directory(_ hosts: [V2ActorHostIdentity], capacity: Int = 2) throws -> V2RoomDirectory {
-            let token = V2RoomActivationToken(roomID: try RoomID("seed-room"), owner: owner,
-                activationEpoch: try .init(1), host: hosts[0])
-            let transport = Transport(token: token, unreachable: false, activationFailure: nil, failures: [],
-                failFirstLookup: false, localHintAvailable: false, localHintGate: nil, localFailures: [], placement: true)
-            return V2RoomDirectory(owners: Owners(owner: owner, gate: nil, missing: false),
-                leases: Leases(lease: nil), hosts: PlacementHosts(values: hosts.map {
-                    .init(identity: $0, accessibleShardIDs: [owner.shardID], availableRooms: capacity, isHealthy: true)
-                }), transport: transport, configuration: try .init())
-        }
-        let first = try directory(identities)
-        let reordered = try directory(identities.reversed().map { .init(hostID: $0.hostID, incarnationID: UUID()) })
-        var counts: [V2ActorHostID: Int] = [:]
-        for index in 0..<256 {
-            let room = try RoomID("placement-room-\(index)")
-            let a = try await first.resolve(room, deadline: .now + .seconds(2))
-            let b = try await reordered.resolve(room, deadline: .now + .seconds(2))
-            #expect(a.host.hostID == b.host.hostID)
-            counts[a.host.hostID, default: 0] += 1
-        }
-        #expect(counts.count == identities.count)
-        #expect(counts.values.allSatisfy { (50...130).contains($0) })
-        await first.drain(); await reordered.drain()
-    }
-
-    @Test("a valid lease wins over higher-capacity rendezvous candidates")
-    func placementPreservesLease() async throws {
-        let fixture = try Fixture(existingLease: true)
+    @Test("committed placement wins over a higher-capacity alternative")
+    func placementPreservesOwner() async throws {
+        let fixture = try Fixture()
         let other = V2ActorHostIdentity(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
-        let directory = V2RoomDirectory(owners: fixture.owners, leases: fixture.leases,
+        let directory = V2RoomDirectory(owners: fixture.owners, placement: fixture.placement,
             hosts: PlacementHosts(values: [.init(identity: other, accessibleShardIDs: [fixture.owner.shardID],
-                availableRooms: 100, isHealthy: true)]), transport: fixture.transport, configuration: try .init())
+                availableRooms: 100, isHealthy: true), .init(identity: fixture.host, accessibleShardIDs: [fixture.owner.shardID],
+                availableRooms: 1, isHealthy: true)]), transport: fixture.transport, configuration: try .init())
         let result = try await directory.resolve(fixture.room, deadline: .now + .seconds(2))
         #expect(result == fixture.token)
-        #expect(await fixture.transport.activations == 0)
+        #expect(await fixture.transport.activations == 1)
         await directory.drain()
     }
 
@@ -445,7 +367,7 @@ struct V2RoomDirectoryTests {
             #expect(try await first.value == fixture.token)
             for caller in others { #expect(try await caller.value == fixture.token) }
             #expect(await fixture.owners.calls == 1)
-            #expect(await fixture.leases.locates == 1)
+
             #expect(await fixture.transport.activations == 1)
         } catch {
             await gate.open()
@@ -502,14 +424,14 @@ struct V2RoomDirectoryTests {
         }
     }
 
-    @Test("a valid but unreachable lease never causes another acquire")
-    func unreachableLease() async throws {
-        let fixture = try Fixture(existingLease: true, unreachable: true)
+    @Test("an unreachable designated owner never activates another host")
+    func unreachableOwner() async throws {
+        let fixture = try Fixture(unreachable: true)
         await failure(.notAccepted(.unavailable)) {
             _ = try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(1))
         }
-        #expect(await fixture.transport.activations == 0)
-        #expect(await fixture.leases.locates == 1)
+        #expect(await fixture.transport.activations == 1)
+
     }
 
     @Test("unknown activation remains unknown after an empty locate")
@@ -519,7 +441,7 @@ struct V2RoomDirectoryTests {
             _ = try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(1))
         }
         #expect(await fixture.transport.activations == 1)
-        #expect(await fixture.leases.locates == 2)
+
     }
 
     @Test("unknown owner rejects without activating an empty room")
@@ -528,7 +450,7 @@ struct V2RoomDirectoryTests {
         await failure(.notAccepted(.notFound)) {
             _ = try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(1))
         }
-        #expect(await fixture.leases.locates == 0)
+
         #expect(await fixture.transport.activations == 0)
     }
 
@@ -537,7 +459,7 @@ struct V2RoomDirectoryTests {
         let fixture = try Fixture()
         let newer = V2RoomActivationToken(
             roomID: fixture.room, owner: fixture.owner,
-            activationEpoch: try .init(2), host: fixture.host
+            activationEpoch: try .init(0x100000002), host: fixture.host
         )
         await fixture.directory.remember(newer)
         await fixture.directory.remember(fixture.token)
@@ -546,23 +468,20 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.transport.activations == 0)
     }
 
-    @Test("a stale cached lookup has a short locator budget and returns to the owner lease")
-    func staleLookupUsesAuthoritativeLease() async throws {
-        let fixture = try Fixture(existingLease: true, failFirstLookup: true)
+    @Test("a stale cached lookup has a short budget and reactivates the designated owner")
+    func staleLookupReactivatesDesignatedOwner() async throws {
+        let fixture = try Fixture(failFirstLookup: true)
         let replacement = V2RoomActivationToken(
             roomID: fixture.room, owner: fixture.owner,
-            activationEpoch: try .init(2), host: fixture.host
+            activationEpoch: try .init(0x100000002), host: fixture.host
         )
         await fixture.directory.remember(fixture.token)
-        await fixture.leases.setLease(try .init(
-            token: replacement, databaseObservedAt: Date(timeIntervalSince1970: 1_001),
-            expiresAt: Date(timeIntervalSince1970: 1_031)
-        ))
+        await fixture.transport.configureRecoveryActivation(replacement)
 
         #expect(try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(12))
                 == replacement)
-        #expect(await fixture.leases.locates == 1)
-        #expect(await fixture.transport.activations == 0)
+
+        #expect(await fixture.transport.activations == 1)
         let lookups = await fixture.transport.lookups
         #expect(lookups.map(\.token) == [fixture.token, replacement])
         #expect(lookups.allSatisfy { $0.budget > .zero && $0.budget <= .seconds(3) })
@@ -570,7 +489,7 @@ struct V2RoomDirectoryTests {
 
     @Test("a shorter configured call timeout also bounds the locator hop")
     func shorterCallTimeout() async throws {
-        let fixture = try Fixture(existingLease: true, callTimeoutMilliseconds: 2_000)
+        let fixture = try Fixture(callTimeoutMilliseconds: 2_000)
         #expect(try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(5))
                 == fixture.token)
         let lookups = await fixture.transport.lookups
@@ -580,7 +499,7 @@ struct V2RoomDirectoryTests {
 
     @Test("unknown durable result retries the same typed operation within its bound")
     func stableRetry() async throws {
-        let fixture = try Fixture(existingLease: true, invokeFailures: [.outcomeUnknown])
+        let fixture = try Fixture(invokeFailures: [.outcomeUnknown])
         let user = UserID(uuid: UUID())
         let command = V2RoomRequest.messaging(.sendOperation(try .init(command: .init(
             roomID: fixture.room, senderUserID: user,
@@ -593,12 +512,12 @@ struct V2RoomDirectoryTests {
         #expect(result == .recovery(.failure(.invalidRequest)))
         let requests = await fixture.transport.invoked
         #expect(requests == [command, command])
-        #expect(await fixture.leases.locates == 1)
+
     }
 
     @Test("repeatable local calls use a hint while public resolution remains physical")
     func localHintOnlyForRepeatableCall() async throws {
-        let fixture = try Fixture(existingLease: true, localHintAvailable: true)
+        let fixture = try Fixture(localHintAvailable: true)
         let user = UserID(uuid: UUID())
         let command = try fixture.send(user: user)
         #expect(try await fixture.directory.resolve(fixture.room, deadline: .now + .seconds(2)) == fixture.token)
@@ -628,7 +547,7 @@ struct V2RoomDirectoryTests {
     @Test("a strict waiter stays strict after cancellation while the local predicate waits")
     func strictWaiterIsSticky() async throws {
         let gate = Gate()
-        let fixture = try Fixture(existingLease: true, localHintAvailable: true, localHintGate: gate)
+        let fixture = try Fixture(localHintAvailable: true, localHintGate: gate)
         await fixture.directory.remember(fixture.token)
         let user = UserID(uuid: UUID())
         let weak = Task { try await fixture.directory.room(fixture.room).call(
@@ -647,18 +566,16 @@ struct V2RoomDirectoryTests {
     @Test("a replaced cache during the predicate is strictly confirmed")
     func cacheReplacementWhileHintSuspended() async throws {
         let gate = Gate()
-        let fixture = try Fixture(existingLease: true, localHintAvailable: true, localHintGate: gate)
+        let fixture = try Fixture(localHintAvailable: true, localHintGate: gate)
         await fixture.directory.remember(fixture.token)
         let user = UserID(uuid: UUID())
         let weak = Task { try await fixture.directory.room(fixture.room).call(
             fixture.send(user: user), principal: .user(user), deadline: .now + .seconds(3)) }
         try await gate.waitForEntries(1)
         let newer = V2RoomActivationToken(roomID: fixture.room, owner: fixture.owner,
-            activationEpoch: try .init(2), host: fixture.host)
+            activationEpoch: try .init(0x100000002), host: fixture.host)
         await fixture.directory.remember(newer)
-        await fixture.leases.setLease(try .init(token: newer,
-            databaseObservedAt: Date(timeIntervalSince1970: 1_001),
-            expiresAt: Date(timeIntervalSince1970: 1_031)))
+        await fixture.transport.configureRecoveryActivation(newer)
         await gate.open()
         _ = try await weak.value
         #expect(await fixture.transport.localInvocations == 0)
@@ -666,16 +583,14 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.transport.invokedTokens == [newer])
     }
 
-    @Test("a local rejection relocates one durable operation without a second acquire")
+    @Test("a local rejection retries one durable operation on the designated owner")
     func staleLocalHintRelocates() async throws {
-        let fixture = try Fixture(existingLease: true, localHintAvailable: true,
+        let fixture = try Fixture(localHintAvailable: true,
             localFailures: [.notAccepted(.notReady)])
         await fixture.directory.remember(fixture.token)
         let newer = V2RoomActivationToken(roomID: fixture.room, owner: fixture.owner,
-            activationEpoch: try .init(2), host: fixture.host)
-        await fixture.leases.setLease(try .init(token: newer,
-            databaseObservedAt: Date(timeIntervalSince1970: 1_001),
-            expiresAt: Date(timeIntervalSince1970: 1_031)))
+            activationEpoch: try .init(0x100000002), host: fixture.host)
+        await fixture.transport.configureRecoveryActivation(newer)
         let user = UserID(uuid: UUID())
         let command = try fixture.send(user: user)
         _ = try await fixture.directory.room(fixture.room).call(command,
@@ -683,12 +598,12 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.transport.localInvocations == 1)
         #expect(await fixture.transport.invoked == [command, command])
         #expect(await fixture.transport.invokedTokens == [newer])
-        #expect(await fixture.transport.activations == 0)
+        #expect(await fixture.transport.activations == 1)
     }
 
     @Test("unknown hinted result retries only the same durable operation")
     func unknownLocalHintUsesExistingRetry() async throws {
-        let fixture = try Fixture(existingLease: true, localHintAvailable: true,
+        let fixture = try Fixture(localHintAvailable: true,
             localFailures: [.outcomeUnknown])
         await fixture.directory.remember(fixture.token)
         let user = UserID(uuid: UUID())
@@ -702,7 +617,7 @@ struct V2RoomDirectoryTests {
 
     @Test("a no-auto-retry request remains strict and does not replay unknown")
     func noAutomaticRetryIsStrict() async throws {
-        let fixture = try Fixture(existingLease: true, invokeFailures: [.outcomeUnknown],
+        let fixture = try Fixture(invokeFailures: [.outcomeUnknown],
             localHintAvailable: true)
         await fixture.directory.remember(fixture.token)
         let command = V2RoomRequest.maintenance(.trimLog(.init(roomID: fixture.room,
@@ -723,7 +638,7 @@ struct V2RoomDirectoryTests {
             let room = RoomID(uuid: UUID())
             await fixture.directory.remember(.init(
                 roomID: room, owner: fixture.owner,
-                activationEpoch: try .init(1), host: fixture.host
+                activationEpoch: try .init(0x100000001), host: fixture.host
             ))
         }
         #expect(await fixture.directory.snapshot().cached == 2)
@@ -751,7 +666,7 @@ struct V2RoomDirectoryTests {
         let host: V2ActorHostIdentity
         let token: V2RoomActivationToken
         let owners: Owners
-        let leases: Leases
+        let placement: Placement
         let transport: Transport
         let directory: V2RoomDirectory
 
@@ -761,7 +676,7 @@ struct V2RoomDirectoryTests {
                 firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)))
         }
 
-        init(ownerGate: Gate? = nil, existingLease: Bool = false,
+        init(ownerGate: Gate? = nil,
              unreachable: Bool = false, missingOwner: Bool = false,
              failFirstLookup: Bool = false,
              activationFailure: V2RoomCallFailure? = nil,
@@ -773,13 +688,9 @@ struct V2RoomDirectoryTests {
              maximumConcurrentResolutions: Int = 2, placement: Bool = false, maximumWaiters: Int = 3) throws {
             owner = try .init(shardID: "shard-a", epoch: 0)
             host = .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
-            token = .init(roomID: room, owner: owner, activationEpoch: try .init(1), host: host)
+            token = .init(roomID: room, owner: owner, activationEpoch: try .init(0x100000001), host: host)
             owners = Owners(owner: owner, gate: ownerGate, missing: missingOwner)
-            let lease = try V2RoomActivationLease(
-                token: token, databaseObservedAt: Date(timeIntervalSince1970: 1_000),
-                expiresAt: Date(timeIntervalSince1970: 1_030)
-            )
-            leases = Leases(lease: existingLease ? lease : nil)
+            self.placement = Placement(host: host)
             transport = Transport(token: token, unreachable: unreachable,
                                   activationFailure: activationFailure, failures: invokeFailures,
                                   failFirstLookup: failFirstLookup,
@@ -795,7 +706,7 @@ struct V2RoomDirectoryTests {
                 callTimeoutMilliseconds: callTimeoutMilliseconds,
                 reservationTimeoutMilliseconds: min(15_000, callTimeoutMilliseconds)
             )
-            directory = .init(owners: owners, leases: leases, hosts: provider,
+            directory = .init(owners: owners, placement: self.placement, hosts: provider,
                               transport: transport, configuration: configuration)
         }
     }
@@ -813,33 +724,24 @@ struct V2RoomDirectoryTests {
         func owner(for roomID: RoomID) async throws -> V2RoomDataOwner {
             calls += 1
             if let gate = roomGates[roomID] ?? gate { await gate.wait() }
-            if missing { throw V2RoomActivationLeaseError.roomNotFound }
+            if missing { throw V2RoomActorStateError.roomNotFound }
             return owner
         }
     }
 
-    private actor Leases: V2RoomActivationLeaseStore {
-        var lease: V2RoomActivationLease?
-        var locates = 0
-        var removeAfterRead = false
-        init(lease: V2RoomActivationLease?) { self.lease = lease }
-        func setLease(_ value: V2RoomActivationLease, removeAfterRead: Bool = false) {
-            lease = value; self.removeAfterRead = removeAfterRead
+    /// Transport unit tests use synthetic active references. Exact owner,
+    /// partition and epoch rejection are covered by the real placement tests.
+    private struct Placement: V2RoomActorPlacementRouting {
+        let host: V2ActorHostIdentity
+        func grant(roomID: RoomID, owner: V2RoomDataOwner) throws -> V2RoomActorPlacementGrant {
+            try .init(host: host, epoch: 1)
         }
-        func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
-            locates += 1
-            let observed = lease
-            if removeAfterRead { lease = nil; removeAfterRead = false }
-            return observed
+        func admission(for token: V2RoomActivationToken) throws -> @Sendable () -> Bool {
+            guard UInt64(token.activationEpoch.rawValue) >> 32 == 1 else {
+                throw V2RoomCallFailure.notAccepted(.staleActivation)
+            }
+            return { true }
         }
-        func acquire(roomID: RoomID, owner: V2RoomDataOwner, host: V2ActorHostIdentity,
-                     duration: V2ActorMilliseconds) async throws -> V2RoomActivationAcquisition {
-            throw V2RoomActivationLeaseError.roomNotFound
-        }
-        func renew(token: V2RoomActivationToken, duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
-            throw V2RoomActivationLeaseError.activationChanged
-        }
-        func release(token: V2RoomActivationToken) async throws -> Bool { false }
     }
 
     private struct PlacementHosts: V2RoomHostDiscovering {

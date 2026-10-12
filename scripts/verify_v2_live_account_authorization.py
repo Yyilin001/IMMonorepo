@@ -38,6 +38,8 @@ import uuid
 from imv2_tls_backpressure_proxy import TLSBackpressureProxy
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'IMV2/scripts'))
+from v2_native_placement_processes import voter_arguments, start_controls
 
 
 class BoundedTLSHTTPServer(http.server.ThreadingHTTPServer):
@@ -538,6 +540,9 @@ def main():
                    if not k.startswith(('IM_V2_', 'IMV2_LIVE_ACCOUNT_', 'IMV2_ROOM_ACTOR_'))}
     with (output / 'build.log').open('w') as log:
         subprocess.run(['swift', 'build', '--disable-automatic-resolution', '--jobs', '4',
+                        '--product', 'IMV2PlacementControlApp'], cwd=ROOT / 'IMV2Server',
+                       env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
+        subprocess.run(['swift', 'build', '--disable-automatic-resolution', '--jobs', '4',
                         '--product', 'IMV2AccountServerApp'], cwd=ROOT / 'IMV2Server',
                        env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
         if args.gateway:
@@ -564,6 +569,8 @@ def main():
         gateway_log = None
         tls_relay = None
         tls_relay_events = []
+        placement_processes = []
+        placement_logs = []
         additional_processes = []
         additional_logs = []
         gateway_samples = []
@@ -607,7 +614,14 @@ def main():
                     '--shards', 'rooms-primary', '--user-buckets', 'users-primary']
                 if args.multi_gateway:
                     actor_configuration += ['--host', 'gateway-secondary=localhost:{}'.format(free_port())]
+                actor_configuration += voter_arguments([free_port() for _ in range(3)])
                 run(actor_configuration)
+                def spawn_control(name, executable, control_environment):
+                    log = (output / (name + '.log')).open('x'); placement_logs.append(log)
+                    return subprocess.Popen([str(executable)], env=control_environment,
+                        stdout=log, stderr=subprocess.STDOUT)
+                start_controls(binary=binary_directory / 'IMV2PlacementControlApp', actors=private / 'actors',
+                    shards=['rooms-primary'], log_directory=output, spawn=spawn_control, owned=placement_processes)
 
                 if args.private_hint or args.room_recovery_scale is not None or args.gateway_recovery_connections or args.app_ack_cut:
                     # The auth-only harness does not run the admission operator.
@@ -1483,6 +1497,14 @@ def main():
                     except subprocess.TimeoutExpired:
                         account.kill()
                         account.wait(timeout=5)
+                # Keep quorum alive through Account and all Gateway shutdowns.
+                for process in placement_processes:
+                    if process.poll() is None: process.terminate()
+                control_deadline = time.monotonic() + 40
+                for process in placement_processes:
+                    try: process.wait(timeout=max(.1, control_deadline-time.monotonic()))
+                    except subprocess.TimeoutExpired: process.kill(); process.wait()
+                for log in placement_logs: log.close()
                 if postgres_started:
                     subprocess.run(['pg_ctl', '-D', str(data), 'stop', '-m', 'fast', '-w'],
                                    stdout=setup, stderr=subprocess.STDOUT, env=environment, check=True)

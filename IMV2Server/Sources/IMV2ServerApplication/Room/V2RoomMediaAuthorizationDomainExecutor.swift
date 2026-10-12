@@ -13,7 +13,7 @@ public struct V2RoomMediaAuthorizationDomainExecutor: Sendable {
 
     public func execute(_ query: V2RoomMediaAuthorizationQuery) async throws -> V2RoomMediaAuthorizationResult {
         guard query.roomID == token.roomID else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         return try await store.execute(query)
     }

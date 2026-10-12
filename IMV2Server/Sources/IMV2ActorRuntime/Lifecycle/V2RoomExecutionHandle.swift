@@ -26,33 +26,33 @@ final class V2RoomHostAdmission: Sendable {
 final class V2RoomExecutionAuthority: Sendable {
     private struct State {
         var phase: V2RoomActivationPhase = .restoring
-        var safetyUntil: ContinuousClock.Instant
         var inFlight = 0
     }
     private let state: Mutex<State>
     private let qualification: V2ActorServiceQualification
+    private let admission: @Sendable () -> Bool
     private let generation: UUID
     private let hostAdmission: V2RoomHostAdmission?
 
     init(
-        safetyUntil: ContinuousClock.Instant, qualification: V2ActorServiceQualification,
+        admission: @escaping @Sendable () -> Bool, qualification: V2ActorServiceQualification,
         generation: UUID, hostAdmission: V2RoomHostAdmission? = nil
     ) {
-        state = Mutex(State(safetyUntil: safetyUntil))
+        state = Mutex(State())
+        self.admission = admission
         self.qualification = qualification
         self.generation = generation
         self.hostAdmission = hostAdmission
     }
     func setPhase(_ phase: V2RoomActivationPhase) { state.withLock { $0.phase = phase } }
-    func renew(until: ContinuousClock.Instant) { state.withLock { $0.safetyUntil = until } }
     var inFlight: Int { state.withLock { $0.inFlight } }
     func deadline() -> ContinuousClock.Instant? {
         state.withLock { value in
             guard value.phase == .ready || value.phase == .draining,
                 let proof = qualification.snapshot(), proof.generation == generation,
-                .now < min(value.safetyUntil, proof.validUntil)
+                .now < proof.validUntil, (value.phase == .draining || admission())
             else { return nil }
-            return min(value.safetyUntil, proof.validUntil)
+            return proof.validUntil
         }
     }
     func admit() throws {
@@ -61,8 +61,8 @@ final class V2RoomExecutionAuthority: Sendable {
                 throw V2RoomCallFailure.notAccepted(.retired)
             }
             guard let proof = qualification.snapshot(), proof.generation == generation,
-                .now < min(value.safetyUntil, proof.validUntil)
-            else { throw V2RoomCallFailure.notAccepted(.leaseLost) }
+                .now < proof.validUntil, (value.phase == .draining || admission())
+            else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
             value.inFlight += 1
         }
     }

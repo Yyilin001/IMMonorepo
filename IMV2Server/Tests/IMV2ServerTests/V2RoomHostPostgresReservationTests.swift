@@ -4,6 +4,7 @@ import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2ActorContracts
+import IMV2ActorCluster
 import IMV2ActorRuntime
 import IMV2Core
 @testable import IMV2Server
@@ -18,78 +19,83 @@ struct V2RoomHostPostgresReservationTests {
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_IS_DISPOSABLE"] == "1"))
     func grantedReadDoesNotWaitForUnadmittedRoom() async throws {
         try await withPairDatabase { database, sql, seed in
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let hosted = try makePairHost(database: database, profile: seed.profile, leases: leases)
-            let host = hosted.host
-            let trace = PairReservationTrace()
-            let coordinator = pairCoordinator(host: host, configuration: hosted.configuration,
-                tokens: hosted.tokens, trace: trace)
-            let executor = try pairExecutor(database: database, profile: seed.profile,
-                admission: hosted.admission)
-            let forward = pairWire(sourceRoom: seed.a, targetRoom: seed.b,
-                sourceMessage: seed.aSource.messageID)
-            let rowLock = PairPhaseGate()
-            await host.start()
-            try await activatePair(host: host, seed: seed, into: hosted.tokens)
-            let tokenA = try #require(await hosted.tokens.get(seed.a))
-            let tokenB = try #require(await hosted.tokens.get(seed.b))
-            let locker = Task {
-                try await database.transaction { transaction in
-                    let txSQL = try #require(transaction as? any SQLDatabase)
-                    try await txSQL.raw("""
-                        SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: seed.b.uuidValue!)
-                        FOR NO KEY UPDATE
-                        """).run()
-                    await rowLock.hold()
-                }
-            }
-            do {
-                try await rowLock.waitUntilHeld()
-                let bQuery = Task {
-                    try await host.invoke(token: tokenB,
-                        request: try recoveryBytes(seed.b), deadline: .now + .seconds(8))
-                }
-                try await pairWaitUntil {
-                    await hosted.admission.snapshot().interactiveRead.inFlight == 1
-                }
-                let pairDeadline = ContinuousClock.now + .seconds(8)
-                let pair = Task { () throws -> V2ActorForwardMessageResultWire in
-                    try await coordinator.withReservations(source: seed.a, target: seed.b,
-                        deadline: pairDeadline) { grants in
-                        await pairExecution(executor: executor, wire: forward, grants: grants,
-                            deadline: pairDeadline)
+            let identity = V2ActorHostIdentity(hostID: try .init("pair-pg-host"), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "room-a") { control in
+                let placement = try await control.register(identity, shard: "room-a")
+                let hosted = try makePairHost(database: database, profile: seed.profile, identity: identity, placement: placement)
+                let host = hosted.host
+                let trace = PairReservationTrace()
+                let coordinator = pairCoordinator(host: host, configuration: hosted.configuration,
+                    tokens: hosted.tokens, trace: trace)
+                let executor = try pairExecutor(database: database, profile: seed.profile,
+                    admission: hosted.admission)
+                let forward = pairWire(sourceRoom: seed.a, targetRoom: seed.b,
+                    sourceMessage: seed.aSource.messageID)
+                let rowLock = PairPhaseGate()
+                await host.start()
+                try await activatePair(host: host, seed: seed, into: hosted.tokens)
+                let tokenA = try #require(await hosted.tokens.get(seed.a))
+                let tokenB = try #require(await hosted.tokens.get(seed.b))
+                let locker = Task {
+                    try await database.transaction { transaction in
+                        let txSQL = try #require(transaction as? any SQLDatabase)
+                        try await txSQL.raw("""
+                            SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: seed.b.uuidValue!)
+                            FOR NO KEY UPDATE
+                            """).run()
+                        await rowLock.hold()
                     }
                 }
-                try await trace.waitForGranted(seed.a)
-                try await trace.waitForAttempt(seed.b)
-                let aQuery = Task {
-                    try await host.invoke(token: tokenA,
-                        request: try recoveryBytes(seed.a), deadline: .now + .seconds(8))
-                }
-                try await pairWaitUntil { await hosted.budget.snapshot().commandCount >= 4 }
-                #expect(await hosted.admission.snapshot().interactiveRead.inFlight == 1)
-                #expect(await coordinator.activePairCount() == 1)
-                await rowLock.open()
-                try await locker.value
+                do {
+                    try await rowLock.waitUntilHeld()
+                    let bQuery = Task {
+                        try await host.invoke(token: tokenB,
+                            request: try recoveryBytes(seed.b), deadline: .now + .seconds(8))
+                    }
+                    try await pairWaitUntil {
+                        await hosted.admission.snapshot().interactiveRead.inFlight == 1
+                    }
+                    let pairDeadline = ContinuousClock.now + .seconds(8)
+                    let pair = Task { () throws -> V2ActorForwardMessageResultWire in
+                        try await coordinator.withReservations(source: seed.a, target: seed.b,
+                            deadline: pairDeadline) { grants in
+                            await pairExecution(executor: executor, wire: forward, grants: grants,
+                                deadline: pairDeadline)
+                        }
+                    }
+                    try await trace.waitForGranted(seed.a)
+                    try await trace.waitForAttempt(seed.b)
+                    let aQuery = Task {
+                        try await host.invoke(token: tokenA,
+                            request: try recoveryBytes(seed.a), deadline: .now + .seconds(8))
+                    }
+                    try await pairWaitUntil { await hosted.budget.snapshot().commandCount >= 4 }
+                    #expect(await hosted.admission.snapshot().interactiveRead.inFlight == 1)
+                    #expect(await coordinator.activePairCount() == 1)
+                    await rowLock.open()
+                    try await locker.value
 
-                let beforePair = try recoveryHead(await bQuery.value, room: seed.b)
-                #expect(beforePair == 1)
-                let result = try await pair.value
-                #expect(result.errorCode == nil)
-                #expect(result.messageID != nil)
-                let afterPair = try recoveryHead(await aQuery.value, room: seed.a)
-                #expect(afterPair == 1)
-                #expect(try await pairRoomHead(sql: sql, room: seed.b) == 2)
-                #expect(try await pairForwardCount(sql: sql, operation: forward.operationID.uuidValue!) == 1)
-                #expect(await hosted.budget.snapshot().commandCount == 0)
-                let reads = await hosted.admission.snapshot().interactiveRead
-                #expect(reads.admittedRequests == 2 && reads.inFlight == 0)
-                #expect((await host.stop(deadline: .now + .seconds(8))).completed)
-            } catch {
-                await rowLock.open()
-                _ = try? await locker.value
-                _ = await host.stop(deadline: .now + .seconds(8))
-                throw error
+                    let beforePair = try recoveryHead(await bQuery.value, room: seed.b)
+                    #expect(beforePair == 1)
+                    let result = try await pair.value
+                    #expect(result.errorCode == nil)
+                    #expect(result.messageID != nil)
+                    let afterPair = try recoveryHead(await aQuery.value, room: seed.a)
+                    #expect(afterPair == 1)
+                    #expect(try await pairRoomHead(sql: sql, room: seed.b) == 2)
+                    #expect(try await pairForwardCount(sql: sql, operation: forward.operationID.uuidValue!) == 1)
+                    #expect(await hosted.budget.snapshot().commandCount == 0)
+                    let reads = await hosted.admission.snapshot().interactiveRead
+                    #expect(reads.admittedRequests == 2 && reads.inFlight == 0)
+                    let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                    try await placement.retireAfterDrain(proof, shards: ["room-a"])
+                } catch {
+                    await rowLock.open()
+                    _ = try? await locker.value
+                    let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                    try await placement.retireAfterDrain(proof, shards: ["room-a"])
+                    throw error
+                }
             }
         }
     }
@@ -98,121 +104,129 @@ struct V2RoomHostPostgresReservationTests {
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_IS_DISPOSABLE"] == "1"))
     func opposingPairCancellationAndUnknown() async throws {
         try await withPairDatabase { database, sql, seed in
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let hosted = try makePairHost(database: database, profile: seed.profile, leases: leases)
-            let host = hosted.host
-            let trace = PairReservationTrace()
-            let coordinator = pairCoordinator(host: host, configuration: hosted.configuration,
-                tokens: hosted.tokens, trace: trace)
-            let executor = try pairExecutor(database: database, profile: seed.profile,
-                admission: hosted.admission)
-            let firstWire = pairWire(sourceRoom: seed.a, targetRoom: seed.b,
-                sourceMessage: seed.aSource.messageID)
-            let unknownWire = pairWire(sourceRoom: seed.b, targetRoom: seed.a,
-                sourceMessage: seed.bSource.messageID)
-            let firstSQLGate = PairPhaseGate()
-            let committedUnknown = PairCommittedOutcome()
-            await host.start()
-            try await activatePair(host: host, seed: seed, into: hosted.tokens)
-            let oldA = try #require(await hosted.tokens.get(seed.a))
-            let oldB = try #require(await hosted.tokens.get(seed.b))
-            do {
-                let firstDeadline = ContinuousClock.now + .seconds(8)
-                let first = Task { () throws -> V2ActorForwardMessageResultWire in
-                    try await coordinator.withReservations(source: seed.a, target: seed.b,
-                        deadline: firstDeadline) { grants in
-                        await firstSQLGate.hold()
-                        return await pairExecution(executor: executor, wire: firstWire, grants: grants,
-                            deadline: firstDeadline)
-                    }
-                }
-                try await firstSQLGate.waitUntilHeld()
-                let firstID = try #require(await trace.requestIDs().first)
-                #expect(await trace.attempted(for: firstID) == [seed.a, seed.b])
-                #expect(await trace.acquired(for: firstID) == [seed.a, seed.b])
-
-                let cancelledDeadline = ContinuousClock.now + .seconds(8)
-                let cancelled = Task { () throws -> V2ActorForwardMessageResultWire in
-                    try await coordinator.withReservations(source: seed.b, target: seed.a,
-                        deadline: cancelledDeadline) { _ in
-                        Issue.record("cancelled pair entered SQL")
-                        return .rolledBack(.invalidRequest)
-                    }
-                }
-                try await trace.waitForRequests(2)
-                let cancelledID = try #require(await trace.requestIDs().last)
-                #expect(await trace.attempted(for: cancelledID) == [seed.a])
-                #expect(await trace.acquired(for: cancelledID).isEmpty)
-                cancelled.cancel()
-                await pairExpectFailure(.notAccepted(.cancelled), cancelled)
-                try await pairWaitUntil { await hosted.budget.snapshot().reservationCount == 2 }
-
-                let unknownDeadline = ContinuousClock.now + .seconds(8)
-                let unknown = Task { () throws -> V2ActorForwardMessageResultWire in
-                    try await coordinator.withReservations(source: seed.b, target: seed.a,
-                        deadline: unknownDeadline) { grants in
-                        let completion = await pairExecution(executor: executor,
-                            wire: unknownWire, grants: grants, deadline: unknownDeadline)
-                        if case .committed(let value) = completion {
-                            await committedUnknown.record(value)
-                            // The PostgreSQL COMMIT succeeded; only the
-                            // coordinator's completion observation is lost.
-                            return .outcomeUnknown
-                        }
-                        return completion
-                    }
-                }
-                try await trace.waitForRequests(3)
-                let unknownID = try #require(await trace.requestIDs().last)
-                #expect(await trace.attempted(for: unknownID) == [seed.a])
-                #expect(await trace.acquired(for: unknownID).isEmpty)
-                #expect(await coordinator.activePairCount() == 2)
-
-                await firstSQLGate.open()
-                let firstResult = try await first.value
-                #expect(firstResult.errorCode == nil && firstResult.messageID != nil)
-                await pairExpectFailure(.outcomeUnknown, unknown)
-                let durableUnknown = try #require(await committedUnknown.value())
-                #expect(durableUnknown.errorCode == nil && durableUnknown.messageID != nil)
-                #expect(await trace.attempted(for: unknownID) == [seed.a, seed.b])
-                #expect(await trace.acquired(for: unknownID) == [seed.a, seed.b])
-                #expect(try await pairForwardCount(sql: sql,
-                    operation: firstWire.operationID.uuidValue!) == 1)
-                #expect(try await pairForwardCount(sql: sql,
-                    operation: unknownWire.operationID.uuidValue!) == 1)
-                try await pairWaitUntil {
-                    let snapshot = await host.snapshot()
-                    let budget = await hosted.budget.snapshot()
-                    return snapshot.activeRooms == 0 && snapshot.retiringRooms == 0 &&
-                        budget.commandCount == 0
-                }
-                #expect(await host.readyTokens().isEmpty)
-                let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-                #expect(try await leases.locate(roomID: seed.a, owner: owner) == nil)
-                #expect(try await leases.locate(roomID: seed.b, owner: owner) == nil)
-
+            let identity = V2ActorHostIdentity(hostID: try .init("pair-pg-host"), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "room-a") { control in
+                let placement = try await control.register(identity, shard: "room-a")
+                let hosted = try makePairHost(database: database, profile: seed.profile, identity: identity, placement: placement)
+                let host = hosted.host
+                let trace = PairReservationTrace()
+                let coordinator = pairCoordinator(host: host, configuration: hosted.configuration,
+                    tokens: hosted.tokens, trace: trace)
+                let executor = try pairExecutor(database: database, profile: seed.profile,
+                    admission: hosted.admission)
+                let firstWire = pairWire(sourceRoom: seed.a, targetRoom: seed.b,
+                    sourceMessage: seed.aSource.messageID)
+                let unknownWire = pairWire(sourceRoom: seed.b, targetRoom: seed.a,
+                    sourceMessage: seed.bSource.messageID)
+                let firstSQLGate = PairPhaseGate()
+                let committedUnknown = PairCommittedOutcome()
+                await host.start()
                 try await activatePair(host: host, seed: seed, into: hosted.tokens)
-                let freshA = try #require(await hosted.tokens.get(seed.a))
-                let freshB = try #require(await hosted.tokens.get(seed.b))
-                #expect(freshA.activationEpoch.rawValue == oldA.activationEpoch.rawValue + 1)
-                #expect(freshB.activationEpoch.rawValue == oldB.activationEpoch.rawValue + 1)
-                #expect(try await leases.release(token: oldA) == false)
-                #expect(try await leases.release(token: oldB) == false)
-                let replayDeadline = ContinuousClock.now + .seconds(8)
-                let replay = try await coordinator.withReservations(source: seed.b,
-                    target: seed.a, deadline: replayDeadline) { grants in
-                    await pairExecution(executor: executor, wire: unknownWire, grants: grants,
-                        deadline: replayDeadline)
+                let oldA = try #require(await hosted.tokens.get(seed.a))
+                let oldB = try #require(await hosted.tokens.get(seed.b))
+                do {
+                    let firstDeadline = ContinuousClock.now + .seconds(8)
+                    let first = Task { () throws -> V2ActorForwardMessageResultWire in
+                        try await coordinator.withReservations(source: seed.a, target: seed.b,
+                            deadline: firstDeadline) { grants in
+                            await firstSQLGate.hold()
+                            return await pairExecution(executor: executor, wire: firstWire, grants: grants,
+                                deadline: firstDeadline)
+                        }
+                    }
+                    try await firstSQLGate.waitUntilHeld()
+                    let firstID = try #require(await trace.requestIDs().first)
+                    #expect(await trace.attempted(for: firstID) == [seed.a, seed.b])
+                    #expect(await trace.acquired(for: firstID) == [seed.a, seed.b])
+
+                    let cancelledDeadline = ContinuousClock.now + .seconds(8)
+                    let cancelled = Task { () throws -> V2ActorForwardMessageResultWire in
+                        try await coordinator.withReservations(source: seed.b, target: seed.a,
+                            deadline: cancelledDeadline) { _ in
+                            Issue.record("cancelled pair entered SQL")
+                            return .rolledBack(.invalidRequest)
+                        }
+                    }
+                    try await trace.waitForRequests(2)
+                    let cancelledID = try #require(await trace.requestIDs().last)
+                    #expect(await trace.attempted(for: cancelledID) == [seed.a])
+                    #expect(await trace.acquired(for: cancelledID).isEmpty)
+                    cancelled.cancel()
+                    await pairExpectFailure(.notAccepted(.cancelled), cancelled)
+                    try await pairWaitUntil { await hosted.budget.snapshot().reservationCount == 2 }
+
+                    let unknownDeadline = ContinuousClock.now + .seconds(8)
+                    let unknown = Task { () throws -> V2ActorForwardMessageResultWire in
+                        try await coordinator.withReservations(source: seed.b, target: seed.a,
+                            deadline: unknownDeadline) { grants in
+                            let completion = await pairExecution(executor: executor,
+                                wire: unknownWire, grants: grants, deadline: unknownDeadline)
+                            if case .committed(let value) = completion {
+                                await committedUnknown.record(value)
+                                // The PostgreSQL COMMIT succeeded; only the
+                                // coordinator's completion observation is lost.
+                                return .outcomeUnknown
+                            }
+                            return completion
+                        }
+                    }
+                    try await trace.waitForRequests(3)
+                    let unknownID = try #require(await trace.requestIDs().last)
+                    #expect(await trace.attempted(for: unknownID) == [seed.a])
+                    #expect(await trace.acquired(for: unknownID).isEmpty)
+                    #expect(await coordinator.activePairCount() == 2)
+
+                    await firstSQLGate.open()
+                    let firstResult = try await first.value
+                    #expect(firstResult.errorCode == nil && firstResult.messageID != nil)
+                    await pairExpectFailure(.outcomeUnknown, unknown)
+                    let durableUnknown = try #require(await committedUnknown.value())
+                    #expect(durableUnknown.errorCode == nil && durableUnknown.messageID != nil)
+                    #expect(await trace.attempted(for: unknownID) == [seed.a, seed.b])
+                    #expect(await trace.acquired(for: unknownID) == [seed.a, seed.b])
+                    #expect(try await pairForwardCount(sql: sql,
+                        operation: firstWire.operationID.uuidValue!) == 1)
+                    #expect(try await pairForwardCount(sql: sql,
+                        operation: unknownWire.operationID.uuidValue!) == 1)
+                    try await pairWaitUntil {
+                        let snapshot = await host.snapshot()
+                        let budget = await hosted.budget.snapshot()
+                        return snapshot.activeRooms == 0 && snapshot.retiringRooms == 0 &&
+                            budget.commandCount == 0
+                    }
+                    #expect(await host.readyTokens().isEmpty)
+                    #expect(!(await host.isReady(token: oldA)))
+                    #expect(!(await host.isReady(token: oldB)))
+
+                    try await activatePair(host: host, seed: seed, into: hosted.tokens)
+                    let freshA = try #require(await hosted.tokens.get(seed.a))
+                    let freshB = try #require(await hosted.tokens.get(seed.b))
+                    #expect(freshA.activationEpoch.rawValue > oldA.activationEpoch.rawValue)
+                    #expect(freshB.activationEpoch.rawValue > oldB.activationEpoch.rawValue)
+                    await #expect(throws: V2RoomCallFailure.notAccepted(.staleActivation)) {
+                        try await host.invoke(token: oldA, request: recoveryBytes(seed.a), deadline: .now + .seconds(5))
+                    }
+                    await #expect(throws: V2RoomCallFailure.notAccepted(.staleActivation)) {
+                        try await host.invoke(token: oldB, request: recoveryBytes(seed.b), deadline: .now + .seconds(5))
+                    }
+                    let replayDeadline = ContinuousClock.now + .seconds(8)
+                    let replay = try await coordinator.withReservations(source: seed.b,
+                        target: seed.a, deadline: replayDeadline) { grants in
+                        await pairExecution(executor: executor, wire: unknownWire, grants: grants,
+                            deadline: replayDeadline)
+                    }
+                    #expect(replay.messageID == durableUnknown.messageID)
+                    #expect(try await pairForwardCount(sql: sql,
+                        operation: unknownWire.operationID.uuidValue!) == 1)
+                    #expect(await hosted.budget.snapshot().commandCount == 0)
+                    let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                    try await placement.retireAfterDrain(proof, shards: ["room-a"])
+                } catch {
+                    await firstSQLGate.open()
+                    let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                    try await placement.retireAfterDrain(proof, shards: ["room-a"])
+                    throw error
                 }
-                #expect(replay.messageID == durableUnknown.messageID)
-                #expect(try await pairForwardCount(sql: sql,
-                    operation: unknownWire.operationID.uuidValue!) == 1)
-                #expect(await hosted.budget.snapshot().commandCount == 0)
-                #expect((await host.stop(deadline: .now + .seconds(8))).completed)
-            } catch {
-                await firstSQLGate.open()
-                _ = await host.stop(deadline: .now + .seconds(8))
-                throw error
             }
         }
     }
@@ -243,7 +257,7 @@ private actor PairTokenRegistry {
 }
 
 private func makePairHost(database: any Database, profile: V2CapacityProfile,
-    leases: PostgresV2RoomActivationStore) throws -> PairHosted {
+    identity: V2ActorHostIdentity, placement: V2RoomActorPlacementRuntime) throws -> PairHosted {
     // Four reservation permits allow one pair to hold two barriers while an
     // opposing pair queues on A; only two rooms are actually activated.
     let config = try V2RoomRuntimeConfiguration(maximumActiveRooms: 4,
@@ -266,8 +280,7 @@ private func makePairHost(database: any Database, profile: V2CapacityProfile,
         databaseWorkAdmission: admission)
     let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
         safetyActorUserID: senderID).runtimeFactory()
-    let identity = V2ActorHostIdentity(hostID: try .init("pair-pg-host"), incarnationID: UUID())
-    return .init(host: .init(identity: identity, leaseStore: leases,
+    return .init(host: .init(identity: identity, placement: placement,
         configuration: config, budget: budget,
         classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
         budget: budget, admission: admission, configuration: config,

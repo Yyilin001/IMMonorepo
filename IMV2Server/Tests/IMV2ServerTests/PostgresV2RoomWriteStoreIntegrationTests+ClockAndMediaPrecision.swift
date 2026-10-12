@@ -1446,53 +1446,52 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let expiry = Date(timeIntervalSince1970: 946_684_800 + 9_223_371_331_200 - 1)
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=\(bind: expiry)").run()
             let identity = try await V2PostgresMembershipIdentitySnapshotValidator(database: database).snapshot(actorUserID: senderID, targetUserID: target)
-            guard case .acquired(let lease) = try await PostgresV2RoomActivationStore(database: database).acquire(
-                roomID: roomID, owner: .init(shardID: "room-a", epoch: 0),
-                host: .init(hostID: .init("membership-precision"), incarnationID: UUID()), duration: .init(30_000)) else { throw CancellationError() }
-            func snapshot() async throws -> [String] {
-                var values: [String] = []
-                for name in ["group_rooms", "rooms", "room_memberships", "membership_operation_receipts",
-                    "room_events", "user_state_event_outbox", "room_admission", "shard_admission_pools"] {
-                    let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: name) r").first(decoding: StringValueRow.self)
-                    values.append(try #require(row).value)
+            try await withRoomActivation(database: database, roomID: roomID) { token in
+                @Sendable func snapshot() async throws -> [String] {
+                    var values: [String] = []
+                    for name in ["group_rooms", "rooms", "room_memberships", "membership_operation_receipts",
+                        "room_events", "user_state_event_outbox", "room_admission", "shard_admission_pools"] {
+                        let row = try await sql.raw("SELECT COALESCE(jsonb_agg(to_jsonb(r) ORDER BY to_jsonb(r)::text), '[]'::jsonb)::text AS value FROM im_v2.\(unsafeRaw: name) r").first(decoding: StringValueRow.self)
+                        values.append(try #require(row).value)
+                    }
+                    return values
                 }
-                return values
+                let dates: [Double] = [946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 946_684_800 + 0.00000125,
+                    1_750_000_000 + 0.99999975, 1_750_000_010, 946_684_800 + 9_223_371_331_200 - 180]
+                for (index, seconds) in dates.enumerated() {
+                    let now = Date(timeIntervalSince1970: seconds)
+                    let intent = try V2MembershipIntent(roomID: roomID, actorUserID: senderID,
+                        operationID: .init(uuid: UUID()), targetUserID: target, action: index % 2 == 0 ? .remove : .add,
+                        expectedMembershipRevision: UInt64(index), confirmedUntilMilliseconds: UInt64(v2GatewayMilliseconds(now)) + 120_000)
+                    let store = PostgresV2MembershipOperationStore(database: database, clock: { now })
+                    guard case .admitted(let admission) = try await store.admit(intent, identitySnapshot: identity, token: token) else { throw CancellationError() }
+                    let command = try V2MembershipOperationCommand(intent: intent, admission: admission)
+                    let result = try await store.submit(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: identity)
+                    guard case .receipt(let proof) = result, case .changed(let first) = proof.outcome else { throw CancellationError() }
+                    #expect(proof.validates(command: command))
+                    #expect(first.membershipRevision == UInt64(index + 1) && first.roomSequence == UInt64(index + 1))
+                    let event = first.eventID.uuidValue!
+                    let row = try await sql.raw("SELECT created_at AS value FROM im_v2.room_events WHERE event_id=\(bind: event)").first(decoding: RevocationClockDateRow.self)
+                    let stored = try #require(row).value
+                    #expect(try Int64(proof.resolvedAtMilliseconds) == v2GatewayMilliseconds(stored))
+                    let exact = try await sql.raw("""
+                        SELECT COUNT(*) AS value FROM im_v2.room_events e
+                        JOIN im_v2.user_state_event_outbox p ON p.source_event_id=e.event_id
+                        WHERE e.event_id=\(bind: event) AND e.created_at=\(bind: now) AND p.created_at=e.created_at
+                          AND e.committed_membership_revision=\(bind: Int64(first.membershipRevision))
+                          AND e.room_sequence=\(bind: Int64(first.roomSequence))
+                          AND (e.payload->>'server_created_at_ms')::bigint=\(bind: Int64(proof.resolvedAtMilliseconds))
+                        """).first(decoding: CountRow.self)
+                    #expect(exact?.value == 1)
+                    let before = try await snapshot()
+                    let replay = PostgresV2MembershipOperationStore(database: database, clock: { Date(timeIntervalSince1970: .nan) })
+                    #expect(try await replay.submit(command, token: token, capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: identity) == result)
+                    #expect(try await snapshot() == before)
+                }
+                #expect(try await count("im_v2.membership_operation_receipts", on: sql) == Int64(dates.count))
+                #expect(try await count("im_v2.room_membership_operations", on: sql) == 0)
+                #expect(try await count("im_v2.room_memberships WHERE left_revision IS NULL", on: sql) == 3)
             }
-            let dates: [Double] = [946_684_800 - 0.00000075, 946_684_800 + 0.00000075, 946_684_800 + 0.00000125,
-                1_750_000_000 + 0.99999975, 1_750_000_010, 946_684_800 + 9_223_371_331_200 - 180]
-            for (index, seconds) in dates.enumerated() {
-                let now = Date(timeIntervalSince1970: seconds)
-                let intent = try V2MembershipIntent(roomID: roomID, actorUserID: senderID,
-                    operationID: .init(uuid: UUID()), targetUserID: target, action: index % 2 == 0 ? .remove : .add,
-                    expectedMembershipRevision: UInt64(index), confirmedUntilMilliseconds: UInt64(v2GatewayMilliseconds(now)) + 120_000)
-                let store = PostgresV2MembershipOperationStore(database: database, clock: { now })
-                guard case .admitted(let admission) = try await store.admit(intent, identitySnapshot: identity, token: lease.token) else { throw CancellationError() }
-                let command = try V2MembershipOperationCommand(intent: intent, admission: admission)
-                let result = try await store.submit(command, token: lease.token, capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: identity)
-                guard case .receipt(let proof) = result, case .changed(let first) = proof.outcome else { throw CancellationError() }
-                #expect(proof.validates(command: command))
-                #expect(first.membershipRevision == UInt64(index + 1) && first.roomSequence == UInt64(index + 1))
-                let event = first.eventID.uuidValue!
-                let row = try await sql.raw("SELECT created_at AS value FROM im_v2.room_events WHERE event_id=\(bind: event)").first(decoding: RevocationClockDateRow.self)
-                let stored = try #require(row).value
-                #expect(try Int64(proof.resolvedAtMilliseconds) == v2GatewayMilliseconds(stored))
-                let exact = try await sql.raw("""
-                    SELECT COUNT(*) AS value FROM im_v2.room_events e
-                    JOIN im_v2.user_state_event_outbox p ON p.source_event_id=e.event_id
-                    WHERE e.event_id=\(bind: event) AND e.created_at=\(bind: now) AND p.created_at=e.created_at
-                      AND e.committed_membership_revision=\(bind: Int64(first.membershipRevision))
-                      AND e.room_sequence=\(bind: Int64(first.roomSequence))
-                      AND (e.payload->>'server_created_at_ms')::bigint=\(bind: Int64(proof.resolvedAtMilliseconds))
-                    """).first(decoding: CountRow.self)
-                #expect(exact?.value == 1)
-                let before = try await snapshot()
-                let replay = PostgresV2MembershipOperationStore(database: database, clock: { Date(timeIntervalSince1970: .nan) })
-                #expect(try await replay.submit(command, token: lease.token, capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: identity) == result)
-                #expect(try await snapshot() == before)
-            }
-            #expect(try await count("im_v2.membership_operation_receipts", on: sql) == Int64(dates.count))
-            #expect(try await count("im_v2.room_membership_operations", on: sql) == 0)
-            #expect(try await count("im_v2.room_memberships WHERE left_revision IS NULL", on: sql) == 3)
         }
     }
 

@@ -51,7 +51,7 @@ struct PostgresV2RoomAdministrationAdapter: Sendable {
     }
 
     private func requireRoom(_ roomID: RoomID) throws {
-        guard token.roomID == roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard token.roomID == roomID else { throw V2RoomActorStateError.activationChanged }
     }
 
     /// 用户通道绝不接受可信安全服务分支，即使它来自有效信封。

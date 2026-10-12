@@ -24,67 +24,74 @@ struct PostgresV2RoomSubscriptionOwnerLifecycleTests {
             let dataOwner = try V2RoomDataOwner(shardID: "source", epoch: 0)
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: roomUUID),'source','standard')").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: roomUUID),\(bind: userUUID),0)").run()
-            let leases = PostgresV2RoomActivationStore(database: database, schema: schema)
-            let instances = Mutex([SubscriptionLifecycleInstance]())
-            let configuration = try V2RoomRuntimeConfiguration(maximumActiveRooms: 2, maximumConcurrentRestores: 1,
-                maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 1,
-                maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 1, maximumConcurrentReservations: 2)
-            let factory = V2RoomActivationFactory<SubscriptionLifecycleRequest, V2RoomSubscriptionResult> { token in
-                let instance = SubscriptionLifecycleInstance(database: database, schema: schema, token: token, user: user)
-                instances.withLock { $0.append(instance) }
-                return .init(restore: { try await instance.restore(deadline: $0) },
-                    execute: { await instance.execute($0) }, invalidateReservation: { _ in }, close: { await instance.close() })
-            }
-            let host = V2RoomActivationHost(identity: .init(hostID: try .init("subscription-lifecycle"), incarnationID: UUID()),
-                leaseStore: leases, configuration: configuration, budget: .init(configuration: configuration),
-                classify: { _ in .barrier }, factory: factory)
-            await host.start()
-            do {
-                guard case .ready(let first) = try await host.activate(roomID: room, owner: dataOwner, deadline: .now + .seconds(5)) else {
-                    throw V2RoomSubscriptionOwnerError.stale
+            let identity = V2ActorHostIdentity(hostID: try .init("subscription-lifecycle"), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "source") { control in
+                let placement = try await control.register(identity, shard: "source")
+                let instances = Mutex([SubscriptionLifecycleInstance]())
+                let configuration = try V2RoomRuntimeConfiguration(maximumActiveRooms: 2, maximumConcurrentRestores: 1,
+                    maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 1,
+                    maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 1, maximumConcurrentReservations: 2)
+                let factory = V2RoomActivationFactory<SubscriptionLifecycleRequest, V2RoomSubscriptionResult> { token in
+                    let instance = SubscriptionLifecycleInstance(database: database, schema: schema, token: token, user: user)
+                    instances.withLock { $0.append(instance) }
+                    return .init(restore: { try await instance.restore(context: $0) },
+                        execute: { await instance.execute($0) }, invalidateReservation: { _ in }, close: { await instance.close() })
                 }
+                let host = V2RoomActivationHost(identity: identity,
+                    placement: placement, configuration: configuration, budget: .init(configuration: configuration),
+                    classify: { _ in .barrier }, factory: factory)
+                await host.start()
+                do {
+                    guard case .ready(let first) = try await host.activate(roomID: room, owner: dataOwner, deadline: .now + .seconds(5)) else {
+                        throw V2RoomSubscriptionOwnerError.stale
+                    }
 
-                guard case .granted(let grant) = try await host.invoke(token: first,
-                    request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5)) else {
-                    throw V2RoomSubscriptionOwnerError.stale
+                    guard case .granted(let grant) = try await host.invoke(token: first,
+                        request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5)) else {
+                        throw V2RoomSubscriptionOwnerError.stale
+                    }
+                    #expect(grant.fence.activation == first)
+                    let transient = try await host.invoke(token: first,
+                        request: SubscriptionLifecycleRequest.transient, deadline: .now + .seconds(5))
+                    #expect(transient == .failure(.unavailable))
+                    #expect(await host.isReady(token: first))
+                    #expect(instances.withLock { $0.count } == 1)
+                    // The final committed cursor now contains a source gap. The
+                    // existing Owner cannot reinterpret current members over it.
+                    try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence=1 WHERE room_id=\(bind: roomUUID)").run()
+                    let original = instances.withLock { $0[0] }
+                    await #expect(throws: V2RoomSubscriptionSourceError.snapshotRequired) { try await original.backgroundDrain() }
+                    await #expect(throws: V2RoomCallFailure.rolledBack(.staleActivation)) {
+                        try await host.invoke(token: first, request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5))
+                    }
+                    let stopWaiting = ContinuousClock.now + .seconds(5)
+                    while await host.snapshot().retiringRooms > 0 {
+                        guard .now < stopWaiting else { throw V2RoomSubscriptionOwnerError.deadlineExceeded }
+                        try await Task.sleep(for: .milliseconds(10))
+                    }
+                    #expect(await instances.withLock { $0[0] }.closed)
+                    guard case .ready(let second) = try await host.activate(roomID: room, owner: dataOwner, deadline: .now + .seconds(5)) else {
+                        throw V2RoomSubscriptionOwnerError.stale
+                    }
+                    #expect(second.activationEpoch.rawValue > first.activationEpoch.rawValue)
+                    #expect(instances.withLock { $0.count } == 2)
+                    guard case .granted(let restored) = try await host.invoke(token: second,
+                        request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5)) else {
+                        throw V2RoomSubscriptionOwnerError.stale
+                    }
+                    #expect(restored.fence.activation == second && restored.userBaselineSequence == 1)
+                    await #expect(throws: V2RoomCallFailure.notAccepted(.staleActivation)) {
+                        try await host.invoke(token: first, request: SubscriptionLifecycleRequest.subscribe,
+                            deadline: .now + .seconds(5))
+                    }
+                    let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                    try await placement.retireAfterDrain(proof, shards: ["source"])
+                } catch {
+                    let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                    try await placement.retireAfterDrain(proof, shards: ["source"])
+                    throw error
                 }
-                #expect(grant.fence.activation == first)
-                let transient = try await host.invoke(token: first,
-                    request: SubscriptionLifecycleRequest.transient, deadline: .now + .seconds(5))
-                #expect(transient == .failure(.unavailable))
-                #expect(try await leases.locate(roomID: room, owner: dataOwner)?.token == first)
-                #expect(instances.withLock { $0.count } == 1)
-                // The final committed cursor now contains a source gap. The
-                // existing Owner cannot reinterpret current members over it.
-                try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence=1 WHERE room_id=\(bind: roomUUID)").run()
-                let original = instances.withLock { $0[0] }
-                await #expect(throws: V2RoomSubscriptionSourceError.snapshotRequired) { try await original.backgroundDrain() }
-                await #expect(throws: V2RoomCallFailure.rolledBack(.staleActivation)) {
-                    try await host.invoke(token: first, request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5))
-                }
-                let stopWaiting = ContinuousClock.now + .seconds(5)
-                while try await leases.locate(roomID: room, owner: dataOwner) != nil {
-                    guard .now < stopWaiting else { throw V2RoomSubscriptionOwnerError.deadlineExceeded }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                while await host.snapshot().retiringRooms > 0 {
-                    guard .now < stopWaiting else { throw V2RoomSubscriptionOwnerError.deadlineExceeded }
-                    try await Task.sleep(for: .milliseconds(10))
-                }
-                #expect(await instances.withLock { $0[0] }.closed)
-                guard case .ready(let second) = try await host.activate(roomID: room, owner: dataOwner, deadline: .now + .seconds(5)) else {
-                    throw V2RoomSubscriptionOwnerError.stale
-                }
-                #expect(second.activationEpoch.rawValue == first.activationEpoch.rawValue + 1)
-                #expect(instances.withLock { $0.count } == 2)
-                guard case .granted(let restored) = try await host.invoke(token: second,
-                    request: SubscriptionLifecycleRequest.subscribe, deadline: .now + .seconds(5)) else {
-                    throw V2RoomSubscriptionOwnerError.stale
-                }
-                #expect(restored.fence.activation == second && restored.userBaselineSequence == 1)
-                #expect(try await leases.release(token: first) == false)
-                #expect((await host.stop(deadline: .now + .seconds(5))).completed)
-            } catch { _ = await host.stop(deadline: .now + .seconds(5)); throw error }
+            }
         }
     }
 }
@@ -99,8 +106,11 @@ private actor SubscriptionLifecycleInstance {
     init(database: any Database, schema: String, token: V2RoomActivationToken, user: UserID) {
         self.database = database; self.schema = schema; self.token = token; self.user = user
     }
-    func restore(deadline: ContinuousClock.Instant) async throws {
-        let source = SubscriptionLifecycleSource(underlying: try PostgresV2RoomSubscriptionSource(database: database, activation: token, schema: schema))
+    func restore(context: V2RoomActivationRestorationContext) async throws {
+        try await context.validate()
+        let deadline = context.deadline
+        let source = SubscriptionLifecycleSource(underlying: try PostgresV2RoomSubscriptionSource(database: database,
+            activation: token, lifetime: context.lifetime, schema: schema))
         self.source = source
         owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: token.roomID, owner: token.owner, activation: token,
             deadline: deadline, trackedUserIDs: [])

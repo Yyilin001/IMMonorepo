@@ -67,237 +67,236 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 receiptProjectionDelivery: SuccessfulProjectionDelivery(), capacityProfile: profile,
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init()).usingPolicyAuthorizations(policies)
-            let leases = try V2RoomServerLeaseStore(databases: ["room-b": owner])
-            let configuration = try V2RoomRuntimeConfiguration()
-            let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(
-                identity: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()), leaseStore: leases,
-                configuration: configuration, budget: .init(configuration: configuration), classify: { $0.turnSchedulingClass },
-                factory: try V2RoomServerActivationFactory(owners: ["room-b": resources], safetyActorUserID: senderID).runtimeFactory())
-            await host.start()
-            let hidden = ["public_user_profiles", "special_accounts", "account_disables", "user_blocks",
-                "user_relationships", "user_stranger_message_preferences"]
-            var renamed: [(owner: Bool, table: String)] = []
-            var mutationTask: Task<Void, any Error>?
-            let policySQLGate = WarmMutationSQLGate()
-            var holdingPolicySQL: Task<Void, any Error>?
-            var policyTriggerInstalled = false
-            var stage = "initial policy change"
-            do {
-                var tokens: [V2RoomActivationToken] = []
-                for room in rooms {
-                    guard case .ready(let token) = try await host.activate(roomID: room,
-                        owner: .init(shardID: "room-b", epoch: 0), deadline: .now + .seconds(10)) else {
-                        throw V2RoomCallFailure.notAccepted(.notReady)
+            let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "room-b") { placementControl in
+                let placement = try await placementControl.register(identity, shard: "room-b")
+                let configuration = try V2RoomRuntimeConfiguration()
+                let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(
+                    identity: identity, placement: placement,
+                    configuration: configuration, budget: .init(configuration: configuration), classify: { $0.turnSchedulingClass },
+                    factory: try V2RoomServerActivationFactory(owners: ["room-b": resources], safetyActorUserID: senderID).runtimeFactory())
+                await host.start()
+                let hidden = ["public_user_profiles", "special_accounts", "account_disables", "user_blocks",
+                    "user_relationships", "user_stranger_message_preferences"]
+                var renamed: [(owner: Bool, table: String)] = []
+                var mutationTask: Task<Void, any Error>?
+                let policySQLGate = WarmMutationSQLGate()
+                var holdingPolicySQL: Task<Void, any Error>?
+                var policyTriggerInstalled = false
+                var stage = "initial policy change"
+                do {
+                    var tokens: [V2RoomActivationToken] = []
+                    for room in rooms {
+                        guard case .ready(let token) = try await host.activate(roomID: room,
+                            owner: .init(shardID: "room-b", epoch: 0), deadline: .now + .seconds(10)) else {
+                            throw V2RoomCallFailure.notAccepted(.notReady)
+                        }
+                        tokens.append(token)
+                        let response = try await warmMutationColdSendWithHeldWrites(reader: initializationReader, writer: sendDatabase) {
+                            try await host.invoke(token: token,
+                                request: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10))
+                        }
+                        try warmMutationAccepted(response)
                     }
-                    tokens.append(token)
-                    let response = try await warmMutationColdSendWithHeldWrites(reader: initializationReader, writer: sendDatabase) {
-                        try await host.invoke(token: token,
-                            request: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10))
+                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState]?.count == 2)
+                    try await V2PostgresSessionReadiness.verify(database: sendDatabase, timeouts: .default)
+                    let initialProfileEvents = try await ownerSQL.raw("""
+                        SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
+                        WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
+                          AND projection_kind='direct_room_profile'
+                        """).first(decoding: WarmMutationCount.self)?.value
+                    #expect(initialProfileEvents == 1)
+                    // Hold the actual policy commit, not a room revocation
+                    // that this boundary intentionally never performs.
+                    try await controlSQL.raw("""
+                        CREATE FUNCTION im_v2.test_hold_warm_policy_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+                        BEGIN PERFORM pg_advisory_xact_lock(966997); RETURN NEW; END $$
+                        """).run()
+                    try await controlSQL.raw("CREATE TRIGGER test_hold_warm_policy_commit BEFORE INSERT ON im_v2.policy_authorization_outbox FOR EACH ROW EXECUTE FUNCTION im_v2.test_hold_warm_policy_commit()").run()
+                    policyTriggerInstalled = true
+                    holdingPolicySQL = Task {
+                        try await control.transaction { transaction in
+                            let sql = try #require(transaction as? any SQLDatabase)
+                            try await sql.raw("SELECT pg_advisory_xact_lock(966997)").run()
+                            let pid = try #require(try await sql.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: WarmMutationCount.self)).value
+                            await policySQLGate.hold(pid)
+                        }
                     }
-                    try warmMutationAccepted(response)
-                }
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState]?.count == 2)
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
-                try await V2PostgresSessionReadiness.verify(database: sendDatabase, timeouts: .default)
-                let initialProfileEvents = try await ownerSQL.raw("""
-                    SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
-                    WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
-                      AND projection_kind='direct_room_profile'
-                    """).first(decoding: WarmMutationCount.self)?.value
-                #expect(initialProfileEvents == 1)
-                // Hold the actual policy commit, not a room revocation
-                // that this boundary intentionally never performs.
-                try await controlSQL.raw("""
-                    CREATE FUNCTION im_v2.test_hold_warm_policy_commit() RETURNS trigger LANGUAGE plpgsql AS $$
-                    BEGIN PERFORM pg_advisory_xact_lock(966997); RETURN NEW; END $$
-                    """).run()
-                try await controlSQL.raw("CREATE TRIGGER test_hold_warm_policy_commit BEFORE INSERT ON im_v2.policy_authorization_outbox FOR EACH ROW EXECUTE FUNCTION im_v2.test_hold_warm_policy_commit()").run()
-                policyTriggerInstalled = true
-                holdingPolicySQL = Task {
-                    try await control.transaction { transaction in
-                        let sql = try #require(transaction as? any SQLDatabase)
-                        try await sql.raw("SELECT pg_advisory_xact_lock(966997)").run()
-                        let pid = try #require(try await sql.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: WarmMutationCount.self)).value
-                        await policySQLGate.hold(pid)
+                    try await warmMutationObserve { await policySQLGate.pid != nil }
+                    let changing = Task {
+                        switch kind {
+                        case "block", "remove":
+                            let command = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
+                                operation: kind == "block" ? .userBlock(.init(uuid: UUID())) : .relationship(.init(uuid: UUID())),
+                                action: kind == "block" ? .userBlock(.block) : .relationship(.remove), now: Date())
+                            _ = try await social.submitSocialOperation(command)
+                        case "stranger": _ = try await preferences.submit(deniedPreference, now: Date())
+                        default:
+                            _ = try await V2PostgresAccountDisableService(operatorPrincipal: "operator:test", policyOwners: owners)
+                                .disable(.init(userID: .init(uuid: memberTwoUUID), operationID: UUID(), reason: .policyEnforcement))
+                        }
                     }
-                }
-                try await warmMutationObserve { await policySQLGate.pid != nil }
-                let changing = Task {
-                    switch kind {
-                    case "block", "remove":
-                        let command = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
-                            operation: kind == "block" ? .userBlock(.init(uuid: UUID())) : .relationship(.init(uuid: UUID())),
-                            action: kind == "block" ? .userBlock(.block) : .relationship(.remove), now: Date())
-                        _ = try await social.submitSocialOperation(command)
-                    case "stranger": _ = try await preferences.submit(deniedPreference, now: Date())
-                    default:
-                        _ = try await V2PostgresAccountDisableService(operatorPrincipal: "operator:test", policyOwners: owners)
-                            .disable(.init(userID: .init(uuid: memberTwoUUID), operationID: UUID(), reason: .policyEnforcement))
+                    mutationTask = changing
+                    let pid = try #require(await policySQLGate.pid)
+                    try await warmMutationObserve {
+                        try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE \(bind: pid)::integer=ANY(pg_blocking_pids(pid))").first(decoding: WarmMutationCount.self)?.value ?? 0 > 0
                     }
-                }
-                mutationTask = changing
-                let pid = try #require(await policySQLGate.pid)
-                try await warmMutationObserve {
-                    try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE \(bind: pid)::integer=ANY(pg_blocking_pids(pid))").first(decoding: WarmMutationCount.self)?.value ?? 0 > 0
-                }
-                #expect(await owners.pressure().roots == 1)
-                // The mutation has not committed. This same room still
-                // authorizes against its last committed memory snapshot.
-                let beforeSend = coldMetrics.sendOperationBatchMetricsSnapshot()
-                let factsBefore = try #require(beforeSend.stages[.policyOwnerStateFacts]).count
-                let transactionsBefore = try #require(beforeSend.stages[.policyOwnerStateTransaction]).count
-                #expect(factsBefore > 0 && transactionsBefore > 0)
-                let warmRequest = try warmMutationRequest(room: rooms[0], text: "before policy commit")
-                try warmMutationAccepted(try await host.invoke(token: tokens[0],
-                    request: warmRequest, deadline: .now + .seconds(10)))
-                if kind == "remove" {
-                    let implicitCount = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0
-                    #expect(implicitCount == 1)
-                    // The identical client operation replays without a second write.
+                    #expect(await owners.pressure().roots == 1)
+                    // The mutation has not committed. This same room still
+                    // authorizes against its last committed memory snapshot.
+                    let beforeSend = coldMetrics.sendOperationBatchMetricsSnapshot()
+                    let factsBefore = try #require(beforeSend.stages[.policyOwnerStateFacts]).count
+                    let transactionsBefore = try #require(beforeSend.stages[.policyOwnerStateTransaction]).count
+                    #expect(factsBefore > 0 && transactionsBefore > 0)
+                    let warmRequest = try warmMutationRequest(room: rooms[0], text: "before policy commit")
                     try warmMutationAccepted(try await host.invoke(token: tokens[0],
                         request: warmRequest, deadline: .now + .seconds(10)))
-                    #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0 == implicitCount)
-                }
-                #expect(await owners.pressure().roots == 1)
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateFacts]?.count ?? 0 == factsBefore)
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateTransaction]?.count ?? 0 == transactionsBefore)
-                // An unrelated room must progress while the policy transaction is held.
-                try warmMutationAccepted(try await host.invoke(token: tokens[1],
-                    request: warmMutationRequest(room: rooms[1], text: "during related change"),
-                    deadline: .now + .seconds(10)))
-                await policySQLGate.release()
-                if let holdingPolicySQL { try await holdingPolicySQL.value }
-                holdingPolicySQL = nil
-                try await changing.value
-                mutationTask = nil
-                if policyTriggerInstalled {
-                    try await controlSQL.raw("DROP TRIGGER test_hold_warm_policy_commit ON im_v2.policy_authorization_outbox").run()
-                    try await controlSQL.raw("DROP FUNCTION im_v2.test_hold_warm_policy_commit()").run()
-                    policyTriggerInstalled = false
-                }
-                // From this point any fallback to policy fact SQL must fail.
-                // Version/receipt/fence tables remain available for durability.
-                for (isOwner, sql) in [(false, controlSQL), (true, ownerSQL)] {
-                    for table in hidden {
-                        try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table) RENAME TO \(unsafeRaw: table + "_warm_mutation_hidden")").run()
-                        renamed.append((isOwner, table))
+                    if kind == "remove" {
+                        let implicitCount = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0
+                        #expect(implicitCount == 1)
+                        // The identical client operation replays without a second write.
+                        try warmMutationAccepted(try await host.invoke(token: tokens[0],
+                            request: warmRequest, deadline: .now + .seconds(10)))
+                        #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.ownerSingleStatement]?.count ?? 0 == implicitCount)
                     }
-                }
-                let denied = try await host.invoke(token: tokens[0],
-                    request: warmMutationRequest(room: rooms[0], text: "after change"), deadline: .now + .seconds(10))
-                guard case .messaging(.sendOperation(.receipt(let receipt))) = denied else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
-                }
-                #expect(receipt.outcome == .rejected(.directPolicyDenied))
-                try warmMutationAccepted(try await host.invoke(token: tokens[1],
-                    request: warmMutationRequest(room: rooms[1], text: "unrelated room"), deadline: .now + .seconds(10)))
-                // Warm sends sample current policy while reusing cached facts;
-                // room registration and owner SQL remain absent.
-                let policySample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
-                #expect(policySample.count == 6 && policySample.inFlight == 0)
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
-                let reads = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().stages[.preparationOwnerRead]
-                #expect(reads?.count ?? 0 == 0)
-                #expect(reads?.inFlight ?? 0 == 0)
-                #expect(sendDatabase.loanMetricsSnapshot().classes[.ordinary]?.inFlight == 0)
-                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 2)
-                #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[1].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 3)
-                for (isOwner, table) in renamed {
-                    let sql = isOwner ? ownerSQL : controlSQL
-                    try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_warm_mutation_hidden") RENAME TO \(unsafeRaw: table)").run()
-                }
-                renamed.removeAll()
-                if kind != "disable" {
-                    stage = "restoring policy mutation"
-                    // Exercise the inverse transition on the same activation:
-                    // a previously denied snapshot must not remain sticky.
-                    switch kind {
-                    case "block":
-                        let command = try await social.freezeSocialFixture(actorUserID: senderID,
-                            targetUserID: .init(uuid: memberTwoUUID), operation: .userBlock(.init(uuid: UUID())),
-                            action: .userBlock(.unblock), now: Date())
-                        _ = try await social.submitSocialOperation(command)
-                    case "remove":
-                        let request = try await social.freezeSocialFixture(actorUserID: senderID,
-                            targetUserID: .init(uuid: memberTwoUUID), operation: .relationship(.init(uuid: UUID())),
-                            action: .relationship(.request), now: Date())
-                        _ = try await social.submitSocialOperation(request)
-                        let accept = try await social.freezeSocialFixture(actorUserID: .init(uuid: memberTwoUUID),
-                            targetUserID: senderID, operation: .relationship(.init(uuid: UUID())),
-                            action: .relationship(.accept), now: Date())
-                        _ = try await social.submitSocialOperation(accept)
-                    default:
-                        let command = try await preferences.freezePreferenceFixture(owner: .init(uuid: memberTwoUUID),
-                            operation: .strangerMessagePreference(.init(uuid: UUID())),
-                            value: .strangerMessage(.allow), now: Date())
-                        _ = try await preferences.submit(command, now: Date())
+                    #expect(await owners.pressure().roots == 1)
+                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateFacts]?.count ?? 0 == factsBefore)
+                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerStateTransaction]?.count ?? 0 == transactionsBefore)
+                    // An unrelated room must progress while the policy transaction is held.
+                    try warmMutationAccepted(try await host.invoke(token: tokens[1],
+                        request: warmMutationRequest(room: rooms[1], text: "during related change"),
+                        deadline: .now + .seconds(10)))
+                    await policySQLGate.release()
+                    if let holdingPolicySQL { try await holdingPolicySQL.value }
+                    holdingPolicySQL = nil
+                    try await changing.value
+                    mutationTask = nil
+                    if policyTriggerInstalled {
+                        try await controlSQL.raw("DROP TRIGGER test_hold_warm_policy_commit ON im_v2.policy_authorization_outbox").run()
+                        try await controlSQL.raw("DROP FUNCTION im_v2.test_hold_warm_policy_commit()").run()
+                        policyTriggerInstalled = false
                     }
+                    // From this point any fallback to policy fact SQL must fail.
+                    // Version/receipt/fence tables remain available for durability.
                     for (isOwner, sql) in [(false, controlSQL), (true, ownerSQL)] {
                         for table in hidden {
                             try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table) RENAME TO \(unsafeRaw: table + "_warm_mutation_hidden")").run()
                             renamed.append((isOwner, table))
                         }
                     }
-                    stage = "sending with restored policy"
-                    try warmMutationAccepted(try await host.invoke(token: tokens[0],
-                        request: warmMutationRequest(room: rooms[0], text: "permission restored"),
-                        deadline: .now + .seconds(10)))
+                    let denied = try await host.invoke(token: tokens[0],
+                        request: warmMutationRequest(room: rooms[0], text: "after change"), deadline: .now + .seconds(10))
+                    guard case .messaging(.sendOperation(.receipt(let receipt))) = denied else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    #expect(receipt.outcome == .rejected(.directPolicyDenied))
                     try warmMutationAccepted(try await host.invoke(token: tokens[1],
-                        request: warmMutationRequest(room: rooms[1], text: "unrelated after restoration"),
-                        deadline: .now + .seconds(10)))
-                    let sample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
-                    #expect(sample.count == 8 && sample.inFlight == 0)
-                    #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
-                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 3)
-                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[1].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 4)
-                    #expect(try await ownerSQL.raw("""
-                        SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
-                        WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
-                          AND projection_kind='direct_room_profile'
-                        """).first(decoding: WarmMutationCount.self)?.value == initialProfileEvents)
-                    let restoredCapabilityEvents = try await ownerSQL.raw("""
-                        SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
-                        WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: senderUUID)
-                          AND projection_kind='direct_sending_capability' AND payload->>'can_send'='true'
-                        """).first(decoding: WarmMutationCount.self)?.value
-                    #expect(restoredCapabilityEvents == 2)
-                    let restrictedCapabilityEvents = try await ownerSQL.raw("""
-                        SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
-                        WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: senderUUID)
-                          AND projection_kind='direct_sending_capability' AND payload->>'can_send'='false'
-                        """).first(decoding: WarmMutationCount.self)?.value
-                    #expect(restrictedCapabilityEvents == 1)
-                    // Restriction hints downgrade the sender's presentation.
-                    // A later accepted send publishes the restored capability.
+                        request: warmMutationRequest(room: rooms[1], text: "unrelated room"), deadline: .now + .seconds(10)))
+                    // Warm sends sample current policy while reusing cached facts;
+                    // room registration and owner SQL remain absent.
+                    let policySample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
+                    #expect(policySample.count == 6 && policySample.inFlight == 0)
+                    #expect(sendDatabase.loanMetricsSnapshot().classes[.ordinary]?.inFlight == 0)
+                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 2)
+                    #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[1].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 3)
                     for (isOwner, table) in renamed {
                         let sql = isOwner ? ownerSQL : controlSQL
                         try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_warm_mutation_hidden") RENAME TO \(unsafeRaw: table)").run()
                     }
                     renamed.removeAll()
+                    if kind != "disable" {
+                        stage = "restoring policy mutation"
+                        // Exercise the inverse transition on the same activation:
+                        // a previously denied snapshot must not remain sticky.
+                        switch kind {
+                        case "block":
+                            let command = try await social.freezeSocialFixture(actorUserID: senderID,
+                                targetUserID: .init(uuid: memberTwoUUID), operation: .userBlock(.init(uuid: UUID())),
+                                action: .userBlock(.unblock), now: Date())
+                            _ = try await social.submitSocialOperation(command)
+                        case "remove":
+                            let request = try await social.freezeSocialFixture(actorUserID: senderID,
+                                targetUserID: .init(uuid: memberTwoUUID), operation: .relationship(.init(uuid: UUID())),
+                                action: .relationship(.request), now: Date())
+                            _ = try await social.submitSocialOperation(request)
+                            let accept = try await social.freezeSocialFixture(actorUserID: .init(uuid: memberTwoUUID),
+                                targetUserID: senderID, operation: .relationship(.init(uuid: UUID())),
+                                action: .relationship(.accept), now: Date())
+                            _ = try await social.submitSocialOperation(accept)
+                        default:
+                            let command = try await preferences.freezePreferenceFixture(owner: .init(uuid: memberTwoUUID),
+                                operation: .strangerMessagePreference(.init(uuid: UUID())),
+                                value: .strangerMessage(.allow), now: Date())
+                            _ = try await preferences.submit(command, now: Date())
+                        }
+                        for (isOwner, sql) in [(false, controlSQL), (true, ownerSQL)] {
+                            for table in hidden {
+                                try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table) RENAME TO \(unsafeRaw: table + "_warm_mutation_hidden")").run()
+                                renamed.append((isOwner, table))
+                            }
+                        }
+                        stage = "sending with restored policy"
+                        try warmMutationAccepted(try await host.invoke(token: tokens[0],
+                            request: warmMutationRequest(room: rooms[0], text: "permission restored"),
+                            deadline: .now + .seconds(10)))
+                        try warmMutationAccepted(try await host.invoke(token: tokens[1],
+                            request: warmMutationRequest(room: rooms[1], text: "unrelated after restoration"),
+                            deadline: .now + .seconds(10)))
+                        let sample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
+                        #expect(sample.count == 8 && sample.inFlight == 0)
+                        #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 3)
+                        #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[1].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 4)
+                        #expect(try await ownerSQL.raw("""
+                            SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
+                            WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
+                              AND projection_kind='direct_room_profile'
+                            """).first(decoding: WarmMutationCount.self)?.value == initialProfileEvents)
+                        let restoredCapabilityEvents = try await ownerSQL.raw("""
+                            SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
+                            WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: senderUUID)
+                              AND projection_kind='direct_sending_capability' AND payload->>'can_send'='true'
+                            """).first(decoding: WarmMutationCount.self)?.value
+                        #expect(restoredCapabilityEvents == 2)
+                        let restrictedCapabilityEvents = try await ownerSQL.raw("""
+                            SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
+                            WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: senderUUID)
+                              AND projection_kind='direct_sending_capability' AND payload->>'can_send'='false'
+                            """).first(decoding: WarmMutationCount.self)?.value
+                        #expect(restrictedCapabilityEvents == 1)
+                        // Restriction hints downgrade the sender's presentation.
+                        // A later accepted send publishes the restored capability.
+                        for (isOwner, table) in renamed {
+                            let sql = isOwner ? ownerSQL : controlSQL
+                            try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_warm_mutation_hidden") RENAME TO \(unsafeRaw: table)").run()
+                        }
+                        renamed.removeAll()
+                    }
+                    stage = "shutdown"
+                    let drained = await host.stop(deadline: .now + .seconds(10))
+                    #expect(drained.completed)
+                    let proof = try #require(drained.proof)
+                    try await placement.retireAfterDrain(proof, shards: ["room-b"])
+                    await resources.shutdownDurableSendOperations()
+                    try await policies.shutdown(); await owners.shutdown()
+                } catch {
+                    Issue.record("Warm policy scenario failed during \(stage)")
+                    await policySQLGate.release()
+                    if let holdingPolicySQL { _ = await holdingPolicySQL.result }
+                    if let mutationTask { _ = await mutationTask.result }
+                    if policyTriggerInstalled {
+                        try? await controlSQL.raw("DROP TRIGGER test_hold_warm_policy_commit ON im_v2.policy_authorization_outbox").run()
+                        try? await controlSQL.raw("DROP FUNCTION im_v2.test_hold_warm_policy_commit()").run()
+                    }
+                    for (isOwner, table) in renamed {
+                        let sql = isOwner ? ownerSQL : controlSQL
+                        try? await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_warm_mutation_hidden") RENAME TO \(unsafeRaw: table)").run()
+                    }
+                    let drained = await host.stop(deadline: .now + .seconds(10))
+                    if let proof = drained.proof { try? await placement.retireAfterDrain(proof, shards: ["room-b"]) }
+                    await resources.shutdownDurableSendOperations()
+                    try? await policies.shutdown(); await owners.shutdown()
+                    throw error
                 }
-                stage = "shutdown"
-                #expect(await host.stop(deadline: .now + .seconds(10)).completed)
-                await resources.shutdownDurableSendOperations()
-                await leases.shutdownLifecycle(); await leases.shutdownRenewals()
-                try await policies.shutdown(); await owners.shutdown()
-            } catch {
-                Issue.record("Warm policy scenario failed during \(stage)")
-                await policySQLGate.release()
-                if let holdingPolicySQL { _ = await holdingPolicySQL.result }
-                if let mutationTask { _ = await mutationTask.result }
-                if policyTriggerInstalled {
-                    try? await controlSQL.raw("DROP TRIGGER test_hold_warm_policy_commit ON im_v2.policy_authorization_outbox").run()
-                    try? await controlSQL.raw("DROP FUNCTION im_v2.test_hold_warm_policy_commit()").run()
-                }
-                for (isOwner, table) in renamed {
-                    let sql = isOwner ? ownerSQL : controlSQL
-                    try? await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_warm_mutation_hidden") RENAME TO \(unsafeRaw: table)").run()
-                }
-                _ = await host.stop(deadline: .now + .seconds(10))
-                await resources.shutdownDurableSendOperations()
-                await leases.shutdownLifecycle(); await leases.shutdownRenewals()
-                try? await policies.shutdown(); await owners.shutdown()
-                throw error
             }
         }
     }

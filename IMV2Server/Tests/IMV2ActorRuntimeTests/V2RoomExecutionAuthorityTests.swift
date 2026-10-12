@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import IMV2ActorContracts
 import Testing
 
@@ -13,7 +14,7 @@ struct V2RoomExecutionAuthorityTests {
         let admission = V2RoomHostAdmission()
         admission.open()
         let authority = V2RoomExecutionAuthority(
-            safetyUntil: .now + .seconds(1),
+            admission: { true },
             qualification: qualification, generation: proof.generation, hostAdmission: admission)
         authority.setPhase(.ready)
         try authority.admit()
@@ -25,18 +26,19 @@ struct V2RoomExecutionAuthorityTests {
         authority.finish()
     }
 
-    @Test("lease expiry rejects admission and dispatch without a Host watchdog turn")
-    func expiryIsSynchronous() throws {
+    @Test("placement withdrawal rejects admission and dispatch before a Host callback")
+    func withdrawalIsSynchronous() throws {
         let qualification = V2ActorServiceQualification.standalone()
         let proof = try #require(qualification.snapshot())
+        let current = Mutex(true)
         let authority = V2RoomExecutionAuthority(
-            safetyUntil: .now + .seconds(1),
+            admission: { current.withLock { $0 } },
             qualification: qualification, generation: proof.generation)
         authority.setPhase(.ready)
         try authority.admit()
-        authority.renew(until: .now - .milliseconds(1))
+        current.withLock { $0 = false }
         #expect(authority.deadline() == nil)
-        #expect(throws: V2RoomCallFailure.notAccepted(.leaseLost)) { try authority.admit() }
+        #expect(throws: V2RoomCallFailure.notAccepted(.authorityLost)) { try authority.admit() }
         #expect(authority.inFlight == 1)
         authority.finish()
         #expect(authority.inFlight == 0)
@@ -47,7 +49,7 @@ struct V2RoomExecutionAuthorityTests {
         let qualification = V2ActorServiceQualification.standalone()
         let proof = try #require(qualification.snapshot())
         let authority = V2RoomExecutionAuthority(
-            safetyUntil: .now + .seconds(1),
+            admission: { true },
             qualification: qualification, generation: proof.generation)
         authority.setPhase(.ready)
         try authority.admit()

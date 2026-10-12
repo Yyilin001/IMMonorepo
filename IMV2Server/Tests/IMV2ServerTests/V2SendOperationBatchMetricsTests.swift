@@ -10,29 +10,29 @@ struct V2SendOperationBatchMetricsTests {
         let aggregate = V2AggregatedSendOperationBatchMetrics(owners: [first, second])
         #expect(Set(aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations.keys)
             == Set(V2RoomSQLContinuationSource.allCases))
-        first.recordSQLResultSettled(source: .lifecycleLeases)
-        first.recordSQLResultSettled(source: .lifecycleLeases)
-        first.recordSQLTaskResumed(source: .lifecycleLeases, duration: .milliseconds(2))
-        second.recordSQLResultSettled(source: .lifecycleLeases)
-        second.recordSQLTaskResumed(source: .lifecycleLeases, duration: .milliseconds(3))
-        let pending = aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations[.lifecycleLeases]!
+        first.recordSQLResultSettled(source: .scalarFenceRooms)
+        first.recordSQLResultSettled(source: .scalarFenceRooms)
+        first.recordSQLTaskResumed(source: .scalarFenceRooms, duration: .milliseconds(2))
+        second.recordSQLResultSettled(source: .scalarFenceRooms)
+        second.recordSQLTaskResumed(source: .scalarFenceRooms, duration: .milliseconds(3))
+        let pending = aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations[.scalarFenceRooms]!
         #expect(pending.settledNotResumed == 1 && pending.resumedNotDispatched == 2)
         #expect(pending.settledToResumedCount == 2 && pending.resumedToDispatchCount == 0)
-        first.recordSQLNextDispatch(source: .lifecycleLeases, duration: .milliseconds(5))
-        second.recordSQLNoNextDispatch(source: .lifecycleLeases)
-        let ended = aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations[.lifecycleLeases]!
+        first.recordSQLNextDispatch(source: .scalarFenceRooms, duration: .milliseconds(5))
+        second.recordSQLNoNextDispatch(source: .scalarFenceRooms)
+        let ended = aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations[.scalarFenceRooms]!
         #expect(ended.settledNotResumed == 1 && ended.resumedNotDispatched == 0)
         #expect(ended.settledToResumedCount == 2 && ended.settledToResumedTotalMilliseconds == 5)
         #expect(ended.settledToResumedMaxMilliseconds == 3)
         #expect(ended.resumedToDispatchCount == 1 && ended.resumedToDispatchTotalMilliseconds == 5)
         #expect(ended.resumedToDispatchMaxMilliseconds == 5 && ended.noNextDispatch == 1)
-        first.recordSQLTaskResumed(source: .lifecycleLeases, duration: .milliseconds(-1))
-        first.recordSQLNextDispatch(source: .lifecycleLeases, duration: .milliseconds(-2))
-        let complete = aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations[.lifecycleLeases]!
+        first.recordSQLTaskResumed(source: .scalarFenceRooms, duration: .milliseconds(-1))
+        first.recordSQLNextDispatch(source: .scalarFenceRooms, duration: .milliseconds(-2))
+        let complete = aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations[.scalarFenceRooms]!
         #expect(complete.settledNotResumed == 0 && complete.resumedNotDispatched == 0)
         #expect(complete.settledToResumedCount == 3 && complete.resumedToDispatchCount == 2)
         #expect(complete.settledToResumedTotalMilliseconds == 5 && complete.resumedToDispatchTotalMilliseconds == 5)
-        for source in V2RoomSQLContinuationSource.allCases where source != .lifecycleLeases {
+        for source in V2RoomSQLContinuationSource.allCases where source != .scalarFenceRooms {
             #expect(aggregate.sendOperationBatchMetricsSnapshot().sqlContinuations[source] == V2RoomSQLContinuationSnapshot())
         }
     }

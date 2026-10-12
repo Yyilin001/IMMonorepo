@@ -45,7 +45,7 @@ final class GatewayJournalRuntime: Sendable {
         } else if let journal = error as? V2RealtimeJournalError {
             switch journal {
             case .invalidInput: reason = "journalInvalidInput"
-            case .leaseLost: reason = "journalLeaseLost"
+            case .authorityLost: reason = "journalLeaseLost"
             case .corruptPersistenceState: reason = "journalCorruptPersistenceState"
             }
         } else if error is CancellationError { return }
@@ -86,7 +86,7 @@ final class GatewayJournalRuntime: Sendable {
             isCurrent: { await service.journalRecipientIsCurrent($0) }, requestColdSnapshot: { recipient, source, fence, cut in
                 let batch = V2RealtimeJournalProjectionBatch(source: source, fence: fence, payload: .baseline(minimumCut: cut))
                 guard case .applied(let receipt) = try await handle.sendJournalProjection(batch, to: recipient.session.gateway),
-                      receipt.snapshotInstalled, receipt.appliedThrough >= cut else { throw V2RealtimeJournalError.leaseLost }
+                      receipt.snapshotInstalled, receipt.appliedThrough >= cut else { throw V2RealtimeJournalError.authorityLost }
                 return receipt
             }, send: { try await handle.sendJournalProjection(Self.userControlProjection($1), to: $0) })
         let sources = try aliases.map { alias in
@@ -112,7 +112,7 @@ final class GatewayJournalRuntime: Sendable {
         }
         await registry.configureJournalInterestChanges { [weak runtime] in runtime?.wakes.continuation.yield(()) }
         await registry.configureJournalUserBaselineBarrier { [weak runtime] user in
-            guard let runtime else { throw V2RealtimeJournalError.leaseLost }
+            guard let runtime else { throw V2RealtimeJournalError.authorityLost }
             do { return try await runtime.ensureUserBaseline(user) }
             catch let error as GatewayJournalAuthorityError {
                 runtime.recordFailure(error, phase: "userBaseline")
@@ -155,10 +155,10 @@ final class GatewayJournalRuntime: Sendable {
             routingEpoch: coverage.token.epoch, session: coverage.sessionID, revision: coverage.revision)
         do {
             try await cold.run(key: key) { [self] in
-                guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.leaseLost }
+                guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
                     registry: registry, receiver: receiver, source: source, gatewayIdentity: identity)
-                guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.leaseLost }
+                guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
             }
         } catch {
             recordFailure(error, phase: "coldRefresh")

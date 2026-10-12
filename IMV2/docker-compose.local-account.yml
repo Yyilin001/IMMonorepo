@@ -24,6 +24,40 @@ services:
     mem_limit: 1g
     pids_limit: 128
 
+  placement-a: &placement-control
+    image: imv2localaccount-v2server
+    command: ["/workspace/IMV2Server/.build/release/IMV2PlacementControlApp"]
+    stop_grace_period: 45s
+    environment:
+      IMV2_ROOM_ACTOR_CONFIGURATION_FILE: /run/im-v2-room-actor/configuration.json
+      IMV2_PLACEMENT_SHARD_IDS: rooms-primary
+    # Only the voting directory is writable; private identities stay read-only.
+    volumes:
+      - ./local-room-actors/placement-a:/run/im-v2-room-actor:ro
+      - ./local-room-actors/placement-a/placement:/run/im-v2-room-actor/placement
+    healthcheck:
+      # Transport readiness only. Actor startup additionally waits for a fresh
+      # majority-confirmed placement before opening room admission.
+      # Placement binds its advertised container address, not loopback.
+      test: ["CMD-SHELL", "bash -c ': > /dev/tcp/$$HOSTNAME/7336'"]
+      interval: 1s
+      timeout: 3s
+      retries: 45
+    mem_limit: 512m
+    pids_limit: 128
+
+  placement-b:
+    <<: *placement-control
+    volumes:
+      - ./local-room-actors/placement-b:/run/im-v2-room-actor:ro
+      - ./local-room-actors/placement-b/placement:/run/im-v2-room-actor/placement
+
+  placement-c:
+    <<: *placement-control
+    volumes:
+      - ./local-room-actors/placement-c:/run/im-v2-room-actor:ro
+      - ./local-room-actors/placement-c/placement:/run/im-v2-room-actor/placement
+
   account:
     image: imv2localaccount-v2server
     # HTTP and workers drain first, followed by up to 60s for Room Actor
@@ -77,6 +111,12 @@ services:
       IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES: 52428800
     depends_on:
       postgres:
+        condition: service_healthy
+      placement-a:
+        condition: service_healthy
+      placement-b:
+        condition: service_healthy
+      placement-c:
         condition: service_healthy
     healthcheck:
       # The account listener must be accepting connections before Caddy is
@@ -213,6 +253,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      placement-a:
+        condition: service_healthy
+      placement-b:
+        condition: service_healthy
+      placement-c:
+        condition: service_healthy
       caddy:
         condition: service_started
     healthcheck:
@@ -267,6 +313,12 @@ services:
       - ./local-room-actors/operator:/run/im-v2-room-actor:ro
     depends_on:
       postgres:
+        condition: service_healthy
+      placement-a:
+        condition: service_healthy
+      placement-b:
+        condition: service_healthy
+      placement-c:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "bash -c ': > /dev/tcp/127.0.0.1/9445'"]

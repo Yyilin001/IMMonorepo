@@ -44,16 +44,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 100, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             let room = RoomID(uuid: roomUUID)
-            let ownerIdentity = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let leases = PostgresV2RoomActivationStore(database: ownerDB)
-            let host = V2ActorHostIdentity(hostID: try .init("d4-invite-host"), incarnationID: UUID())
-            guard case .acquired(let grant) = try await leases.acquire(roomID: room,
-                owner: ownerIdentity, host: host, duration: try .init(30_000)) else {
-                throw V2RoomActivationLeaseError.activationChanged
-            }
+            try await withRoomActivation(database: ownerDB, roomID: room) { token in
             let fixedNow = Date()
             let executor = try V2RoomInvitationDomainExecutor(database: ownerDB,
-                token: grant.token,
+                token: token,
                 identities: PostgresV2GroupInvitationIdentityReader(database: controlDB),
                 capacityProfile: profile, now: { fixedNow })
             let drop = D4InviteResponseDrop()
@@ -61,11 +55,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             @Sendable func operationStore(_ intent: V2GroupInvitationOperationIntent) throws -> PostgresV2GroupInvitationOperationStore {
                 let invite: GroupInviteID?
                 switch intent.action { case .submit(let id, _, _), .revoke(let id, _): invite = id; default: invite = nil }
-                return try .init(database: ownerDB, activationToken: grant.token,
+                return try .init(database: ownerDB, activationToken: token,
                     identities: PostgresV2GroupInvitationIdentityReader(database: controlDB), issuer: issuer,
                     policy: .standard, capacity: profile, inviteID: invite)
             }
-            let readStore = try PostgresV2GroupInvitationOperationStore(database: ownerDB, activationToken: grant.token,
+            let readStore = try PostgresV2GroupInvitationOperationStore(database: ownerDB, activationToken: token,
                 identities: PostgresV2GroupInvitationIdentityReader(database: controlDB), issuer: issuer, policy: .standard, capacity: profile)
             let port = V2ActorInvitationRoomPort(query: { query, _ in try await executor.execute(query) })
             let operationPort = V2GroupInvitationOperationRoomPort(baseline: { query, _ in
@@ -136,11 +130,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(membershipCount == (state == "approved" ? 1 : 0))
             #expect(try await control.raw("SELECT count(*)::bigint AS value FROM im_v2.group_join_quota_intents WHERE phase IN ('held','tracking')")
                 .first(decoding: D4InviteCountRow.self)?.value == 0)
-            #expect(try await leases.release(token: grant.token))
+            try await owner.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind:roomUUID)").run()
             let revoke = try intent(actor, reference: .groupInvite(.init(uuid: UUID())), action: .revoke(inviteID: inviteID, expectedMembershipRevision: decisionBaseline.membershipRevision))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) { try await operationStore(revoke).admit(revoke, now: fixedNow) }
+            await #expect(throws: V2RoomActorStateError.ownerChanged) { try await operationStore(revoke).admit(revoke, now: fixedNow) }
             #expect(try await owner.raw("SELECT state FROM im_v2.group_invite_links WHERE invite_id = \(bind: inviteID.uuidValue!)")
                 .first(decoding: D4InviteStateRow.self)?.state == "active")
+            }
             try await control.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await owner.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()

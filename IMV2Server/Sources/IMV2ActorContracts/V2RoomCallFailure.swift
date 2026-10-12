@@ -10,7 +10,7 @@ public enum V2RoomFailureReason: String, Codable, Sendable {
     case staleActivation
     case notReady
     case retired
-    case leaseLost
+    case authorityLost
     case unavailable
     case overloaded
     case deadlineExceeded
@@ -57,7 +57,7 @@ extension V2RoomCallFailure {
             }
         case .notAccepted(let reason), .rolledBack(let reason):
             switch reason {
-            case .staleActivation, .notReady, .retired, .leaseLost, .unavailable:
+            case .staleActivation, .notReady, .retired, .authorityLost, .unavailable:
                 .refreshLocation
             case .overloaded, .deadlineExceeded, .cancelled, .notFound, .forbidden,
                  .invalidRequest, .unsupportedVersion, .idempotencyConflict:

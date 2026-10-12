@@ -4,6 +4,7 @@ import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2ActorContracts
+import IMV2ActorCluster
 import IMV2ActorRuntime
 import IMV2Core
 @testable import IMV2Server
@@ -21,8 +22,10 @@ struct V2RoomHostPostgresOverloadDrainTests {
             let healthy = RoomID(uuid: UUID()), excess = RoomID(uuid: UUID())
             try await overloadSeedRoom(healthy, sql: sql)
             try await overloadSeedRoom(excess, sql: sql)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
+            let identity = V2ActorHostIdentity(hostID: try .init("overload-drain-host"), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "room-a") { control in
+            let placement = try await control.register(identity, shard: "room-a")
+            let hosted = try overloadHost(database: database, fixture: fixture, identity: identity, placement: placement,
                 configuration: overloadConfiguration())
             let host = hosted.host
             let hotLockerGate = OverloadGate(), healthyLockerGate = OverloadGate()
@@ -116,7 +119,7 @@ struct V2RoomHostPostgresOverloadDrainTests {
 
                 let drainedEarly = await host.drain(deadline: .now + .milliseconds(60))
                 #expect(!drainedEarly.completed)
-                #expect(try await overloadLiveLease(sql, room: roomID, token: hotToken))
+                #expect(try await overloadCommittedOwner(control, token: hotToken))
                 await overloadExpectFailure(.notAccepted(.staleActivation), Task {
                     try await host.invoke(token: hotToken,
                         request: try overloadSendBytes(room: roomID, operation: UUID()),
@@ -130,15 +133,15 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 #expect(try await overloadCompletionCount(sql, room: roomID, operation: secondID) == 1)
                 #expect(try await overloadCompletionCount(sql, room: roomID, operation: rejectedID) == 0)
                 #expect((await host.drain(deadline: .now + .seconds(5))).completed)
-                try await overloadAssertReleased(hosted, leases: leases,
-                    rooms: [roomID, healthy, excess])
+                try await overloadAssertReleased(hosted)
             } catch {
                 await healthyLockerGate.open()
                 await hotLockerGate.open()
                 _ = try? await healthyLocker?.value
                 _ = try? await hotLocker?.value
-                _ = await host.stop(deadline: .now + .seconds(5))
+                try await hosted.stop()
                 throw error
+            }
             }
         }
     }
@@ -149,8 +152,10 @@ struct V2RoomHostPostgresOverloadDrainTests {
         try await withOverloadDatabase(capacityClass: .large) { database, sql, fixture in
             let secondRoom = RoomID(uuid: UUID())
             try await overloadSeedRoom(secondRoom, capacityClass: .large, sql: sql)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let hosted = try overloadHost(database: database, fixture: fixture, leases: leases,
+            let identity = V2ActorHostIdentity(hostID: try .init("overload-drain-host"), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "room-a") { control in
+            let placement = try await control.register(identity, shard: "room-a")
+            let hosted = try overloadHost(database: database, fixture: fixture, identity: identity, placement: placement,
                 configuration: overloadConfiguration(), writeCapacity: 2)
             let host = hosted.host
             let gate = OverloadGate()
@@ -194,8 +199,8 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 #expect(try await overloadCompletionCount(sql, room: roomID, operation: firstID) == 0)
                 #expect(try await overloadCompletionCount(sql, room: secondRoom, operation: secondID) == 0)
                 #expect(!(await host.drain(deadline: .now + .milliseconds(60))).completed)
-                #expect(try await overloadLiveLease(sql, room: roomID, token: firstToken))
-                #expect(try await overloadLiveLease(sql, room: secondRoom, token: secondToken))
+                #expect(try await overloadCommittedOwner(control, token: firstToken))
+                #expect(try await overloadCommittedOwner(control, token: secondToken))
                 await gate.open()
                 try await locker.value
                 try overloadRequireAccepted(try await first.value)
@@ -205,12 +210,13 @@ struct V2RoomHostPostgresOverloadDrainTests {
                 let batch = await hosted.resources.sendOperationOwnerMetricsSnapshot()
                 #expect(batch.retainedItems == 0 && batch.inFlightBatches == 0)
                 #expect((await host.drain(deadline: .now + .seconds(5))).completed)
-                try await overloadAssertReleased(hosted, leases: leases, rooms: [roomID, secondRoom])
+                try await overloadAssertReleased(hosted)
             } catch {
                 await gate.open()
                 _ = try? await locker.value
-                _ = await host.stop(deadline: .now + .seconds(5))
+                try await hosted.stop()
                 throw error
+            }
             }
         }
     }
@@ -221,6 +227,13 @@ private struct OverloadHosted: Sendable {
     let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
     let budget: V2RoomCommandBudget
     let resources: V2RoomServerOwnerResources
+    let placement: V2RoomActorPlacementRuntime
+
+    func stop() async throws {
+        let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+        try await placement.retireAfterDrain(proof, shards: ["room-a"])
+        await resources.shutdownDurableSendOperations()
+    }
 }
 
 private func overloadConfiguration(batchWaitMilliseconds: Int64 = 2) throws -> V2RoomRuntimeConfiguration {
@@ -232,7 +245,7 @@ private func overloadConfiguration(batchWaitMilliseconds: Int64 = 2) throws -> V
 
 private func overloadHost(database: any Database,
     fixture: PostgresV2RoomWriteStoreIntegrationTests,
-    leases: PostgresV2RoomActivationStore,
+    identity: V2ActorHostIdentity, placement: V2RoomActorPlacementRuntime,
     configuration: V2RoomRuntimeConfiguration, writeCapacity: Int = 1) throws -> OverloadHosted {
     let writes = PostgresV2RoomWriteStore(database: database,
         strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
@@ -248,12 +261,10 @@ private func overloadHost(database: any Database,
     let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
         safetyActorUserID: senderID).runtimeFactory()
     let budget = V2RoomCommandBudget(configuration: configuration)
-    let identity = V2ActorHostIdentity(hostID: try .init("overload-drain-host"),
-        incarnationID: UUID())
-    return .init(host: .init(identity: identity, leaseStore: leases,
+    return .init(host: .init(identity: identity, placement: placement,
         configuration: configuration, budget: budget,
         classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
-        budget: budget, resources: resources)
+        budget: budget, resources: resources, placement: placement)
 }
 
 private func overloadActivate(_ host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,
@@ -313,26 +324,22 @@ private func overloadCompletionCount(_ sql: any SQLDatabase, room: RoomID,
         """).first(decoding: OverloadCountRow.self)).value
 }
 
-private func overloadLiveLease(_ sql: any SQLDatabase, room: RoomID,
+private func overloadCommittedOwner(_ control: V2NativePlacementTestControl,
     token: V2RoomActivationToken) async throws -> Bool {
-    try await sql.raw("""
-        SELECT COUNT(*)::bigint AS value FROM im_v2.room_activation_leases
-        WHERE room_id = \(bind: room.uuidValue!)
-          AND activation_epoch = \(bind: token.activationEpoch.rawValue)
-          AND host_incarnation_id = \(bind: token.host.incarnationID)
-          AND expires_at > clock_timestamp()
-        """).first(decoding: OverloadCountRow.self)?.value == 1
+    let snapshot = try await control.snapshot()
+    return snapshot.slots[0].owner.host == token.host && !snapshot.slots[0].retired
 }
 
-private func overloadAssertReleased(_ hosted: OverloadHosted,
-    leases: PostgresV2RoomActivationStore, rooms: [RoomID]) async throws {
+private func overloadAssertReleased(_ hosted: OverloadHosted) async throws {
     let snapshot = await hosted.budget.snapshot()
     #expect(snapshot.commandCount == 0 && snapshot.byteCount == 0 && snapshot.roomCount == 0)
     #expect(snapshot.peakCommandCount <= 3)
     let batch = await hosted.resources.sendOperationOwnerMetricsSnapshot()
     #expect(batch.retainedItems == 0 && batch.inFlightBatches == 0)
-    let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-    for room in rooms { #expect(try await leases.locate(roomID: room, owner: owner) == nil) }
+    #expect(await hosted.host.readyTokens().isEmpty)
+    #expect(await hosted.host.snapshot().activeRooms == 0)
+    #expect(await hosted.host.snapshot().retiringRooms == 0)
+    try await hosted.stop()
 }
 
 private func overloadSeedRoom(_ room: RoomID,

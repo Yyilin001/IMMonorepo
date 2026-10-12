@@ -163,8 +163,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 guard case .receipt(let winner)=submitted else { throw CancellationError() }
                 let count=try await count("im_v2.room_events",on:sql)
                 if winner.outcome == .closed { #expect(count==0) } else { #expect(count==1 && winner.validates(command:racing)) }
-                #expect(try await PostgresV2RoomActivationStore(database:database).release(token:token))
-                await #expect(throws:V2RoomActivationLeaseError.activationChanged) { _=try await store.recover(query,token:token) }
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind:roomUUID)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { _=try await store.recover(query,token:token) }
             }
         }
     }

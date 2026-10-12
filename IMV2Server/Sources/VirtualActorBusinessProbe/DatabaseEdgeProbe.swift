@@ -72,41 +72,52 @@ enum DatabaseEdgeProbe {
         let name = try required("VA_DB_EDGE_NODE")
         let resources = V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: 1),
             logger: Logger(label: "imv2.va.database-edge.\(name)"), ownsEventLoopGroup: true)
-        let controlID = DatabaseID(string: "control")
-        resources.databases.use(try .postgres(url: required("VA_DB_EDGE_CONTROL_URL"),
-            maxConnectionsPerEventLoop: 4), as: controlID, isDefault: true)
-        let control = resources.database(controlID)
-        var databases: [String: any Database] = [:]
-        var owners: [String: V2RoomServerOwnerResources] = [:]
-        for slot in ["a", "b"] where !host || name == "host-\(slot)" {
-            let identifier = DatabaseID(string: "owner-\(slot)")
-            resources.databases.use(try .postgres(url: required("VA_DB_EDGE_OWNER_\(slot.uppercased())_URL"),
-                maxConnectionsPerEventLoop: 4), as: identifier)
-            let database = resources.database(identifier)
-            databases["room-\(slot)"] = database
-            if host {
-                let writes = PostgresV2RoomWriteStore(database: database,
-                    strangerMessagePolicy: try .init(maximumMessagesPerWindow: 1000, window: 86_400),
-                    contentReviewMode: .disabled)
-                    .usingControlDatabase(control)
-                owners["room-\(slot)"] = try .init(database: database, writes: writes,
-                    membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
-                    invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
-                    invitationSecretIssuer: try invitationSecretIssuer(),
-                    receiptProjectionDelivery: Shadow(),
-                    capacityProfile: .init(id: "standard", limits: .init(
-                        maxEligibleMembers: 10, maxCommandsPerWindow: 1000, retryAfterSeconds: 3)),
-                    messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
-                    contentReviewMode: .disabled, queryBatchConfiguration: .init())
-            }
-        }
-        let configuration = try V2RoomActorApplicationConfiguration(environment: Environment(),
-            hostsRooms: host, configuredShardIDs: ["room-a", "room-b"])
-        let factory = host ? try V2RoomServerActivationFactory(owners: owners, safetyActorUserID: user) : nil
-        let application = try await V2RoomActorApplication.start(configuration: configuration,
-            ownerRouter: V2PostgresRoomShardRouter(database: control), roomDatabases: databases, factory: factory,
-            qualification: host ? .standalone() : nil)
+        var startedApplication: V2RoomActorApplication?
         do {
+            let controlID = DatabaseID(string: "control")
+            resources.databases.use(try .postgres(url: required("VA_DB_EDGE_CONTROL_URL"),
+                maxConnectionsPerEventLoop: 4), as: controlID, isDefault: true)
+            let control = try V2EventLoopBalancedDatabase(databases: [resources.database(controlID)],
+                loanPolicy: .init(maximumConnections: 4, reservedRenewalConnections: 1,
+                                  maximumQueued: 32, maximumWait: .seconds(5)))
+            var databases: [String: any Database] = [:]
+            var owners: [String: V2RoomServerOwnerResources] = [:]
+            for slot in ["a", "b"] where !host || name == "host-\(slot)" {
+                let identifier = DatabaseID(string: "owner-\(slot)")
+                resources.databases.use(try .postgres(url: required("VA_DB_EDGE_OWNER_\(slot.uppercased())_URL"),
+                    maxConnectionsPerEventLoop: 4), as: identifier)
+                let database = try V2EventLoopBalancedDatabase(databases: [resources.database(identifier)],
+                    loanPolicy: .init(maximumConnections: 4, reservedRenewalConnections: 1,
+                                      maximumQueued: 32, maximumWait: .seconds(5)))
+                databases["room-\(slot)"] = database
+                if host {
+                    let policyOwners = PostgresV2PolicyOwnerDirectory(journal: .init(database: control),
+                        dispatcher: .init(database: control, projectionDelivery: Shadow()))
+                    let authorizations = V2RoomPolicyAuthorizationService(roomDatabase: database,
+                        policyOwners: policyOwners, endpoint: "room-\(slot)", maximumRooms: 1)
+                    let writes = PostgresV2RoomWriteStore(database: database,
+                        strangerMessagePolicy: try .init(maximumMessagesPerWindow: 1000, window: 86_400),
+                        contentReviewMode: .disabled)
+                        .usingControlDatabase(control).usingPolicyAuthorizations(authorizations)
+                    owners["room-\(slot)"] = try .init(database: database, writes: writes,
+                        membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
+                        invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
+                        invitationSecretIssuer: try invitationSecretIssuer(),
+                        receiptProjectionDelivery: Shadow(),
+                        capacityProfile: .init(id: "standard", limits: .init(
+                            maxEligibleMembers: 10, maxCommandsPerWindow: 1000, retryAfterSeconds: 3)),
+                        messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
+                        contentReviewMode: .disabled, queryBatchConfiguration: .init())
+                        .usingPolicyAuthorizations(authorizations)
+                }
+            }
+            let configuration = try V2RoomActorApplicationConfiguration(environment: Environment(),
+                hostsRooms: host, configuredShardIDs: ["room-a", "room-b"])
+            let factory = host ? try V2RoomServerActivationFactory(owners: owners, safetyActorUserID: user) : nil
+            let application = try await V2RoomActorApplication.start(configuration: configuration,
+                ownerRouter: V2PostgresRoomShardRouter(database: control), roomDatabases: databases, factory: factory,
+                qualification: host ? .standalone() : nil)
+            startedApplication = application
             if host {
                 guard await application.readiness() else { throw Failure.invalid("host readiness") }
                 try marker("\(name)-ready.json", true)
@@ -132,10 +143,17 @@ enum DatabaseEdgeProbe {
             guard try await application.stop(deadline: .now + .seconds(60)) else {
                 throw Failure.invalid("incomplete drain")
             }
+            startedApplication = nil
             try await resources.shutdown()
             try marker("\(name)-stopped.json", true)
         } catch {
-            _ = try? await application.stop(deadline: .now + .seconds(10))
+            if let startedApplication {
+                guard (try? await startedApplication.stop(deadline: .now + .seconds(60))) == true else {
+                    // Still-owned SQL cannot outlive the resources it uses;
+                    // incomplete drain must not certify Host retirement.
+                    throw V2RoomActorApplicationError.incompleteShutdown
+                }
+            }
             try? await resources.shutdown()
             throw error
         }
@@ -227,7 +245,7 @@ enum DatabaseEdgeProbe {
             case .outcomeUnknown: return "outcomeUnknown"
             case .notAccepted(let reason), .rolledBack(let reason):
                 switch reason {
-                case .unavailable, .deadlineExceeded, .leaseLost, .staleActivation, .notReady, .retired:
+                case .unavailable, .deadlineExceeded, .authorityLost, .staleActivation, .notReady, .retired:
                     return String(describing: failure)
                 default: throw failure
                 }
@@ -252,15 +270,16 @@ enum DatabaseEdgeProbe {
         try edited(await eventually(application, faultEdit), revision: 3)
         try edited(await call(application, faultEdit), revision: 3)
         // A failed control read may finish after its caller deadline. The
-        // production domain completion deliberately retires driver failures as
-        // uncertain, so recovery can replace this epoch even though no edit
-        // committed. Use the recovered token as the next fault's baseline.
+        // production domain completion retires uncertain physical instances
+        // only after their work settles. Native partition ownership stays on
+        // this Host; the replacement has a new local activation counter.
+        // Use the recovered token as the next fault's baseline.
         let controlRecovered = try await application.directory.resolve(room(1), deadline: .now + .seconds(10))
         try marker("control-recovered-token.json", controlRecovered)
         try marker("control-recovered.json", true)
 
         let faultSend = try send(1, operation: 401)
-        try await wait("owner-cut-expired")
+        try await wait("owner-cut-start")
         let ownerFailure = try await rejected(application, faultSend)
         _ = try message(await call(application, send(2, operation: 402)))
         try marker("owner-cut-result.json", ["affectedFailure": ownerFailure, "healthySend": "accepted"])
@@ -271,7 +290,7 @@ enum DatabaseEdgeProbe {
         }
         let replacement = try await application.directory.resolve(room(1), deadline: .now + .seconds(10))
         guard replacement.activationEpoch.rawValue > controlRecovered.activationEpoch.rawValue else {
-            throw Failure.invalid("expired lease did not get a new epoch")
+            throw Failure.invalid("uncertain room instance was not replaced after its work settled")
         }
         try marker("replacement-token.json", replacement)
         try marker("owner-recovered.json", true)

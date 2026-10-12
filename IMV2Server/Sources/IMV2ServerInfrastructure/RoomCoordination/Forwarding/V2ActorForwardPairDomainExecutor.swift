@@ -54,7 +54,7 @@ public struct V2ActorForwardPairDomainExecutor: Sendable {
         let selected = Set([pair.source.roomID, pair.targetRoomID])
         guard activationTokens.count == selected.count,
               Set(activationTokens.map(\.roomID)) == selected else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         let scope = try V2RoomActivationWriteScope(tokens: activationTokens)
         let key = try ForwardPairIdentity(pair)

@@ -8,54 +8,74 @@ import unittest
 from unittest.mock import patch
 from run_v2_actor_realtime_benchmark import (
     CANDIDATE_WIRE_VERSION, preclose_witness_request, capture_preclose_witness, finish_preclose_witness, ActorPartitionCanary, PARTS, private_json, private_json_snapshot, apply_partition_fixture_cleanup, benchmark_targets_per_connection, checkpoint_connection_proof, checkpoint_heartbeat_continuity, checkpoint_response_matches_request,
-    checkpoint_rebuilt_owner_rooms, room_activation_checkpoint, checkpoint_physical_continuity, partition_takeover_witness_proof, partition_observed_history_proof,
+    checkpoint_restored_owner_rooms, room_placement_checkpoint, checkpoint_physical_continuity, partition_takeover_witness_proof, partition_observed_history_proof,
 )
 
 
 class ActorPartitionCheckpointTests(unittest.TestCase):
-    def test_owner_recovery_requires_exact_activation_and_every_device_scope(self):
+    def test_scope_recovery_preserves_native_owner_and_every_device_scope(self):
         host = 'aaaaaaaa-0000-0000-0000-000000000001'
         room = 'bbbbbbbb-0000-0000-0000-000000000001'
-        old = dict(databaseNow=10, leases=[dict(roomID=room, hostID=host.upper(),
-            activationEpoch=1, ownerShardID='rooms', ownerEpoch=0,
-            incarnation=host, expiresAt=20)])
-        new = copy.deepcopy(old)
-        new['leases'][0].update(activationEpoch=2, expiresAt=30)
+        old = dict(rooms=[dict(roomID=room, hostID=host.upper(), epoch=2,
+            ownerShardID='rooms', ownerEpoch=0, clusterID='cluster', partition=0,
+            incarnationID=host, revision=10, retired=False, hostRetired=False, transfer=None)])
+        new = copy.deepcopy(old); new['rooms'][0]['revision'] = 11
         before = [dict(slots=[dict(connectionIndex=i, coverage=dict(requestedScopes=[
             dict(scope='room', scopeID=room.upper(), scopeGeneration=1, revision=1)])) for i in range(2)])]
         after = copy.deepcopy(before)
         for slot in after[0]['slots']: slot['coverage']['requestedScopes'][0]['revision'] = 2
-        check = lambda a, leases: checkpoint_rebuilt_owner_rooms(before, a, old, leases, host)
+        check = lambda a, placement: checkpoint_restored_owner_rooms(before, a, old, placement, host)
         self.assertTrue(check(after, new))
+        missing_device = copy.deepcopy(after); missing_device[0]['slots'].pop()
+        self.assertFalse(check(missing_device, new))
+        duplicate_device = copy.deepcopy(after)
+        duplicate_device[0]['slots'][1] = copy.deepcopy(duplicate_device[0]['slots'][0])
+        self.assertFalse(check(duplicate_device, new))
         unchanged = copy.deepcopy(after)
         unchanged[0]['slots'][1]['coverage']['requestedScopes'][0]['revision'] = 1
         self.assertFalse(check(unchanged, new))
-        for field, value in [('activationEpoch', 1), ('ownerEpoch', 1), ('ownerShardID', 'other'),
-                             ('expiresAt', 10), ('hostID', None), ('incarnation', None)]:
-            invalid = copy.deepcopy(new); invalid['leases'][0][field] = value
+        for field, value in [('epoch', 3), ('ownerEpoch', 1), ('ownerShardID', 'other'),
+                             ('revision', 9), ('hostID', None), ('incarnationID', None),
+                             ('retired', True), ('hostRetired', True), ('transfer', 'pending'),
+                             ('clusterID', 'other'), ('partition', 1)]:
+            invalid = copy.deepcopy(new); invalid['rooms'][0][field] = value
             self.assertFalse(check(after, invalid))
-        self.assertFalse(check(after, dict(databaseNow=10, leases=[])))
-        self.assertFalse(checkpoint_rebuilt_owner_rooms(before, after, old, new,
+        self.assertFalse(check(after, dict(rooms=[])))
+        self.assertFalse(checkpoint_restored_owner_rooms(before, after, old, new,
             'aaaaaaaa-0000-0000-0000-000000000002'))
 
-    def test_room_activation_checkpoint_requires_exact_owned_room_set(self):
+    def test_room_placement_checkpoint_requires_routes_and_fresh_native_state(self):
         room = '00000000-0000-0000-0000-000000000001'
+        host = dict(hostID='aaaaaaaa-0000-0000-0000-000000000001',
+                    incarnationID='bbbbbbbb-0000-0000-0000-000000000001')
+        shards = [dict(shardID='rooms', clusterID='cluster', revision=3,
+            partitions=[dict(partition=0, owner=host, epoch=2, retired=False)],
+            hosts=[dict(identity=host, retired=False)])]
         parts = [dict(slots=[dict(coverage=dict(requestedScopes=[
             dict(scope='room', scopeID=room), dict(scope='room', scopeID=room)]))])]
+        args = SimpleNamespace(output_dir=Path('/unused'), candidate_binary=Path('/products/Gateway'))
+        routes = [dict(roomID=room, ownerShardID='rooms', ownerEpoch=0)]
         with patch('run_v2_actor_realtime_benchmark.fault_read_query',
-                   return_value=json.dumps(dict(leases=[dict(roomID=room)]))) as read:
-            value = room_activation_checkpoint(SimpleNamespace(), {}, parts)
-            self.assertEqual(len(value['leases']), 1)
-            self.assertIn('FROM im_v2.room_activation_leases', read.call_args.args[2])
-        for leases in ([], [dict(roomID='00000000-0000-0000-0000-000000000002')],
-                       [dict(roomID=room), dict(roomID=room)]):
+                   return_value=json.dumps(dict(rooms=routes))) as read, \
+             patch('run_v2_actor_realtime_benchmark.subprocess.run',
+                   return_value=SimpleNamespace(stdout=json.dumps(shards))) as query:
+            value = room_placement_checkpoint(args, {}, parts)
+            self.assertEqual(len(value['rooms']), 1)
+            self.assertEqual(value['rooms'][0]['epoch'], 2)
+            self.assertIn('FROM im_v2.room_owner_routes', read.call_args.args[2])
+            self.assertEqual(query.call_args.args[0][-1], '--inspect')
+            self.assertIn('partition-inspector', query.call_args.kwargs['env']['IMV2_ROOM_ACTOR_CONFIGURATION_FILE'])
+        for invalid in ([], [dict(routes[0], roomID='00000000-0000-0000-0000-000000000002')],
+                        [routes[0], routes[0]]):
             with patch('run_v2_actor_realtime_benchmark.fault_read_query',
-                       return_value=json.dumps(dict(leases=leases))):
+                       return_value=json.dumps(dict(rooms=invalid))), \
+                 patch('run_v2_actor_realtime_benchmark.subprocess.run') as query:
                 with self.assertRaisesRegex(RuntimeError, 'checkpoint_incomplete'):
-                    room_activation_checkpoint(SimpleNamespace(), {}, parts)
+                    room_placement_checkpoint(args, {}, parts)
+                query.assert_not_called()
         with patch('run_v2_actor_realtime_benchmark.fault_read_query') as read:
             with self.assertRaisesRegex(RuntimeError, 'budget_invalid'):
-                room_activation_checkpoint(SimpleNamespace(), {}, [])
+                room_placement_checkpoint(args, {}, [])
             read.assert_not_called()
 
     def test_preclose_sampling_is_bounded_and_missing_response_is_incomplete(self):

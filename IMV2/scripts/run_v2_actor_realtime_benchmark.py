@@ -29,6 +29,8 @@ import threading
 import time
 import uuid
 import urllib.request
+from v2_native_placement_processes import voter_arguments, start_controls
+from v2_native_placement_inspection import decode_placement_inspection, room_placement, require_live_owner, same_owner
 
 
 class LoaderFailureReportDrain:
@@ -308,9 +310,13 @@ def prepare(args, manifest):
     command = ['python3',str(ROOT/'IMV2/scripts/prepare_v2_room_actor_configuration.py'),
                '--output-dir',str(actors),'--shards',manifest['shardID'],'--user-buckets',manifest['userBucket'],
                '--caller',f'account=localhost:{args.actor_port+NODES}']
+    if getattr(args, 'actor_partition_canary', None) is not None:
+        command += ['--caller', f'partition-inspector=localhost:{args.actor_port+NODES+4}']
     # Exercise the redesigned candidate through the real local benchmark
     # entrypoint. Baseline files below retain their original authorization.
     command += ['--policy-partitions', '16']
+    placement_port = args.placement_port if args.placement_port is not None else args.actor_port + 64
+    command += voter_arguments([placement_port + index for index in range(3)])
     for index in range(NODES):
         command += ['--host',f'gateway-{index}=localhost:{args.actor_port+index}']
     run_command(command, args.output_dir/'prepare.log')
@@ -322,7 +328,7 @@ def prepare(args, manifest):
         config.pop('policyPlacement', None)
         for service in config['services']:
             service['permissions'] = [x for x in service['permissions']
-                                      if not x.startswith(('realtime', 'policy'))]
+                                      if not x.startswith(('realtime', 'policy', 'placement'))]
         private_json(node/'baseline.json',config)
     parts = [[] for _ in range(PARTS)]
     lines = (args.fixture/'credentials.jsonl').read_text().splitlines(True)
@@ -351,11 +357,17 @@ def verify_candidate_authorization_mode(args, kind, query):
     return dict(mode=mode, memoryDeploymentChecked=True, **observed)
 
 
+def candidate_placement_binary(args):
+    return getattr(args, 'candidate_placement_binary', None) or args.candidate_binary.parent / 'IMV2PlacementControlApp'
+
+
 def required_benchmark_binaries(args):
     if args.kind != 'candidate' and any(value is None for value in
         (args.baseline_checkout, args.baseline_binary, args.baseline_account_binary)):
         raise ValueError('baseline/both requires baseline checkout, gateway binary and account binary')
     binaries = [args.candidate_binary, args.candidate_account_binary, args.loader_binary]
+    if args.kind != 'baseline':
+        binaries.append(candidate_placement_binary(args))
     if args.kind != 'candidate':
         binaries += [args.baseline_binary, args.baseline_account_binary]
     return binaries
@@ -430,7 +442,6 @@ def room_notification_loss_constraints(args, manifest):
         return
     if (args.kind != 'candidate' or not args.allow_small_canary or manifest['users'] > 500
             or args.shared_postgres or args.allow_scaled_diagnostic
-            or args.room_host_restart_canary is not None or args.realtime_host_restart_canary is not None
             or args.actor_partition_canary is not None or args.planned_reconnect_inflight_canary
             or app_canary_enabled(args) or args.preclose_recovery_witness):
         raise ValueError('notification loss requires an owned candidate-only small fixture and no other fault')
@@ -735,12 +746,11 @@ def postgres_statement_category_case(column):
     return rf"""CASE
 {admission_cases}
    WHEN {operation} AND {column} ~* '(shard_admission_pools|room_admission)' THEN 'admission_credit'
-   WHEN {operation} AND {column} ~* 'room_activation_leases' THEN 'room_activation_fence'
    WHEN {operation} AND {column} ~* 'realtime_partition_leases' THEN 'realtime_partition_control'
    WHEN {operation} AND {column} ~* 'user_live_presence_leases' THEN 'presence'
    WHEN {operation} AND {column} ~* '(messages|message_send_completions)' THEN 'message_append'
    WHEN {operation} AND {column} ~* '(FROM|UPDATE)[[:space:]]+[^[:space:]]*rooms([[:space:]]|$)' AND
-        {column} ~* 'FOR[[:space:]]+(NO[[:space:]]+KEY[[:space:]]+UPDATE|UPDATE|SHARE|KEY[[:space:]]+SHARE)' THEN 'room_activation_fence'
+        {column} ~* 'FOR[[:space:]]+(NO[[:space:]]+KEY[[:space:]]+UPDATE|UPDATE|SHARE|KEY[[:space:]]+SHARE)' THEN 'room_state_lock'
    WHEN {column} ~* '^[[:space:]]*(BEGIN|COMMIT|END|ROLLBACK|ABORT|SET|START)([[:space:];]|$)' THEN 'transaction_control'
    WHEN {column} ~* '^[[:space:]]*SELECT[[:space:]]+' AND
         {column} ~* '(clock_timestamp|set_config)[[:space:]]*\(' THEN 'transaction_control'
@@ -756,6 +766,7 @@ def postgres_statement_category_probe_sql():
         ('wrong_marker_operation', '/* imv2_admission_fast_update */ SELECT 1', 'other'),
         ('update_admission', 'UPDATE im_v2.shard_admission_pools SET command_window_used=1', 'admission_credit'),
         ('update_presence', 'UPDATE im_v2.user_live_presence_leases SET expires_at=clock_timestamp()', 'presence'),
+        ('locked_room_state', 'SELECT room_sequence FROM im_v2.rooms FOR UPDATE', 'room_state_lock'),
         ('begin', 'BEGIN', 'transaction_control'),
         ('commit', 'COMMIT', 'transaction_control'),
         ('set_config', "SELECT set_config('lock_timeout','1s',true)", 'transaction_control'),
@@ -795,8 +806,7 @@ WITH activity_snapshot AS MATERIALIZED (
 ), held_locks AS MATERIALIZED (
  SELECT lock.pid, lock.locktype, lock.mode, count(*) AS locks,
  CASE lock.relname
-   WHEN 'room_activation_leases' THEN 'room_activation_fence'
-   WHEN 'rooms' THEN 'room_activation_fence'
+   WHEN 'rooms' THEN 'room_state_lock'
    WHEN 'shard_admission_pools' THEN 'admission_credit'
    WHEN 'room_admission' THEN 'admission_credit'
    WHEN 'messages' THEN 'message_append'
@@ -849,7 +859,7 @@ SELECT json_build_object(
    SELECT schemaname, relname, n_tup_ins, n_tup_upd, n_tup_del, n_tup_hot_upd,
           n_live_tup, n_dead_tup, seq_scan, idx_scan, autovacuum_count, autoanalyze_count
    FROM pg_stat_user_tables WHERE relname IN (
-     'room_activation_leases','user_live_presence_leases','realtime_partition_leases',
+     'user_live_presence_leases','realtime_partition_leases',
      'rooms','room_admission','shard_admission_pools','messages','message_send_completions',
      'realtime_dirty_room_heads','user_sync_wake_outbox') ORDER BY schemaname,relname) t),
  'database', (SELECT row_to_json(d) FROM (
@@ -1112,166 +1122,15 @@ def partition_lease_snapshot(args, database, partitions):
     return value
 
 
-def restart_canary_constraints(args, manifest, phases):
-    if args.realtime_host_restart_canary is None:
-        return
-    if (args.kind != 'candidate' or not args.allow_small_canary or manifest['users'] > 500
-            or args.planned_reconnect_inflight_canary or args.allow_scaled_diagnostic):
-        raise ValueError('restart canary requires candidate-only explicit small fixture <=500, without other fault modes')
-    if not 0 <= args.realtime_host_restart_canary < NODES:
-        raise ValueError('restart target must be an owned Gateway index')
-    if (not phases or phases[0].get('name') != 'natural-ttl-recovery'
-            or phases[0].get('durationSeconds') != 60 or phases[0].get('messagesPerSecond', 0) != 0
-            or phases[0].get('roomLogReadsPerSecond', 0) != 0 or phases[0].get('syncPullsPerSecond', 0) != 0
-            or any(phase.get('reconnectPercentPerMinute', 0) != 0 for phase in phases)):
-        raise ValueError('restart canary requires its quiet natural-TTL scenario and no client reconnects')
 
 
-class RealtimeHostRestartCanary:
-    """Owned process restart; observations never change lease or client deadlines."""
-    def __init__(self, args, database, directory, foreground_partitions):
-        self.args, self.database, self.directory = args, database, directory
-        self.target = args.realtime_host_restart_canary
-        self.survivor = (self.target + 1) % NODES
-        self.foreground_partitions = foreground_partitions
-        self.old_process = None
-        self.initial = None
-        self.last_old = None
-        self.samples = []
-        self.restart_process = None
-        self.recovered = False
-        self.deadline = None
-        self.kill_time = None
-        self.first_higher = None
-        self.pre_metrics = None
-        self.post_metrics = None
-        self.kill_monotonic = None
-        self.recovery_elapsed = None
-
-    def permitted_exit(self, process):
-        return process is self.old_process and process.poll() == -signal.SIGKILL
-
-    def metrics(self):
-        values = []
-        for index in range(NODES):
-            with urllib.request.urlopen(f'http://127.0.0.1:{self.args.metrics_port+index}/metrics', timeout=1) as response:
-                body = response.read(4*1024*1024).decode('utf-8')
-            scalars = {}
-            for key in ('reachable_nodes', 'installed_partitions', 'cached_partitions', 'control_started_total',
-                        'control_settled_total', 'publish_started_total', 'publish_settled_total', 'coverage_losses_total'):
-                match = re.search(r'^im_v2_actor_realtime_'+key+r' ([0-9]+(?:\.[0-9]+)?)$', body, re.M)
-                if match is None:
-                    raise RuntimeError('canary_metrics_missing')
-                scalars[key] = float(match.group(1))
-            values.append(dict(node=index, **scalars))
-        return values
-
-    def persist(self):
-        value = dict(formatVersion=1, state='recovered' if self.recovered else 'observing',
-                     targetGateway=self.target, survivorGateway=self.survivor,
-                     oldPID=self.old_process.pid if self.old_process else None,
-                     newPID=self.restart_process.pid if self.restart_process else None,
-                     confirmedSIGKILL=self.old_process is not None and self.old_process.returncode == -signal.SIGKILL,
-                     killAtUnixSeconds=self.kill_time, initial=self.initial, lastOld=self.last_old,
-                     firstHigher=self.first_higher, samples=self.samples, preKillAggregateMetrics=self.pre_metrics,
-                     postRecoveryAggregateMetrics=self.post_metrics, recoveryElapsedSeconds=self.recovery_elapsed,
-                     productionControllerUsed=True, acceleratedExpiry=False,
-                     ttlOrRenewalConfigurationChanged=False, preKillPerConnectionReadyProven=False,
-                     clientDisconnectRecoveryProven=False, clientConnectionsRemainOnSurvivor=True,
-                     scope='natural PostgreSQL TTL, real production controller and restart; final current scope/cursor proof is independent')
-        private_json_snapshot(self.directory/'realtime-restart-canary.json', value)
-
-    def step(self, release_at, gateways, launch):
-        now = time.time()
-        if self.deadline is None:
-            if now < release_at:
-                return
-            # Capture the original quiet phase end once in monotonic time.
-            # Wall-clock changes cannot extend this wait after it was armed.
-            self.deadline = time.monotonic() + max(0, release_at + 60 - now)
-        if self.recovered:
-            return
-        if time.monotonic() >= self.deadline:
-            self.persist(); raise TimeoutError('natural_ttl_restart_not_recovered_in_quiet_phase')
-        if self.old_process is None:
-            try:
-                metrics = self.metrics()
-            except (OSError, RuntimeError, ValueError):
-                return  # bounded by the unchanged quiet-phase deadline
-            if (any(row['reachable_nodes'] != NODES for row in metrics)
-                    or sum(row['installed_partitions'] for row in metrics) != 256):
-                return
-            snapshot = partition_lease_snapshot(self.args, self.database, self.foreground_partitions)
-            eligible = [row for row in snapshot['leases'] if row['hostID'] == f'gateway-{self.target}'
-                        and row['epoch'] > 0 and row['expiresAt'] - snapshot['databaseNow'] >= 10]
-            if not eligible:
-                return
-            # Require enough real recovery window before touching a process.
-            if self.deadline - time.monotonic() < 40:
-                raise TimeoutError('natural_ttl_restart_arm_window_exhausted')
-            self.initial = eligible[0]
-            self.pre_metrics = metrics
-            process = gateways[self.target]
-            if process.poll() is not None:
-                raise RuntimeError('restart_target_exited_before_planned_kill')
-            self.old_process = process
-            self.kill_time = time.time(); self.kill_monotonic = time.monotonic()
-            self.persist()
-            process.kill()
-            if process.wait(timeout=5) != -signal.SIGKILL:
-                raise RuntimeError('restart_target_not_confirmed_sigkill')
-            self.persist()
-            post = partition_lease_snapshot(self.args, self.database, [self.initial['partitionID']])
-            row = post['leases'][0]
-            if (row['epoch'], row['token'], row['incarnation'], row['hostID'], row['serviceID']) != (
-                    self.initial['epoch'], self.initial['token'], self.initial['incarnation'], self.initial['hostID'], self.initial['serviceID']):
-                raise RuntimeError('restart_old_lease_changed_before_natural_expiry')
-            self.last_old = row
-            self.samples.append(post)
-            self.restart_process = launch(self.target)
-            gateways[self.target] = self.restart_process
-            self.persist()
-            return
-        snapshot = partition_lease_snapshot(self.args, self.database, [self.initial['partitionID']])
-        self.samples.append(snapshot)
-        if len(self.samples) > 64:
-            raise RuntimeError('restart_observation_bound_exhausted')
-        row = snapshot['leases'][0]
-        if row['epoch'] == self.initial['epoch']:
-            if (row['token'], row['incarnation'], row['hostID'], row['serviceID']) != (
-                    self.initial['token'], self.initial['incarnation'], self.initial['hostID'], self.initial['serviceID']):
-                raise RuntimeError('restart_same_epoch_identity_changed')
-            # A previously dispatched real renewal can settle after process exit;
-            # retain its last observed expiry instead of pretending SIGKILL cancels SQL.
-            self.last_old = row
-        elif row['epoch'] > self.initial['epoch']:
-            if snapshot['databaseNow'] < self.last_old['expiresAt']:
-                raise RuntimeError('restart_claim_preceded_observed_natural_expiry')
-            if row['incarnation'] == self.initial['incarnation'] or row['token'] == self.initial['token']:
-                raise RuntimeError('restart_higher_epoch_reused_old_identity')
-            if self.first_higher is None:
-                self.first_higher = snapshot
-            if row['hostID'] == f'gateway-{self.target}' and row['expiresAt'] > snapshot['databaseNow']:
-                try:
-                    metrics = self.metrics()
-                except (OSError, RuntimeError, ValueError):
-                    metrics = []
-                if (len(metrics) == NODES and all(value['reachable_nodes'] == NODES for value in metrics)
-                        and sum(value['installed_partitions'] for value in metrics) == 256
-                        and metrics[self.target]['installed_partitions'] > 0):
-                    self.post_metrics = metrics
-                    self.recovery_elapsed = time.monotonic() - self.kill_monotonic
-                    self.recovered = True
-        else:
-            raise RuntimeError('restart_lease_epoch_regressed')
-        self.persist()
 
 
 def partition_canary_constraints(args, manifest, phases):
     if args.actor_partition_canary is None:
         return
     if (args.kind != 'candidate' or not args.allow_small_canary or manifest['users'] > 500
-            or args.planned_reconnect_inflight_canary or args.realtime_host_restart_canary is not None
+            or args.planned_reconnect_inflight_canary
             or args.allow_scaled_diagnostic or args.shared_postgres):
         raise ValueError('partition canary requires candidate-only owned PG, explicit <=500 fixture, no other fault mode')
     if (not phases or phases[0].get('name') != 'actor-partition-recovery'
@@ -1450,48 +1309,62 @@ def checkpoint_physical_continuity(before, after):
     return True
 
 
-def room_activation_checkpoint(args, database, parts):
+def room_placement_checkpoint(args, database, parts):
     rooms = sorted({str(uuid.UUID(scope['scopeID']))
                     for part in parts for slot in part['slots']
                     for scope in slot['coverage']['requestedScopes'] if scope['scope'] == 'room'})
     if not rooms or len(rooms) > 500:
-        raise RuntimeError('partition_room_activation_checkpoint_budget_invalid')
+        raise RuntimeError('partition_room_placement_checkpoint_budget_invalid')
     literals = ','.join("'"+room+"'::uuid" for room in rooms)
-    sql = f"""SELECT json_build_object('databaseNow',extract(epoch FROM clock_timestamp()),
-        'requestedRooms',{len(rooms)},'leases',coalesce(json_agg(json_build_object(
-        'roomID',room_id,'activationEpoch',activation_epoch,'ownerShardID',owner_shard_id,
-        'ownerEpoch',owner_epoch,'hostID',host_id,'incarnation',host_incarnation_id,
-        'expiresAt',extract(epoch FROM expires_at))), '[]'::json))
-        FROM im_v2.room_activation_leases WHERE room_id IN ({literals})"""
+    sql = f"""SELECT json_build_object('requestedRooms',{len(rooms)},
+        'rooms',coalesce(json_agg(json_build_object('roomID',room_id,
+        'ownerShardID',room_shard_id,'ownerEpoch',route_epoch)), '[]'::json))
+        FROM im_v2.room_owner_routes WHERE room_id IN ({literals})"""
     value = json.loads(fault_read_query(args, database, sql))
-    if (len(value.get('leases', [])) != len(rooms)
-            or {row.get('roomID') for row in value.get('leases', [])} != set(rooms)):
-        raise RuntimeError('partition_room_activation_checkpoint_incomplete')
-    return value
+    rows = value.get('rooms', [])
+    if len(rows) != len(rooms) or {str(uuid.UUID(row['roomID'])) for row in rows} != set(rooms):
+        raise RuntimeError('partition_room_placement_checkpoint_incomplete')
+    shards = sorted({row['ownerShardID'] for row in rows})
+    environment = os.environ.copy()
+    environment.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(
+        args.output_dir/'actors6'/'partition-inspector'/'configuration.json'),
+        IMV2_PLACEMENT_SHARD_IDS=','.join(shards))
+    query = subprocess.run([str(candidate_placement_binary(args)), '--inspect'],
+        cwd=ROOT, env=environment, capture_output=True, text=True, check=True, timeout=45)
+    snapshots = decode_placement_inspection(query.stdout)
+    observations = []
+    for row in rows:
+        native = room_placement(snapshots, row['roomID'], row['ownerShardID'])
+        require_live_owner(native, native['hostID'])
+        observations.append(dict(row, **native))
+    return dict(requestedRooms=len(rooms), rooms=observations,
+                proofScope='native-quorum-placement-and-data-owner')
 
 
-def checkpoint_rebuilt_owner_rooms(before, after, old_leases, new_leases, isolated_host):
+def checkpoint_restored_owner_rooms(before, after, old_placement, new_placement, isolated_host):
     normalize = lambda value: str(uuid.UUID(value))
     host = normalize(isolated_host)
-    old = {normalize(row['roomID']): row for row in old_leases['leases']}
-    new = {normalize(row['roomID']): row for row in new_leases['leases']}
-    affected = {room for room, row in old.items()
-                if row['hostID'] is not None and normalize(row['hostID']) == host}
+    old = {normalize(row['roomID']): row for row in old_placement['rooms']}
+    new = {normalize(row['roomID']): row for row in new_placement['rooms']}
+    affected = {room for room, row in old.items() if normalize(row['hostID']) == host}
     if not affected or len(before) != len(after): return False
     for room in affected:
         previous, current = old[room], new.get(room)
-        if (current is None or current['activationEpoch'] <= previous['activationEpoch']
+        if (current is None or not same_owner(previous, current)
                 or current['ownerShardID'] != previous['ownerShardID']
                 or current['ownerEpoch'] != previous['ownerEpoch']
-                or current['hostID'] is None or current['incarnation'] is None
-                or current['expiresAt'] is None or current['expiresAt'] <= new_leases['databaseNow']):
+                or current['revision'] < previous['revision']
+                or current['retired'] or current['hostRetired'] or current['transfer'] is not None):
             return False
     witnessed = set()
     for old_part, new_part in zip(before, after):
         previous = {slot['connectionIndex']: slot for slot in old_part['slots']}
+        current_indices = [slot['connectionIndex'] for slot in new_part['slots']]
+        if (len(previous) != len(old_part['slots'])
+                or len(set(current_indices)) != len(current_indices)
+                or set(current_indices) != set(previous)): return False
         for slot in new_part['slots']:
-            prior = previous.get(slot['connectionIndex'])
-            if prior is None: return False
+            prior = previous[slot['connectionIndex']]
             old_room = next(scope for scope in prior['coverage']['requestedScopes'] if scope['scope'] == 'room')
             room = normalize(old_room['scopeID'])
             if room not in affected: continue
@@ -1735,7 +1608,7 @@ class ActorPartitionCanary:
         self.target = args.actor_partition_canary
         self.room_host = room_host
         self.room_before = None
-        self.room_rebuilt = False
+        self.room_scopes_restored = False
         self.foreground = foreground
         self.state = 'arming'
         self.request = None
@@ -1793,7 +1666,7 @@ class ActorPartitionCanary:
     def persist(self):
         private_json_snapshot(self.directory/'actor-partition-canary.json', dict(formatVersion=1,
             state=self.state, passed=self.recovered, targetGateway=self.target, targetPID=self.pid,
-            roomActivationRecoveryProven=self.room_rebuilt,
+            roomScopeRecoveryProven=self.room_scopes_restored,
             majorityRosterCount=NODES, nonVotingCallers=1, productionControllerUsed=True,
             alteredLeaseTTL=False, alteredPoolBudget=False, clientReconnectsRequested=False,
             preFaultReadyNonzeroProven=self.before is not None, targetQualificationWithdrawn=self.qualified_zero,
@@ -1834,11 +1707,11 @@ class ActorPartitionCanary:
                 if not any(link['sourceNode'] == source and link['opened'] > 0 for link in proxy['links']):
                     raise RuntimeError('fixture_unavailable:association_coverage')
             if self.deadline-time.monotonic() < 80: raise TimeoutError('partition_arm_window_exhausted')
-            self.room_before = room_activation_checkpoint(self.args, self.database, parts)
+            self.room_before = room_placement_checkpoint(self.args, self.database, parts)
             if not self.room_host or not any(row['hostID'] and uuid.UUID(row['hostID']) == uuid.UUID(self.room_host)
-                                             for row in self.room_before['leases']):
+                                             for row in self.room_before['rooms']):
                 return # Do not inject a Room recovery fault without actual affected rooms.
-            private_json_snapshot(self.directory/'room-activation-checkpoint-before.json', self.room_before)
+            private_json_snapshot(self.directory/'room-placement-checkpoint-before.json', self.room_before)
             self.pid = process.pid; self.before = parts; self.initial = self.last_old = eligible[0]
             self.proxy_samples.append(self.proxy.command('isolate', self.target))
             self.state = 'isolated'; self.persist(); return
@@ -1893,13 +1766,13 @@ class ActorPartitionCanary:
         elif self.state == 'healing':
             parts = self.checkpoint('after')
             if parts is not None and checkpoint_connection_proof(parts, self.counts, require_ready=True):
-                room_after = room_activation_checkpoint(self.args, self.database, parts)
-                private_json_snapshot(self.directory/'room-activation-checkpoint-after.json', room_after)
-                self.room_rebuilt = checkpoint_rebuilt_owner_rooms(self.before, parts,
+                room_after = room_placement_checkpoint(self.args, self.database, parts)
+                private_json_snapshot(self.directory/'room-placement-checkpoint-after.json', room_after)
+                self.room_scopes_restored = checkpoint_restored_owner_rooms(self.before, parts,
                     self.room_before, room_after, self.room_host)
                 if not checkpoint_physical_continuity(self.before, parts):
                     raise RuntimeError('partition_repair_changed_physical_channel')
-                if (lease_active and self.room_rebuilt
+                if (lease_active and self.room_scopes_restored
                         and all(item['service_qualified'] == 1 for item in metrics)
                         and sum(item['installed_partitions'] for item in metrics) == 256):
                     if time.monotonic() >= self.deadline:
@@ -1979,11 +1852,11 @@ def run_revision(args, kind, actors, counts, manifest):
         if not initial_facts_empty:
             raise RuntimeError('planned_reconnect_fixture_not_empty')
     processes, streams, loaders = [], [], []
+    placement_processes = []
     failure_context = None
     result = None
     fixture_cleanup = None
     failure_stage = 'startup'
-    restart_canary = None
     partition_canary = None
     actor_proxy = None
     service_stop_deadline = None
@@ -2059,6 +1932,12 @@ def run_revision(args, kind, actors, counts, manifest):
     try:
         if args.actor_partition_canary is not None:
             failure_stage = 'partition_fixture'
+        if kind == 'candidate':
+            failure_stage = 'placement_startup'
+            start_controls(binary=candidate_placement_binary(args), actors=actors,
+                shards=[manifest['shardID']], log_directory=directory, owned=placement_processes,
+                spawn=lambda name, binary, environment: start([str(binary)], name, environment))
+            failure_stage = 'startup'
         if kind=='baseline':
             start([str(args.nats_binary),'-a','127.0.0.1','-p',str(args.nats_port)],'nats')
         if args.actor_partition_canary is not None:
@@ -2083,18 +1962,6 @@ def run_revision(args, kind, actors, counts, manifest):
             for index, environment in enumerate(gateway_environments):
                 environment.update(actor_proxy.environment(index))
         gateways=[start([str(binary)],f'gateway-{i}',gateway_environments[i]) for i in range(NODES)]
-        if args.room_host_restart_canary is not None:
-            from v2_room_host_restart_canary import RoomHostRestartCanary
-            restart_canary = RoomHostRestartCanary(args, directory, counts,
-                lambda sql: fault_read_query(args, database, sql), private_json_snapshot,
-                checkpoint_response_matches_request, checkpoint_connection_proof, checkpoint_physical_continuity,
-                json.loads((actors/f'gateway-{args.room_host_restart_canary}'/'candidate.json').read_text())['hostID'],
-                {index: json.loads((actors/f'gateway-{index}'/'candidate.json').read_text())['hostID']
-                 for index in range(NODES)})
-        elif args.realtime_host_restart_canary is not None:
-            foreground = {realtime_topic_partition(json.loads(line)['targetRoomIDs'][0])
-                          for line in (args.fixture/'credentials.jsonl').read_text().splitlines()}
-            restart_canary = RealtimeHostRestartCanary(args, database, directory, foreground)
         if actor_proxy:
             foreground = {realtime_topic_partition(json.loads(line)['targetRoomIDs'][0])
                           for line in (args.fixture/'credentials.jsonl').read_text().splitlines()}
@@ -2161,7 +2028,7 @@ def run_revision(args, kind, actors, counts, manifest):
         barrier_path=directory/'scenario-start-barrier.json'
         failure_stage = 'workload'
         def loader_command(i, count, *, prefill=False):
-            client_gateway = restart_canary.survivor if restart_canary else i % NODES
+            client_gateway = i % NODES
             command=[str(args.loader_binary),'--benchmark-wire-version',str(45 if kind=='baseline' else CANDIDATE_WIRE_VERSION),'--host','127.0.0.1','--port',str(args.gateway_port+client_gateway),
                      '--account-base-url',f'https://localhost:{args.https_port+client_gateway}',
                      '--server-name','localhost','--ca-path',str(actors/'ca/cert.pem'),
@@ -2176,14 +2043,14 @@ def run_revision(args, kind, actors, counts, manifest):
                      '--scenario',str(prefill_scenario if prefill else args.scenario),'--scenario-rate-scale',str(1/PARTS),
                      '--scenario-ready-path',str(directory/f'prefill-part-{i}-ready.json' if prefill else directory/f'part-{i}-ready.json'),
                      '--scenario-start-barrier-path',str(prefill_barrier if prefill else barrier_path)]
-            if not restart_canary and not partition_canary:
+            if not partition_canary:
                 at = command.index('--hold-seconds')
                 command[at:at] = ['--local-port-base', str(25000+(i//NODES)*10000)]
             if args.planned_reconnect_inflight_canary:
                 command += ['--planned-reconnect-inflight-canary', '1']
             if args.room_notification_loss_canary:
                 command += ['--room-notification-loss-canary', '1']
-            if (partition_canary or args.room_host_restart_canary is not None or args.preclose_recovery_witness) and not prefill:
+            if (partition_canary or args.preclose_recovery_witness) and not prefill:
                 command += ['--checkpoint-request-path', str(directory/f'checkpoint-request-{i}.json'),
                             '--checkpoint-response-path', str(directory/f'checkpoint-response-{i}.json')]
             return command
@@ -2237,7 +2104,7 @@ def run_revision(args, kind, actors, counts, manifest):
         preclose_request = None
         preclose_terminal = False
         while any(p.poll() is None for p in loaders):
-            if any(p.poll() is not None and not (restart_canary and restart_canary.permitted_exit(p))
+            if any(p.poll() is not None
                    for p in service_processes):
                 raise RuntimeError('Gateway/Account/edge/broker exited during workload')
             first_failure = loader_report_drain.started is None
@@ -2256,8 +2123,6 @@ def run_revision(args, kind, actors, counts, manifest):
                 temporary.rename(barrier_path)
                 barrier_released=True
                 print(f'{kind}: all {manifest["users"]} connections warm; common scenario barrier released',flush=True)
-            if barrier_released and restart_canary:
-                restart_canary.step(release/1000, gateways, restart_gateway)
             if barrier_released and partition_canary:
                 partition_canary.step(release/1000, gateways)
             if args.preclose_recovery_witness and barrier_released and not preclose_terminal:
@@ -2276,11 +2141,6 @@ def run_revision(args, kind, actors, counts, manifest):
         if partition_canary and not partition_canary.recovered:
             partition_canary.persist()
             raise RuntimeError('partition_canary_did_not_complete')
-        if restart_canary:
-            if any(p.poll() is not None and not restart_canary.permitted_exit(p) for p in service_processes):
-                raise RuntimeError('service_exited_at_restart_canary_completion')
-            if not restart_canary.recovered:
-                raise RuntimeError('restart_canary_did_not_complete')
         failure_stage = 'report_aggregation'
         loader_report_drain.observe([p.poll() for p in loaders], time.monotonic())
         reports=[json.loads((directory/f'report-{i}.json').read_text()) for i in range(PARTS) if (directory/f'report-{i}.json').exists()]
@@ -2298,9 +2158,10 @@ def run_revision(args, kind, actors, counts, manifest):
             if thread.is_alive(): thread.join(timeout=10)
             if scheduling_thread is not None and scheduling_thread.is_alive(): scheduling_thread.join(timeout=10)
             service_stop_deadline = time.monotonic() + 90
-            for process in service_processes:
+            business_processes = [process for process in service_processes if process not in placement_processes]
+            for process in business_processes:
                 if process.poll() is None: process.send_signal(signal.SIGTERM)
-            for process in service_processes:
+            for process in business_processes:
                 process.wait(timeout=max(.1, service_stop_deadline-time.monotonic()))
             if not wait_for_database_client_drain(args, database):
                 raise RuntimeError('planned_reconnect_fact_clients_not_drained')
@@ -2321,19 +2182,6 @@ def run_revision(args, kind, actors, counts, manifest):
             result['roomNotificationLossCanary'] = proof
             private_json(directory/'room-notification-loss-canary.json', proof)
             result['qualityPassed'] = result['qualityPassed'] and proof['passed']
-        if args.room_host_restart_canary is not None:
-            result['roomHostRestartCanary'] = dict(passed=restart_canary.recovered,
-                naturalLeaseExpiry=True, roomActivationTakeoverProven=restart_canary.higher is not None,
-                preKillPerConnectionReadyProven=restart_canary.before is not None,
-                survivorChannelContinuityProven=restart_canary.after is not None,
-                subsequentAppliedSequenceProven=restart_canary.recovered,
-                clientDisconnectRecoveryProven=False, lateOldFenceInjectionProven=False)
-            result['qualityPassed'] = result['qualityPassed'] and restart_canary.recovered
-        elif restart_canary:
-            result['realtimeHostRestartCanary'] = dict(passed=restart_canary.recovered,
-                naturalLeaseExpiry=True, productionControllerUsed=True,
-                clientDisconnectRecoveryProven=False, preKillPerConnectionReadyProven=False)
-            result['qualityPassed'] = result['qualityPassed'] and restart_canary.recovered
         if partition_canary:
             result['actorPartitionCanary'] = dict(passed=partition_canary.recovered,
                 sameProcess=True, naturalLeaseBoundary=True, preFaultNonzeroReady=True,
@@ -2380,16 +2228,18 @@ def run_revision(args, kind, actors, counts, manifest):
                             if proc is not (actor_proxy.process if actor_proxy else None)]
         service_cleanup_requested = {proc.pid for proc in cleanup_services if proc.poll() is None}
         app_cleanup_requested = {proc.pid for proc in processes if proc.poll() is None} if app_canary_enabled(args) else set()
-        for proc in processes:
-            if proc is not (actor_proxy.process if actor_proxy else None) and proc.poll() is None: proc.send_signal(signal.SIGTERM)
         deadline=service_stop_deadline if service_stop_deadline is not None else time.monotonic()+90
-        for proc in processes:
-            if actor_proxy and proc is actor_proxy.process: continue
-            try: proc.wait(timeout=max(0.1,deadline-time.monotonic()))
-            except subprocess.TimeoutExpired:
-                proc.kill();proc.wait()
-                service_forced_kills += 1
-                if app_canary_enabled(args): app_forced_kills += 1
+        business_processes = [proc for proc in cleanup_services if proc not in placement_processes]
+        for group in (business_processes, placement_processes):
+            # Never dismantle quorum while a business Host still needs to retire.
+            for proc in group:
+                if proc.poll() is None: proc.send_signal(signal.SIGTERM)
+            for proc in group:
+                try: proc.wait(timeout=max(0.1,deadline-time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    proc.kill();proc.wait()
+                    service_forced_kills += 1
+                    if app_canary_enabled(args): app_forced_kills += 1
         # Aggregate lifecycle evidence only: no argv, environment, credentials
         # or database URLs. Loader drain is a separate quality witness.
         private_json_snapshot(directory/'service-cleanup.json', dict(
@@ -2486,6 +2336,8 @@ def main():
     parser.add_argument('--baseline-checkout',type=Path, help='required for baseline/both; candidate-only defaults to current checkout')
     parser.add_argument('--baseline-binary',type=Path)
     parser.add_argument('--candidate-binary',required=True,type=Path)
+    parser.add_argument('--candidate-placement-binary',type=Path,help='defaults to IMV2PlacementControlApp alongside the candidate Gateway')
+    parser.add_argument('--placement-port',type=int,help='first of three control ports; default actor port + 64')
     parser.add_argument('--baseline-account-binary',type=Path)
     parser.add_argument('--candidate-account-binary',required=True,type=Path)
     parser.add_argument('--loader-binary',required=True,type=Path,help='one Release binary used for both revisions')
@@ -2527,14 +2379,8 @@ def main():
     parser.add_argument('--actor-partition-canary', type=int, choices=range(NODES),
                         help='candidate <=500: silent native Actor-only isolation with live PG/client channels')
     parser.add_argument('--actor-proxy-port', type=int, default=19337)
-    parser.add_argument('--room-host-restart-canary', type=int, choices=range(NODES),
-                        help='owned candidate <=500: actual Room host SIGKILL, natural lease takeover, survivor Ready and subsequent TCP delivery')
-    parser.add_argument('--room-host-auto-target', action='store_true',
-                        help='room host canary: select the actual host with most Ready foreground rooms, excluding the fixed client Gateway')
     parser.add_argument('--room-notification-loss-canary', action='store_true',
                         help='owned candidate <=500: discard actual room body/H notifications; require heartbeat-driven cursor convergence')
-    parser.add_argument('--realtime-host-restart-canary', type=int, choices=range(NODES),
-                        help='candidate-only <=500-user production controller restart; clients stay on a surviving Gateway; natural TTL only')
     app_mode = parser.add_mutually_exclusive_group()
     app_mode.add_argument('--app-outbox-canary', action='store_true', help='explicit real App SQLite lost-ACK test; no Loader or capacity acceptance')
     app_mode.add_argument('--app-multi-device-canary', action='store_true', help='exact real App cross-Gateway device-scope test; no proxy or capacity acceptance')
@@ -2556,8 +2402,6 @@ def main():
         parser.error('candidate policy control connections must be in 1...64; process ceiling is checked at startup')
     if args.app_journal_trim_canary and not args.app_room_progress_canary:
         parser.error('--app-journal-trim-canary requires --app-room-progress-canary')
-    if args.room_host_auto_target and args.room_host_restart_canary is None:
-        parser.error('--room-host-auto-target requires --room-host-restart-canary')
     for name in ('fixture','output_dir','baseline_checkout','baseline_binary','candidate_binary','loader_binary','baseline_account_binary','candidate_account_binary','scenario','nats_binary'):
         if getattr(args,name) is not None:
             setattr(args,name,getattr(args,name).resolve())
@@ -2578,16 +2422,13 @@ def main():
         try: preflight_app_canary(args,manifest)
         except (ValueError, OSError) as error: parser.error(str(error))
     try:
-        from v2_room_host_restart_canary import constraints as room_restart_constraints
-        room_restart_constraints(args, manifest, scenario_phases)
-        restart_canary_constraints(args, manifest, scenario_phases)
         partition_canary_constraints(args, manifest, scenario_phases)
     except ValueError as error:
         parser.error(str(error))
     if args.preclose_recovery_witness:
         if (args.kind != 'candidate' or not (args.allow_small_canary or args.allow_scaled_diagnostic)
                 or app_canary_enabled(args) or args.actor_partition_canary is not None
-                or args.realtime_host_restart_canary is not None or args.planned_reconnect_inflight_canary):
+                or args.planned_reconnect_inflight_canary):
             parser.error('preclose witness requires candidate-only scaled/small diagnostic without other fault modes')
         args.preclose_measurement_end_offset = 0
         for phase in scenario_phases:
@@ -2638,6 +2479,7 @@ def main():
                   scenarioSHA256=sha(args.scenario),measurementPhase=args.measurement_phase,platform=platform.platform(),cpuCount=os.cpu_count(),
                   fdLimitBefore=soft,fdLimit=hard,nodes=NODES,loaderPartitions=0 if app_canary_enabled(args) else PARTS,
                   baselineBinarySHA256=sha(args.baseline_binary) if args.kind != 'candidate' else None,candidateBinarySHA256=sha(args.candidate_binary),
+                  candidatePlacementBinarySHA256=sha(candidate_placement_binary(args)) if args.kind != 'baseline' else None,
                   loaderBinarySHA256=sha(args.loader_binary),loaderContract=loader_contract,
                   benchmarkWireVersions=dict(baseline=45,candidate=CANDIDATE_WIRE_VERSION),
                   authorizationModes=dict(baseline='legacy', candidate=args.candidate_authorization_mode),
@@ -2651,8 +2493,8 @@ def main():
                   candidateActorBinaryInvocations=args.candidate_actor_binary_invocations,
                   messageTransport='tcp',messageRecoveryTransport='tcp_query',
                   accountHTTPConnectionsPerHostSoftLimit=256,scenarioStartBarrier=not app_canary_enabled(args),
-                  explicitLocalSourcePorts=not app_canary_enabled(args) and args.realtime_host_restart_canary is None and args.actor_partition_canary is None and args.room_host_restart_canary is None,
-                  localSourcePortRange=[25000,44999] if not app_canary_enabled(args) and args.realtime_host_restart_canary is None and args.actor_partition_canary is None and args.room_host_restart_canary is None else None,
+                  explicitLocalSourcePorts=not app_canary_enabled(args) and args.actor_partition_canary is None,
+                  localSourcePortRange=[25000,44999] if not app_canary_enabled(args) and args.actor_partition_canary is None else None,
                   candidateWorkingDiffSHA256=hashlib.sha256(subprocess.check_output(['git','-C',str(ROOT),'diff','--binary','HEAD'])).hexdigest(),
                   candidateSourceFilesSHA256={str(p.relative_to(ROOT)):sha(p) for p in sorted((ROOT/'IMV2Server/Sources').rglob('*')) if p.is_file()},
                   baselineAccountBinarySHA256=sha(args.baseline_account_binary) if args.kind != 'candidate' else None,
@@ -2660,8 +2502,6 @@ def main():
                   edgeSourceSHA256=sha(ROOT/'IMV2/scripts/v2_benchmark_https_edge.py'),canary=args.allow_small_canary,
                   scaledDiagnostic=args.allow_scaled_diagnostic,
                   plannedReconnectInflightCanary=args.planned_reconnect_inflight_canary,
-                  realtimeHostRestartCanary=args.realtime_host_restart_canary,
-                  roomHostRestartCanary=args.room_host_restart_canary,
                   actorPartitionCanary=args.actor_partition_canary,
                   appOutboxCanary=args.app_outbox_canary,
                   appMultiDeviceCanary=args.app_multi_device_canary,

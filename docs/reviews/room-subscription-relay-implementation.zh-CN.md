@@ -100,7 +100,7 @@ UUID TopicKey 与账号 scope 规范化修复后，`/tmp/imv2-room-subscription-
 
 本次结构审查确认：旧续期周期按 (room,user) 重新走 subscribe/snapshot/grant/activate，Source 读取又使用业务写入的房间和激活租约行锁。第二阶段移除稳定订阅的重复成员授权，Gateway 按共享房间与 peer 合批续期；Owner 只接受已激活 exact fence、连续控制确认和可信新鲜 committed H/lease proof。续期仍有批量轻量只读 SQL，不能宣称零查询。读-only Source 使用一致 MVCC cut 与独立新鲜 token 复查，保留业务写入围栏及物理事务 watchdog/join。证明边界见 `room-subscription-readonly-proof.md`。这些新增改动尚待 root 编译与真实 PostgreSQL 验证。
 
-新增独立 `--room-host-restart-canary` 和 `room-host-production-restart-canary.json`：先取得每连接真实 Ready，再 SIGKILL 实际持有前台房间 activation 的宿主；保持客户端在存活 Gateway，观察自然租约过期、新 activation/incarnation、物理客户端连接连续、恢复 Ready 和故障后应用序号增长。该 witness 不用 Journal 分区恢复替代房间恢复；明确不证明客户端断线重连或直接迟到旧 fence 注入。正式故障执行尚未开始。
+历史记录（该旧租约入口已在原生分布式 Actor 改造中移除，当前进度见 `room-virtual-actor-contract.md`）：新增独立 `--room-host-restart-canary` 和 `room-host-production-restart-canary.json`：先取得每连接真实 Ready，再 SIGKILL 实际持有前台房间 activation 的宿主；保持客户端在存活 Gateway，观察自然租约过期、新 activation/incarnation、物理客户端连接连续、恢复 Ready 和故障后应用序号增长。该 witness 不用 Journal 分区恢复替代房间恢复；明确不证明客户端断线重连或直接迟到旧 fence 注入。正式故障执行尚未开始。
 
 第二阶段统一构建 `/tmp/imv2-shared-renewal-readonly-boundaries-20261003-r1.log` 成功（91.53 秒）；r1 的五项 PG 失败来自 root 填写不存在的测试角色。修正有效角色后以相同二进制复验 `/tmp/imv2-shared-renewal-readonly-boundaries-20261003-r2.log`，退出码 0：Server 64、App 3、Cluster 4，共 71 项通过，包括真实 PG 并发无写锁读取、读取中退役拒绝、共享房间/peer 续期、控制缺口拒绝、RPC ACK 丢失与物理交付 join。
 

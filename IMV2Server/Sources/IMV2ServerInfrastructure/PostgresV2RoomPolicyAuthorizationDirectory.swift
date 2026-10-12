@@ -39,7 +39,7 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
     }
 
     /// Current facts require no room registration or revocation fallback.
-    /// Participants are read under the complete activation fence on cold creation.
+    /// Cold creation validates the durable data owner before reading participants.
     init(database: any Database, endpoint: String, maximumRooms: Int,
          maximumCreations: Int = 16,
          databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil,

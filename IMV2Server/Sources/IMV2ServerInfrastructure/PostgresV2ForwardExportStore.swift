@@ -127,7 +127,7 @@ public struct PostgresV2ForwardExportStore: Sendable {
             let token = try activationScope.token(for: sourceRoom)
             guard token.owner.shardID == sourceRoute.shardID,
                   token.owner.epoch == sourceRoute.epoch else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
         }
         return try await v2WithPostgresTransactionRetry(database: database, maximumRetryCount: 0,

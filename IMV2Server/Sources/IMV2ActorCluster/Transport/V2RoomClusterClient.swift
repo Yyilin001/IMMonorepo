@@ -87,6 +87,25 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
     public func suspendUnreachableHost(_ host: V2ActorHostIdentity) async -> Bool {
         await control.suspend(host)
     }
+    package func writePlacement(_ request: V2PlacementRaftWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
+        try await directory.peer(for: host).writePlacement(request, on: host, deadline: deadline)
+    }
+    package func readPlacement(_ request: V2PlacementRaftWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
+        try await directory.peer(for: host).readPlacement(request, on: host, deadline: deadline)
+    }
+    package func exchangeRaft(_ request: V2PlacementRaftWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
+        let peer = try directory.peer(for: host)
+        return try await peer.exchangeRaft(request, on: host, deadline: deadline)
+    }
+    package func drainPlacement(_ request: V2ActorPlacementDrainWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2ActorPlacementDrainReceipt {
+        let peer = try directory.peer(for: host)
+        return try await peer.drainPlacement(request, on: host, deadline: deadline)
+    }
+
     package func forwardPair(_ pair: V2ActorForwardPairWire, token: V2RoomActivationToken,
         deadline: ContinuousClock.Instant) async throws -> V2ActorForwardMessageResultWire {
         let peer = try directory.peer(for: token.host)

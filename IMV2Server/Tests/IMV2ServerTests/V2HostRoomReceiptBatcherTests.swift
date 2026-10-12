@@ -51,7 +51,7 @@ struct V2HostRoomReceiptBatcherTests {
         let second = Task { try await batcher.record(try makeTurn(tokens[1])) }
         try await waitPending(batcher, count: 2)
         let third = Task { try await batcher.record(try makeTurn(tokens[2])) }
-        await #expect(throws: V2RoomActivationLeaseError.activationChanged) { try await first.value }
+        await #expect(throws: V2RoomActorStateError.activationChanged) { try await first.value }
         #expect(try await second.value == .recordFailure(.store(.roomSequenceNotFound)))
         #expect(try await third.value == .record(.idempotencyConflict))
     }

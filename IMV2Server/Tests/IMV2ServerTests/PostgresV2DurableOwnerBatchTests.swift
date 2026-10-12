@@ -127,7 +127,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let second = try await prepare([commands[1]], secondToken, .now + .seconds(30))
                     if scenario == "stale" {
                         await policies.retire(token: firstToken)
-                        _ = try await PostgresV2RoomActivationStore(database: database).release(token: firstToken)
                     } else if scenario == "constraint" || scenario == "receipt_constraint" {
                         try await sql.raw("CREATE TABLE im_v2.fixture_failed_room (room_id uuid NOT NULL)").run()
                         try await sql.raw("INSERT INTO im_v2.fixture_failed_room VALUES (\(bind: rooms[0].uuidValue!))").run()
@@ -170,7 +169,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     if scenario == "constraint" {
                         #expect((stages[.ownerMessagePersistence]?.count ?? 0) >= 1)
                     } else if scenario == "late_quota" {
-                        #expect((stages[.ownerAdmission]?.count ?? 0) == 0)
                         // Retired infrastructure quota rows are not consulted or charged.
                         // A fixture changing them cannot revoke a valid message.
                         let handoffs = metrics.sendOperationBatchMetricsSnapshot().ownerAdmissionHandoffs
@@ -363,11 +361,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     // measured child completed; none claims the unknown commit.
                     for stage: V2SendOperationStage in [.ownerLocks, .ownerReceiptRead,
                         .ownerPreflight, .ownerReduction, .ownerPolicy, .ownerMessagePersistence,
-                        .ownerProjection, .ownerProof, .ownerReceiptPersistence] {
-                        #expect(snapshot.stages[stage]?.count ?? 0 == ([V2SendOperationStage.ownerReceiptRead, .ownerProof, .ownerReceiptPersistence].contains(stage) ? 0 : (singleton ? 1 : 2)))
+                        .ownerProjection] {
+                        #expect(snapshot.stages[stage]?.count ?? 0 == (stage == .ownerReceiptRead ? 0 : (singleton ? 1 : 2)))
                         #expect(snapshot.stages[stage]?.inFlight == 0)
                     }
-                    #expect(snapshot.stages[.ownerAdmission]?.count ?? 0 == 0)
                     let stages = snapshot.stages
                     #expect(stages[.ownerCommit]?.count == (singleton ? 1 : 2))
                     #expect(stages[.ownerRollback]?.count ?? 0 == 0)

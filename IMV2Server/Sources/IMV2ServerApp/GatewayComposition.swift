@@ -85,8 +85,16 @@ struct GatewayComposition {
             if let policies { durableOwnerResources = policies.physicalResources }
             // 2. 启动房间 Actor：有 hostIdentity 时启动房间承载节点及发现服务，
             // 否则启动仅调用远端房间的客户端节点。返回的目录和预留协调器供房间服务使用。
-            let actorFactory = try V2RoomServerActivationFactory(owners: policies?.ownerResources ?? prepared.roomOwners.ownerResources,
-                safetyActorUserID: configuration.contentReviewSafetyActorUserID)
+            // A caller-only Gateway has no local room executors or hosted
+            // policy authorization. Construct the factory only on room Hosts.
+            let actorFactory: V2RoomServerActivationFactory?
+            if prepared.roomOwners.actorConfiguration.hostIdentity != nil {
+                actorFactory = try V2RoomServerActivationFactory(
+                    owners: policies?.ownerResources ?? prepared.roomOwners.ownerResources,
+                    safetyActorUserID: configuration.contentReviewSafetyActorUserID)
+            } else {
+                actorFactory = nil
+            }
             // Construct one qualification before starting the room host. The
             // realtime discovery transport supplies authenticated witnesses to
             // this same object; no host silently selects standalone operation.
@@ -98,8 +106,7 @@ struct GatewayComposition {
                 configuration: prepared.roomOwners.actorConfiguration,
                 ownerRouter: V2PostgresRoomShardRouter(database: prepared.topology.database),
                 roomDatabases: prepared.topology.roomShardDatabases,
-                factory: prepared.roomOwners.actorConfiguration.hostIdentity == nil ? nil : actorFactory,
-                physicalRegistrationKeys: prepared.roomOwners.physicalStoreKeyByShard,
+                factory: actorFactory,
                 qualification: serviceQualification, policyServices: policies?.hosted
             )
             // 从这里开始，后续任何抛错都必须先排空已启动的房间 Actor。

@@ -89,7 +89,7 @@ final class V2DirectRoomSendAcceptanceMemory: Sendable {
         guard let row = try await sql.raw("""
             /* imv2_room_send_initialization */
             SELECT r.room_kind, r.membership_revision, r.frozen_at, r.room_sequence, r.timeline_sequence,
-                   r.room_shard_id, r.capacity_profile_id, r.capacity_class,
+                   r.room_shard_id, r.owner_epoch, r.capacity_profile_id, r.capacity_class,
                    p.direct_policy_revision,
                    p.lower_user_id, p.higher_user_id,
                    p.lower_has_replied, p.higher_has_replied,
@@ -109,6 +109,10 @@ final class V2DirectRoomSendAcceptanceMemory: Sendable {
             FROM im_v2.rooms r LEFT JOIN im_v2.direct_room_pairs p ON p.room_id=r.room_id
             WHERE r.room_id=\(bind: room)
             """).first() else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+        guard try row.decode(column: "room_shard_id", as: String.self) == token.owner.shardID,
+              try row.decode(column: "owner_epoch", as: Int64.self) == token.owner.epoch else {
+            throw V2RoomOwnerFenceError.ownerChanged
+        }
         let kind = try row.decode(column: "room_kind", as: String.self)
         guard kind == "direct" || kind == "group" else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
         return .init(token: token, kind: kind, directState: kind == "direct" ? try row.decode(model: State.self) : nil)

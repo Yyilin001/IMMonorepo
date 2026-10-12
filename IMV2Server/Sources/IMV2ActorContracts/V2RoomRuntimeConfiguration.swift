@@ -17,9 +17,6 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
     public let maximumBytesPerTurn: Int
     public let maximumConcurrentReservations: Int
     public let maximumResolveAttempts: Int
-    public let leaseDuration: V2ActorMilliseconds
-    public let renewalInterval: V2ActorMilliseconds
-    public let renewalSafetyMargin: V2ActorMilliseconds
     public let transactionTimeout: V2ActorMilliseconds
     public let callTimeout: V2ActorMilliseconds
     public let batchWait: V2ActorMilliseconds
@@ -47,9 +44,6 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
         maximumBytesPerTurn: Int = 4 * 1_024 * 1_024,
         maximumConcurrentReservations: Int = 128,
         maximumResolveAttempts: Int = 3,
-        leaseDurationMilliseconds: Int64 = 30_000,
-        renewalIntervalMilliseconds: Int64 = 5_000,
-        renewalSafetyMarginMilliseconds: Int64 = 2_000,
         transactionTimeoutMilliseconds: Int64 = 10_000,
         callTimeoutMilliseconds: Int64 = 30_000,
         batchWaitMilliseconds: Int64 = 2,
@@ -94,18 +88,13 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
               maximumResolveAttempts <= 16
         else { throw V2ActorContractError.invalidConfiguration("capacityRelationships") }
 
-        let lease = try V2ActorMilliseconds(leaseDurationMilliseconds)
-        let renewal = try V2ActorMilliseconds(renewalIntervalMilliseconds)
-        let margin = try V2ActorMilliseconds(renewalSafetyMarginMilliseconds)
         let transaction = try V2ActorMilliseconds(transactionTimeoutMilliseconds)
         let call = try V2ActorMilliseconds(callTimeoutMilliseconds)
         let batch = try V2ActorMilliseconds(batchWaitMilliseconds)
         let idle = try V2ActorMilliseconds(idleTimeoutMilliseconds)
         let drain = try V2ActorMilliseconds(drainTimeoutMilliseconds)
         let reservation = try V2ActorMilliseconds(reservationTimeoutMilliseconds)
-        guard renewal.rawValue + margin.rawValue < lease.rawValue,
-              transaction.rawValue + margin.rawValue < lease.rawValue,
-              batch < transaction, transaction <= call,
+        guard batch < transaction, transaction <= call,
               transaction <= reservation, reservation <= call, call <= drain
         else { throw V2ActorContractError.invalidConfiguration("timeRelationships") }
 
@@ -125,9 +114,6 @@ public struct V2RoomRuntimeConfiguration: Equatable, Sendable {
         self.maximumBytesPerTurn = maximumBytesPerTurn
         self.maximumConcurrentReservations = maximumConcurrentReservations
         self.maximumResolveAttempts = maximumResolveAttempts
-        self.leaseDuration = lease
-        self.renewalInterval = renewal
-        self.renewalSafetyMargin = margin
         self.transactionTimeout = transaction
         self.callTimeout = call
         self.batchWait = batch

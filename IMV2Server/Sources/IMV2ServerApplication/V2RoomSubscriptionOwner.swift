@@ -207,7 +207,7 @@ public actor V2RoomSubscriptionOwner {
             let status = try requireStatus(await relay.status(for: identity))
             try checkDeadline()
             let remaining = remainingLease(cut.remainingLeaseMilliseconds, since: proofStarted)
-            guard remaining > 0 else { throw V2RoomActivationLeaseError.leaseExpired }
+            guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
             return .init(fence: status.fence, memberRevision: member.memberRevision, baselineSequence: cut.highWatermark, remainingLeaseMilliseconds: remaining)
         } catch { await failClosedIfNeeded(error); throw error }
     }
@@ -241,7 +241,7 @@ public actor V2RoomSubscriptionOwner {
         }
         let started = ContinuousClock.now
         let proof = try await leaseProof(activation, deadline)
-        guard proof.activation == activation else { throw V2RoomActivationLeaseError.activationChanged }
+        guard proof.activation == activation else { throw V2RoomActorStateError.activationChanged }
         let committedSequence = await relay.committedSequence()
         guard proof.roomControlVersion == appliedRoomControlVersion, proof.roomControlVersion >= requiredControlVersion,
               proof.committedRoomSequence <= UInt64(Int64.max) else {
@@ -262,7 +262,7 @@ public actor V2RoomSubscriptionOwner {
             throw V2RoomSubscriptionOwnerError.deadlineExceeded
         }
         let remaining = remainingLease(proof.remainingLeaseMilliseconds, since: started)
-        guard remaining > 0 else { throw V2RoomActivationLeaseError.leaseExpired }
+        guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
         // Authorization renewal never acknowledges or retires message deliveries.
         return .init(fence: expectedFence, appliedControlSequence: appliedControlSequence,
                      committedRoomSequence: max(proof.committedRoomSequence, committedSequence), remainingLeaseMilliseconds: remaining)
@@ -342,7 +342,7 @@ public actor V2RoomSubscriptionOwner {
             let status = try requireStatus(await relay.status(for: identity))
             try checkDeadline()
             let remaining = remainingLease(cut.remainingLeaseMilliseconds, since: started)
-            guard remaining > 0 else { throw V2RoomActivationLeaseError.leaseExpired }
+            guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
             return .init(fence: status.fence, memberRevision: member.memberRevision, baselineSequence: cut.highWatermark, remainingLeaseMilliseconds: remaining)
         } catch { await failClosedIfNeeded(error); throw error }
     }
@@ -526,7 +526,7 @@ public actor V2RoomSubscriptionOwner {
         return .init(consumedThrough: consumed, observedHighWatermark: observed)
     }
     private func failClosedIfNeeded(_ error: any Error) async {
-        if error is V2RoomSubscriptionSourceError || error is V2RoomSubscriptionRelayError || error is V2RoomActivationLeaseError {
+        if error is V2RoomSubscriptionSourceError || error is V2RoomSubscriptionRelayError || error is V2RoomActorStateError {
             closed = true; await relay.invalidate(); changed = true
         }
     }

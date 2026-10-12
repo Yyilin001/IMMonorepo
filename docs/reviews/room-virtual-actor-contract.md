@@ -1,94 +1,136 @@
-# 房间 Virtual Actor 当前合同
+# 房间分布式 Actor 当前合同
 
-业务入口通过逻辑 RoomID 调用房间能力。`IMV2ActorRuntime` 负责定位、激活、恢复、顺序执行和回收；PostgreSQL 决定房间归属、写入资格和持久完成结果。当前实现的故障与容量验收状态见[执行证据](virtual-actor/README.md)，本合同不宣告尚未完成的 G5 通过。领域授权、幂等和保留政策继续服从[现有业务合同](README.md)。
+本文描述已落地并完成验收的原生归属控制实现。房间数据库租约、逐房间续租和租约行围栏已经移除；不提供旧实现的兼容运行模式。核心控制、正常排空、真实崩溃接管和监督部署代次替换已验证。控制回执滚动归档已实现；监督代次记录回收和最新 Linux 部署验证均已完成；本次没有执行性能压测。
 
 ## 模块与调用边界
 
-| 模块 | 当前职责 |
+| 模块 | 职责 |
 | --- | --- |
-| `IMV2ActorContracts` | 有界 wire DTO、逻辑身份、完整 activation token、调用结果及资源配置 |
-| `IMV2ActorRuntime` | `V2RoomDirectory` / `V2RoomRef`、Host 生命周期、FIFO turn、命令许可及双房间 reservation |
-| `IMV2ActorCluster` | 固定版本 DistributedCluster、已认证的物理 endpoint、mTLS、服务签名与发现 |
-| `IMV2Server` | 保留领域请求/结果的 typed clients、Server factory/executor、PostgreSQL lease 与 transaction fence |
-| `IMV2ActorApplication` | 身份/信任配置、节点启动、依赖组装与有序关闭 |
+| `IMV2ActorContracts` | 逻辑房间身份、数据 Owner、完整 activation token、调用结果和资源限制 |
+| `IMV2ActorRuntime` | Directory、唯一的本地 Host、恢复、FIFO 执行、生命周期 pin、排空和回收 |
+| `IMV2ActorCluster` | 已认证集群传输、固定三投票节点的归属日志、分区迁移和归属缓存 |
+| `IMV2Server` / `IMV2ServerInfrastructure` | 领域执行器、业务 SQL、数据 Owner 校验和持久业务结果 |
+| `IMV2ActorApplication` | 节点注册、依赖组装、控制层客户端与有序停机 |
+| `IMV2PlacementControlApp` | 独立控制进程，持久化投票、日志、提交位置和快照 |
 
-业务代码使用 `V2RoomRefMessagingClient`、`V2RoomRefQueryClient` 等领域门面；只需提供原请求中的 RoomID 和稳定 operation ID。底层 `directory.room(roomID).call(...)` 消费 Contracts DTO，物理 shard、Host 地址和 activation epoch 由基础设施处理。领域层不接收 DistributedActor ID，也不保存物理 endpoint。
+业务入口通过逻辑 RoomID 调用 typed client。Directory 先确定数据 Owner，再按控制层已提交的分区归属定位 Actor Host。数据存放在哪个数据库，与 Actor 当前在哪个进程执行，是两种独立归属；分区迁移不会隐式迁移房间数据。
 
-Gateway 的房间命令、Account 的群昵称/邀请/消息媒体授权，以及房间维护写入均接入这些能力。用户同步、账号禁用、工作流认领、媒体 provider 复制和派生投影保留自己的持久权限边界；它们不因携带 RoomID 就变成房间权威写入。各入口和合法例外见[写者台账](virtual-actor/writer-ledger.md)。
+集群发现只解析已配置节点的地址和已认证实例。加入集群、探测失败、网络超时及 membership 变化，都不直接授权创建替代 Owner。
 
-## 定位、恢复与写入资格
+## 控制层与注册
 
-1. Directory 根据持久 route 查数据 owner；租约记录位于该 owner 的实际数据库。数据 ownerEpoch 与 activationEpoch 独立。
-2. 有效租约优先于集群 membership。只有没有有效租约时，具备该 owner 访问权限和容量的 Host 才竞争 acquire。
-3. 同 Host 的首次访问共享恢复；跨 Host 以数据库锁与递增 epoch 决胜。Factory 完成恢复并重新验证资格后才发布 ready。
-4. token 包含房间、data owner、activation epoch 和 Host incarnation。每次进程启动产生新 incarnation，迟到续租、释放和清理必须匹配完整 token。
-5. 每个业务 SQL 事务在实际 owner 库获取 fence 锁，检查完整 token 和拿锁后的数据库时间，并持锁到 commit/rollback。新 epoch 获准后旧 epoch 不得再提交房间事实。
+每个逻辑数据 shard 使用固定三个投票节点的持久化控制日志。Gateway 和 Account 是控制层客户端，业务进程停机不会同时拆除投票多数。
 
-未知 RoomID 返回不存在；普通 resolve 不会隐式创建空房间。创建协调器先固定持久意图和 RoomID，再通过封闭 bootstrap 完成房间数据及目录，随后进入普通激活。
+控制节点按 `copy → persist → publish` 顺序处理转换。文件存储采用真实落盘、原子替换和持久状态 CAS；同一投票文件只允许一个本地进程持有。正常启动只打开已有文件，首次初始化必须显式 provisioning，不能以重新初始化掩盖控制历史丢失。
 
-房间 Actor 保存有界运行状态，不把内存当消息或完成结果的权威。Directory 位置缓存、Host 资格及业务提示缓存均有容量、过期和代次检查；暖缓存不能绕过持久授权和事务 fence。
+Host 注册绑定逻辑 HostID 和本次进程 incarnation。即使 Host 当前没有任何房间分区，其注册状态仍保留在控制日志中。后继 incarnation 只能替换已退役的前任；旧进程迟到的注销不能退役新进程。
 
-Directory 的只读位置 lookup 每跳最多等待 3 秒，已有更短截止优先。旧物理地址无响应后重新读取权威租约；超时不证明租约失效，也不允许抢占有效租约。激活、业务写和未知结果核对保留各自原有期限，已经派发的底层 RPC 仍追踪到实际完成。
+分区撤回与接管发布均要求后继 Host 存在有效注册，并准确匹配 incarnation。注册缺失、已退役或 incarnation 不符时，状态机拒绝迁移。后继在待完成迁移期间退役后，必须先取消该迁移，才能注册其新 incarnation。
 
-只读或带稳定操作 ID 的持久幂等 `RoomRef.call` 可复用已确认的本机或远端物理引用，省略重复位置lookup；纯state集合读取按缓存的完整token与物理Host分组。实际派发前核对descriptor、会话、capability和reference generation；明确位置失效仅精确撤销匹配缓存并进入有界singleflight，超时或busy不证明远端已死亡。公开resolve或预约等显式确认路径仍保留其严格要求；共享等待者中的严格要求即使取消也不降低。冷位置解析及结果未知恢复保留原权限、期限和实际排空限额。历史本机能力验证见[本机缓存调用证据](virtual-actor/r3-local-capability-evidence.md#仅限本机的缓存调用)，当前远端缓存与生产阶段证据见[实时路由实施证据](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/docs/reviews/actor-realtime-routing-evidence.md)。
+持久快照与远端快照的构造也验证完整注册表：每个 Owner 和待接管 Host 必须准确匹配注册 incarnation；已退役 Host 不能保留可准入的分区。待接管 Host 退役后保留原身份，以便取消迁移，不能用新 incarnation 改写尚未完成的接管。
 
-## 顺序、微批与失败语义
+暖路径读取节点内已提交的归属缓存。刷新失败保留最后确认的状态，不据此推断旧 Host 已死亡，也不发布新 Owner。
 
-Swift actor 的隔离不能保证跨 await 的完整业务串行。Runtime 显式维护写入admission次序和单个未决turn；只有队首连续兼容send可以合批，管理变更、命令查询和写reservation形成相应屏障。
+## 激活与生命周期
 
-纯房间state授权集合读取具有数据库快照语义，独立于尚未提交的命令FIFO。它通过精确ready activation的生命周期read pin保留executor，不取得多房间独占reservation，也不使写缓存失效。实际SQL使用排序的房间及租约共享行围栏，取得全部锁后检查新鲜数据库时间和完整token，再在同一正文statement snapshot检查逐viewer权限和持久head。已经ACK的提交事实可见；未COMMIT的排队写不因较早进入Actor而被承诺可见。共享读锁仍会与写/续期冲突，不能表述为无锁查询，参见[PostgreSQL 16行锁](https://www.postgresql.org/docs/16/explicit-locking.html#LOCKING-ROWS)与[Read Committed快照](https://www.postgresql.org/docs/16/transaction-iso.html#XACT-READ-COMMITTED)。
+`V2RoomActivationHost` 是生产路径中唯一的本地实例管理者。同一房间的首次恢复共享一个任务；等待者取消不会取消其他调用者仍在使用的实际恢复工作。
 
-Pure `roomLog.pull` follows the same lifecycle snapshot semantics: its exact activation is retained while borrowing the original command count/byte permit and ordinary database admission. It does not hold an exclusive room command lane while waiting for SQL. The production factory uses shared room/lease fences, fresh database time, full activation identity, and the existing member/history visibility query. A committed result is checked against the original deadline and safe lifecycle after actual callback settlement; unknown and rollback preserve their certainty. Subscribe and mutations retain their existing command path. Targeted runtime and PostgreSQL verification passed in r118; formal capacity acceptance remains pending.
+Host 将已提交分区归属、进程 incarnation 和本地激活代次绑定到完整 token。恢复完成后重新验证执行资格，再发布 ready；旧 token 不能调用新实例。
 
-Cold state recovery registers one bounded Pending observer per distinct room and shares the existing resolver admission. The caller drains completed room results into host/owner cohorts and invokes them promptly, without waiting for every cold room. There is one batch deadline signal, no per-room caller task or unbounded stream, and no extra queue beyond the original waiter/pending limits. Cancellation removes only that batch's observers and never releases shared actual resolution early.
+后台查询、订阅、媒体授权和维护通过 Host 签发的 `V2RoomActivationLifetime` 保留实际生命周期。token 可以参与传输和身份核对，但 token 本身不能构造这个本地能力。
 
-read pin在同步准入时绑定exact Entry/generation、owner/token、资格与safe期限；真实callback结束后才释放。实际Host集合批次至多4、每批100项，沿用原字节及数据库准入预算；没有新等待队列或无界Task。取消、drain或资格丢失不得提前释放在途资源；提交后返回必须再次核对原截止及同一ready身份。过期或旧资格结果不能安装新Ready。纯SELECT结果未知保留unknown错误，不当作已成功授权，也不因未写事实而无条件退役写执行器；写事务原outcomeUnknown规则不变。本节新read-pin路径正在实现验证，正式容量状态仍以实施证据为准。
+回收先关闭准入，再等待恢复、排队和执行轮次、reservation、生命周期 pin 和执行器关闭实际完成，最后移除实例。请求取消、调用超时或停机等待超时，都不能提前释放仍在执行的工作。排空未完成时，上层继续保留数据库和线程资源。
 
-同物理 owner 的房间共享 send、receipt、recovery batcher 和数据库预算。Runtime 的收集窗口与物理 batcher 沿用同一 ingress/截止时间，不叠加完整等待窗口。send 共享事务保持整批回滚合同，receipt 保持逐项结果合同。SQL 准入发生在实际 Host/批次边界，远端 Gateway 等待 RPC 时不占用 owner 数据库许可。
+执行资格失效使用 `authorityLost`，表示归属或服务资格不能继续授权当前实例。服务资格、传输认证及实时订阅仍有各自有效期，不能与已移除的房间数据库租约混为一谈。
 
-双房间同库写按规范 RoomID 顺序取得 reservation，再进入同一 scoped SQL 事务；跨 owner 的转发使用既有持久工作流、稳定源/目标身份及目标导入能力。信用补充在业务 fence 之外完成有界预留，不能持业务锁等待另一个连接 refill。信用和本地已接受状态绑定完整 token，Host 关闭时清理再释放身份额度。
+## 顺序、业务 SQL 与结果
 
-`notAccepted` 表示已知未被接受；业务拒绝保持原领域结果。请求可能已进入持久执行或 COMMIT 回执丢失时保留 `outcomeUnknown`，停止旧 activation 的后续执行。重试使用原 operation ID 查询持久结果，不能重新生成业务身份，也不能把客户端取消当作未提交证明。
+房间通过显式 FIFO turn 管理跨 `await` 的业务顺序；Swift actor 隔离本身不替代这个顺序。只读生命周期 pin 不取得独占写轮次，双房间 reservation 按规范 RoomID 顺序组织。
 
-## 生命周期和关闭
+业务 SQL 继续校验房间的数据 Owner 和 `ownerEpoch`，保留业务所需的房间行锁、权限和持久结果约束。数据库不再负责核对物理 Host incarnation、续租或释放 Actor。数据 Owner 校验不能单独证明跨进程 Actor 唯一性；控制层归属与真实生命周期排空共同承担这个边界。
 
-Host 管理 absent、acquiring、restoring、ready、draining、uncertain、stopped 状态。激活等待者、恢复并发、房间/节点请求数与字节、reservation、位置缓存及 owner batch 状态都有有限预算。一个等待者取消不取消其他等待者共享的恢复。
+`notAccepted` 表示运行时未接受执行；明确回滚使用 `rolledBack`。COMMIT 回执丢失或实际结果无法确认时返回 `outcomeUnknown`，停止旧 activation 的后续执行。客户端沿用原操作身份核对持久结果，不能以客户端取消推断数据库未提交。
 
-idle 回收先关闭 admission，排空队列、在途 turn、reservation 和本房间 batch 状态，再关闭 executor、条件释放租约和注销 endpoint。旧实例的迟到清理不影响后继 token。租约续租独立于业务 FIFO；排空超时仍保留运行资源和租约责任，不能提前销毁共享数据库连接池。
+## 分区迁移与节点停机
 
-应用关闭先停止入口/worker，再排空 Directory 与 Cluster/Host，最后释放数据库与线程资源。`V2RoomActorApplication.stop` 返回未完成时，上层不得把底层依赖当作已经安全关闭。
+生产迁移入口是 `V2RoomActorApplication.transferRoomPartition`：
 
-PostgreSQL 房间续租保留单令牌 `renew` 接口，存储实例内部使用至多 2ms 的收集窗口，每批最多 128 个请求，至多 2 个真实 SQL 批次同时执行，已接受请求总量最多 10,000。批次先按 UUID 顺序锁定所有房间，再按相同顺序锁定租约，取得全部锁后读取新鲜数据库时间；逐项核对 owner、Host/incarnation、activation epoch 和有效期，已过期租约不能复活。无效令牌只使自身失败，有效项在同一事务提交后才返回。Host 保守续租预算从调用 `renew` 前开始，覆盖收集、排队、锁等待及提交时间；租约 TTL 和 watchdog 策略不变。
+1. 确认后继 Host 的完整注册身份及数据 shard 访问资格。
+2. 在控制日志提交分区撤回，关闭旧分区的新准入。
+3. 已认证的旧 Host 实际排空相关恢复、房间执行、后台 pin 和执行器。
+4. 旧 Host 完成后签发排空证明，控制层验证证明并提交后继 Owner 与新 epoch。
+5. 后继 Host 从持久业务数据恢复房间。
 
-续租存储由单个应用生命周期拥有；不能把同一个实例交给互不相关的 Host 并独立关闭。取消单个等待者不取消共享 SQL。Host 完成房间排空后调用 `shutdownRenewals`：拒绝新请求和尚未派发的队列项，等待已派发事务真实完成，再允许关闭数据库。相同 batcher 的别名只排空一次，关闭可重复调用；调用方模式不产生续租任务。
+重试沿用原 transfer ID 和预期 Owner。撤回后超时不会直接发布后继 Owner，也不把超时当作排空证明。
 
-## 部署身份
+如果旧 Host 已完成整机排空并在控制日志中持久化退役，分区迁移复用这一事实，不再请求已退出进程提供分区排空回复。控制端必须从多数派重新读取准确的预期快照，确认旧 Owner、分区退役状态及 transfer ID，再以 CAS 提交接管；调用方提交的退役字段不构成证明。
 
-Gateway 和 Account 必须配置 `IMV2_ROOM_ACTOR_CONFIGURATION_FILE`。JSON 引用每个进程自己的 Ed25519 签名密钥、TLS 私钥/证书、私有 CA 和明确的 service/host/shard 信任映射；不能用集群加入成功代替授权。传输使用 TLS 1.3，证书 DNS 名及服务签名同时校验。
+正常停机先关闭业务入口和 worker，再排空 Directory、Host 和通信，提交准确 incarnation 的注销，最后关闭控制客户端及数据库。排空失败返回未完成，不伪造注销或安全停止。
 
-同进程调用可使用托管 Node 私有注入的本地入口，其身份绑定该次 Host incarnation、物理 endpoint 和 generation。首次会话仍验证签名 Hello/Grant；随后使用不可序列化、调用方不能构造的 Host capability，省去每次调用的签名、验签和 JSON 解码。权限、principal、session 期限、重放、shard、完整 activation token、调用期限及真实完成追踪仍与远端共用检查。请求和响应按原 JSON 编码规则各测量一次字节数，调用方与 Host 分别检查自身上限；远端继续使用签名包。旧入口关闭后拒绝新请求，已派发请求在真正完成前仍占用排空责任。
+## 崩溃排除与自动接管
 
-通信调用与 Host 执行分别承担排空责任。Host 可在执行仍进行时向到期的调用者返回 `outcomeUnknown`；Client 在底层通信实际返回后可以清除 dispatch 记录，Host 的执行项、许可和精确 token 的租约仍保留至 executor 完成。Node 必须先完成 Host 排空，才能关闭其余通信和共享资源，不能用 Client 的在途计数为零推断房间执行已结束。
+崩溃节点不能提供排空证明。Docker 部署使用独立 `IMV2RoomHostSupervisorApp`，持有仅含 Placement 读、写、排除权限的 caller 身份。三个独立投票进程不依赖房间 Host 的存活。手工启动且没有可信实例绑定的 Host，不能靠不可达、计时器或 gossip down 自动授予后继资格。
 
-Gateway 根据配置中的 hostID 选择托管房间或仅调用远端房间；Account 强制 caller-only。承担房间维护/审核 worker 的 caller 需要显式相应服务权限。Operator 继续独立工作流控制，不创建空置 Host。
+监督启动器将准确容器 ID、daemon ID、启动时间与 Host incarnation 持久绑定。Host 在启动门发布本次实际身份；绑定清单落盘后才放行数据库连接和注册。容器重启、身份变化、daemon 变化、特权或宿主 PID 模式均拒绝使用原绑定。删除只针对完整容器 ID，且必须确认实例实际不存在。
 
-本地/测试配置生成示例：
+Gateway 在建立任何 Host 数据库连接池前生成一次 Actor 配置，所有 PostgreSQL 连接使用同一 incarnation 的 `application_name`：`imva:` 加完整 32 位十六进制身份，共 37 个 ASCII 字节；重连沿用该值。标识用于准确定位会话，不是排除证明。
 
-```sh
-python3 IMV2/scripts/prepare_v2_room_actor_configuration.py \
-  --output-dir /tmp/imv2-room-topology \
-  --host actor-host=actor-host:7337 \
-  --caller gateway=gateway:7337 --worker-caller gateway \
-  --caller account=account:7338 --shards rooms-primary \
-  --mount-root /run/im-v2-room-actor
-```
+恢复执行顺序：
 
-每个容器只挂载自己的 node 子目录。CA 私钥不挂入服务，已有输出目录不会被覆盖。默认本地启动脚本会创建并保留自己的 Host/caller 身份；此生成器的自签 CA 用于隔离验证，正式部署通过现有 secret provisioning 提供材料。
+1. 向多数派复核准确旧身份，持久保存稳定操作 ID。
+2. 可信部署后端不可逆排除旧容器，阻止旧 incarnation 再连接。
+3. 在部署清单覆盖的每个物理 PostgreSQL 结束旧会话并重新确认不存在；共享目标只收尾一次。
+4. 向多数派提交准确身份的退役，再取消指向该退役身份的待迁移引用。
+5. 所有已知故障 Host 先退役，再选择已注册且获准访问相同数据 shard 的后继。
+6. 接管完成、旧身份不再持有归属或迁移引用后，才标记持久恢复操作完成。
 
-新库使用 `im-v2-current-68` canonical schema，与 `V2SchemaReadiness.currentSchemaID` 一致；不提供混合 schema 或历史在线迁移。所有重建和故障脚本只针对显式可丢弃实例。
+数据库收尾核对完整 incarnation、PID 与 backend start，使用等待实际退出的 `pg_terminate_backend`；信号发送成功不等于收尾完成。观察连接不得使用旧身份或事务快照。当前明确拒绝 prepared transactions，避免两阶段事务在会话结束后继续存在。数据库不可用、权限错误、取消或超时都不能推进归属。
 
-## 观测与验证
+`V2RoomHostExclusionProof` 是包内原生能力，不能从 RPC 数据构造。证书绑定准确 Host/incarnation、shard、控制组及稳定操作 ID，由专用排除身份签名。旧证明重放不能退役新 incarnation；跨 shard 部分完成沿用原操作继续，不伪造跨 shard 原子提交。
 
-私有 metrics 入口导出 `im_v2_room_actor_*` 固定维度指标：本地 active/pending/restoring/retiring rooms、激活等待者、命令许可当前数/字节及进程峰值、reservation，以及 Directory 的缓存/解析状态。outstanding 包括排队、执行和等待核对的命令，不能解释成纯等待队列；caller-only 节点省略 Host 指标，缺少观测不能当作零。send/receipt 的既有 batch 指标汇总实际物理 owner。
+恢复日志使用 PB、SHA-256、独占文件锁、原子替换和文件/目录 fsync。正常 open 不重建丢失或损坏的历史。Supervisor 重启先收尾并退役待恢复身份，再放行显式配置的新代次，随后继续接管。新代次使用新的启动门、意图和清单；禁止手工重启旧绑定容器。全体 Host 都退役时保持不可用，清除失效后继引用后，新代次才能注册恢复。
 
-[验证证据](virtual-actor/README.md)区分真实 PostgreSQL、独立进程与 Linux 应用栈。故障入口与具体断言见[故障验证说明](virtual-actor/v1-fault-harness.md)；相对性能配置与尚未完成的测量见[基线协议](virtual-actor/v1-baseline-protocol.md)。
+Supervisor 串行持有一个长期 `V2RoomHostControlSession`，用于检查、退役和接管。不会每轮重建 ClusterSystem；失败启动先完整关闭再重试，正常退出先取消并等待实际工作、关闭控制会话，再释放库存、日志、HTTP 和 SQL 资源。运维 CLI 的独立短期检查仍在自己的进程内创建并关闭客户端。
+
+部署步骤和完整配置见 [Host 监督部署说明](../../IMV2/docs/10-operations/room-host-supervision.md)。Docker Engine 的 Unix socket HTTP 请求显式提供 Host 头；该 JSON 属于部署 API，不进入 Actor 消息协议。
+
+## 控制历史与容量
+
+控制日志使用绝对索引，累计 4,096 条新的已提交日志后可以压缩；在途本地回复和未提交后缀不能被丢弃。落后投票节点通过已认证 PB 分块安装快照，单块最多 512 KiB，完整应用快照最多 16 MiB。完整摘要、分组、任期、索引及已有提交事实确认并持久化后才接受安装，再通过新多数确认提供线性一致读取。
+
+控制请求把首次提交的 `originRevision` 与请求 ID、命令类型一起固定进 PB 和持久回执。刷新 CAS 不能改写该版本。公开迁移接口要求调用方从首次已提交检查取得并保存该版本，重试和调用方重启后沿用；不接受缺少此字段的旧协议。
+
+应用状态在每个绝对已提交日志索引 4,096 的倍数执行同一回收规则，各副本不会依据本地落盘时间决定回收边界。滚动基点保留原 bootstrap 摘要，保留最近 2,048 份成功结果，以及当前注册、待完成迁移和最新相关终止步骤仍引用的旧证明。两次回收之间最多再增长 4,095 份成功结果；旧证明按固定 Host/分区数量有界，不随历史运行轮数增长。落盘压缩可以独立发生，不改变回收或 CAS 判定。物理日志达到 4,096 条已提交记录或 8 MiB 已提交载荷时尝试压缩；尚未完成的本地回复继续阻止压缩，避免大拓扑的完整 CAS 快照先耗尽 64 MiB 文件上限。
+
+近期回执仍返回原结果快照；单独保留的早期证明确认原操作已提交，并返回当前已提交状态。已经没有引用、且首次版本低于滚动基点的请求返回 `requestExpired`，不重新执行。仍在进行的旧迁移依据保留的首次撤回证明完成或取消。过期但未被接受的注册，仅在多数派确认同一前任仍已退役时，生成新请求身份重试；已接受的当前注册不会因历史回收失去退役证明。
+
+检查点仍有 65,536 份记录和 16 MiB 的防御性上限。状态机为新生命周期工作预留终止记录和编码空间，容量不足拒绝新控制步骤；已承诺的收尾及回执证明仍保留。拒绝结果与 barrier 不进入成功归档。业务消息的持久成功结果不受此控制归档回收影响。
+
+`IMV2PlacementControlApp --inspect` 从真实多数派输出每个 shard 的归属、注册、迁移及归档数量/字节/终止预留。占用加预留达到任一上限 80% 时标记 `nearCapacity`；不能用落后副本或 Gateway 缓存替代成功结果。各 shard 单独线性一致，不构成跨 shard 原子读取。
+
+监督代次记录回收已接入：成功监控轮次后仅处理已被新实例替换、且不再被注册/Owner/迁移/待恢复意图引用的旧代次。重新核对 Docker 不可逆排除和全部 SQL 会话收尾后，原子修改可写私有部署文档，记录完整绑定及稳定删除 ID；关闭实际文件工作后删除准确旧文件并同步目录。中途重启先继续删除队列，再放行启动。当前和待删除条目合计上限 256，已完成历史不持续累积。最新文件占用拒删及两种删除中断检查通过。
+
+**改造已完成。** 当前生产源码与冻结的 Linux 构建源码逐文件一致；Gateway、Account、Operator、控制节点、监督服务及业务验收入口的六个 Release 产品均编译成功。最新协议下，真实提交后崩溃、数据库收尾阻断、监督服务重启、未知发送重放、显式代次替换及旧记录实际回收均通过。证据见 `/private/tmp/imv2-native-supervisor-final-20261012/completion-audit.json` 和 `run-11.json`。没有执行压测，不由功能验收推导容量。
+
+## 实际验证证据
+
+仅运行受影响检查；本次没有吞吐负载或压力测试。已通过的非相关检查不重复运行。
+
+| 场景 | 实际结果 |
+| --- | --- |
+| 数据库短断连、同会话标识重连、数据库进程重启 | 归属及 epoch 不变，另一 Owner 继续落盘，恢复后消息/成功结果各一次 |
+| 正常忙碌 SIGTERM 与新 incarnation 注册 | 等待真实 SQL 完成，Host 正常退出，注册退役后再恢复；原 Gateway 一次重放 |
+| 真正提交后、ACK 前整个 Host 退出 | 客户端观察未知结果，SQL 消息和成功结果各一行 |
+| PostgreSQL 暂停期间排除旧 Host | 旧容器已删除，但数据库未收尾前不推进归属、不完成恢复日志 |
+| Supervisor 被强杀并重启 | 沿用原持久操作 ID，完成数据库收尾、退役及健康 Host 接管 |
+| 原 caller 重试未知发送 | 保留原 Directory，一次逻辑重试返回相同消息 ID，数据库仍只有一条 |
+| Host 短暂网络分区 | 三次实际多数派读取均保留原 Owner/epoch，未产生排除意图 |
+| 受监督显式代次替换 | Supervisor 正常退出而 Host 继续运行；追加初始化后准确排除前任，新 incarnation 注册并推进 epoch |
+| 旧代次实际回收 | 旧条目移出活动清单，删除队列完成，旧启动意图/实例清单/启动门均已不存在 |
+| 回收中途重启与异常文件 | 部分文件删除和全部删除后均可续作；摘要损坏、仍持有的文件锁及不明文件拒绝删除 |
+| 控制日志按载荷压缩 | 未满条数时可按载荷压缩；未完成的回复阻止压缩，恢复后保留原成功证明 |
+| 全部 Host 已退役且待迁移后继失效 | 不授予虚假归属；取消失效引用后，新代次注册并接管，针对性检查通过 |
+
+真实崩溃与代次替换入口为 `IMV2/scripts/test_v2_native_host_crash.py`，要求随机独立 `colima-imv2-native-*` context、固定源快照及三个成功构建的 Linux Release 产品摘要。最新结果保存在 `/private/tmp/imv2-native-supervisor-final-20261012/run-11.json`，`crashTakeoverVerified`、`supervisorRestartResumed`、`generationReplacementVerified`、`generationRetentionVerified` 均为 true；该轮容器、网络和私有配置均已清理。R9 是滚动归档前的旧证据，R10 在构建摘要校验阶段拒绝启动，没有进入运行时验证；不能把它们当作本轮通过记录。
+
+之前通过的数据库边界证据为 `/private/tmp/imv2-native-database-edges-20261012/edge-result/result.json`；完整 Linux 正常停机及应用栈证据为 `/private/tmp/imv2-native-linux-app-20261012/runs/run-bed1a6c43f4b4ac199a0e7e3e6ffecab/result.json`。它们分别证明自己的场景；当前崩溃证据单独取得，不由旧正常退出结果推导。

@@ -83,10 +83,6 @@
       "owner": "V1"
     },
     {
-      "path": "IMV2/scripts/test_v2_virtual_actor_multihost_probe.py",
-      "owner": "V1"
-    },
-    {
       "path": "IMV2/scripts/test_virtual_actor_capacity_assessment.py",
       "owner": "V1"
     },

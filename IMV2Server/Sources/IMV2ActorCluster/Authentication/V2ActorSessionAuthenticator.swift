@@ -198,6 +198,22 @@ public actor V2ActorSessionAuthenticator {
 
     private func authorize(_ call: V2ActorAuthenticatedCall, peer: V2ActorTrustedService) throws {
         switch call.request {
+        case .placementWrite(let request):
+            guard call.principal == .service, peer.permissions.contains(.placementWrite), request.isBounded else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        case .placementRead(let request):
+            guard call.principal == .service, peer.permissions.contains(.placementRead), request.isBounded else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        case .placementRaft(let request):
+            guard call.principal == .service, peer.permissions.contains(.placementVote), request.isBounded else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        case .drainPlacement(let request):
+            guard call.principal == .service, peer.permissions.contains(.roomCoordination), request.isBounded else {
+                throw V2ActorAuthenticationError.forbidden
+            }
         case .forwardPair(let token, let pair):
             guard call.principal == .service, peer.permissions.contains(.roomCoordination) else {
                 throw V2ActorAuthenticationError.forbidden

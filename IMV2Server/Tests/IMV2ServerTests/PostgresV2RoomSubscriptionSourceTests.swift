@@ -12,15 +12,14 @@ import IMV2ServerApplication
 struct PostgresV2RoomSubscriptionSourceTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func largeGroupSnapshotIncludesEveryTrackedOnlineMember() async throws {
-        try await withSubscriptionSourceDatabase { database, sql, schema in
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
             let room = RoomID(uuid: UUID())
             let users = (0..<V2GroupCapacityPolicy.largeMaximumMembers).map { _ in UUID() }
             let tracked = Set(users.map { UserID(uuid: $0) })
-            let activation = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
+            let (activation, lifetime) = try await activations.activate(room)
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id,room_kind,capacity_class) VALUES(\(bind: room.uuidValue!),'source','standard','group','large')").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) SELECT \(bind: room.uuidValue!),user_id,0 FROM unnest(\(bind: users)::uuid[]) members(user_id)").run()
-            try await insertSubscriptionLease(sql: sql, schema: schema, activation: activation)
-            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, schema: schema)
+            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema)
             let snapshot = try await source.snapshot(roomID: room, owner: activation.owner, trackedUserIDs: tracked)
             #expect(snapshot.members.count == users.count)
             #expect(Set(snapshot.members.map(\.userID)) == tracked)
@@ -29,27 +28,27 @@ struct PostgresV2RoomSubscriptionSourceTests {
     }
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func retirementDuringReadCutIsRejectedByFreshProof() async throws {
-        try await withSubscriptionSourceDatabase { database, sql, schema in
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
             let room = RoomID(uuid: UUID())
-            let activation = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
+            let (activation, lifetime) = try await activations.activate(room)
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room.uuidValue!),'source','standard')").run()
-            try await insertSubscriptionLease(sql: sql, schema: schema, activation: activation)
-            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, schema: schema)
+            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema)
             let cut = SubscriptionReadGate(), resume = SubscriptionReadGate()
             let reader = Task {
-                try await source.withLease { tx in
+                try await source.withOwnedCut { tx in
                     await cut.signal(); await resume.wait()
-                    // The RR cut still sees the predecessor, but that cannot
-                    // establish fresh authority after a committed retirement.
-                    let rows = try await tx.raw("SELECT host_id FROM \(unsafeRaw: schema).room_activation_leases WHERE room_id=\(bind: room.uuidValue!)").all()
+                    // The read cut can finish its SQL, but its native pin
+                    // must reject publication after Host withdrawal.
+                    let rows = try await tx.raw("SELECT room_id FROM \(unsafeRaw: schema).rooms WHERE room_id=\(bind: room.uuidValue!)").all()
                     return rows.count
                 }
             }
             await cut.wait()
             do {
-                try await sql.raw("UPDATE \(unsafeRaw: schema).room_activation_leases SET host_id=NULL,host_incarnation_id=NULL,expires_at=NULL WHERE room_id=\(bind: room.uuidValue!)").run()
+                let draining = await activations.drain(deadline: .now + .milliseconds(20))
+                #expect(!draining.completed && draining.proof == nil)
                 await resume.signal()
-                await #expect(throws: V2RoomActivationLeaseError.activationChanged) { try await reader.value }
+                await #expect(throws: V2RoomCallFailure.notAccepted(.staleActivation)) { try await reader.value }
             } catch {
                 await resume.signal(); _ = try? await reader.value; throw error
             }
@@ -58,13 +57,12 @@ struct PostgresV2RoomSubscriptionSourceTests {
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func snapshotAndPageDoNotWaitForRoomWriteFence() async throws {
-        try await withSubscriptionSourceDatabase { database, sql, schema in
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
             let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
-            let activation = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
+            let (activation, lifetime) = try await activations.activate(room)
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room.uuidValue!),'source','standard')").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room.uuidValue!),\(bind: user.uuidValue!),0)").run()
-            try await insertSubscriptionLease(sql: sql, schema: schema, activation: activation)
-            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, schema: schema)
+            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema)
             let locked = SubscriptionReadGate(), release = SubscriptionReadGate()
             let writer = Task {
                 try await database.transaction { transaction in
@@ -92,9 +90,9 @@ struct PostgresV2RoomSubscriptionSourceTests {
             let updated = try await source.snapshot(roomID: room, owner: activation.owner, trackedUserIDs: [user])
             #expect(updated.highWatermark == 1 && updated.membershipRevision == 1)
             #expect(updated.members.first?.authorized == false)
-            try await sql.raw("UPDATE \(unsafeRaw: schema).room_activation_leases SET activation_epoch=activation_epoch+1 WHERE room_id=\(bind: room.uuidValue!)").run()
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: room.uuidValue!)").run()
 
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 try await source.read(roomID: room, owner: activation.owner, afterRoomSequence: 1, trackedUserIDs: [user], limit: 64)
             }
         }
@@ -102,7 +100,7 @@ struct PostgresV2RoomSubscriptionSourceTests {
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func ordinaryMessageQueryDoesNotExecutePerViewerMembershipJoins() async throws {
-        try await withSubscriptionSourceDatabase { database, sql, schema in
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
             let room = UUID(), users = (0..<32).map { _ in UUID() }
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id,room_sequence) VALUES(\(bind: room),'source','standard',32)").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) SELECT \(bind: room),user_id,0 FROM unnest(\(bind: users)::uuid[]) users(user_id)").run()
@@ -112,8 +110,8 @@ struct PostgresV2RoomSubscriptionSourceTests {
                     jsonb_build_object('event_type','message.accepted','room_id',\(bind: room.uuidString),'room_sequence',sequence),0,now()
                 FROM generate_series(1,32) sequence
                 """).run()
-            let activation = try roomSubscriptionFixtureActivation(roomID: RoomID(uuid: room), ownerEpoch: 0)
-            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, schema: schema)
+            let (activation, lifetime) = try await activations.activate(RoomID(uuid: room))
+            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema)
             let query = source.readQuery(room: room, users: users, after: 0, limit: 64)
             let plan = try await sql.raw("EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) \(query)").all()
                 .map { try $0.decode(column: "QUERY PLAN", as: String.self) }.joined(separator: "\n")
@@ -125,7 +123,6 @@ struct PostgresV2RoomSubscriptionSourceTests {
             // but PostgreSQL must never execute their table scans for an
             // ordinary-message page, regardless of the 32 tracked viewers.
             #expect(membershipScans.allSatisfy { $0.contains("never executed") })
-            try await insertSubscriptionLease(sql: sql, schema: schema, activation: activation)
             let page = try await source.read(roomID: RoomID(uuid: room), owner: try .init(shardID: "source", epoch: 0),
                 afterRoomSequence: 0, trackedUserIDs: Set(users.map { UserID(uuid: $0) }), limit: 64)
             #expect(page.records.count == 32)
@@ -135,15 +132,14 @@ struct PostgresV2RoomSubscriptionSourceTests {
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func historicalControlsCompactMessagesAndOwnerFence() async throws {
-        try await withSubscriptionSourceDatabase { database, sql, schema in
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
             let room = UUID(), user = UUID(), other = UUID()
             let roomID = RoomID(uuid: room), userID = UserID(uuid: user), otherID = UserID(uuid: other)
             let owner = try V2RoomDataOwner(shardID: "source", epoch: 0)
-            let activation = try roomSubscriptionFixtureActivation(roomID: RoomID(uuid: room), ownerEpoch: 0)
-            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, schema: schema)
+            let (activation, lifetime) = try await activations.activate(RoomID(uuid: room))
+            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema)
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room),'source','standard')").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room),\(bind: user),0),(\(bind: room),\(bind: other),0)").run()
-            try await insertSubscriptionLease(sql: sql, schema: schema, activation: activation)
             let tracked: Set<UserID> = [userID, otherID]
             let snapshot = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: tracked)
             #expect(snapshot.highWatermark == 0)
@@ -200,7 +196,7 @@ struct PostgresV2RoomSubscriptionSourceTests {
                     #expect(delivery.deliverySequence > 1 && event.recipientUserIDs.isEmpty)
                 }
             }
-            let headOnly = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, schema: schema, maximumOnlineBodyBytes: 1)
+            let headOnly = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema, maximumOnlineBodyBytes: 1)
             let boundedPage = try await headOnly.read(roomID: roomID, owner: owner,
                 afterRoomSequence: 0, trackedUserIDs: tracked, limit: 64)
             #expect(boundedPage.records.count == 5 && boundedPage.records.allSatisfy { !$0.hasOnlineBody })
@@ -224,29 +220,19 @@ struct PostgresV2RoomSubscriptionSourceTests {
                 try await source.read(roomID: roomID, owner: owner, afterRoomSequence: 6, trackedUserIDs: tracked, limit: 64)
             }
             #expect(snapshot.remainingLeaseMilliseconds > 0 && snapshot.remainingLeaseMilliseconds <= 60_000)
-            let wrongActivation = try roomSubscriptionFixtureActivation(roomID: roomID, ownerEpoch: 0)
-            let fenced = try PostgresV2RoomSubscriptionSource(database: database, activation: wrongActivation, schema: schema)
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                try await fenced.snapshot(roomID: roomID, owner: owner, trackedUserIDs: tracked)
+            let wrongActivation = V2RoomActivationToken(roomID: roomID, owner: owner,
+                activationEpoch: try .init(activation.activationEpoch.rawValue + 1), host: activation.host)
+            #expect(throws: V2RoomSubscriptionSourceError.wrongOwner) {
+                try PostgresV2RoomSubscriptionSource(database: database, activation: wrongActivation,
+                    lifetime: lifetime, schema: schema)
             }
-            try await sql.raw("UPDATE \(unsafeRaw: schema).room_activation_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE room_id=\(bind: room)").run()
-
-            await #expect(throws: V2RoomActivationLeaseError.leaseExpired) {
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: room)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: tracked)
             }
 
         }
     }
-}
-
-private func insertSubscriptionLease(sql: any SQLDatabase, schema: String, activation: V2RoomActivationToken) async throws {
-    try await sql.raw("""
-        INSERT INTO \(unsafeRaw: schema).room_activation_leases
-        (room_id,activation_epoch,owner_shard_id,owner_epoch,host_id,host_incarnation_id,expires_at)
-        VALUES(\(bind: activation.roomID.uuidValue!),\(bind: activation.activationEpoch.rawValue),
-        \(bind: activation.owner.shardID),\(bind: activation.owner.epoch),\(bind: activation.host.hostID.rawValue),
-        \(bind: activation.host.incarnationID),clock_timestamp()+interval '60 seconds')
-        """).run()
 }
 
 private actor SubscriptionReadGate {
@@ -263,9 +249,11 @@ private actor SubscriptionReadGate {
     }
 }
 
-private func withSubscriptionSourceDatabase(_ body: (any Database, any SQLDatabase, String) async throws -> Void) async throws {
+private func withSubscriptionSourceDatabase(_ body: @escaping @Sendable (any Database, any SQLDatabase, String, V2NativeSubscriptionTestHost) async throws -> Void) async throws {
     try await withUserEventDatabase { database, sql, schema in
         try await sql.raw("CREATE TABLE \(unsafeRaw: schema).realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
-        try await body(database, sql, schema)
+        try await withNativeSubscriptionTestHost(shardID: "source") { activations in
+            try await body(database, sql, schema, activations)
+        }
     }
 }

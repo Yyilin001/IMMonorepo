@@ -831,528 +831,520 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 operationID: try .init("00000000-0000-0000-0000-00000000c005"),
                 targetUserID: try .init(memberThreeUUID.uuidString)
             , firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-            let activationScope: V2RoomActivationWriteScope?
-            if actorScoped {
-                let activations = PostgresV2RoomActivationStore(database: resources.database(.psql))
-                let owner = try V2RoomDataOwner(shardID: "rooms-primary", epoch: 0)
-                let host = V2ActorHostIdentity(
-                    hostID: try .init("direct-log-test"), incarnationID: UUID()
-                )
-                var tokens: [V2RoomActivationToken] = []
-                for roomID in [room.roomID, secondRoom.roomID] {
-                    guard case .acquired(let lease) = try await activations.acquire(
-                        roomID: roomID, owner: owner, host: host, duration: .init(30_000)
-                    ) else { throw V2RoomActivationLeaseError.activationChanged }
-                    tokens.append(lease.token)
+            @Sendable func exercise(activationScope: V2RoomActivationWriteScope?) async throws {
+                func selected(_ local: PostgresV2RoomWriteStore) -> V2PolicyAuthorizedTestWriteStore {
+                    .init(database: resources.database(.psql), controlDatabase: resources.database(identityDatabaseID),
+                        store: local, shardID: "rooms-primary", epoch: 0, activationScope: activationScope)
                 }
-                activationScope = try .init(tokens: tokens)
-            } else {
-                activationScope = nil
-            }
-            func selected(_ local: PostgresV2RoomWriteStore) -> V2PolicyAuthorizedTestWriteStore {
-                .init(database: resources.database(.psql), controlDatabase: resources.database(identityDatabaseID),
-                    store: local, shardID: "rooms-primary", epoch: 0, activationScope: activationScope)
-            }
-            let isolatingWriterLocal = PostgresV2RoomWriteStore(
-                database: resources.database(.psql),
-                strangerMessagePolicy: try .init(
-                    maximumMessagesPerWindow: 10, window: 86_400
-                ),
-                contentReviewMode: .disabled)
-            let isolatingWriter = selected(isolatingWriterLocal)
-            let legacyProfile = try V2CapacityProfile(
-                id: "legacy-test",
-                limits: profile.limits
-            )
-            let invalidProfileRequest = V2RoomWriteRequest(
-                command: try .init(roomID: secondRoom.roomID, senderUserID: senderID,
-                    clientMessageID: .init("00000000-0000-0000-0000-00000000c054"),
-                    text: "错误配置输入", limits: .init(maxUTF8Bytes: 64)),
-                capacityProfile: legacyProfile,
-                identifiers: try .init(messageID: .init("00000000-0000-0000-0000-00000000c055"),
-                    eventID: .init("00000000-0000-0000-0000-00000000c056")), now: now)
-            await #expect(throws: V2RoomWriteStoreError.capacityProfileMismatch) {
-                try await isolatingWriter.accept(command: invalidProfileRequest.command,
-                    capacityProfile: invalidProfileRequest.capacityProfile,
-                    identifiers: invalidProfileRequest.identifiers, now: invalidProfileRequest.now)
-            }
-            let isolatedProfileWrites = try await sql.raw("""
-                SELECT COUNT(*)::bigint AS value
-                FROM im_v2.messages
-                WHERE message_id IN (
-                    '00000000-0000-0000-0000-00000000c051'::uuid,
-                    '00000000-0000-0000-0000-00000000c055'::uuid
+                let isolatingWriterLocal = PostgresV2RoomWriteStore(
+                    database: resources.database(.psql),
+                    strangerMessagePolicy: try .init(
+                        maximumMessagesPerWindow: 10, window: 86_400
+                    ),
+                    contentReviewMode: .disabled)
+                let isolatingWriter = selected(isolatingWriterLocal)
+                let legacyProfile = try V2CapacityProfile(
+                    id: "legacy-test",
+                    limits: profile.limits
                 )
-                """).first(decoding: CountRow.self)
-            #expect(isolatedProfileWrites?.value == 0)
-            let writerLocal = PostgresV2RoomWriteStore(
-                database: resources.database(.psql),
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled)
-            let writer = selected(writerLocal)
-            let messages = V2SendMessageService(
-                store: writer, capacityProfile: profile,
-                limits: try .init(maxUTF8Bytes: 64), now: { now }
-            )
-            // Each room initializes its actual policy state before its independent write.
-            let coldRequests: [V2RoomWriteRequest] = [
-                .init(
-                    command: try .init(
-                        roomID: room.roomID, senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c030"),
-                        text: "第一条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c031"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c032")
-                    ),
-                    now: now
-                ),
-                .init(
-                    command: try .init(
-                        roomID: secondRoom.roomID, senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c034"),
-                        text: "第二条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c035"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c036")
-                    ),
-                    now: now
-                ),
-            ]
-            var coldBatched: [V2SendMessageOutcome] = []
-            for request in coldRequests {
-                coldBatched.append(try await writer.accept(command: request.command,
-                    capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
-            }
-            #expect(coldBatched.allSatisfy {
-                if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
-                return false
-            })
-            #expect(try await count("im_v2.stranger_message_windows", on: sql) == 2)
-            let coldSources = Set(["00000000-0000-0000-0000-00000000C032", "00000000-0000-0000-0000-00000000C036"])
-            let coldOutbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
-            let coldProjector = try PostgresV2UserStateEventProjector(database: resources.database(.psql))
-            let deliveryTime = now.addingTimeInterval(60)
-            let coldLeases = try await deliverUserStateEvents(coldOutbox, projector: coldProjector, now: deliveryTime, leaseDuration: 30, limit: 1024)
-                .filter { coldSources.contains($0.event.sourceEventID.rawValue) }
-            #expect(coldLeases.count == 4)
-            let coldProjectionRows = try await sql.raw("""
-                SELECT user_id, user_sync_sequence, source_event_id, projection_kind
-                FROM im_v2.user_sync_log
-                WHERE source_event_id IN
-                    ('00000000-0000-0000-0000-00000000c032'::uuid,
-                     '00000000-0000-0000-0000-00000000c036'::uuid)
-                ORDER BY user_id, user_sync_sequence
-                """).all(decoding: DirectBatchProjectionSyncAssertionRow.self)
-            #expect(coldProjectionRows.count == 4)
-            #expect(coldProjectionRows.filter {
-                $0.userID == senderUUID
-                    && $0.projectionKind == "direct_sending_capability"
-            }.count == 2)
-            #expect(coldProjectionRows.filter {
-                $0.projectionKind == "direct_room_profile"
-            }.count == 2)
-            let senderCapabilitySequences = coldProjectionRows
-                .filter { $0.userID == senderUUID }
-                .map(\.userSyncSequence)
-            #expect(senderCapabilitySequences.count == 2)
-            if senderCapabilitySequences.count == 2 {
-                #expect(senderCapabilitySequences[1] == senderCapabilitySequences[0] + 1)
-            }
-            let coldPairStates = try await sql.raw("""
-                SELECT lower_profile_visible_to_higher,
-                       higher_profile_visible_to_lower,
-                       lower_can_send, higher_can_send
-                FROM im_v2.direct_room_pairs
-                WHERE room_id IN
-                    (\(bind: UUID(uuidString: room.roomID.rawValue)! ),
-                     \(bind: UUID(uuidString: secondRoom.roomID.rawValue)! ))
-                """).all(decoding: DirectPairProjectionStateAssertionRow.self)
-            #expect(coldPairStates.count == 2)
-            #expect(coldPairStates.allSatisfy {
-                $0.lowerProfileVisibleToHigher || $0.higherProfileVisibleToLower
-            })
-            #expect(coldPairStates.allSatisfy {
-                $0.lowerCanSend == true || $0.higherCanSend == true
-            })
-            let clientID = try ClientMessageID("00000000-0000-0000-0000-00000000c003")
-            guard case .accepted(let accepted) = try await messages.send(.init(
-                roomID: room.roomID, actorUserID: senderID, clientMessageID: clientID,
-                text: "只写一次的私聊"
-            )) else {
-                Issue.record("expected room-log acceptance")
-                throw CancellationError()
-            }
-
-            let replay = try await messages.send(.init(
-                roomID: room.roomID, actorUserID: senderID, clientMessageID: clientID,
-                text: "只写一次的私聊"
-            ))
-            guard case .idempotent(let replayed) = replay else {
-                Issue.record("expected idempotent replay")
-                throw CancellationError()
-            }
-            #expect(replayed == accepted.receipt)
-
-            // A later policy mutation must still be fenced by the durable
-            // user policy revision inside the write transaction; a stale
-            // cache entry must never authorize this send.
-            guard case .accepted = try await messages.send(.init(
-                roomID: room.roomID, actorUserID: senderID,
-                clientMessageID: try .init("00000000-0000-0000-0000-00000000c004"),
-                text: "缓存回填后的第二条消息"
-            )) else {
-                Issue.record("expected second room-log acceptance")
-                throw CancellationError()
-            }
-
-            // Friend relationships make the two established conversations
-            // eligible without changing their room-event history.  The test
-            // removes them immediately after the append so the stale-policy
-            // assertion below retains its original stranger semantics.
-            try await sql.raw("""
-                INSERT INTO im_v2.user_relationships
-                    (lower_user_id, higher_user_id, state, requested_by_user_id, updated_at)
-                VALUES
-                    (\(bind: senderUUID), \(bind: memberTwoUUID), 'accepted', \(bind: senderUUID), \(bind: now)),
-                    (\(bind: senderUUID), \(bind: memberThreeUUID), 'accepted', \(bind: senderUUID), \(bind: now))
-                """).run()
-            try await sql.raw("""
-                UPDATE im_v2.direct_room_pairs
-                SET direct_policy_revision = direct_policy_revision + 1
-                WHERE room_id IN (\(bind: UUID(uuidString: room.roomID.rawValue)! ),
-                                  \(bind: UUID(uuidString: secondRoom.roomID.rawValue)! ))
-                """).run()
-            // The direct-policy revisions above intentionally invalidate the
-            // old cache entries. Warm only the first room, then mix that cache
-            // hit with a second-room miss, exercising the complete-path fallback.
-            guard case .accepted = try await messages.send(.init(
-                roomID: room.roomID, actorUserID: senderID,
-                clientMessageID: try .init("00000000-0000-0000-0000-00000000c021"),
-                text: "关系变更后的缓存回填"
-            )) else {
-                Issue.record("expected first post-revision cache warm acceptance")
-                throw CancellationError()
-            }
-            let mixedPolicyRequests: [V2RoomWriteRequest] = [
-                .init(
-                    command: try .init(
-                        roomID: room.roomID,
-                        senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c040"),
-                        text: "缓存命中输入",
-                        limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c041"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c042")
-                    ),
-                    now: now
-                ),
-                .init(
-                    command: try .init(
-                        roomID: secondRoom.roomID,
-                        senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c044"),
-                        text: "缓存未命中输入",
-                        limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c045"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c046")
-                    ),
-                    now: now
-                ),
-            ]
-            var mixedPolicyBatch: [V2SendMessageOutcome] = []
-            for request in mixedPolicyRequests {
-                mixedPolicyBatch.append(try await writer.accept(command: request.command,
-                    capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
-            }
-            #expect(mixedPolicyBatch.allSatisfy {
-                if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
-                return false
-            })
-            let projectionRecordsBeforeSteadyStateBatch = try await sql.raw("""
-                SELECT COUNT(*)::bigint AS value
-                FROM im_v2.user_sync_log
-                WHERE projection_kind IN ('direct_sending_capability', 'direct_room_profile')
-                """).first(decoding: CountRow.self)
-            if actorScoped {
-                let beforeMessages = try await count("im_v2.messages", on: sql)
-                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: secondRoom.roomID.uuidValue!)").run()
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
-                    let request = coldRequests[1]
-                    _ = try await writer.accept(command: request.command, capacityProfile: request.capacityProfile,
-                        identifiers: request.identifiers, now: request.now)
+                let invalidProfileRequest = V2RoomWriteRequest(
+                    command: try .init(roomID: secondRoom.roomID, senderUserID: senderID,
+                        clientMessageID: .init("00000000-0000-0000-0000-00000000c054"),
+                        text: "错误配置输入", limits: .init(maxUTF8Bytes: 64)),
+                    capacityProfile: legacyProfile,
+                    identifiers: try .init(messageID: .init("00000000-0000-0000-0000-00000000c055"),
+                        eventID: .init("00000000-0000-0000-0000-00000000c056")), now: now)
+                await #expect(throws: V2RoomWriteStoreError.capacityProfileMismatch) {
+                    try await isolatingWriter.accept(command: invalidProfileRequest.command,
+                        capacityProfile: invalidProfileRequest.capacityProfile,
+                        identifiers: invalidProfileRequest.identifiers, now: invalidProfileRequest.now)
                 }
-                #expect(try await count("im_v2.messages", on: sql) == beforeMessages)
-                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=0 WHERE room_id=\(bind: secondRoom.roomID.uuidValue!)").run()
-            }
-            let steadyRequests: [V2RoomWriteRequest] = [
-                .init(
-                    command: try .init(
-                        roomID: room.roomID,
-                        senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c007"),
-                        text: "第一条批量消息",
-                        limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c008"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c009")
-                    ),
-                    now: now
-                ),
-                .init(
-                    command: try .init(
-                        roomID: secondRoom.roomID,
-                        senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c011"),
-                        text: "第二条批量消息",
-                        limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c012"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c013")
-                    ),
-                    now: now
-                ),
-            ]
-            var batched: [V2SendMessageOutcome] = []
-            for request in steadyRequests {
-                batched.append(try await writer.accept(command: request.command,
-                    capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
-            }
-            #expect(batched.allSatisfy {
-                if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
-                return false
-            })
-            let projectionRecordsAfterSteadyStateBatch = try await sql.raw("""
-                SELECT COUNT(*)::bigint AS value
-                FROM im_v2.user_sync_log
-                WHERE projection_kind IN ('direct_sending_capability', 'direct_room_profile')
-                """).first(decoding: CountRow.self)
-            #expect(
-                projectionRecordsAfterSteadyStateBatch?.value
-                    == projectionRecordsBeforeSteadyStateBatch?.value
-            )
-            // Sequential room turns preserve consecutive committed room sequences.
-            let sameRoomRequests: [V2RoomWriteRequest] = [
-                .init(
-                    command: try .init(
-                        roomID: room.roomID, senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c015"),
-                        text: "热点会话的第一条原子批消息",
-                        limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c016"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c017")
-                    ),
-                    now: now
-                ),
-                .init(
-                    command: try .init(
-                        roomID: room.roomID, senderUserID: senderID,
-                        clientMessageID: try .init("00000000-0000-0000-0000-00000000c019"),
-                        text: "热点会话的第二条原子批消息",
-                        limits: try .init(maxUTF8Bytes: 64)
-                    ),
-                    capacityProfile: profile,
-                    identifiers: try .init(
-                        messageID: .init("00000000-0000-0000-0000-00000000c01a"),
-                        eventID: .init("00000000-0000-0000-0000-00000000c01b")
-                    ),
-                    now: now
-                ),
-            ]
-            var sameRoomBatch: [V2SendMessageOutcome] = []
-            for request in sameRoomRequests {
-                sameRoomBatch.append(try await writer.accept(command: request.command,
-                    capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
-            }
-            guard case .accepted(let firstSameRoomMessage) = sameRoomBatch[0],
-                  case .accepted(let secondSameRoomMessage) = sameRoomBatch[1],
-
-                  secondSameRoomMessage.roomSequence == firstSameRoomMessage.roomSequence + 1
-            else {
-                Issue.record("expected ordered hot direct fallback acceptance")
-                throw CancellationError()
-            }
-            let hotRoomAdmission = try #require(try await sql.raw("""
-                SELECT command_window_used
-                FROM im_v2.room_admission
-                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
-                """).first(decoding: CapacityRow.self))
-            #expect(hotRoomAdmission.commandWindowUsed == 0)
-
-            try await sql.raw("""
-                DELETE FROM im_v2.user_relationships
-                WHERE lower_user_id = \(bind: senderUUID)
-                  AND higher_user_id IN (\(bind: memberTwoUUID), \(bind: memberThreeUUID))
-                """).run()
-
-            // Rich messages retain the existing CTE: the plain-message fast
-            // path must never silently skip a required moderation record.
-            let reviewingMessages = V2SendMessageService(
-                store: selected(PostgresV2RoomWriteStore(
+                let isolatedProfileWrites = try await sql.raw("""
+                    SELECT COUNT(*)::bigint AS value
+                    FROM im_v2.messages
+                    WHERE message_id IN (
+                        '00000000-0000-0000-0000-00000000c051'::uuid,
+                        '00000000-0000-0000-0000-00000000c055'::uuid
+                    )
+                    """).first(decoding: CountRow.self)
+                #expect(isolatedProfileWrites?.value == 0)
+                let writerLocal = PostgresV2RoomWriteStore(
                     database: resources.database(.psql),
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                    contentReviewMode: .enabled)),
-                capacityProfile: profile,
-                limits: try .init(maxUTF8Bytes: 64),
-                now: { now }
-            )
-            guard case .accepted = try await reviewingMessages.send(.init(
-                roomID: room.roomID, actorUserID: senderID,
-                clientMessageID: try .init("00000000-0000-0000-0000-00000000c00a"),
-                text: "审核路径仍保留完整持久化"
-            )) else {
-                Issue.record("expected reviewed room-log acceptance")
-                throw CancellationError()
-            }
-            #expect(try await count("im_v2.content_review_jobs", on: sql) == 1)
-
-            _ = try await PostgresV2AccountPreferenceOperationStore(database: resources.database(.psql), projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: policyOwners).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(try .init("00000000-0000-0000-0000-00000000c005")), value: .strangerMessage(.deny), now: now)
-            await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
-                _ = try await messages.send(.init(
-                    roomID: room.roomID, actorUserID: senderID,
-                    clientMessageID: .init("00000000-0000-0000-0000-00000000c006"),
-                    text: "策略变更后必须被拒绝"))
-            }
-            #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
-
-            let roomLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: resources.database(.psql)))
-            let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
-            let recipientPage = try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
-            #expect(senderPage.events.map(\.roomSequence) == [
-                accepted.roomSequence,
-                accepted.roomSequence + 1,
-                accepted.roomSequence + 2,
-                accepted.roomSequence + 3,
-                accepted.roomSequence + 4,
-                accepted.roomSequence + 5,
-                accepted.roomSequence + 6,
-                accepted.roomSequence + 7
-            ])
-            #expect(recipientPage.events == senderPage.events)
-            #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
-            let acceptedEventID = try #require(UUID(uuidString: senderPage.events.first?.sourceEventID.rawValue ?? ""))
-            let directMessageEvent = try #require(try await sql.raw("""
-                SELECT accepted_event_id, accepted_event_storage,
-                       accepted_membership_revision
-                FROM im_v2.messages
-                WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
-                """).first(decoding: DirectMessageRowEventRow.self))
-            #expect(directMessageEvent.acceptedEventID == acceptedEventID)
-            #expect(directMessageEvent.acceptedEventStorage == "message_row")
-            #expect(accepted.sourceEventID?.rawValue == acceptedEventID.uuidString)
-            // Direct-room creation commits its initial membership revision
-            // before the first accepted message. The row-source event must
-            // retain that exact historical fence rather than assuming zero.
-            #expect(directMessageEvent.acceptedMembershipRevision == 1)
-            #expect(accepted.acceptedMembershipRevision == 1)
-            #expect(try await count(
-                "im_v2.room_events WHERE event_id = '\(acceptedEventID.uuidString)'",
-                on: sql
-            ) == 0)
-
-            // The accepted event must continue to expose its original body
-            // after a later message revision changes the mutable row.
-            await #expect(throws: (any Error).self) {
-                try await sql.raw("""
-                    UPDATE im_v2.messages
-                    SET text_body = '没有 revision 的非法修改'
-                    WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
-                    """).run()
-            }
-            try await sql.raw("""
-                UPDATE im_v2.messages
-                SET text_body = '已编辑的当前内容', rich_entities = '[]'::jsonb,
-                    content_revision = 2
-                WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
-                """).run()
-            let recoveredAfterRevision = try await roomLog.pull(
-                roomID: room.roomID, actorUserID: senderID,
-                afterRoomSequence: accepted.roomSequence - 1, pageSize: 10
-            )
-            let originalPayload = String(
-                data: try #require(recoveredAfterRevision.events.first?.payload),
-                encoding: .utf8
-            )
-            #expect(originalPayload?.contains("只写一次的私聊") == true)
-            #expect(originalPayload?.contains("已编辑的当前内容") == false)
-            #expect(try await count("im_v2.message_content_versions", on: sql) == 1)
-            await #expect(throws: V2GroupEventLogError.actorNotMember) {
-                try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
-            }
-
-            #expect(try await count("im_v2.messages", on: sql) == 12)
-            // Eleven ordinary direct messages are materialized from the
-            // message row itself. The reviewed message intentionally retains
-            // the complete room-event write graph.
-            #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
-            #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
-            #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'message'", on: sql) == 0)
-            let roomAdmission = try #require(try await sql.raw("""
-                SELECT command_window_used
-                FROM im_v2.room_admission
-                WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
-                """).first(decoding: CapacityRow.self))
-            #expect(roomAdmission.commandWindowUsed == 0)
-
-            // Warm the actual cached append, then corrupt membership without
-            // changing its revision. A cache revision match must not authorize
-            // a third participant, and the conditional failure must roll back.
-            for _ in 0..<2 {
-                guard case .accepted = try await messages.send(.init(
-                    roomID: secondRoom.roomID, actorUserID: senderID,
-                    clientMessageID: .init(uuid: UUID()), text: "membership fence warmup"
+                    contentReviewMode: .disabled)
+                let writer = selected(writerLocal)
+                let messages = V2SendMessageService(
+                    store: writer, capacityProfile: profile,
+                    limits: try .init(maxUTF8Bytes: 64), now: { now }
+                )
+                // Each room initializes its actual policy state before its independent write.
+                let coldRequests: [V2RoomWriteRequest] = [
+                    .init(
+                        command: try .init(
+                            roomID: room.roomID, senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c030"),
+                            text: "第一条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c031"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c032")
+                        ),
+                        now: now
+                    ),
+                    .init(
+                        command: try .init(
+                            roomID: secondRoom.roomID, senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c034"),
+                            text: "第二条冷批量消息", limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c035"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c036")
+                        ),
+                        now: now
+                    ),
+                ]
+                var coldBatched: [V2SendMessageOutcome] = []
+                for request in coldRequests {
+                    coldBatched.append(try await writer.accept(command: request.command,
+                        capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
+                }
+                #expect(coldBatched.allSatisfy {
+                    if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
+                    return false
+                })
+                #expect(try await count("im_v2.stranger_message_windows", on: sql) == 2)
+                let coldSources = Set(["00000000-0000-0000-0000-00000000C032", "00000000-0000-0000-0000-00000000C036"])
+                let coldOutbox = try PostgresV2UserStateEventOutbox(database: resources.database(.psql))
+                let coldProjector = try PostgresV2UserStateEventProjector(database: resources.database(.psql))
+                let deliveryTime = now.addingTimeInterval(60)
+                let coldLeases = try await deliverUserStateEvents(coldOutbox, projector: coldProjector, now: deliveryTime, leaseDuration: 30, limit: 1024)
+                    .filter { coldSources.contains($0.event.sourceEventID.rawValue) }
+                #expect(coldLeases.count == 4)
+                let coldProjectionRows = try await sql.raw("""
+                    SELECT user_id, user_sync_sequence, source_event_id, projection_kind
+                    FROM im_v2.user_sync_log
+                    WHERE source_event_id IN
+                        ('00000000-0000-0000-0000-00000000c032'::uuid,
+                         '00000000-0000-0000-0000-00000000c036'::uuid)
+                    ORDER BY user_id, user_sync_sequence
+                    """).all(decoding: DirectBatchProjectionSyncAssertionRow.self)
+                #expect(coldProjectionRows.count == 4)
+                #expect(coldProjectionRows.filter {
+                    $0.userID == senderUUID
+                        && $0.projectionKind == "direct_sending_capability"
+                }.count == 2)
+                #expect(coldProjectionRows.filter {
+                    $0.projectionKind == "direct_room_profile"
+                }.count == 2)
+                let senderCapabilitySequences = coldProjectionRows
+                    .filter { $0.userID == senderUUID }
+                    .map(\.userSyncSequence)
+                #expect(senderCapabilitySequences.count == 2)
+                if senderCapabilitySequences.count == 2 {
+                    #expect(senderCapabilitySequences[1] == senderCapabilitySequences[0] + 1)
+                }
+                let coldPairStates = try await sql.raw("""
+                    SELECT lower_profile_visible_to_higher,
+                           higher_profile_visible_to_lower,
+                           lower_can_send, higher_can_send
+                    FROM im_v2.direct_room_pairs
+                    WHERE room_id IN
+                        (\(bind: UUID(uuidString: room.roomID.rawValue)! ),
+                         \(bind: UUID(uuidString: secondRoom.roomID.rawValue)! ))
+                    """).all(decoding: DirectPairProjectionStateAssertionRow.self)
+                #expect(coldPairStates.count == 2)
+                #expect(coldPairStates.allSatisfy {
+                    $0.lowerProfileVisibleToHigher || $0.higherProfileVisibleToLower
+                })
+                #expect(coldPairStates.allSatisfy {
+                    $0.lowerCanSend == true || $0.higherCanSend == true
+                })
+                let clientID = try ClientMessageID("00000000-0000-0000-0000-00000000c003")
+                guard case .accepted(let accepted) = try await messages.send(.init(
+                    roomID: room.roomID, actorUserID: senderID, clientMessageID: clientID,
+                    text: "只写一次的私聊"
                 )) else {
-                    Issue.record("expected membership-fence warmup acceptance")
+                    Issue.record("expected room-log acceptance")
                     throw CancellationError()
                 }
-            }
-            let secondRoomUUID = try #require(secondRoom.roomID.uuidValue)
-            try await sql.raw("""
-                INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
-                VALUES (\(bind: secondRoomUUID), \(bind: memberTwoUUID), 1)
-                """).run()
-            let beforeCorruptArtifacts = try await directWriteArtifactCounts(sql: sql)
-            let beforeCorruptSequence = try #require(try await sql.raw("""
-                SELECT room_sequence AS value FROM im_v2.rooms
-                WHERE room_id = \(bind: secondRoomUUID)
-                """).first(decoding: CountRow.self)).value
-            await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
-                try await messages.send(.init(
-                    roomID: secondRoom.roomID, actorUserID: senderID,
-                    clientMessageID: .init(uuid: UUID()), text: "must reject third member"
+
+                let replay = try await messages.send(.init(
+                    roomID: room.roomID, actorUserID: senderID, clientMessageID: clientID,
+                    text: "只写一次的私聊"
                 ))
-            }
-            #expect(try await directWriteArtifactCounts(sql: sql) == beforeCorruptArtifacts)
-            #expect(try await sql.raw("""
-                SELECT room_sequence AS value FROM im_v2.rooms
-                WHERE room_id = \(bind: secondRoomUUID)
-                """).first(decoding: CountRow.self)?.value == beforeCorruptSequence)
+                guard case .idempotent(let replayed) = replay else {
+                    Issue.record("expected idempotent replay")
+                    throw CancellationError()
+                }
+                #expect(replayed == accepted.receipt)
 
-            let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
-            try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
-            try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = 1 WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: memberTwoUUID)").run()
-            await #expect(throws: V2GroupEventLogError.actorNotMember) {
-                try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: 0, pageSize: 10)
-            }
+                // A later policy mutation must still be fenced by the durable
+                // user policy revision inside the write transaction; a stale
+                // cache entry must never authorize this send.
+                guard case .accepted = try await messages.send(.init(
+                    roomID: room.roomID, actorUserID: senderID,
+                    clientMessageID: try .init("00000000-0000-0000-0000-00000000c004"),
+                    text: "缓存回填后的第二条消息"
+                )) else {
+                    Issue.record("expected second room-log acceptance")
+                    throw CancellationError()
+                }
 
-            try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
+                // Friend relationships make the two established conversations
+                // eligible without changing their room-event history.  The test
+                // removes them immediately after the append so the stale-policy
+                // assertion below retains its original stranger semantics.
+                try await sql.raw("""
+                    INSERT INTO im_v2.user_relationships
+                        (lower_user_id, higher_user_id, state, requested_by_user_id, updated_at)
+                    VALUES
+                        (\(bind: senderUUID), \(bind: memberTwoUUID), 'accepted', \(bind: senderUUID), \(bind: now)),
+                        (\(bind: senderUUID), \(bind: memberThreeUUID), 'accepted', \(bind: senderUUID), \(bind: now))
+                    """).run()
+                try await sql.raw("""
+                    UPDATE im_v2.direct_room_pairs
+                    SET direct_policy_revision = direct_policy_revision + 1
+                    WHERE room_id IN (\(bind: UUID(uuidString: room.roomID.rawValue)! ),
+                                      \(bind: UUID(uuidString: secondRoom.roomID.rawValue)! ))
+                    """).run()
+                // The direct-policy revisions above intentionally invalidate the
+                // old cache entries. Warm only the first room, then mix that cache
+                // hit with a second-room miss, exercising the complete-path fallback.
+                guard case .accepted = try await messages.send(.init(
+                    roomID: room.roomID, actorUserID: senderID,
+                    clientMessageID: try .init("00000000-0000-0000-0000-00000000c021"),
+                    text: "关系变更后的缓存回填"
+                )) else {
+                    Issue.record("expected first post-revision cache warm acceptance")
+                    throw CancellationError()
+                }
+                let mixedPolicyRequests: [V2RoomWriteRequest] = [
+                    .init(
+                        command: try .init(
+                            roomID: room.roomID,
+                            senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c040"),
+                            text: "缓存命中输入",
+                            limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c041"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c042")
+                        ),
+                        now: now
+                    ),
+                    .init(
+                        command: try .init(
+                            roomID: secondRoom.roomID,
+                            senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c044"),
+                            text: "缓存未命中输入",
+                            limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c045"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c046")
+                        ),
+                        now: now
+                    ),
+                ]
+                var mixedPolicyBatch: [V2SendMessageOutcome] = []
+                for request in mixedPolicyRequests {
+                    mixedPolicyBatch.append(try await writer.accept(command: request.command,
+                        capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
+                }
+                #expect(mixedPolicyBatch.allSatisfy {
+                    if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
+                    return false
+                })
+                let projectionRecordsBeforeSteadyStateBatch = try await sql.raw("""
+                    SELECT COUNT(*)::bigint AS value
+                    FROM im_v2.user_sync_log
+                    WHERE projection_kind IN ('direct_sending_capability', 'direct_room_profile')
+                    """).first(decoding: CountRow.self)
+                if actorScoped {
+                    let beforeMessages = try await count("im_v2.messages", on: sql)
+                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: secondRoom.roomID.uuidValue!)").run()
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                        let request = coldRequests[1]
+                        _ = try await writer.accept(command: request.command, capacityProfile: request.capacityProfile,
+                            identifiers: request.identifiers, now: request.now)
+                    }
+                    #expect(try await count("im_v2.messages", on: sql) == beforeMessages)
+                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=0 WHERE room_id=\(bind: secondRoom.roomID.uuidValue!)").run()
+                }
+                let steadyRequests: [V2RoomWriteRequest] = [
+                    .init(
+                        command: try .init(
+                            roomID: room.roomID,
+                            senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c007"),
+                            text: "第一条批量消息",
+                            limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c008"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c009")
+                        ),
+                        now: now
+                    ),
+                    .init(
+                        command: try .init(
+                            roomID: secondRoom.roomID,
+                            senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c011"),
+                            text: "第二条批量消息",
+                            limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c012"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c013")
+                        ),
+                        now: now
+                    ),
+                ]
+                var batched: [V2SendMessageOutcome] = []
+                for request in steadyRequests {
+                    batched.append(try await writer.accept(command: request.command,
+                        capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
+                }
+                #expect(batched.allSatisfy {
+                    if case .accepted(let message) = $0 { return message.roomSequence > 0 && message.sourceEventID != nil }
+                    return false
+                })
+                let projectionRecordsAfterSteadyStateBatch = try await sql.raw("""
+                    SELECT COUNT(*)::bigint AS value
+                    FROM im_v2.user_sync_log
+                    WHERE projection_kind IN ('direct_sending_capability', 'direct_room_profile')
+                    """).first(decoding: CountRow.self)
+                #expect(
+                    projectionRecordsAfterSteadyStateBatch?.value
+                        == projectionRecordsBeforeSteadyStateBatch?.value
+                )
+                // Sequential room turns preserve consecutive committed room sequences.
+                let sameRoomRequests: [V2RoomWriteRequest] = [
+                    .init(
+                        command: try .init(
+                            roomID: room.roomID, senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c015"),
+                            text: "热点会话的第一条原子批消息",
+                            limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c016"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c017")
+                        ),
+                        now: now
+                    ),
+                    .init(
+                        command: try .init(
+                            roomID: room.roomID, senderUserID: senderID,
+                            clientMessageID: try .init("00000000-0000-0000-0000-00000000c019"),
+                            text: "热点会话的第二条原子批消息",
+                            limits: try .init(maxUTF8Bytes: 64)
+                        ),
+                        capacityProfile: profile,
+                        identifiers: try .init(
+                            messageID: .init("00000000-0000-0000-0000-00000000c01a"),
+                            eventID: .init("00000000-0000-0000-0000-00000000c01b")
+                        ),
+                        now: now
+                    ),
+                ]
+                var sameRoomBatch: [V2SendMessageOutcome] = []
+                for request in sameRoomRequests {
+                    sameRoomBatch.append(try await writer.accept(command: request.command,
+                        capacityProfile: request.capacityProfile, identifiers: request.identifiers, now: request.now))
+                }
+                guard case .accepted(let firstSameRoomMessage) = sameRoomBatch[0],
+                      case .accepted(let secondSameRoomMessage) = sameRoomBatch[1],
+
+                      secondSameRoomMessage.roomSequence == firstSameRoomMessage.roomSequence + 1
+                else {
+                    Issue.record("expected ordered hot direct fallback acceptance")
+                    throw CancellationError()
+                }
+                let hotRoomAdmission = try #require(try await sql.raw("""
+                    SELECT command_window_used
+                    FROM im_v2.room_admission
+                    WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                    """).first(decoding: CapacityRow.self))
+                #expect(hotRoomAdmission.commandWindowUsed == 0)
+
+                try await sql.raw("""
+                    DELETE FROM im_v2.user_relationships
+                    WHERE lower_user_id = \(bind: senderUUID)
+                      AND higher_user_id IN (\(bind: memberTwoUUID), \(bind: memberThreeUUID))
+                    """).run()
+
+                // Rich messages retain the existing CTE: the plain-message fast
+                // path must never silently skip a required moderation record.
+                let reviewingMessages = V2SendMessageService(
+                    store: selected(PostgresV2RoomWriteStore(
+                        database: resources.database(.psql),
+                        strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
+                        contentReviewMode: .enabled)),
+                    capacityProfile: profile,
+                    limits: try .init(maxUTF8Bytes: 64),
+                    now: { now }
+                )
+                guard case .accepted = try await reviewingMessages.send(.init(
+                    roomID: room.roomID, actorUserID: senderID,
+                    clientMessageID: try .init("00000000-0000-0000-0000-00000000c00a"),
+                    text: "审核路径仍保留完整持久化"
+                )) else {
+                    Issue.record("expected reviewed room-log acceptance")
+                    throw CancellationError()
+                }
+                #expect(try await count("im_v2.content_review_jobs", on: sql) == 1)
+
+                _ = try await PostgresV2AccountPreferenceOperationStore(database: resources.database(.psql), projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: policyOwners).executePreferenceFixture(owner: recipient, operation: .strangerMessagePreference(try .init("00000000-0000-0000-0000-00000000c005")), value: .strangerMessage(.deny), now: now)
+                await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
+                    _ = try await messages.send(.init(
+                        roomID: room.roomID, actorUserID: senderID,
+                        clientMessageID: .init("00000000-0000-0000-0000-00000000c006"),
+                        text: "策略变更后必须被拒绝"))
+                }
+                #expect(try await retiredDirectDenialTableIsAbsent(on: sql))
+
+                let roomLog = V2GroupEventLogService(store: PostgresV2GroupEventLogStore(database: resources.database(.psql)))
+                let senderPage = try await roomLog.pull(roomID: room.roomID, actorUserID: senderID, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
+                let recipientPage = try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: accepted.roomSequence - 1, pageSize: 10)
+                #expect(senderPage.events.map(\.roomSequence) == [
+                    accepted.roomSequence,
+                    accepted.roomSequence + 1,
+                    accepted.roomSequence + 2,
+                    accepted.roomSequence + 3,
+                    accepted.roomSequence + 4,
+                    accepted.roomSequence + 5,
+                    accepted.roomSequence + 6,
+                    accepted.roomSequence + 7
+                ])
+                #expect(recipientPage.events == senderPage.events)
+                #expect(String(data: try #require(senderPage.events.first?.payload), encoding: .utf8)?.contains("只写一次的私聊") == true)
+                let acceptedEventID = try #require(UUID(uuidString: senderPage.events.first?.sourceEventID.rawValue ?? ""))
+                let directMessageEvent = try #require(try await sql.raw("""
+                    SELECT accepted_event_id, accepted_event_storage,
+                           accepted_membership_revision
+                    FROM im_v2.messages
+                    WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
+                    """).first(decoding: DirectMessageRowEventRow.self))
+                #expect(directMessageEvent.acceptedEventID == acceptedEventID)
+                #expect(directMessageEvent.acceptedEventStorage == "message_row")
+                #expect(accepted.sourceEventID?.rawValue == acceptedEventID.uuidString)
+                // Direct-room creation commits its initial membership revision
+                // before the first accepted message. The row-source event must
+                // retain that exact historical fence rather than assuming zero.
+                #expect(directMessageEvent.acceptedMembershipRevision == 1)
+                #expect(accepted.acceptedMembershipRevision == 1)
+                #expect(try await count(
+                    "im_v2.room_events WHERE event_id = '\(acceptedEventID.uuidString)'",
+                    on: sql
+                ) == 0)
+
+                // The accepted event must continue to expose its original body
+                // after a later message revision changes the mutable row.
+                await #expect(throws: (any Error).self) {
+                    try await sql.raw("""
+                        UPDATE im_v2.messages
+                        SET text_body = '没有 revision 的非法修改'
+                        WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
+                        """).run()
+                }
+                try await sql.raw("""
+                    UPDATE im_v2.messages
+                    SET text_body = '已编辑的当前内容', rich_entities = '[]'::jsonb,
+                        content_revision = 2
+                    WHERE message_id = \(bind: UUID(uuidString: accepted.messageID.rawValue)!)
+                    """).run()
+                let recoveredAfterRevision = try await roomLog.pull(
+                    roomID: room.roomID, actorUserID: senderID,
+                    afterRoomSequence: accepted.roomSequence - 1, pageSize: 10
+                )
+                let originalPayload = String(
+                    data: try #require(recoveredAfterRevision.events.first?.payload),
+                    encoding: .utf8
+                )
+                #expect(originalPayload?.contains("只写一次的私聊") == true)
+                #expect(originalPayload?.contains("已编辑的当前内容") == false)
+                #expect(try await count("im_v2.message_content_versions", on: sql) == 1)
+                await #expect(throws: V2GroupEventLogError.actorNotMember) {
+                    try await roomLog.pull(roomID: room.roomID, actorUserID: try .init(memberThreeUUID.uuidString), afterRoomSequence: 0, pageSize: 10)
+                }
+
+                #expect(try await count("im_v2.messages", on: sql) == 12)
+                // Eleven ordinary direct messages are materialized from the
+                // message row itself. The reviewed message intentionally retains
+                // the complete room-event write graph.
+                #expect(try await count("im_v2.room_events WHERE event_type = 'message.accepted'", on: sql) == 1)
+                #expect(try await count("im_v2.message_projection_states", on: sql) == 0)
+                #expect(try await count("im_v2.user_sync_log WHERE projection_kind = 'message'", on: sql) == 0)
+                let roomAdmission = try #require(try await sql.raw("""
+                    SELECT command_window_used
+                    FROM im_v2.room_admission
+                    WHERE room_id = \(bind: UUID(uuidString: room.roomID.rawValue)!)
+                    """).first(decoding: CapacityRow.self))
+                #expect(roomAdmission.commandWindowUsed == 0)
+
+                // Warm the actual cached append, then corrupt membership without
+                // changing its revision. A cache revision match must not authorize
+                // a third participant, and the conditional failure must roll back.
+                for _ in 0..<2 {
+                    guard case .accepted = try await messages.send(.init(
+                        roomID: secondRoom.roomID, actorUserID: senderID,
+                        clientMessageID: .init(uuid: UUID()), text: "membership fence warmup"
+                    )) else {
+                        Issue.record("expected membership-fence warmup acceptance")
+                        throw CancellationError()
+                    }
+                }
+                let secondRoomUUID = try #require(secondRoom.roomID.uuidValue)
+                try await sql.raw("""
+                    INSERT INTO im_v2.room_memberships (room_id, user_id, joined_revision)
+                    VALUES (\(bind: secondRoomUUID), \(bind: memberTwoUUID), 1)
+                    """).run()
+                let beforeCorruptArtifacts = try await directWriteArtifactCounts(sql: sql)
+                let beforeCorruptSequence = try #require(try await sql.raw("""
+                    SELECT room_sequence AS value FROM im_v2.rooms
+                    WHERE room_id = \(bind: secondRoomUUID)
+                    """).first(decoding: CountRow.self)).value
+                await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
+                    try await messages.send(.init(
+                        roomID: secondRoom.roomID, actorUserID: senderID,
+                        clientMessageID: .init(uuid: UUID()), text: "must reject third member"
+                    ))
+                }
+                #expect(try await directWriteArtifactCounts(sql: sql) == beforeCorruptArtifacts)
+                #expect(try await sql.raw("""
+                    SELECT room_sequence AS value FROM im_v2.rooms
+                    WHERE room_id = \(bind: secondRoomUUID)
+                    """).first(decoding: CountRow.self)?.value == beforeCorruptSequence)
+
+                let roomUUID = try #require(UUID(uuidString: room.roomID.rawValue))
+                try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1 WHERE room_id = \(bind: roomUUID)").run()
+                try await sql.raw("UPDATE im_v2.room_memberships SET left_revision = 1 WHERE room_id = \(bind: roomUUID) AND user_id = \(bind: memberTwoUUID)").run()
+                await #expect(throws: V2GroupEventLogError.actorNotMember) {
+                    try await roomLog.pull(roomID: room.roomID, actorUserID: recipient, afterRoomSequence: 0, pageSize: 10)
+                }
+
+                try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
+            }
+            if actorScoped {
+                try await withRoomActivations(database: resources.database(.psql),
+                    roomIDs: [room.roomID, secondRoom.roomID], shardID: "rooms-primary") { tokens in
+                    try await exercise(activationScope: .init(tokens: tokens))
+                }
+            } else {
+                try await exercise(activationScope: nil)
+            }
             await policyOwners.shutdown()
             } catch {
                 await policyOwners.shutdown()

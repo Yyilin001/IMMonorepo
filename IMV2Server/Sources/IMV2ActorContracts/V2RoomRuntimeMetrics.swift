@@ -35,7 +35,6 @@ public struct V2RoomDirectoryCallMetricsSnapshot: Equatable, Sendable {
     public let recoveryAttempts: UInt64
     public let recoveryWaits: UInt64
     public let recoveringRooms: Int
-    public let waitingForLeaseRooms: Int
     public let recoveryWarmItems: UInt64
     public let recoveryColdItems: UInt64
     /// Calls actually entering the transport batch API, including predispatch rejection.
@@ -51,7 +50,6 @@ public struct V2RoomDirectoryCallMetricsSnapshot: Equatable, Sendable {
                 recoveryAttempts: UInt64 = 0,
                 recoveryWaits: UInt64 = 0,
                 recoveringRooms: Int = 0,
-                waitingForLeaseRooms: Int = 0,
                 recoveryWarmItems: UInt64 = 0, recoveryColdItems: UInt64 = 0,
                 recoveryHostCohorts: UInt64 = 0, recoveryHostItems: UInt64 = 0,
                 recoveryStages: [V2RoomDirectoryRecoveryStage: V2RoomDirectoryRecoveryStageSnapshot] = [:]) {
@@ -62,7 +60,6 @@ public struct V2RoomDirectoryCallMetricsSnapshot: Equatable, Sendable {
         self.recoveryAttempts = recoveryAttempts
         self.recoveryWaits = recoveryWaits
         self.recoveringRooms = recoveringRooms
-        self.waitingForLeaseRooms = waitingForLeaseRooms
         self.recoveryWarmItems = recoveryWarmItems; self.recoveryColdItems = recoveryColdItems
         self.recoveryHostCohorts = recoveryHostCohorts; self.recoveryHostItems = recoveryHostItems
         self.recoveryStages = Dictionary(uniqueKeysWithValues: V2RoomDirectoryRecoveryStage.allCases.map {
@@ -132,14 +129,17 @@ public struct V2RoomActivationHostSnapshot: Equatable, Sendable {
     public let activationWaiters: Int
     public let restoringRooms: Int
     public let retiringRooms: Int
+    public let completedIdleRetirements: UInt64
 
-    package init(accepting: Bool, activeRooms: Int, pendingRooms: Int, activationWaiters: Int, restoringRooms: Int, retiringRooms: Int) {
+    package init(accepting: Bool, activeRooms: Int, pendingRooms: Int, activationWaiters: Int, restoringRooms: Int, retiringRooms: Int,
+                 completedIdleRetirements: UInt64 = 0) {
         self.accepting = accepting
         self.activeRooms = activeRooms
         self.pendingRooms = pendingRooms
         self.activationWaiters = activationWaiters
         self.restoringRooms = restoringRooms
         self.retiringRooms = retiringRooms
+        self.completedIdleRetirements = completedIdleRetirements
     }
 }
 

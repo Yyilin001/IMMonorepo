@@ -57,135 +57,102 @@ struct PostgresV2RoomRecoveryStoreTests {
                        (\(bind: UUID()),\(bind: room.uuidValue!),2,\(bind: viewerB.uuidValue!),\(bind: UUID()),'B1',clock_timestamp(),2),
                        (\(bind: UUID()),\(bind: room.uuidValue!),3,\(bind: viewerA.uuidValue!),\(bind: UUID()),'A2',clock_timestamp(),3)
                 """).run()
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("state-batch-host"), incarnationID: UUID())
-            let leases = PostgresV2RoomActivationStore(database: database, schema: schema)
-            let duration = try V2ActorMilliseconds(30_000)
-            guard case .acquired(let live) = try await leases.acquire(roomID: room, owner: owner, host: host, duration: duration),
-                  case .acquired(let old) = try await leases.acquire(roomID: staleRoom, owner: owner, host: host, duration: duration) else {
-                Issue.record("actual activation acquisition failed"); return
+            try await withRoomActivations(database: database, roomIDs: [room, staleRoom]) { tokens in
+                let live = try #require(tokens.first { $0.roomID == room })
+                let old = try #require(tokens.first { $0.roomID == staleRoom })
+                try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET owner_epoch=1 WHERE room_id=\(bind: staleRoom.uuidValue!)").run()
+                let observed = try V2EventLoopBalancedDatabase(databases: [database], loanPolicy: .init(
+                    maximumConnections: 4, reservedRenewalConnections: 1, maximumQueued: 4, maximumWait: .seconds(5)))
+                let deadline = ContinuousClock.now + .seconds(5)
+                let turns = [(live, viewerA), (live, viewerB), (live, outsider), (old, viewerA)].map {
+                    V2GrantedRoomReadTurn(token: $0.0, actorUserID: $0.1, batchDeadline: deadline, callDeadline: deadline)
+                }
+                let executor = V2ActorRoomQueryExecutor(database: observed)
+                let batcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(),
+                    executeStates: { try await executor.recoveryStates($0, schema: schema) },
+                    execute: { _, _ in throw V2HostRoomRecoveryBatchError.corruptResult })
+                let result = try await batcher.states(turns)
+                await observed.shutdownLoans()
+                let a = try #require(result[.init(roomID: room, viewerUserID: viewerA)]).get()
+                let b = try #require(result[.init(roomID: room, viewerUserID: viewerB)]).get()
+                guard case .state(let stateA) = a, case .state(let stateB) = b else {
+                    Issue.record("authorized viewers missing"); return
+                }
+                #expect(stateA.head == 4 && stateB.head == 4)
+                #expect(stateA.readThrough == 1 && stateA.latestOwnMessageSequence == 3)
+                #expect(stateB.readThrough == 2 && stateB.latestOwnMessageSequence == 2)
+                #expect(try result[.init(roomID: room, viewerUserID: outsider)]?.get() == .unavailable)
+                if case .failure(let error)? = result[.init(roomID: staleRoom, viewerUserID: viewerA)] {
+                    #expect(error as? V2RoomActorStateError == .ownerChanged)
+                } else { Issue.record("stale token must retain its precise data owner failure") }
+                let sample = observed.loanMetricsSnapshot().observations[.roomRecovery]!
+                #expect(sample.sqlPhases[.readBody]!.count == 1)
+                #expect(sample.sqlPhases[.fence]!.count == 3)
+                #expect(sample.sqlPhases[.transactionControl]!.count == 2)
             }
-            #expect(try await leases.release(token: old.token))
-            guard case .acquired = try await leases.acquire(roomID: staleRoom, owner: owner, host: host, duration: duration) else {
-                Issue.record("actual successor acquisition failed"); return
-            }
-            let observed = try V2EventLoopBalancedDatabase(databases: [database], loanPolicy: .init(
-                maximumConnections: 4, reservedRenewalConnections: 1, maximumQueued: 4, maximumWait: .seconds(5)))
-            let deadline = ContinuousClock.now + .seconds(5)
-            let turns = [(live.token, viewerA), (live.token, viewerB), (live.token, outsider), (old.token, viewerA)].map {
-                V2GrantedRoomReadTurn(token: $0.0, actorUserID: $0.1, batchDeadline: deadline, callDeadline: deadline)
-            }
-            let executor = V2ActorRoomQueryExecutor(database: observed)
-            let batcher = V2HostRoomRecoveryQueryBatcher(configuration: try .init(),
-                executeStates: { try await executor.recoveryStates($0, schema: schema) },
-                execute: { _, _ in throw V2HostRoomRecoveryBatchError.corruptResult })
-            let result = try await batcher.states(turns)
-            await observed.shutdownLoans()
-            let a = try #require(result[.init(roomID: room, viewerUserID: viewerA)]).get()
-            let b = try #require(result[.init(roomID: room, viewerUserID: viewerB)]).get()
-            guard case .state(let stateA) = a, case .state(let stateB) = b else {
-                Issue.record("authorized viewers missing"); return
-            }
-            #expect(stateA.head == 4 && stateB.head == 4)
-            #expect(stateA.readThrough == 1 && stateA.latestOwnMessageSequence == 3)
-            #expect(stateB.readThrough == 2 && stateB.latestOwnMessageSequence == 2)
-            #expect(try result[.init(roomID: room, viewerUserID: outsider)]?.get() == .unavailable)
-            if case .failure(let error)? = result[.init(roomID: staleRoom, viewerUserID: viewerA)] {
-                #expect(error as? V2RoomActivationLeaseError == .activationChanged)
-            } else { Issue.record("stale token must retain its precise activation failure") }
-            let sample = observed.loanMetricsSnapshot().observations[.roomRecovery]!
-            #expect(sample.sqlPhases[.readBody]!.count == 1)
-            #expect(sample.sqlPhases[.fence]!.count == 3)
-            #expect(sample.sqlPhases[.transactionControl]!.count == 2)
         }
     }
 
-    @Test("snapshot share fences coexist and block lease mutations until actual read settles", arguments: [false, true])
-    func snapshotReadFenceLocks(expire: Bool) async throws {
+    @Test("snapshot data-owner share fences coexist and hold ownership until the actual read settles")
+    func snapshotReadFenceLocks() async throws {
         try await withUserEventDatabase { database, sql, schema in
             let room = RoomID(uuid: UUID())
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES (\(bind: room.uuidValue!), 'snapshot-owner','standard')").run()
-            let owner = try V2RoomDataOwner(shardID: "snapshot-owner", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("snapshot-host"), incarnationID: UUID())
-            let store = PostgresV2RoomActivationStore(database: database, schema: schema)
-            guard case .acquired(let lease) = try await store.acquire(roomID: room, owner: owner, host: host, duration: .init(30_000)) else {
-                Issue.record("expected actual activation"); return
-            }
-            let end = ContinuousClock.now + .seconds(5)
-            let gate = SnapshotReadGate()
-            let mutationGate = SnapshotReadGate()
-            let reader = Task {
-                try await V2RoomSQLDeadline.withDeadline(end) {
-                    try await v2WithRoomScopedTransaction(database: database) { transaction in
-                        let connection = try #require(transaction as? any SQLDatabase)
-                        let pid = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: SnapshotCount.self))
-                        let result = try await v2RoomSnapshotReadActivationFences(tokens: [lease.token], sql: connection, schema: schema)
-                        try #require(result[room]).get()
-                        await gate.hold(pid.value)
-                    }
-                }
-            }
-            var writer: Task<Void, any Error>?
-            var finalRead: Task<Void, any Error>?
-            do {
-                let pid = try await gate.waitForHolder(end)
-                // A second genuine read transaction must complete while the
-                // first still owns both share locks. No synthetic KEY SHARE.
-                try await V2RoomSQLDeadline.withDeadline(end) {
-                    try await v2WithRoomScopedTransaction(database: database) { transaction in
-                        let connection = try #require(transaction as? any SQLDatabase)
-                        let result = try await v2RoomSnapshotReadActivationFences(tokens: [lease.token], sql: connection, schema: schema)
-                        try #require(result[room]).get()
-                    }
-                }
-                writer = Task {
+            try await withRoomActivation(database: database, roomID: room, shardID: "snapshot-owner") { token in
+                let end = ContinuousClock.now + .seconds(5)
+                let gate = SnapshotReadGate()
+                let reader = Task {
                     try await V2RoomSQLDeadline.withDeadline(end) {
                         try await v2WithRoomScopedTransaction(database: database) { transaction in
                             let connection = try #require(transaction as? any SQLDatabase)
-                            if expire {
-                                try await connection.raw("UPDATE \(unsafeRaw: schema).room_activation_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE room_id=\(bind: room.uuidValue!)").run()
-                                let mutationPID = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: SnapshotCount.self))
-                                await mutationGate.hold(mutationPID.value)
-                            } else {
+                            let pid = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: SnapshotCount.self))
+                            let result = try await v2RoomSnapshotReadActivationFences(tokens: [token], sql: connection, schema: schema)
+                            try #require(result[room]).get()
+                            await gate.hold(pid.value)
+                        }
+                    }
+                }
+                var writer: Task<Void, any Error>?
+                do {
+                    let pid = try await gate.waitForHolder(end)
+                    try await V2RoomSQLDeadline.withDeadline(end) {
+                        try await v2WithRoomScopedTransaction(database: database) { transaction in
+                            let connection = try #require(transaction as? any SQLDatabase)
+                            let result = try await v2RoomSnapshotReadActivationFences(tokens: [token], sql: connection, schema: schema)
+                            try #require(result[room]).get()
+                        }
+                    }
+                    writer = Task {
+                        try await V2RoomSQLDeadline.withDeadline(end) {
+                            try await v2WithRoomScopedTransaction(database: database) { transaction in
+                                let connection = try #require(transaction as? any SQLDatabase)
                                 try await connection.raw("UPDATE \(unsafeRaw: schema).rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: room.uuidValue!)").run()
                             }
                         }
                     }
-                }
-                var blocked = false
-                while ContinuousClock.now < end {
-                    let count = try #require(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND \(bind: pid)::int=ANY(pg_blocking_pids(pid))").first(decoding: SnapshotCount.self))
-                    if count.value > 0 { blocked = true; break }
-                    await Task.yield()
-                }
-                try #require(blocked, "lease/owner mutation must wait for the actual snapshot transaction")
-                await gate.open(); try await reader.value
-                let mutationPID = expire ? try await mutationGate.waitForHolder(end) : nil
-                finalRead = Task {
-                try await V2RoomSQLDeadline.withDeadline(end) {
-                    try await v2WithRoomScopedTransaction(database: database) { transaction in
-                        let connection = try #require(transaction as? any SQLDatabase)
-                        let result = try await v2RoomSnapshotReadActivationFences(tokens: [lease.token], sql: connection, schema: schema)
-                        if case .failure(let error)? = result[room] {
-                            #expect(error as? V2RoomActivationLeaseError == (expire ? .leaseExpired : .ownerChanged))
-                        } else { Issue.record("old snapshot token must fail after the actual mutation") }
-                    }
-                }
-                }
-                if let mutationPID {
-                    var waited = false
+                    var blocked = false
                     while ContinuousClock.now < end {
-                        let count = try #require(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND \(bind: mutationPID)::int=ANY(pg_blocking_pids(pid))").first(decoding: SnapshotCount.self))
-                        if count.value > 0 { waited = true; break }
+                        let count = try #require(try await sql.raw("SELECT count(*)::bigint AS value FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND \(bind: pid)::int=ANY(pg_blocking_pids(pid))").first(decoding: SnapshotCount.self))
+                        if count.value > 0 { blocked = true; break }
                         await Task.yield()
                     }
-                    await mutationGate.open()
-                    try #require(waited, "snapshot must actually wait before observing the predecessor's expiry")
+                    try #require(blocked, "data-owner mutation must wait for the actual snapshot transaction")
+                    await gate.open()
+                    try await reader.value
+                    try await writer!.value
+                    try await v2WithRoomScopedTransaction(database: database) { transaction in
+                        let connection = try #require(transaction as? any SQLDatabase)
+                        let result = try await v2RoomSnapshotReadActivationFences(tokens: [token], sql: connection, schema: schema)
+                        if case .failure(let error)? = result[room] {
+                            #expect(error as? V2RoomActorStateError == .ownerChanged)
+                        } else { Issue.record("old data owner must fail after the committed mutation") }
+                    }
+                } catch {
+                    await gate.open()
+                    _ = await reader.result
+                    _ = await writer?.result
+                    throw error
                 }
-                try await writer!.value; try await finalRead!.value
-            } catch {
-                await gate.open(); await mutationGate.open(); _ = try? await reader.value; _ = try? await writer?.value; _ = try? await finalRead?.value
-                throw error
             }
         }
     }
@@ -361,49 +328,40 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let room = RoomID(uuid: UUID()), viewer = UserID(uuid: UUID())
             try await sql.raw("INSERT INTO im_v2.rooms(room_id,room_shard_id,capacity_profile_id,membership_revision) VALUES (\(bind: room.uuidValue!), 'room-a','standard',1)").run()
             try await sql.raw("INSERT INTO im_v2.room_memberships(room_id,user_id,joined_revision) VALUES (\(bind: room.uuidValue!),\(bind: viewer.uuidValue!),1)").run()
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("snapshot-pull-host"), incarnationID: UUID())
-            let store = PostgresV2RoomActivationStore(database: database)
-            guard case .acquired(let lease) = try await store.acquire(roomID: room, owner: owner, host: host, duration: .init(30_000)) else {
-                Issue.record("expected actual pull activation"); return
-            }
-            let executor = V2ActorRoomQueryExecutor(database: database)
-            let request = try V2ActorRoomLogPullWire(roomID: room, actorUserID: viewer, afterRoomSequence: 0, pageSize: 100)
-            let deadline = ContinuousClock.now + .seconds(5)
-            let gate = SnapshotReadGate()
-            let holder = Task {
-                try await V2RoomSQLDeadline.withDeadline(deadline) {
-                    try await v2WithRoomScopedTransaction(database: database) { transaction in
-                        let connection = try #require(transaction as? any SQLDatabase)
-                        let pid = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: SnapshotCount.self))
-                        let fenced = try await v2RoomSnapshotReadActivationFences(tokens: [lease.token], sql: connection)
-                        try #require(fenced[room]).get()
-                        await gate.hold(pid.value)
+            try await withRoomActivation(database: database, roomID: room) { token in
+                let executor = V2ActorRoomQueryExecutor(database: database)
+                let request = try V2ActorRoomLogPullWire(roomID: room, actorUserID: viewer, afterRoomSequence: 0, pageSize: 100)
+                let deadline = ContinuousClock.now + .seconds(5)
+                let gate = SnapshotReadGate()
+                let holder = Task {
+                    try await V2RoomSQLDeadline.withDeadline(deadline) {
+                        try await v2WithRoomScopedTransaction(database: database) { transaction in
+                            let connection = try #require(transaction as? any SQLDatabase)
+                            let pid = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value").first(decoding: SnapshotCount.self))
+                            let fenced = try await v2RoomSnapshotReadActivationFences(tokens: [token], sql: connection)
+                            try #require(fenced[room]).get()
+                            await gate.hold(pid.value)
+                        }
                     }
                 }
-            }
-            do {
-                _ = try await gate.waitForHolder(deadline)
-                let result = try await V2RoomSQLDeadline.withDeadline(deadline) {
-                    try await executor.pullSnapshot(request, token: lease.token)
+                do {
+                    _ = try await gate.waitForHolder(deadline)
+                    let result = try await V2RoomSQLDeadline.withDeadline(deadline) {
+                        try await executor.pullSnapshot(request, token: token)
+                    }
+                    guard case .page = result else { throw V2RoomRecoveryReadError.corruptPersistence }
+                    let unauthorized = try V2ActorRoomLogPullWire(roomID: room, actorUserID: .init(uuid: UUID()), afterRoomSequence: 0, pageSize: 100)
+                    await #expect(throws: V2GroupEventLogError.actorNotMember) {
+                        _ = try await executor.pullSnapshot(unauthorized, token: token)
+                    }
+                    await gate.open(); try await holder.value
+                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: room.uuidValue!)").run()
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                        _ = try await executor.pullSnapshot(request, token: token)
+                    }
+                } catch {
+                    await gate.open(); _ = try? await holder.value; throw error
                 }
-                guard case .page = result else { throw V2RoomRecoveryReadError.corruptPersistence }
-                let unauthorized = try V2ActorRoomLogPullWire(roomID: room, actorUserID: .init(uuid: UUID()), afterRoomSequence: 0, pageSize: 100)
-                await #expect(throws: V2GroupEventLogError.actorNotMember) {
-                    _ = try await executor.pullSnapshot(unauthorized, token: lease.token)
-                }
-                await gate.open(); try await holder.value
-                let stale = V2RoomActivationToken(roomID: room, owner: owner,
-                    activationEpoch: try .init(lease.token.activationEpoch.rawValue + 1), host: host)
-                await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                    _ = try await executor.pullSnapshot(request, token: stale)
-                }
-                try await sql.raw("UPDATE im_v2.room_activation_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE room_id=\(bind: room.uuidValue!)").run()
-                await #expect(throws: V2RoomActivationLeaseError.leaseExpired) {
-                    _ = try await executor.pullSnapshot(request, token: lease.token)
-                }
-            } catch {
-                await gate.open(); _ = try? await holder.value; throw error
             }
         }
     }
@@ -427,91 +385,85 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let staleRoom = RoomID(uuid: UUID())
             try await sql.raw("INSERT INTO im_v2.rooms(room_id,room_shard_id,capacity_profile_id) VALUES (\(bind: staleRoom.uuidValue!),'room-a','standard')").run()
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("pull-collection-host"), incarnationID: UUID())
-            let leases = PostgresV2RoomActivationStore(database: database)
-            guard case .acquired(let live) = try await leases.acquire(roomID: roomID, owner: owner, host: host, duration: .init(30_000)),
-                  case .acquired(let old) = try await leases.acquire(roomID: staleRoom, owner: owner, host: host, duration: .init(30_000)) else {
-                Issue.record("expected actual activation leases"); return
-            }
-            #expect(try await leases.release(token: old.token))
-            guard case .acquired = try await leases.acquire(roomID: staleRoom, owner: owner, host: host, duration: .init(30_000)) else {
-                Issue.record("expected actual successor lease"); return
-            }
-            let observed = try V2EventLoopBalancedDatabase(databases: [database], loanPolicy: .init(
-                maximumConnections: 4, reservedRenewalConnections: 1, maximumQueued: 4, maximumWait: .seconds(5)))
-            let executor = V2ActorRoomQueryExecutor(database: observed)
-            let deadline = ContinuousClock.now + .seconds(10)
-            var requests: [V2GrantedRoomLogPull] = try (0..<4).map { index in
-                try .init(token: live.token, query: .init(roomID: roomID,
-                    actorUserID: index.isMultiple(of: 2) ? senderID : .init(uuid: memberTwoUUID),
-                    afterRoomSequence: UInt64(index), pageSize: 1), callDeadline: deadline)
-            }
-            let denied = try V2GrantedRoomLogPull(token: live.token,
-                query: .init(roomID: roomID, actorUserID: .init(uuid: UUID()), afterRoomSequence: 0, pageSize: 1), callDeadline: deadline)
-            let stale = try V2GrantedRoomLogPull(token: old.token,
-                query: .init(roomID: staleRoom, actorUserID: senderID, afterRoomSequence: 0, pageSize: 1), callDeadline: deadline)
-            requests += [denied, stale]
-            let replies = PullCollectionReplies()
-            do {
-                let responseBudget = overflow ? 128 * 1024 : 256 * 1024
-                try await executor.pullSnapshots(requests, maximumResponseBytes: responseBudget) { id, result in
-                    await replies.record(id, result)
+            try await withRoomActivations(database: database, roomIDs: [roomID, staleRoom]) { tokens in
+                let live = try #require(tokens.first { $0.roomID == roomID })
+                let old = try #require(tokens.first { $0.roomID == staleRoom })
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: staleRoom.uuidValue!)").run()
+                let observed = try V2EventLoopBalancedDatabase(databases: [database], loanPolicy: .init(
+                    maximumConnections: 4, reservedRenewalConnections: 1, maximumQueued: 4, maximumWait: .seconds(5)))
+                let executor = V2ActorRoomQueryExecutor(database: observed)
+                let deadline = ContinuousClock.now + .seconds(10)
+                var requests: [V2GrantedRoomLogPull] = try (0..<4).map { index in
+                    try .init(token: live, query: .init(roomID: roomID,
+                        actorUserID: index.isMultiple(of: 2) ? senderID : .init(uuid: memberTwoUUID),
+                        afterRoomSequence: UInt64(index), pageSize: 1), callDeadline: deadline)
                 }
-                let values = await replies.snapshot()
-                #expect(values.count == requests.count)
-                var encodedWholePages = 0
-                for (index, request) in requests.prefix(4).enumerated() {
-                    let result = try #require(values[request.id]).get()
-                    guard case .page(let page) = result else { Issue.record("expected complete authorized page"); continue }
-                    #expect(page.events.count == 1)
-                    #expect(page.events.first?.roomSequence == UInt64(index + 1))
-                    #expect(page.nextRoomSequence == UInt64(index + 1))
-                    #expect(page.hasMore == (index < 3))
-                    // Compare against the unchanged scalar authority/template,
-                    // rather than expecting synthetic payloads from the batch.
-                    let original = try await PostgresV2GroupEventLogStore(database: database).pull(
-                        roomID: roomID, actorUserID: request.query.actorUserID,
-                        afterRoomSequence: UInt64(index), pageSize: 1)
-                    let originalWire = try V2ActorRoomLogPageWire(original)
-                    #expect(page == originalWire)
-                    encodedWholePages += try page.protobufResponseByteCount() + 64
-                }
-                #expect(try values[denied.id]?.get() == .failure(.actorNotMember))
-                if case .failure(let failure)? = values[stale.id] {
-                    #expect(failure as? V2RoomActivationLeaseError == .activationChanged)
-                } else { Issue.record("stale sibling must fail without rejecting healthy viewers") }
-                let first = try #require(observed.loanMetricsSnapshot().observations[.groupEventPull])
-                // Each subgroup scans once; no row-lock fence or explicit
-                // transaction. Overflow keeps complete pages in two subgroups.
-                #expect(first.sqlPhases[.readBody]?.count == (overflow ? 2 : 1))
-                #expect((first.sqlPhases[.fence]?.count ?? 0) == 0)
-                #expect((first.sqlPhases[.transactionControl]?.count ?? 0) == 0)
-                #expect(first.actualHeldCount == 1)
-                if overflow {
-                    #expect(encodedWholePages > responseBudget)
-                    let singleton = try V2GrantedRoomLogPull(token: live.token,
-                        query: .init(roomID: roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 4),
-                        callDeadline: deadline)
-                    let large = PullCollectionReplies()
-                    try await executor.pullSnapshots([singleton], maximumResponseBytes: responseBudget) { id, result in
-                        await large.record(id, result)
+                let denied = try V2GrantedRoomLogPull(token: live,
+                    query: .init(roomID: roomID, actorUserID: .init(uuid: UUID()), afterRoomSequence: 0, pageSize: 1), callDeadline: deadline)
+                let stale = try V2GrantedRoomLogPull(token: old,
+                    query: .init(roomID: staleRoom, actorUserID: senderID, afterRoomSequence: 0, pageSize: 1), callDeadline: deadline)
+                requests += [denied, stale]
+                let replies = PullCollectionReplies()
+                do {
+                    let responseBudget = overflow ? 128 * 1024 : 256 * 1024
+                    try await executor.pullSnapshots(requests, maximumResponseBytes: responseBudget) { id, result in
+                        await replies.record(id, result)
                     }
-                    let singleResults = await large.snapshot()
-                    let result = try #require(singleResults[singleton.id]).get()
-                    guard case .page(let page) = result else { throw V2RoomRecoveryReadError.corruptPersistence }
-                    #expect(page.events.count == 4 && page.nextRoomSequence == 4 && !page.hasMore)
-                    let bytes = try page.protobufResponseByteCount()
-                    #expect(bytes > responseBudget && bytes < 8 * 1024 * 1024)
-                    // The conservative internal bound must not reject this
-                    // legal native page or manufacture a smaller partial page.
-                    let after = try #require(observed.loanMetricsSnapshot().observations[.groupEventPull])
-                    #expect(after.sqlPhases[.readBody]?.count == first.sqlPhases[.readBody]!.count + 2)
-                    #expect(after.actualHeldCount == 2)
+                    let values = await replies.snapshot()
+                    #expect(values.count == requests.count)
+                    var encodedWholePages = 0
+                    for (index, request) in requests.prefix(4).enumerated() {
+                        let result = try #require(values[request.id]).get()
+                        guard case .page(let page) = result else { Issue.record("expected complete authorized page"); continue }
+                        #expect(page.events.count == 1)
+                        #expect(page.events.first?.roomSequence == UInt64(index + 1))
+                        #expect(page.nextRoomSequence == UInt64(index + 1))
+                        #expect(page.hasMore == (index < 3))
+                        // Compare against the unchanged scalar authority/template,
+                        // rather than expecting synthetic payloads from the batch.
+                        let original = try await PostgresV2GroupEventLogStore(database: database).pull(
+                            roomID: roomID, actorUserID: request.query.actorUserID,
+                            afterRoomSequence: UInt64(index), pageSize: 1)
+                        let originalWire = try V2ActorRoomLogPageWire(original)
+                        #expect(page == originalWire)
+                        encodedWholePages += try page.protobufResponseByteCount() + 64
+                    }
+                    #expect(try values[denied.id]?.get() == .failure(.actorNotMember))
+                    if case .failure(let failure)? = values[stale.id] {
+                        #expect(failure as? V2RoomActorStateError == .ownerChanged)
+                    } else { Issue.record("stale sibling must fail without rejecting healthy viewers") }
+                    let first = try #require(observed.loanMetricsSnapshot().observations[.groupEventPull])
+                    // Each subgroup scans once; no row-lock fence or explicit
+                    // transaction. Overflow keeps complete pages in two subgroups.
+                    #expect(first.sqlPhases[.readBody]?.count == (overflow ? 2 : 1))
+                    #expect((first.sqlPhases[.fence]?.count ?? 0) == 0)
+                    #expect((first.sqlPhases[.transactionControl]?.count ?? 0) == 0)
+                    #expect(first.actualHeldCount == 1)
+                    if overflow {
+                        #expect(encodedWholePages > responseBudget)
+                        let singleton = try V2GrantedRoomLogPull(token: live,
+                            query: .init(roomID: roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 4),
+                            callDeadline: deadline)
+                        let large = PullCollectionReplies()
+                        try await executor.pullSnapshots([singleton], maximumResponseBytes: responseBudget) { id, result in
+                            await large.record(id, result)
+                        }
+                        let singleResults = await large.snapshot()
+                        let result = try #require(singleResults[singleton.id]).get()
+                        guard case .page(let page) = result else { throw V2RoomRecoveryReadError.corruptPersistence }
+                        #expect(page.events.count == 4 && page.nextRoomSequence == 4 && !page.hasMore)
+                        let bytes = try page.protobufResponseByteCount()
+                        #expect(bytes > responseBudget && bytes < 8 * 1024 * 1024)
+                        // The conservative internal bound must not reject this
+                        // legal native page or manufacture a smaller partial page.
+                        let after = try #require(observed.loanMetricsSnapshot().observations[.groupEventPull])
+                        #expect(after.sqlPhases[.readBody]?.count == first.sqlPhases[.readBody]!.count + 2)
+                        #expect(after.actualHeldCount == 2)
+                    }
+                    await observed.shutdownLoans()
+                } catch {
+                    await observed.shutdownLoans(); throw error
                 }
-                await observed.shutdownLoans()
-            } catch {
-                await observed.shutdownLoans(); throw error
             }
         }
     }

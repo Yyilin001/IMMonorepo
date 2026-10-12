@@ -34,12 +34,19 @@ public protocol V2RoomForwardPairServing: Sendable {
         deadline: ContinuousClock.Instant) async throws -> V2ActorForwardMessageResultWire
 }
 
-/// 房间激活前唯一的分布式入口。其 ActorID 通过已认证的配置带外分发。
+/// Independent control and room services share only the authenticated endpoint
+/// shape. A control service owns its own admission and lifecycle budget.
+public protocol V2ActorHostInboundServing: Sendable {
+    func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket
+    func exchange(_ packet: V2ActorSignedPacket, boundToken: V2RoomActivationToken?) async throws -> V2ActorSignedPacket
+}
+
+/// 已认证的控制／房间 RPC 入口。ActorID 通过可信发现或配置分发。
 public distributed actor V2RoomHostEndpoint {
     public typealias ActorSystem = ClusterSystem
-    private let service: V2RoomClusterInboundService
+    private let service: any V2ActorHostInboundServing
 
-    public init(actorSystem: ClusterSystem, service: V2RoomClusterInboundService) {
+    public init(actorSystem: ClusterSystem, service: any V2ActorHostInboundServing) {
         self.actorSystem = actorSystem
         self.service = service
     }
@@ -76,7 +83,7 @@ public distributed actor V2RoomClusterActor {
 /// 远程报文与节点创建的本地能力共用权限、重放、分片、接收方、
 /// 会话、截止时间和精确激活检查。
 /// Cluster 成员关系绝不构成授权事实。
-public actor V2RoomClusterInboundService {
+public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
     private let identity: V2ActorHostIdentity
     private let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
     private let authenticator: V2ActorSessionAuthenticator
@@ -87,6 +94,7 @@ public actor V2RoomClusterInboundService {
     private let policyMutations: (any V2PolicyMutationServing)?
     private let policyOwnership: (any V2PolicyOwnershipServing)?
     private let forwardPairs: (any V2RoomForwardPairServing)?
+    private let placementDrain: (any V2ActorPlacementDraining)?
     private let maximumInboundRequests: Int
     private let localGeneration: UUID
     private let actorSystem: ClusterSystem
@@ -108,7 +116,8 @@ public actor V2RoomClusterInboundService {
                 actorSystem: ClusterSystem,
                 policyOwnership: (any V2PolicyOwnershipServing)? = nil,
                 policyMutations: (any V2PolicyMutationServing)? = nil,
-                forwardPairs: (any V2RoomForwardPairServing)? = nil) throws {
+                forwardPairs: (any V2RoomForwardPairServing)? = nil,
+                placementDrain: (any V2ActorPlacementDraining)? = nil) throws {
         guard !allowedShards.isEmpty, !serviceShardAccess.isEmpty,
               maximumInboundRequests > 0,
               serviceShardAccess.values.allSatisfy({ !$0.isEmpty && $0.isSubset(of: allowedShards) })
@@ -123,6 +132,7 @@ public actor V2RoomClusterInboundService {
         self.policyOwnership = policyOwnership
         self.policyMutations = policyMutations
         self.forwardPairs = forwardPairs
+        self.placementDrain = placementDrain
         self.maximumInboundRequests = maximumInboundRequests
         self.batchAdmission = .init(maximumRenewalBatches: min(maximumInboundRequests, serviceShardAccess.count * 2))
         self.localGeneration = localGeneration
@@ -286,7 +296,7 @@ public actor V2RoomClusterInboundService {
         let response: V2ActorRPCResponse
         do { response = try await dispatch(request, deadline: verified.deadline) }
         catch let failure as V2RoomCallFailure { response = .failure(failure) }
-        catch let leaseError as V2RoomActivationLeaseError where leaseError == .roomNotFound {
+        catch let leaseError as V2RoomActorStateError where leaseError == .roomNotFound {
             response = .failure(.notAccepted(.notFound))
         } catch {
             // 调用可能已进入 SQL。不能依据此处捕获的错误
@@ -352,6 +362,14 @@ public actor V2RoomClusterInboundService {
     private func dispatch(_ request: V2ActorRPCRequest,
                           deadline: ContinuousClock.Instant) async throws -> V2ActorRPCResponse {
         switch request {
+        case .placementWrite, .placementRead, .placementRaft:
+            throw V2ActorAuthenticationError.forbidden
+        case .drainPlacement(let request):
+            guard request.isBounded, let placementDrain else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+            var result = try await placementDrain.drainPlacement(request, deadline: deadline)
+            guard try result.matches(request, host: identity) else { throw V2RoomCallFailure.outcomeUnknown }
+            result.certificate = try V2PlacementDrainCertificate.signPartition(result.receipt, shard: request.shardID, signer: signer)
+            return .placementDrained(result)
         case .forwardPair(let token, let pair):
             guard let forwardPairs else { throw V2RoomCallFailure.notAccepted(.unavailable) }
             guard await host.isReady(token: token) else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
@@ -386,11 +404,7 @@ public actor V2RoomClusterInboundService {
                     throw V2RoomCallFailure.notAccepted(.staleActivation)
                 }
                 return .ready(token: token, physicalReference: try await physicalReference(for: token))
-            case .occupied(let lease):
-                guard lease.token.roomID == roomID, lease.token.owner == owner else {
-                    throw V2RoomCallFailure.notAccepted(.staleActivation)
-                }
-                return .occupied(lease)
+
             }
         case .lookup(let token):
             return .ready(token: token, physicalReference: try await physicalReference(for: token))
@@ -441,7 +455,7 @@ public actor V2RoomClusterInboundService {
 
     private func requestToken(_ request: V2ActorRPCRequest) -> V2RoomActivationToken? {
         switch request {
-        case .activate, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot: nil
+        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot: nil
         case .lookup(let token), .invoke(let token, _), .reserve(let token, _): token
         case .forwardPair(let token, _): token
         case .markDispatched(let grant), .abortReservation(let grant), .finishReservation(let grant, _): grant.token
@@ -450,6 +464,8 @@ public actor V2RoomClusterInboundService {
 
     private func requestShard(_ request: V2ActorRPCRequest) -> String {
         switch request {
+        case .placementWrite(let request), .placementRead(let request), .placementRaft(let request): request.shardID
+        case .drainPlacement(let request): request.shardID
         case .policySnapshots(let request): request.endpoint
         case .updatePolicySnapshot(let request): request.endpoint
         case .forwardPair(let token, _): token.owner.shardID
@@ -464,7 +480,7 @@ public actor V2RoomClusterInboundService {
 
     private func isHostOnly(_ request: V2ActorRPCRequest) -> Bool {
         switch request {
-        case .activate, .lookup, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .forwardPair: true
+        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .lookup, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .forwardPair: true
         default: false
         }
     }

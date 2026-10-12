@@ -16,7 +16,6 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     private var database: any Database
     private var controlDatabase: (any Database)?
     private var policyAuthorizations: V2RoomPolicyAuthorizationService?
-    var usesMemorySendPreparation: Bool { policyAuthorizations != nil }
     var currentPolicyAuthorizations: V2RoomPolicyAuthorizationService? { policyAuthorizations }
     private var controlResolution: V2RoomWriteControlResolution = .unresolved
     var controlScopeRoomKinds: [UUID: String]? { controlResolution.roomKinds }
@@ -67,8 +66,8 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         return copy
     }
 
-    /// 绑定已经获准的确切激活权限。每条 SQL 路径仍在自身事务内校验该权限；
-    /// 此值拷贝本身不授予权限，并保留共享缓存的身份。
+    /// 绑定已获准轮次的确切激活身份。普通消息由 Actor 生命周期保护，
+    /// 其他业务按需核对持久化数据归属；值拷贝本身不授予权限。
     var strangerQuotaWindowSeconds:TimeInterval { strangerMessagePolicy.window }
     private var transactionOwnership: V2RoomWriteTransactionOwnership = .store
 
@@ -104,11 +103,12 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     }
 
     /// Available only with a live runtime-minted execution and its exact room
-    /// activation. Actual SQL also checks the durable lease and activation.
+    /// activation. SQL checks the durable data Owner; native Actor admission
+    /// and its lifetime capability establish physical execution authority.
     func usingPolicyExecution(_ execution: V2RoomPolicyExecution) throws -> Self {
         guard let activationScope,
               try activationScope.token(for: execution.activation.roomID.uuidValue!) == execution.activation else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         var copy = self
         copy.controlResolution = .executing(execution)
@@ -204,7 +204,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     ) async throws -> V2SendMessageOutcome {
         if let policies = policyAuthorizations, controlResolution.needsPreparation {
             guard let token = try activationScope?.token(for: uuid(request.command.roomID)) else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
             do {
                 let commit = try await policies.executeForward(command: request.command, token: token) { execution in
@@ -245,7 +245,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     ) async throws -> RoomWriteCommit {
         try validateAuthorizationCommand(request.command)
         let room = try uuid(request.command.roomID), sender = try uuid(request.command.senderUserID)
-        guard let source = forwardOwnerSourceRoomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard let source = forwardOwnerSourceRoomID else { throw V2RoomActorStateError.activationChanged }
         return try await withRoomWriteTransaction { transaction in
             let sql = try sqlDatabase(from: transaction)
             try await acquireMessageOperationLock(roomID: room, senderID: sender,
@@ -281,7 +281,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         _ = try activationScope?.token(for: roomID)
         if activationScope != nil, command.forwardedFrom != nil,
            forwardOwnerSourceRoomID == nil {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         try validateAuthorizationCommand(command)
         let cacheKey = V2DirectSendPolicyCache.Key(roomID: roomID, senderID: senderID)
@@ -349,7 +349,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
         guard activationToken.roomID.uuidValue == export.intent.targetRoomID,
               activationToken.owner.shardID == export.intent.targetShardID,
               activationToken.owner.epoch == export.intent.targetEpoch else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         return try await usingActivationScope(.init(tokens: [activationToken]))
             .importForwardExport(export, capacityProfile: capacityProfile, limits: limits,
@@ -365,7 +365,7 @@ public struct PostgresV2RoomWriteStore: V2RoomWriteStore {
     ) async throws -> V2ForwardImportOutcome {
         if let policies = policyAuthorizations, controlResolution.needsPreparation {
             guard let token = try activationScope?.token(for: export.intent.targetRoomID) else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
             let preflight = try await withRoomWriteTransaction { transaction in
                 try await V2RoomWriteForwardInboxPath(activationScope: activationScope)

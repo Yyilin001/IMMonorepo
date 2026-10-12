@@ -9,6 +9,7 @@ import IMV2Core
 @testable import IMV2ServerInfrastructure
 import SQLKit
 import Testing
+import Synchronization
 
 @Suite(.serialized)
 struct V2ResourceProfilePresentationTests {
@@ -78,7 +79,7 @@ struct V2ResourceProfilePresentationTests {
           arguments: ["owner", "admin-default", "member-default", "admin-empty", "admin-unrelated", "member-grant", "admin-grant"])
     func joinReviewContexts(_ scenario: String) async throws {
         let resources = makeV2DatabaseTestResources()
-        var service: V2ResourceProfilePresentationService?
+        let service = Mutex<V2ResourceProfilePresentationService?>(nil)
         do {
             resources.databases.use(try .postgres(url: #require(ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"])), as: .psql, isDefault: true)
             let database = resources.database(.psql), sql = try #require(database as? any SQLDatabase)
@@ -99,56 +100,62 @@ struct V2ResourceProfilePresentationTests {
             if scenario.hasSuffix("grant") || scenario == "admin-unrelated" {
                 try await sql.raw("INSERT INTO im_v2.group_role_permissions(room_id,role,permission) VALUES(\(bind: room.uuidValue!),\(bind: role),\(bind: scenario == "admin-unrelated" ? "send_messages" : "invite_members"))").run()
             }
-            let tokens = PostgresV2RoomActivationStore(database: database), identity = try testToken(room)
-            guard case .acquired(let lease) = try await tokens.acquire(roomID: room, owner: identity.owner,
-                host: identity.host, duration: .init(30_000)) else { throw V2RoomActivationLeaseError.activationChanged }
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: lease.token)
-            let port = V2ActorRoomMediaAuthorizationPort(query: { request, _ in try await executor.execute(request) })
-            let reader = V2ResourceProfilePresentationService(controlDatabase: database, authorization: port,
-                avatars: .init(delivery: NoProfileAvatarDelivery()))
-            service = reader
-            let reviewKey = V2ProfileViewLookupKey(userID: applicant, context: .groupJoinReview(room))
-            let applicantMemberKey = V2ProfileViewLookupKey(userID: applicant, context: .room(room))
-            let memberKey = V2ProfileViewLookupKey(userID: member, context: .room(room))
-            let memberReviewKey = V2ProfileViewLookupKey(userID: member, context: .groupJoinReview(room))
-            let allowed = scenario == "owner" || scenario == "admin-default" || scenario.hasSuffix("grant")
-            let page = try await reader.read(.init(keys: [reviewKey, applicantMemberKey, memberKey, memberReviewKey]), actorUserID: actor, deviceID: device)
-            if allowed {
-                guard case .presentation(let value, let avatar) = page.results[0] else { throw V2MediaStoreError.downloadNotAuthorized }
-                #expect(value.lease.key == reviewKey && value.groupMember == nil && avatar == nil)
-            } else { #expect(page.results[0] == .unavailable(reviewKey)) }
-            #expect(page.results[1] == .unavailable(applicantMemberKey))
-            guard case .presentation = page.results[2] else { throw V2MediaStoreError.downloadNotAuthorized }
-            #expect(page.results[3] == .unavailable(memberReviewKey))
-            if scenario == "owner" {
-                let request = V2ActorProfileVisibilityBatchWire(roomID: room, actorUserID: actor, roomKind: .groupJoinReview, targetUserIDs: [applicant])
-                let deadline = ContinuousClock.now + .seconds(5)
-                let proof = try #require(try await port.captureProfiles(request, deadline: deadline))
-                try await sql.raw("UPDATE im_v2.rooms SET group_permission_revision=group_permission_revision+1 WHERE room_id=\(bind: room.uuidValue!)").run()
-                #expect(try await !port.recheckProfiles(proof, deadline: deadline))
-                for (blocker, blocked) in [(actor, applicant), (applicant, actor)] {
-                    try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: blocker.uuidValue!),\(bind: blocked.uuidValue!),clock_timestamp())").run()
-                    let page = try await reader.read(.init(keys: [reviewKey]), actorUserID: actor, deviceID: device)
-                    #expect(page.results == [.unavailable(reviewKey)])
-                    try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: blocker.uuidValue!) AND blocked_user_id=\(bind: blocked.uuidValue!)").run()
-                }
-                try await sql.raw("UPDATE im_v2.group_join_requests SET state='cancelled',decided_by_user_id=applicant_user_id,decided_at=clock_timestamp(),updated_at=clock_timestamp() WHERE request_id=\(bind: application)").run()
-                let cancelled = try await reader.read(.init(keys: [reviewKey]), actorUserID: actor, deviceID: device)
-                #expect(cancelled.results == [.unavailable(reviewKey)])
-                try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at=clock_timestamp() WHERE device_id=\(bind: device.uuidValue!)").run()
-                await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
-                    _ = try await reader.read(.init(keys: [reviewKey]), actorUserID: actor, deviceID: device)
+            try await withRoomActivationLifetime(database: database, roomID: room,
+                                                 shardID: "profile-test") { token, lifetime in
+                let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: token, lifetime: lifetime)
+                let port = V2ActorRoomMediaAuthorizationPort(query: { request, _ in try await executor.execute(request) })
+                let reader = V2ResourceProfilePresentationService(controlDatabase: database, authorization: port,
+                    avatars: .init(delivery: NoProfileAvatarDelivery()))
+                service.withLock { $0 = reader }
+                do {
+                    let reviewKey = V2ProfileViewLookupKey(userID: applicant, context: .groupJoinReview(room))
+                    let applicantMemberKey = V2ProfileViewLookupKey(userID: applicant, context: .room(room))
+                    let memberKey = V2ProfileViewLookupKey(userID: member, context: .room(room))
+                    let memberReviewKey = V2ProfileViewLookupKey(userID: member, context: .groupJoinReview(room))
+                    let allowed = scenario == "owner" || scenario == "admin-default" || scenario.hasSuffix("grant")
+                    let page = try await reader.read(.init(keys: [reviewKey, applicantMemberKey, memberKey, memberReviewKey]), actorUserID: actor, deviceID: device)
+                    if allowed {
+                        guard case .presentation(let value, let avatar) = page.results[0] else { throw V2MediaStoreError.downloadNotAuthorized }
+                        #expect(value.lease.key == reviewKey && value.groupMember == nil && avatar == nil)
+                    } else { #expect(page.results[0] == .unavailable(reviewKey)) }
+                    #expect(page.results[1] == .unavailable(applicantMemberKey))
+                    guard case .presentation = page.results[2] else { throw V2MediaStoreError.downloadNotAuthorized }
+                    #expect(page.results[3] == .unavailable(memberReviewKey))
+                    if scenario == "owner" {
+                        let request = V2ActorProfileVisibilityBatchWire(roomID: room, actorUserID: actor, roomKind: .groupJoinReview, targetUserIDs: [applicant])
+                        let deadline = ContinuousClock.now + .seconds(5)
+                        let proof = try #require(try await port.captureProfiles(request, deadline: deadline))
+                        try await sql.raw("UPDATE im_v2.rooms SET group_permission_revision=group_permission_revision+1 WHERE room_id=\(bind: room.uuidValue!)").run()
+                        #expect(try await !port.recheckProfiles(proof, deadline: deadline))
+                        for (blocker, blocked) in [(actor, applicant), (applicant, actor)] {
+                            try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: blocker.uuidValue!),\(bind: blocked.uuidValue!),clock_timestamp())").run()
+                            let page = try await reader.read(.init(keys: [reviewKey]), actorUserID: actor, deviceID: device)
+                            #expect(page.results == [.unavailable(reviewKey)])
+                            try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: blocker.uuidValue!) AND blocked_user_id=\(bind: blocked.uuidValue!)").run()
+                        }
+                        try await sql.raw("UPDATE im_v2.group_join_requests SET state='cancelled',decided_by_user_id=applicant_user_id,decided_at=clock_timestamp(),updated_at=clock_timestamp() WHERE request_id=\(bind: application)").run()
+                        let cancelled = try await reader.read(.init(keys: [reviewKey]), actorUserID: actor, deviceID: device)
+                        #expect(cancelled.results == [.unavailable(reviewKey)])
+                        try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at=clock_timestamp() WHERE device_id=\(bind: device.uuidValue!)").run()
+                        await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
+                            _ = try await reader.read(.init(keys: [reviewKey]), actorUserID: actor, deviceID: device)
+                        }
+                    }
+                    await reader.close()
+                } catch {
+                    await reader.close()
+                    throw error
                 }
             }
-            await reader.close(); try await resources.shutdown()
-        } catch { await service?.close(); try? await resources.shutdown(); throw error }
+            try await resources.shutdown()
+        } catch { await service.withLock { $0 }?.close(); try? await resources.shutdown(); throw error }
     }
 
     @Test("direct chat author lookups distinguish the peer, self, wrong room kind and blocked access",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil))
     func directChatAuthorContexts() async throws {
         let resources = makeV2DatabaseTestResources()
-        var service: V2ResourceProfilePresentationService?
+        let service = Mutex<V2ResourceProfilePresentationService?>(nil)
         do {
             resources.databases.use(try .postgres(url: #require(ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"])), as: .psql, isDefault: true)
             let database = resources.database(.psql), sql = try #require(database as? any SQLDatabase)
@@ -167,59 +174,64 @@ struct V2ResourceProfilePresentationTests {
                        GREATEST(\(bind: actor.uuidValue!),\(bind: peer.uuidValue!)),
                        \(bind: room.uuidValue!),'profile-test',clock_timestamp(),clock_timestamp())
                 """).run()
-            let tokens = PostgresV2RoomActivationStore(database: database), identity = try testToken(room)
-            guard case .acquired(let lease) = try await tokens.acquire(roomID: room, owner: identity.owner,
-                host: identity.host, duration: .init(30_000)) else { throw V2RoomActivationLeaseError.activationChanged }
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: lease.token)
-            let reader = authorityService(database: database,
-                authorization: .init(query: { request, _ in try await executor.execute(request) }),
-                avatars: .init(delivery: NoProfileAvatarDelivery()))
-            service = reader
-            let ownKey = V2ProfileViewLookupKey(userID: actor, context: .relationship)
-            let peerKey = V2ProfileViewLookupKey(userID: peer, context: .directConversation)
-            let strangerKey = V2ProfileViewLookupKey(userID: stranger, context: .directConversation)
-            let wrongSelfKey = V2ProfileViewLookupKey(userID: actor, context: .directConversation)
-            let page = try await reader.read(.init(keys: [ownKey, peerKey, strangerKey, wrongSelfKey]), actorUserID: actor, deviceID: device)
-            for (index, key) in [ownKey, peerKey].enumerated() {
-                guard case .presentation(let value, let avatar) = page.results[index] else { throw V2MediaStoreError.downloadNotAuthorized }
-                #expect(value.lease.key == key && value.lease.actorUserID == actor && value.lease.deviceID == device)
-                #expect(value.view.userID == key.userID && value.groupMember == nil && avatar == nil)
+            try await withRoomActivationLifetime(database: database, roomID: room,
+                                                 shardID: "profile-test") { token, lifetime in
+                let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: token, lifetime: lifetime)
+                let reader = authorityService(database: database,
+                    authorization: .init(query: { request, _ in try await executor.execute(request) }),
+                    avatars: .init(delivery: NoProfileAvatarDelivery()))
+                service.withLock { $0 = reader }
+                do {
+                    let ownKey = V2ProfileViewLookupKey(userID: actor, context: .relationship)
+                    let peerKey = V2ProfileViewLookupKey(userID: peer, context: .directConversation)
+                    let strangerKey = V2ProfileViewLookupKey(userID: stranger, context: .directConversation)
+                    let wrongSelfKey = V2ProfileViewLookupKey(userID: actor, context: .directConversation)
+                    let page = try await reader.read(.init(keys: [ownKey, peerKey, strangerKey, wrongSelfKey]), actorUserID: actor, deviceID: device)
+                    for (index, key) in [ownKey, peerKey].enumerated() {
+                        guard case .presentation(let value, let avatar) = page.results[index] else { throw V2MediaStoreError.downloadNotAuthorized }
+                        #expect(value.lease.key == key && value.lease.actorUserID == actor && value.lease.deviceID == device)
+                        #expect(value.view.userID == key.userID && value.groupMember == nil && avatar == nil)
+                    }
+                    #expect(page.results[2] == .unavailable(strangerKey))
+                    #expect(page.results[3] == .unavailable(wrongSelfKey))
+                    let roomKeys = [actor, peer, stranger].map { V2ProfileViewLookupKey(userID: $0, context: .room(room)) }
+                    let roomPage = try await reader.read(.init(keys: roomKeys), actorUserID: actor, deviceID: device)
+                    for index in 0..<2 {
+                        guard case .presentation(let value, let avatar) = roomPage.results[index] else { throw V2MediaStoreError.downloadNotAuthorized }
+                        #expect(value.lease.key == roomKeys[index] && value.lease.contextRevision == 3)
+                        #expect(value.groupMember == nil && avatar == nil)
+                    }
+                    #expect(roomPage.results[2] == .unavailable(roomKeys[2]))
+                    // Generic membership does not relax commands which require a group.
+                    #expect(try await executor.execute(.profileVisibilityBatch(.init(roomID: room, actorUserID: actor,
+                        roomKind: .group, targetUserIDs: [peer]))) == .notVisible)
+                    for (blocker, blockedUser) in [(actor, peer), (peer, actor)] {
+                        try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: blocker.uuidValue!),\(bind: blockedUser.uuidValue!),clock_timestamp())").run()
+                        let blocked = try await reader.read(.init(keys: [ownKey, peerKey]), actorUserID: actor, deviceID: device)
+                        guard case .presentation = blocked.results.first else { throw V2MediaStoreError.downloadNotAuthorized }
+                        #expect(blocked.results.last == .unavailable(peerKey))
+                        let blockedRoom = try await reader.read(.init(keys: roomKeys), actorUserID: actor, deviceID: device)
+                        #expect(blockedRoom.results[1] == .unavailable(roomKeys[1]))
+                        try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: blocker.uuidValue!) AND blocked_user_id=\(bind: blockedUser.uuidValue!)").run()
+                    }
+                    try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=3 WHERE room_id=\(bind: room.uuidValue!) AND user_id=\(bind: peer.uuidValue!)").run()
+                    let departed = try await reader.read(.init(keys: [roomKeys[1]]), actorUserID: actor, deviceID: device)
+                    #expect(departed.results == [.unavailable(roomKeys[1])])
+                    try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=3 WHERE room_id=\(bind: room.uuidValue!) AND user_id=\(bind: actor.uuidValue!)").run()
+                    let removedViewer = try await reader.read(.init(keys: [roomKeys[0]]), actorUserID: actor, deviceID: device)
+                    #expect(removedViewer.results == [.unavailable(roomKeys[0])])
+                    try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at=clock_timestamp() WHERE device_id=\(bind: device.uuidValue!)").run()
+                    await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
+                        _ = try await reader.read(.init(keys: [ownKey, peerKey]), actorUserID: actor, deviceID: device)
+                    }
+                    await reader.close()
+                } catch {
+                    await reader.close()
+                    throw error
+                }
             }
-            #expect(page.results[2] == .unavailable(strangerKey))
-            #expect(page.results[3] == .unavailable(wrongSelfKey))
-            let roomKeys = [actor, peer, stranger].map { V2ProfileViewLookupKey(userID: $0, context: .room(room)) }
-            let roomPage = try await reader.read(.init(keys: roomKeys), actorUserID: actor, deviceID: device)
-            for index in 0..<2 {
-                guard case .presentation(let value, let avatar) = roomPage.results[index] else { throw V2MediaStoreError.downloadNotAuthorized }
-                #expect(value.lease.key == roomKeys[index] && value.lease.contextRevision == 3)
-                #expect(value.groupMember == nil && avatar == nil)
-            }
-            #expect(roomPage.results[2] == .unavailable(roomKeys[2]))
-            // Generic membership does not relax commands which require a group.
-            #expect(try await executor.execute(.profileVisibilityBatch(.init(roomID: room, actorUserID: actor,
-                roomKind: .group, targetUserIDs: [peer]))) == .notVisible)
-            for (blocker, blockedUser) in [(actor, peer), (peer, actor)] {
-                try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: blocker.uuidValue!),\(bind: blockedUser.uuidValue!),clock_timestamp())").run()
-                let blocked = try await reader.read(.init(keys: [ownKey, peerKey]), actorUserID: actor, deviceID: device)
-                guard case .presentation = blocked.results.first else { throw V2MediaStoreError.downloadNotAuthorized }
-                #expect(blocked.results.last == .unavailable(peerKey))
-                let blockedRoom = try await reader.read(.init(keys: roomKeys), actorUserID: actor, deviceID: device)
-                #expect(blockedRoom.results[1] == .unavailable(roomKeys[1]))
-                try await sql.raw("DELETE FROM im_v2.user_blocks WHERE blocker_user_id=\(bind: blocker.uuidValue!) AND blocked_user_id=\(bind: blockedUser.uuidValue!)").run()
-            }
-            try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=3 WHERE room_id=\(bind: room.uuidValue!) AND user_id=\(bind: peer.uuidValue!)").run()
-            let departed = try await reader.read(.init(keys: [roomKeys[1]]), actorUserID: actor, deviceID: device)
-            #expect(departed.results == [.unavailable(roomKeys[1])])
-            try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=3 WHERE room_id=\(bind: room.uuidValue!) AND user_id=\(bind: actor.uuidValue!)").run()
-            let removedViewer = try await reader.read(.init(keys: [roomKeys[0]]), actorUserID: actor, deviceID: device)
-            #expect(removedViewer.results == [.unavailable(roomKeys[0])])
-            try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at=clock_timestamp() WHERE device_id=\(bind: device.uuidValue!)").run()
-            await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
-                _ = try await reader.read(.init(keys: [ownKey, peerKey]), actorUserID: actor, deviceID: device)
-            }
-            await reader.close()
             try await resources.shutdown()
-        } catch { await service?.close(); try? await resources.shutdown(); throw error }
+        } catch { await service.withLock { $0 }?.close(); try? await resources.shutdown(); throw error }
     }
 
     @Test("nickname scans share profile admission and shutdown drains noncooperative scans",
@@ -288,38 +300,43 @@ struct V2ResourceProfilePresentationTests {
             try await sql.raw("INSERT INTO im_v2.room_member_nicknames(room_id,user_id,nickname,revision,updated_at) VALUES(\(bind: room.uuidValue!),\(bind: targets[1].uuidValue!),'Current authorized name',2,clock_timestamp())").run()
             try await sql.raw("INSERT INTO im_v2.user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(\(bind: targets[0].uuidValue!),\(bind: actor.uuidValue!),clock_timestamp())").run()
             try await sql.raw("UPDATE im_v2.room_memberships SET left_revision=3 WHERE room_id=\(bind: room.uuidValue!) AND user_id=\(bind: targets[2].uuidValue!)").run()
-            let tokens = PostgresV2RoomActivationStore(database: database), identity = try testToken(room)
-            guard case .acquired(let lease) = try await tokens.acquire(roomID: room, owner: identity.owner,
-                host: identity.host, duration: .init(30_000)) else { throw V2RoomActivationLeaseError.activationChanged }
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: lease.token)
-            let service = V2ResourceProfilePresentationService(controlDatabase: database,
-                authorization: .init(query: { request, _ in try await executor.execute(request) }),
-                avatars: .init(delivery: NoProfileAvatarDelivery()))
-            let scanned = V2GroupNicknamePage(values: try targets.map {
-                try .init(roomID: room, userID: $0, groupNickname: "Stale scan text must not escape", revision: #require(.init(rawValue: 1)))
-            }, nextCursor: targets.last)
-            let page = try await service.readGroupNicknames(roomID: room, afterUserID: nil, limit: 3,
-                actorUserID: actor, deviceID: device, candidates: { scanned })
-            #expect(page.nextCursor == targets.last && page.batch.results.count == 3)
-            #expect(page.batch.results[0] == .unavailable(.init(userID: targets[0], context: .room(room))))
-            #expect(page.batch.results[2] == .unavailable(.init(userID: targets[2], context: .room(room))))
-            guard case .presentation(let value, let avatar) = page.batch.results[1] else { throw V2MediaStoreError.downloadNotAuthorized }
-            #expect(value.groupMember?.groupNickname == "Current authorized name" && value.groupMember?.revision.rawValue == 2)
-            #expect(value.lease.actorUserID == actor && value.lease.deviceID == device && avatar == nil)
-            #expect(!String(decoding: try JSONEncoder().encode(page), as: UTF8.self).contains("Stale scan text"))
-            await #expect(throws: V2ProfilePresentationError.corruptPersistenceState) {
-                _ = try await service.readGroupNicknames(roomID: room, afterUserID: targets[1], limit: 3,
-                    actorUserID: actor, deviceID: device, candidates: { scanned })
+            try await withRoomActivationLifetime(database: database, roomID: room,
+                                                 shardID: "profile-test") { token, lifetime in
+                let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: token, lifetime: lifetime)
+                let service = V2ResourceProfilePresentationService(controlDatabase: database,
+                    authorization: .init(query: { request, _ in try await executor.execute(request) }),
+                    avatars: .init(delivery: NoProfileAvatarDelivery()))
+                do {
+                    let scanned = V2GroupNicknamePage(values: try targets.map {
+                        try .init(roomID: room, userID: $0, groupNickname: "Stale scan text must not escape", revision: #require(.init(rawValue: 1)))
+                    }, nextCursor: targets.last)
+                    let page = try await service.readGroupNicknames(roomID: room, afterUserID: nil, limit: 3,
+                        actorUserID: actor, deviceID: device, candidates: { scanned })
+                    #expect(page.nextCursor == targets.last && page.batch.results.count == 3)
+                    #expect(page.batch.results[0] == .unavailable(.init(userID: targets[0], context: .room(room))))
+                    #expect(page.batch.results[2] == .unavailable(.init(userID: targets[2], context: .room(room))))
+                    guard case .presentation(let value, let avatar) = page.batch.results[1] else { throw V2MediaStoreError.downloadNotAuthorized }
+                    #expect(value.groupMember?.groupNickname == "Current authorized name" && value.groupMember?.revision.rawValue == 2)
+                    #expect(value.lease.actorUserID == actor && value.lease.deviceID == device && avatar == nil)
+                    #expect(!String(decoding: try JSONEncoder().encode(page), as: UTF8.self).contains("Stale scan text"))
+                    await #expect(throws: V2ProfilePresentationError.corruptPersistenceState) {
+                        _ = try await service.readGroupNicknames(roomID: room, afterUserID: targets[1], limit: 3,
+                            actorUserID: actor, deviceID: device, candidates: { scanned })
+                    }
+                    let empty = try await service.readGroupNicknames(roomID: room, afterUserID: targets.last, limit: 3,
+                        actorUserID: actor, deviceID: device, candidates: { .init(values: [], nextCursor: nil) })
+                    #expect(empty.batch.results.isEmpty && empty.nextCursor == nil)
+                    try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at=clock_timestamp() WHERE device_id=\(bind: device.uuidValue!)").run()
+                    await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
+                        _ = try await service.readGroupNicknames(roomID: room, afterUserID: nil, limit: 3,
+                            actorUserID: actor, deviceID: device, candidates: { .init(values: [], nextCursor: nil) })
+                    }
+                    await service.close()
+                } catch {
+                    await service.close()
+                    throw error
+                }
             }
-            let empty = try await service.readGroupNicknames(roomID: room, afterUserID: targets.last, limit: 3,
-                actorUserID: actor, deviceID: device, candidates: { .init(values: [], nextCursor: nil) })
-            #expect(empty.batch.results.isEmpty && empty.nextCursor == nil)
-            try await sql.raw("UPDATE im_v2.auth_devices SET revoked_at=clock_timestamp() WHERE device_id=\(bind: device.uuidValue!)").run()
-            await #expect(throws: V2MediaStoreError.downloadNotAuthorized) {
-                _ = try await service.readGroupNicknames(roomID: room, afterUserID: nil, limit: 3,
-                    actorUserID: actor, deviceID: device, candidates: { .init(values: [], nextCursor: nil) })
-            }
-            await service.close()
             try await resources.shutdown()
         } catch { try? await resources.shutdown(); throw error }
     }
@@ -443,18 +460,17 @@ struct V2ResourceProfilePresentationTests {
                 try await sql.raw("INSERT INTO im_v2.room_memberships(room_id,user_id,joined_revision) VALUES (\(bind: room.uuidValue!),\(bind: user.uuidValue!),0)").run()
             }
             try await sql.raw("INSERT INTO im_v2.room_memberships(room_id,user_id,joined_revision,left_revision) VALUES (\(bind: room.uuidValue!),\(bind: departed.uuidValue!),0,3)").run()
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let token = try testToken(room)
-            guard case .acquired(let grant) = try await leases.acquire(roomID: room, owner: token.owner, host: token.host, duration: .init(30_000))
-            else { throw V2RoomActivationLeaseError.activationChanged }
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: grant.token)
-            let request = V2ActorProfileVisibilityBatchWire(roomID: room, actorUserID: actor, roomKind: .group, targetUserIDs: [target, departed])
-            guard case .profilesVisible(let snapshot) = try await executor.execute(.profileVisibilityBatch(request))
-            else { throw V2MediaStoreError.downloadNotAuthorized }
-            #expect(snapshot.visibleTargetUserIDs == [target])
-            #expect(snapshot.membershipRevision == 3)
-            #expect(try await leases.release(token: grant.token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) { _ = try await executor.execute(.profileVisibilityBatch(request)) }
+            try await withRoomActivationLifetime(database: database, roomID: room,
+                                                 shardID: "profile-test") { token, lifetime in
+                let executor = try V2RoomMediaAuthorizationDomainExecutor(database: database, token: token, lifetime: lifetime)
+                let request = V2ActorProfileVisibilityBatchWire(roomID: room, actorUserID: actor, roomKind: .group, targetUserIDs: [target, departed])
+                guard case .profilesVisible(let snapshot) = try await executor.execute(.profileVisibilityBatch(request))
+                else { throw V2MediaStoreError.downloadNotAuthorized }
+                #expect(snapshot.visibleTargetUserIDs == [target])
+                #expect(snapshot.membershipRevision == 3)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room.uuidValue!)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await executor.execute(.profileVisibilityBatch(request)) }
+            }
             try await resources.shutdown()
         } catch { try? await resources.shutdown(); throw error }
     }

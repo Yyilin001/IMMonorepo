@@ -29,8 +29,18 @@ struct GatewayPreparedAssembly {
         app: Application,
         logger: Logger
     ) async throws -> Self {
+        // Issue one process identity before opening any SQL pool. The same
+        // incarnation tags its sessions and later registers the native Host.
+        let actorConfiguration = try V2RoomActorApplicationConfiguration(
+            environment: ProcessRuntimeEnvironment(), hostsRooms: nil,
+            configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
+            batchWaitMilliseconds: Int64(max(
+                configuration.roomTurnBatchMaximumDelayMilliseconds,
+                configuration.readReceiptBatchMaximumDelayMilliseconds)))
+        try await actorConfiguration.awaitSupervisedStartup()
         let topology = try await GatewayDatabaseTopology.build(
-            configuration: configuration, resources: resources, logger: logger
+            configuration: configuration, resources: resources, logger: logger,
+            actorConfiguration: actorConfiguration
         )
         // 同址用户桶复用路由栅栏的控制库连接；其他桶使用各自的投递库连接。
         let coLocatedControlBuckets = Set(configuration.userShardStorage.compactMap { storage in
@@ -64,6 +74,7 @@ struct GatewayPreparedAssembly {
         )
         let roomOwners = try GatewayRoomOwnerAssembly.build(
             configuration: configuration,
+            actorConfiguration: actorConfiguration,
             topology: topology,
             userShardProjectionDelivery: projection.userShardProjectionDelivery,
             databaseWorkAdmission: frontdoor.databaseWorkAdmission,

@@ -12,6 +12,11 @@ public enum V2ActorServicePermission: String, Codable, Hashable, Sendable {
     case trustedSafety
     case specialAccountAudit
     case roomCoordination
+    case placementVote
+    case placementRead
+    case placementWrite
+    /// Dedicated deployment authority, separate from room Hosts and callers.
+    case placementExclude
     case realtimePublish
     case realtimeReceive
     case policyMutation
@@ -70,6 +75,10 @@ public struct V2ActorSessionGrant: Codable, Equatable, Sendable {
 }
 
 public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
+    case placementWrite(V2PlacementRaftWire)
+    case placementRead(V2PlacementRaftWire)
+    case placementRaft(V2PlacementRaftWire)
+    case drainPlacement(V2ActorPlacementDrainWire)
     case activate(roomID: RoomID, owner: V2RoomDataOwner)
     case lookup(V2RoomActivationToken)
     case mutatePolicy(V2PolicyMutationWire)
@@ -87,8 +96,11 @@ public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
 
 public enum V2ActorRPCResponse: Codable, Equatable, Sendable {
     /// 物理引用只保留在 Cluster 内；Runtime 的 RoomRef 只接触令牌。
+    case placementWrite(V2PlacementRaftWire)
+    case placementRead(V2PlacementRaftWire)
+    case placementRaft(V2PlacementRaftWire)
+    case placementDrained(V2ActorPlacementDrainedWire)
     case ready(token: V2RoomActivationToken, physicalReference: Data)
-    case occupied(V2RoomActivationLease)
     case result(V2RoomResponse)
     case subscriptionRenewBatch([V2RoomSubscriptionRenewBatchOutcome])
     case recoveryBatch([V2RoomRecoveryBatchWireOutcome])

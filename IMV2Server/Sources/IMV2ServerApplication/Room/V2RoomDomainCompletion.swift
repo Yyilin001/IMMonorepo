@@ -10,13 +10,12 @@ package func v2RoomDomainCompletion<Value: Sendable>(_ error: any Error) -> V2Ro
         case .outcomeUnknown: return .outcomeUnknown
         }
     }
-    if let failure = error as? V2RoomActivationLeaseError {
+    if let failure = error as? V2RoomActorStateError {
         switch failure {
         case .roomNotFound: return .rolledBack(.notFound)
         case .ownerChanged, .activationChanged: return .rolledBack(.staleActivation)
-        case .leaseExpired: return .rolledBack(.leaseLost)
-        // A renewal-only error proves nothing about a business transaction.
-        case .renewalDeferred, .epochExhausted, .outcomeUnknown: return .outcomeUnknown
+        // Epoch exhaustion proves nothing about a business transaction.
+        case .epochExhausted, .outcomeUnknown: return .outcomeUnknown
         }
     }
     if error is V2RoomOwnerFenceError { return .rolledBack(.staleActivation) }

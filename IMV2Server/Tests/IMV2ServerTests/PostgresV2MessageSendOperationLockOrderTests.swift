@@ -21,7 +21,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let firstID = UUID(uuidString: "00000000-0000-0000-0000-000000000041")!
             let secondID = UUID(uuidString: "00000000-0000-0000-0000-000000000042")!
             let deadline = UInt64(now.timeIntervalSince1970 * 1000) + 60_000
-            func command(_ id: UUID, _ text: String) throws -> V2MessageSendOperationCommand {
+            @Sendable func command(_ id: UUID, _ text: String) throws -> V2MessageSendOperationCommand {
                 try .init(command: .init(roomID: direct.roomID, senderUserID: senderID,
                     clientMessageID: .init(uuid: id), text: text, limits: .init(maxUTF8Bytes: 64)),
                     firstSubmissionDeadlineMilliseconds: deadline)

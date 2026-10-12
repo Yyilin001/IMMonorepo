@@ -3,6 +3,7 @@ import FluentKit
 import SQLKit
 import IMV2Core
 import IMV2ActorContracts
+import IMV2ActorRuntime
 import IMV2ServerContracts
 import IMV2ServerApplication
 
@@ -10,27 +11,30 @@ import IMV2ServerApplication
 /// Membership controls rebuild historical state at their committed revisions;
 /// ordinary bodies rely on the already-consumed control stream. Only edits,
 /// withdrawals and reactions query original-message visibility. Compact bodies
-/// become pull heads. Every cut is fenced by the actual activation lease.
+/// become pull heads. Every cut retains the actual activation through its native lifetime capability.
 public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
     private let database: any Database
     private let admission: V2DatabaseWorkAdmissionController?
     private let schema: String
     private let activation: V2RoomActivationToken
+    private let lifetime: V2RoomActivationLifetime
     private let maximumTrackedUsers: Int
     private let maximumOnlineBodyBytes: Int
-    public init(database: any Database, activation: V2RoomActivationToken, schema: String = "im_v2", maximumTrackedUsers: Int = V2GroupCapacityPolicy.largeMaximumMembers,
+    public init(database: any Database, activation: V2RoomActivationToken, lifetime: V2RoomActivationLifetime, schema: String = "im_v2", maximumTrackedUsers: Int = V2GroupCapacityPolicy.largeMaximumMembers,
                 maximumOnlineBodyBytes: Int = 262_144, databaseWorkAdmission: V2DatabaseWorkAdmissionController? = nil) throws {
         guard schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil,
               maximumTrackedUsers > 0, (1...262_144).contains(maximumOnlineBodyBytes) else {
             throw V2RoomSubscriptionSourceError.invalidInput
         }
+        guard lifetime.token == activation else { throw V2RoomSubscriptionSourceError.wrongOwner }
+        self.lifetime = lifetime
         self.admission = databaseWorkAdmission; self.database = database; self.schema = schema; self.activation = activation; self.maximumTrackedUsers = maximumTrackedUsers
         self.maximumOnlineBodyBytes = maximumOnlineBodyBytes
     }
 
     public func snapshot(roomID: RoomID, owner: V2RoomDataOwner,
                          trackedUserIDs: Set<UserID>) async throws -> V2RoomSubscriptionSourceSnapshot {
-        let (value, remaining) = try await withLease { sql in
+        let (value, remaining) = try await withOwnedCut { sql in
             try await self.snapshotSQL(roomID: roomID, owner: owner, trackedUserIDs: trackedUserIDs, sql: sql, remaining: 0)
         }
         return .init(roomID: value.roomID, owner: value.owner, highWatermark: value.highWatermark,
@@ -56,7 +60,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
 
     public func read(roomID: RoomID, owner: V2RoomDataOwner, afterRoomSequence: UInt64,
                      trackedUserIDs: Set<UserID>, limit: Int) async throws -> V2RoomSubscriptionSourcePage {
-        let (value, remaining) = try await withLease { sql in
+        let (value, remaining) = try await withOwnedCut { sql in
             try await self.readSQL(roomID: roomID, owner: owner, afterRoomSequence: afterRoomSequence,
                 trackedUserIDs: trackedUserIDs, limit: limit, sql: sql, remaining: 0)
         }
@@ -191,65 +195,41 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
             """
     }
 
-    package func withLease<Value: Sendable>(
+    package func withOwnedCut<Value: Sendable>(
         _ operation: @escaping @Sendable (any SQLDatabase) async throws -> Value
     ) async throws -> (Value, Int64) {
-        let started = ContinuousClock.now
         let deadline = V2RoomSQLDeadline.boundedTransactionDeadline()
-        let cut = try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
-            callerDeadline: deadline) {
-        try await v2WithRoomActivationTransaction(database: database, deadline: deadline,
-            readOnlyRepeatableRead: true) { transaction in
-            guard let sql = transaction as? any SQLDatabase else { throw V2RoomSubscriptionSourceError.invalidInput }
-            // Establish the cut before reading lease, members or log. Ordinary
-            // writers retain their exact-token write locks; this reader takes none.
-            let initial = try await self.readLease(sql: sql)
-            let value = try await operation(sql)
-            let final = try await self.readLease(sql: sql)
-            return (value, min(initial, final))
-        }
-        }
-        // A RR re-read cannot see retirement committed during the cut. Use a
-        // new transaction before issuing authority, without extending the cut's
-        // original lease budget even if a renewal committed in the meantime.
-        let fresh = try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
-            callerDeadline: deadline) {
-            try await v2WithRoomActivationTransaction(database: database, deadline: deadline) { transaction in
-                guard let sql = transaction as? any SQLDatabase else { throw V2RoomSubscriptionSourceError.invalidInput }
-                return try await self.readLease(sql: sql)
+        return try await lifetime.withPin(deadline: deadline) { validUntil in
+            let value = try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
+                callerDeadline: validUntil) {
+                try await v2WithRoomActivationTransaction(database: database, deadline: validUntil,
+                    readOnlyRepeatableRead: true) { transaction in
+                    guard let sql = transaction as? any SQLDatabase else {
+                        throw V2RoomSubscriptionSourceError.invalidInput
+                    }
+                    guard let row = try await sql.raw("""
+                        SELECT room_shard_id, owner_epoch FROM \(unsafeRaw: schema).rooms
+                        WHERE room_id=\(bind: activation.roomID.uuidValue!)
+                        """).first(decoding: ReadOwnerRow.self) else {
+                        throw V2RoomActorStateError.roomNotFound
+                    }
+                    guard row.room_shard_id == activation.owner.shardID,
+                          row.owner_epoch == activation.owner.epoch else {
+                        throw V2RoomActorStateError.ownerChanged
+                    }
+                    return try await operation(sql)
+                }
             }
+            let duration = ContinuousClock.now.duration(to: validUntil).components
+            let remaining = duration.seconds * 1000 + duration.attoseconds / 1_000_000_000_000_000
+            guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            return (value, remaining)
         }
-        let elapsed = started.duration(to: .now).components
-        let elapsedMilliseconds = Int64(ceil(Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1e15))
-        let remaining = min(cut.1, fresh) - max(0, elapsedMilliseconds)
-        guard remaining > 0 else { throw V2RoomActivationLeaseError.leaseExpired }
-        return (cut.0, remaining)
     }
 
-    private func readLease(sql: any SQLDatabase) async throws -> Int64 {
-        guard let row = try await sql.raw("""
-            SELECT r.room_shard_id,r.owner_epoch,l.activation_epoch,l.owner_shard_id,
-                   l.owner_epoch AS lease_owner_epoch,l.host_id,l.host_incarnation_id,
-                   floor(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint AS remaining
-            FROM \(unsafeRaw: schema).rooms r
-            LEFT JOIN \(unsafeRaw: schema).room_activation_leases l ON l.room_id=r.room_id
-            WHERE r.room_id=\(bind: activation.roomID.uuidValue!)
-            """).first(decoding: ReadLeaseRow.self) else { throw V2RoomActivationLeaseError.roomNotFound }
-        guard row.room_shard_id == activation.owner.shardID, row.owner_epoch == activation.owner.epoch else {
-            throw V2RoomActivationLeaseError.ownerChanged
-        }
-        guard row.activation_epoch == activation.activationEpoch.rawValue,
-              row.owner_shard_id == activation.owner.shardID, row.lease_owner_epoch == activation.owner.epoch,
-              row.host_id == activation.host.hostID.rawValue, row.host_incarnation_id == activation.host.incarnationID else {
-            throw V2RoomActivationLeaseError.activationChanged
-        }
-        guard let remaining = row.remaining, remaining > 0 else { throw V2RoomActivationLeaseError.leaseExpired }
-        return remaining
-    }
-    private struct ReadLeaseRow: Decodable {
-        let room_shard_id: String; let owner_epoch: Int64
-        let activation_epoch: Int64?; let owner_shard_id: String?; let lease_owner_epoch: Int64?
-        let host_id: String?; let host_incarnation_id: UUID?; let remaining: Int64?
+    private struct ReadOwnerRow: Decodable {
+        let room_shard_id: String
+        let owner_epoch: Int64
     }
 
     private func inputs(_ roomID: RoomID, _ owner: V2RoomDataOwner, _ users: Set<UserID>) throws -> (UUID, [UUID]) {

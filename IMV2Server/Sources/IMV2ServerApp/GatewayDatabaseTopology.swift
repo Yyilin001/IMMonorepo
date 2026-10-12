@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ActorApplication
 import IMV2ServerApplication
 import IMV2ServerContracts
 import FluentKit
@@ -78,8 +79,10 @@ struct GatewayDatabaseTopology {
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
         resources: V2DatabaseWorkloadResources,
-        logger: Logger
+        logger: Logger,
+        actorConfiguration: V2RoomActorApplicationConfiguration
     ) async throws -> Self {
+        let applicationName = actorConfiguration.hostIdentity.map(V2ActorPostgresSessionIdentity.applicationName)
         let workloads = resources
         let resources = workloads.control
         let allControlEventLoops = Array(resources.eventLoopGroup.makeIterator())
@@ -126,6 +129,7 @@ struct GatewayDatabaseTopology {
                     try postgresDatabaseConfiguration(
                         url: url,
                         policy: configuration.databasePolicy,
+                        applicationName: applicationName,
                         maximumConnectionsPerEventLoop: capacity,
                         sessionTimeouts: role == .foreground || role == .messageWrite ? .default : nil,
                         prepareRoomQueries: (role == .messageWrite || role == .foreground || role == .sync)
@@ -144,9 +148,9 @@ struct GatewayDatabaseTopology {
                 // 都会绑定到同一个连接池，配置的逐 EventLoop 连接数便无法生效。
                 for eventLoopDatabase in eventLoopPool.eventLoopDatabases {
                     if role == .foreground || role == .messageWrite {
-                        try await V2PostgresSessionReadiness.verify(database: eventLoopDatabase, timeouts: .default)
+                        try await V2PostgresSessionReadiness.verify(database: eventLoopDatabase, timeouts: .default, applicationName: applicationName)
                     } else {
-                        try await V2PostgresSessionReadiness.verify(database: eventLoopDatabase, policy: configuration.databasePolicy)
+                        try await V2PostgresSessionReadiness.verify(database: eventLoopDatabase, policy: configuration.databasePolicy, applicationName: applicationName)
                     }
                 }
                 databasesByRole[role, default: [:]][url] = eventLoopPool.database
@@ -170,19 +174,21 @@ struct GatewayDatabaseTopology {
         resources.databases.use(try postgresDatabaseConfiguration(
             url: configuration.databaseURL,
             policy: configuration.databasePolicy,
+            applicationName: applicationName,
             maximumConnectionsPerEventLoop: 1
         ), as: userStateRouteDatabaseID)
         let userStateRoutePool = try V2EventLoopDatabasePool(
             databases: resources.databases, logger: logger, identifier: userStateRouteDatabaseID, eventLoops: controlEventLoops
         )
         for routeDatabase in userStateRoutePool.eventLoopDatabases {
-            try await V2PostgresSessionReadiness.verify(database: routeDatabase, policy: configuration.databasePolicy)
+            try await V2PostgresSessionReadiness.verify(database: routeDatabase, policy: configuration.databasePolicy, applicationName: applicationName)
         }
         let userStateRouter = V2PostgresUserShardRouter(database: userStateRoutePool.database)
 
         let directSendControlID = DatabaseID(string: "gateway-direct-send-control")
         resources.databases.use(try postgresDatabaseConfiguration(url: configuration.databaseURL,
             policy: configuration.databasePolicy,
+            applicationName: applicationName,
             maximumConnectionsPerEventLoop: configuration.directSendControlConnectionsPerEventLoop),
             as: directSendControlID)
         let directSendControlPool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger,
@@ -192,18 +198,18 @@ struct GatewayDatabaseTopology {
                 maximumQueued: configuration.interactiveReadDatabaseWorkMaximumQueued,
                 maximumWait: .milliseconds(configuration.databasePolicy.poolTimeoutMilliseconds)))
         for policyDatabase in directSendControlPool.eventLoopDatabases {
-            try await V2PostgresSessionReadiness.verify(database: policyDatabase, policy: configuration.databasePolicy)
+            try await V2PostgresSessionReadiness.verify(database: policyDatabase, policy: configuration.databasePolicy, applicationName: applicationName)
         }
 
         // Room identity initialization has a control-only read pool. Message
         // Owner databases no longer allocate authorization resolution pools.
         let identityID = DatabaseID(string: "gateway-room-identity-control")
         resources.databases.use(try postgresDatabaseConfiguration(url: configuration.databaseURL,
-            policy: configuration.databasePolicy, maximumConnectionsPerEventLoop: 1), as: identityID)
+            policy: configuration.databasePolicy, applicationName: applicationName, maximumConnectionsPerEventLoop: 1), as: identityID)
         let identityPool = try V2EventLoopDatabasePool(databases: resources.databases, logger: logger,
             identifier: identityID, eventLoops: controlEventLoops)
         for member in identityPool.eventLoopDatabases {
-            try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy)
+            try await V2PostgresSessionReadiness.verify(database: member, policy: configuration.databasePolicy, applicationName: applicationName)
         }
         let roomIdentityControlDatabase: any Database = identityPool.database
 
@@ -293,11 +299,16 @@ struct GatewayDatabaseTopology {
 private func postgresDatabaseConfiguration(
     url: String,
     policy: V2PostgresRuntimePolicy,
+    applicationName: String?,
     maximumConnectionsPerEventLoop: Int,
     sessionTimeouts: V2RoomActivationSQLTimeouts? = nil,
     prepareRoomQueries: Bool = false
 ) throws -> DatabaseConfigurationFactory {
     var configuration = try SQLPostgresConfiguration(url: url)
+    if let applicationName {
+        configuration.coreConfiguration.options.additionalStartupParameters.removeAll { $0.0 == "application_name" }
+        configuration.coreConfiguration.options.additionalStartupParameters.append(("application_name", applicationName))
+    }
     if prepareRoomQueries {
         configuration.coreConfiguration.options.preparedQueryCacheCapacity = 16
         configuration.coreConfiguration.options.preparedQuerySQLPrefixes = ["/* imv2_plain_direct_append */", "/* imv2_room_pull_snapshot */"]

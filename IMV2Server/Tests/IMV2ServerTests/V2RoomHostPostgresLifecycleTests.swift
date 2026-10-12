@@ -4,6 +4,7 @@ import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2ActorContracts
+import IMV2ActorCluster
 import IMV2ActorRuntime
 import IMV2Core
 @testable import IMV2Server
@@ -13,15 +14,14 @@ import Testing
 
 @Suite("Room Host concrete restore and retirement against PostgreSQL", .serialized, .timeLimit(.minutes(3)))
 struct V2RoomHostPostgresLifecycleTests {
-    @Test("lease changes during concrete restore never publish a half actor and recovery gets a new epoch",
+    @Test("pending concrete restore blocks takeover until physical drain; recovery gets a new epoch",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_G2_DATABASE_IS_DISPOSABLE"] == "1"))
-    func lostLeaseDuringRestore() async throws {
-        try await withG2HostDatabase { database, sql, fixture in
-            let leases = PostgresV2RoomActivationStore(database: database)
+    func pendingRestoreBlocksTakeover() async throws {
+        try await withG2HostDatabase { database, _, fixture, identity, placement, control in
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let barrier = G2PhaseBarrier(target: roomID)
             let config = try g2RuntimeConfiguration()
-            let hosted = try g2Host(database: database, fixture: fixture, leaseStore: leases,
+            let hosted = try g2Host(database: database, fixture: fixture, identity: identity, placement: placement,
                 configuration: config, restoreBarrier: barrier)
             let host = hosted.host
             await host.start()
@@ -33,39 +33,39 @@ struct V2RoomHostPostgresLifecycleTests {
                 #expect(await host.readyTokens().isEmpty)
                 #expect(await host.snapshot().pendingRooms == 1)
 
-                // This is the real DB authority changing after acquire but
-                // before V2RoomServerActivation.restore validates its token.
-                #expect(try await leases.release(token: old))
-                let other = V2ActorHostIdentity(hostID: try .init("g2-takeover"), incarnationID: UUID())
-                guard case .acquired(let successor) = try await leases.acquire(roomID: roomID,
-                    owner: owner, host: other, duration: .init(30_000)) else {
-                    throw G2TestFailure.successorUnavailable
+                let stoppedEarly = await host.stop(deadline: .now + .milliseconds(60))
+                #expect(!stoppedEarly.completed && stoppedEarly.proof == nil)
+                #expect(stoppedEarly.remainingRooms == 1)
+                let successor = V2ActorHostIdentity(hostID: identity.hostID, incarnationID: UUID())
+                await #expect(throws: V2ActorPlacementError.staleOwner) {
+                    _ = try await control.register(successor, shard: "room-a")
                 }
+                await g2ExpectFailure(.notAccepted(.retired), first)
                 await barrier.open()
-                await g2ExpectFailure(.notAccepted(.unavailable), first)
-                try await g2WaitUntil {
-                    let snapshot = await host.snapshot()
-                    return snapshot.pendingRooms == 0 && snapshot.retiringRooms == 0
-                }
+                #expect(try await g2StopAndRetire(hosted, placement: placement))
                 #expect(await host.readyTokens().isEmpty)
-                #expect(try await leases.locate(roomID: roomID, owner: owner)?.token == successor.token)
-                #expect(try await leases.release(token: successor.token))
-
-                guard case .ready(let recovered) = try await host.activate(roomID: roomID,
-                    owner: owner, deadline: .now + .seconds(5)) else {
-                    throw G2TestFailure.recoveryNotReady
-                }
-                #expect(recovered.activationEpoch.rawValue == successor.token.activationEpoch.rawValue + 1)
-                try await g2AssertConcreteRecovery(host: host, token: recovered, room: roomID)
-                #expect((await host.stop(deadline: .now + .seconds(5))).completed)
                 #expect(await hosted.budget.snapshot().commandCount == 0)
-                #expect(try await sql.raw("""
-                    SELECT COUNT(*)::bigint AS value FROM im_v2.room_activation_leases
-                    WHERE room_id = \(bind: roomUUID) AND expires_at IS NOT NULL
-                    """).first(decoding: G2CountRow.self)?.value == 0)
+
+                let nextPlacement = try await control.register(successor, shard: "room-a")
+                let recoveredHost = try g2Host(database: database, fixture: fixture,
+                    identity: successor, placement: nextPlacement, configuration: config,
+                    restoreBarrier: barrier)
+                await recoveredHost.host.start()
+                do {
+                    guard case .ready(let recovered) = try await recoveredHost.host.activate(roomID: roomID,
+                        owner: owner, deadline: .now + .seconds(5)) else {
+                        throw G2TestFailure.recoveryNotReady
+                    }
+                    #expect(recovered.host == successor && recovered.activationEpoch > old.activationEpoch)
+                    try await g2AssertConcreteRecovery(host: recoveredHost.host, token: recovered, room: roomID)
+                    #expect(try await g2StopAndRetire(recoveredHost, placement: nextPlacement))
+                } catch {
+                    _ = try? await g2StopAndRetire(recoveredHost, placement: nextPlacement)
+                    throw error
+                }
             } catch {
                 await barrier.open()
-                _ = await host.stop(deadline: .now + .seconds(5))
+                _ = try? await g2StopAndRetire(hosted, placement: placement)
                 throw error
             }
         }
@@ -74,11 +74,10 @@ struct V2RoomHostPostgresLifecycleTests {
     @Test("one cancelled waiter cannot cancel a shared concrete restore",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_G2_DATABASE_IS_DISPOSABLE"] == "1"))
     func cancelledWaiterSharesRestore() async throws {
-        try await withG2HostDatabase { database, _, fixture in
-            let leases = PostgresV2RoomActivationStore(database: database)
+        try await withG2HostDatabase { database, _, fixture, identity, placement, control in
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let barrier = G2PhaseBarrier(target: roomID)
-            let hosted = try g2Host(database: database, fixture: fixture, leaseStore: leases,
+            let hosted = try g2Host(database: database, fixture: fixture, identity: identity, placement: placement,
                 configuration: g2RuntimeConfiguration(), restoreBarrier: barrier)
             let host = hosted.host
             await host.start()
@@ -100,15 +99,15 @@ struct V2RoomHostPostgresLifecycleTests {
                     throw G2TestFailure.recoveryNotReady
                 }
                 #expect(token == tokenBeforeReady)
-                #expect(token.activationEpoch.rawValue == 1)
+                #expect(token.host == identity)
                 try await g2AssertConcreteRecovery(host: host, token: token, room: roomID)
                 #expect(await host.snapshot().activationWaiters == 0)
                 #expect(await hosted.budget.snapshot().commandCount == 0)
-                #expect((await host.stop(deadline: .now + .seconds(5))).completed)
-                #expect(try await leases.locate(roomID: roomID, owner: owner) == nil)
+                #expect(try await g2StopAndRetire(hosted, placement: placement))
+                #expect(try await control.snapshot().registration(for: identity.hostID) == .init(host: identity, retired: true))
             } catch {
                 await barrier.open()
-                _ = await host.stop(deadline: .now + .seconds(5))
+                _ = try? await g2StopAndRetire(hosted, placement: placement)
                 throw error
             }
         }
@@ -117,7 +116,7 @@ struct V2RoomHostPostgresLifecycleTests {
     @Test("stalled restore and idle retirement preserve healthy service and exact-token handoff",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_G2_DATABASE_IS_DISPOSABLE"] == "1"))
     func saturatedRestoreAndIdleHandoff() async throws {
-        try await withG2HostDatabase { database, sql, fixture in
+        try await withG2HostDatabase { database, sql, fixture, identity, placement, control in
             let hotUUID = UUID(), excessUUID = UUID()
             let hotRoom = RoomID(uuid: hotUUID), excessRoom = RoomID(uuid: excessUUID)
             try await sql.raw("""
@@ -125,11 +124,10 @@ struct V2RoomHostPostgresLifecycleTests {
                 VALUES (\(bind: hotUUID), 'room-a', 'standard'),
                        (\(bind: excessUUID), 'room-a', 'standard')
                 """).run()
-            let leases = PostgresV2RoomActivationStore(database: database)
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let restoreGate = G2PhaseBarrier(target: hotRoom)
             let closeGate = G2PhaseBarrier(target: hotRoom)
-            let hosted = try g2Host(database: database, fixture: fixture, leaseStore: leases,
+            let hosted = try g2Host(database: database, fixture: fixture, identity: identity, placement: placement,
                 configuration: g2RuntimeConfiguration(idleMilliseconds: 800),
                 restoreBarrier: restoreGate, closeBarrier: closeGate)
             let host = hosted.host
@@ -151,7 +149,7 @@ struct V2RoomHostPostgresLifecycleTests {
                     try await host.activate(roomID: excessRoom, owner: owner,
                         deadline: .now + .seconds(1))
                 })
-                #expect(try await leases.locate(roomID: excessRoom, owner: owner) == nil)
+                #expect(!(await host.readyTokens()).contains(where: { $0.roomID == excessRoom }))
                 try await g2AssertConcreteRecovery(host: host, token: healthy, room: roomID)
                 #expect(await hosted.budget.snapshot().commandCount == 0)
 
@@ -165,24 +163,28 @@ struct V2RoomHostPostgresLifecycleTests {
                     try await host.activate(roomID: hotRoom, owner: owner,
                         deadline: .now + .seconds(1))
                 })
-                #expect(try await leases.locate(roomID: hotRoom, owner: owner)?.token == firstHot)
+                #expect(await host.snapshot().retiringRooms >= 1)
                 await closeGate.open()
                 try await g2WaitUntil {
-                    try await leases.locate(roomID: hotRoom, owner: owner) == nil
+                    await host.snapshot().retiringRooms == 0
                 }
                 guard case .ready(let nextHot) = try await host.activate(roomID: hotRoom,
                     owner: owner, deadline: .now + .seconds(5)) else {
                     throw G2TestFailure.recoveryNotReady
                 }
-                #expect(nextHot.activationEpoch.rawValue == firstHot.activationEpoch.rawValue + 1)
-                #expect(try await leases.release(token: firstHot) == false)
-                #expect(try await leases.locate(roomID: hotRoom, owner: owner)?.token == nextHot)
-                #expect((await host.stop(deadline: .now + .seconds(5))).completed)
+                #expect(nextHot.activationEpoch > firstHot.activationEpoch)
+                await g2ExpectFailure(.notAccepted(.staleActivation), Task {
+                    try await host.invoke(token: firstHot,
+                        request: .recovery(.init(roomID: hotRoom, actorUserID: senderID, kind: .state)),
+                        deadline: .now + .seconds(1))
+                })
+                #expect((await host.readyTokens()).contains(nextHot))
+                #expect(try await g2StopAndRetire(hosted, placement: placement))
                 #expect(await hosted.budget.snapshot().commandCount == 0)
             } catch {
                 await restoreGate.open()
                 await closeGate.open()
-                _ = await host.stop(deadline: .now + .seconds(5))
+                _ = try? await g2StopAndRetire(hosted, placement: placement)
                 throw error
             }
         }
@@ -194,6 +196,14 @@ private struct G2HostedRoom {
     let budget: V2RoomCommandBudget
 }
 
+private func g2StopAndRetire(_ hosted: G2HostedRoom,
+                             placement: V2RoomActorPlacementRuntime) async throws -> Bool {
+    let drained = await hosted.host.stop(deadline: .now + .seconds(5))
+    guard drained.completed, let proof = drained.proof else { return false }
+    try await placement.retireAfterDrain(proof, shards: ["room-a"])
+    return true
+}
+
 private func g2RuntimeConfiguration(idleMilliseconds: Int64 = 300_000) throws -> V2RoomRuntimeConfiguration {
     try .init(maximumActiveRooms: 2, maximumConcurrentRestores: 1,
         maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 1,
@@ -202,7 +212,7 @@ private func g2RuntimeConfiguration(idleMilliseconds: Int64 = 300_000) throws ->
 }
 
 private func g2Host(database: any Database, fixture: PostgresV2RoomWriteStoreIntegrationTests,
-    leaseStore: PostgresV2RoomActivationStore, configuration: V2RoomRuntimeConfiguration,
+    identity: V2ActorHostIdentity, placement: V2RoomActorPlacementRuntime, configuration: V2RoomRuntimeConfiguration,
     restoreBarrier: G2PhaseBarrier, closeBarrier: G2PhaseBarrier? = nil) throws -> G2HostedRoom {
     let writes = PostgresV2RoomWriteStore(database: database)
     let ownerResources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
@@ -227,8 +237,7 @@ private func g2Host(database: any Database, fixture: PostgresV2RoomWriteStoreInt
         })
     }
     let budget = V2RoomCommandBudget(configuration: configuration)
-    let identity = V2ActorHostIdentity(hostID: try .init("g2-concrete-host"), incarnationID: UUID())
-    return .init(host: .init(identity: identity, leaseStore: leaseStore,
+    return .init(host: .init(identity: identity, placement: placement,
         configuration: configuration, budget: budget,
         classify: { $0.canShareSendTurn ? .send : .barrier }, factory: wrapped), budget: budget)
 }
@@ -291,8 +300,6 @@ private struct G2ProjectionDelivery: V2UserShardProjectionDelivering {
         projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }
 
-private struct G2CountRow: Decodable { let value: Int64 }
-
 private enum G2TestFailure: Error {
     case disposableDatabaseRequired
     case successorUnavailable
@@ -302,7 +309,8 @@ private enum G2TestFailure: Error {
 }
 
 private func withG2HostDatabase(_ operation: (any Database, any SQLDatabase,
-    PostgresV2RoomWriteStoreIntegrationTests) async throws -> Void) async throws {
+    PostgresV2RoomWriteStoreIntegrationTests, V2ActorHostIdentity, V2RoomActorPlacementRuntime,
+    V2NativePlacementTestControl) async throws -> Void) async throws {
     guard ProcessInfo.processInfo.environment["IMV2_ACTOR_HOST_G2_DATABASE_IS_DISPOSABLE"] == "1" else {
         throw G2TestFailure.disposableDatabaseRequired
     }
@@ -324,7 +332,11 @@ private func withG2HostDatabase(_ operation: (any Database, any SQLDatabase,
         try await fixture.seedRoom(on: sql)
         try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1").run()
         try await sql.raw("UPDATE im_v2.room_memberships SET joined_revision = 1").run()
-        try await operation(database, sql, fixture)
+        let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        try await withNativePlacementTestControl(host: identity, shardID: "room-a") { control in
+            let placement = try await control.register(identity, shard: "room-a")
+            try await operation(database, sql, fixture, identity, placement, control)
+        }
         try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
         installed = false
         try await resources.shutdown()

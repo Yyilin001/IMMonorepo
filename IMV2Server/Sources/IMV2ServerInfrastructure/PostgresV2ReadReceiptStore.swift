@@ -25,12 +25,12 @@ public struct PostgresV2ReadReceiptStore: V2ReadReceiptControlStore {
     }
 
     /// 虚拟 Actor 路径。每个事务（包括幂等重放）都会先获取规范房间锁，
-    /// 再检查精确激活，最后才查看操作记录。
+    /// 再检查数据 Owner，最后才查看操作记录。物理激活由上层原生 Actor 校验。
     public func recordActivationValidated(
         command: V2RecordReadReceiptCommand, token: V2RoomActivationToken,
         now: Date, timeouts: V2RoomActivationSQLTimeouts = .default
     ) async throws -> V2ReadReceiptOutcome {
-        guard token.roomID == command.roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard token.roomID == command.roomID else { throw V2RoomActorStateError.activationChanged }
         return try await record(command: command, activationScope: try .init(tokens: [token]), timeouts: timeouts, now: now)
     }
 
@@ -885,30 +885,15 @@ private func receiptActivationValidities(
         do {
             try await v2LockRoomActivationOwner(roomID: room, owner: token.owner, sql: sql, schema: "im_v2")
             ownerMatched.append((room, token))
-        } catch let error as V2RoomActivationLeaseError {
+        } catch let error as V2RoomActorStateError {
             switch error {
             case .roomNotFound, .ownerChanged: break
             default: throw error
             }
         }
     }
-    var leaseRows: [UUID: V2RoomActivationPersistenceRow] = [:]
-    for (room, _) in ownerMatched {
-        if let row = try await sql.raw("""
-            SELECT activation_epoch, owner_shard_id, owner_epoch, host_id, host_incarnation_id, expires_at
-            FROM im_v2.room_activation_leases WHERE room_id = \(bind: room) FOR UPDATE
-            """).first(decoding: V2RoomActivationPersistenceRow.self) {
-            leaseRows[room] = row
-        }
-    }
-    let observed = try await v2RoomActivationDatabaseClock(sql: sql)
     var validities = Dictionary(uniqueKeysWithValues: ordered.map { ($0.0, false) })
-    for (room, token) in ownerMatched {
-        if let row = leaseRows[room], row.matches(token),
-           let expiresAt = row.expiresAt, expiresAt > observed {
-            validities[room] = true
-        }
-    }
+    for (room, _) in ownerMatched { validities[room] = true }
     return validities
 }
 

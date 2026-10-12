@@ -45,10 +45,13 @@ public actor V2RoomClusterClientNode {
     private var client: V2RoomClusterClient?
     private var discovery: V2RoomClusterDiscovery?
 
+    private let callerIncarnation: UUID
+
     public init(configuration: V2RoomClusterClientNodeConfiguration,
                 signer: V2ActorSigningIdentity, trust: V2ActorTrustStore,
                 authenticationLimits: V2ActorAuthenticationLimits,
-                runtimeConfiguration: V2RoomRuntimeConfiguration) {
+                runtimeConfiguration: V2RoomRuntimeConfiguration, callerIncarnation: UUID = UUID()) {
+        self.callerIncarnation = callerIncarnation
         self.configuration = configuration
         self.signer = signer
         self.trust = trust
@@ -83,7 +86,7 @@ public actor V2RoomClusterClientNode {
         }
         let client = V2RoomClusterClient(system: system, signer: signer, trust: trust,
                                          limits: authenticationLimits,
-                                         configuration: runtimeConfiguration)
+                                         configuration: runtimeConfiguration, callerIncarnation: callerIncarnation)
         self.client = client
         if let discoveryConfiguration {
             let discovery = V2RoomClusterDiscovery(system: system, client: client,

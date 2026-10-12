@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "status": "configuration-frozen-measurements-pending",
-  "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
+  "baselineRevisionPolicy": "explicit-native-placement-revision",
   "swiftImage": "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6",
   "postgresImage": "postgres:16-alpine",
   "projectPrefix": "imv2-va-v1-capacity",

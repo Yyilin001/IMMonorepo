@@ -25,7 +25,7 @@ struct V2GatewayDomainCommandHandlerTests {
             (.rolledBack(.overloaded), "rolled_back", "overloaded"),
             (.notAccepted(.unavailable), "not_accepted", "unavailable"),
             (.rolledBack(.deadlineExceeded), "rolled_back", "deadline_exceeded"),
-            (.notAccepted(.leaseLost), "not_accepted", "lease_lost"),
+            (.notAccepted(.authorityLost), "not_accepted", "lease_lost"),
             (.outcomeUnknown, "outcome_unknown", "none")
         ]
         for (failure, disposition, reason) in failures {

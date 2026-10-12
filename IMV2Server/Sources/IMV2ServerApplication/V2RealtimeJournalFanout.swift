@@ -70,7 +70,7 @@ public actor V2RealtimeJournalFanout {
 
     public func apply(sourceID: String, lease: V2RealtimePartitionLease,
                       batch: V2RealtimeJournalBatch) async throws -> V2RealtimeJournalApplyResult {
-        guard !closed, (operations < 16), batch.partitionID == lease.partitionID else { throw V2RealtimeJournalError.leaseLost }
+        guard !closed, (operations < 16), batch.partitionID == lease.partitionID else { throw V2RealtimeJournalError.authorityLost }
         operations += 1
         defer { operationFinished() }
         guard batch.entries.allSatisfy({ $0.topicKind == "roomEvents" || $0.topicKind == "userSync" }) else {
@@ -78,7 +78,7 @@ public actor V2RealtimeJournalFanout {
         }
         let through = batch.requiresSnapshot ? batch.publishedThrough : (batch.entries.last?.sequence ?? batch.publishedThrough)
         let safe = try await fanout(sourceID: sourceID, lease: lease, control: batch, heads: nil, through: through)
-        guard safe else { throw V2RealtimeJournalError.leaseLost }
+        guard safe else { throw V2RealtimeJournalError.authorityLost }
         return .init(sourceID: sourceID, partitionID: lease.partitionID,
                      appliedThrough: through, snapshotInstalled: batch.requiresSnapshot)
     }
@@ -101,7 +101,7 @@ public actor V2RealtimeJournalFanout {
                                  heads: [V2RealtimeRoomHeadChange]) async throws -> Bool {
         guard !closed, (operations < 16), heads.count <= 128,
               heads.allSatisfy({ $0.partitionID == lease.partitionID }), recipient.deadline > .now else {
-            throw V2RealtimeJournalError.leaseLost
+            throw V2RealtimeJournalError.authorityLost
         }
         operations += 1
         defer { operationFinished() }
@@ -126,7 +126,7 @@ public actor V2RealtimeJournalFanout {
               batch.registration.routingToken == recipient.token.leaseToken,
               batch.registration.partitionID == recipient.token.partitionID,
               batch.journal.entries.allSatisfy({ $0.topicKind == "roomEvents" || $0.topicKind == "userSync" }) else {
-            throw V2RealtimeJournalError.leaseLost
+            throw V2RealtimeJournalError.authorityLost
         }
         operations += 1
         defer { operationFinished() }
@@ -137,7 +137,7 @@ public actor V2RealtimeJournalFanout {
                 (batch.journal.entries.last?.sequence ?? batch.journal.publishedThrough))
         let applied = await deliver(source: source, lease: lease, recipient: recipient,
             control: batch.journal, heads: batch.heads, through: through)
-        guard applied else { throw V2RealtimeJournalError.leaseLost }
+        guard applied else { throw V2RealtimeJournalError.authorityLost }
         let lane = key(source: source, lease: lease, recipient: recipient)
         return max(batch.controlCursor, checkpoints[lane] ?? through)
     }
@@ -268,7 +268,7 @@ public actor V2RealtimeJournalFanout {
         let result = try await coldSnapshot(recipient, source, fence, minimumCut)
         try Task.checkCancellation()
         guard !closed, recipient.deadline > .now, await isCurrent(recipient), result.source == source, result.fence == fence,
-              result.snapshotInstalled, result.appliedThrough >= minimumCut else { throw V2RealtimeJournalError.leaseLost }
+              result.snapshotInstalled, result.appliedThrough >= minimumCut else { throw V2RealtimeJournalError.authorityLost }
         checkpoints[lane] = result.appliedThrough
     }
 
@@ -288,9 +288,9 @@ public actor V2RealtimeJournalFanout {
             }
             guard case .applied(let applied) = result, applied.batchID == batch.batchID,
                   applied.source == source, applied.fence == fence, applied.appliedThrough == end,
-                  !applied.snapshotInstalled else { throw V2RealtimeJournalError.leaseLost }
+                  !applied.snapshotInstalled else { throw V2RealtimeJournalError.authorityLost }
             try Task.checkCancellation()
-            guard !closed, recipient.deadline > .now, await isCurrent(recipient) else { throw V2RealtimeJournalError.leaseLost }
+            guard !closed, recipient.deadline > .now, await isCurrent(recipient) else { throw V2RealtimeJournalError.authorityLost }
             checkpoints[lane] = end
         }
     }

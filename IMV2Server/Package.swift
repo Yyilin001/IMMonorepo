@@ -16,6 +16,8 @@ let package = Package(
         .library(name: "IMV2ServerGateway", targets: ["IMV2ServerGateway"]),
         .library(name: "IMV2ServerHTTP", targets: ["IMV2ServerHTTP"]),
         .executable(name: "IMV2ResourceImageWorker", targets: ["IMV2ResourceImageWorker"]),
+        .executable(name: "IMV2PlacementControlApp", targets: ["IMV2PlacementControlApp"]),
+        .executable(name: "IMV2RoomHostSupervisorApp", targets: ["IMV2RoomHostSupervisorApp"]),
         .executable(name: "IMV2ServerApp", targets: ["IMV2ServerApp"]),
         .executable(name: "IMV2AccountServerApp", targets: ["IMV2AccountServerApp"]),
         .executable(name: "IMV2OperatorServerApp", targets: ["IMV2OperatorServerApp"]),
@@ -52,6 +54,15 @@ let package = Package(
     ],
     targets: [
         .executableTarget(name: "IMV2ResourceImageWorker"),
+        .executableTarget(name: "IMV2PlacementControlApp",
+            dependencies: ["IMV2ActorApplication", "IMV2Server", "IMV2ServerContracts", "IMV2ServerApplication",
+                           .product(name: "Logging", package: "swift-log")]),
+        .executableTarget(name: "IMV2RoomHostSupervisorApp",
+            dependencies: ["IMV2ActorApplication", "IMV2ActorCluster", "IMV2ActorContracts", "IMV2Server", "IMV2ServerContracts", "IMV2ServerApplication",
+                .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOPosix", package: "swift-nio")]),
         .target(
             name: "IMV2ActorContracts",
             dependencies: ["IMV2Core", .product(name: "SwiftProtobuf", package: "swift-protobuf")]
@@ -153,7 +164,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "VirtualActorBusinessProbe",
-            dependencies: ["IMV2ServerInfrastructure", "IMV2ActorApplication", "IMV2ServerApplication", "IMV2Server", "IMV2ServerContracts", "IMV2ActorCluster", "IMV2ActorRuntime", "IMV2ActorContracts", "IMV2Core",
+            dependencies: ["IMV2ServerInfrastructure", "IMV2ActorApplication", "IMV2ActorRuntime", "IMV2ServerApplication", "IMV2Server", "IMV2ServerContracts", "IMV2ActorCluster", "IMV2ActorContracts", "IMV2Core",
                 .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
                 .product(name: "FluentKit", package: "fluent-kit"),
                 .product(name: "NIOPosix", package: "swift-nio"),
@@ -165,14 +176,20 @@ let package = Package(
         .target(
             name: "IMV2ActorApplication",
             dependencies: ["IMV2ServerInfrastructure", "IMV2ServerContracts", "IMV2ServerApplication", "IMV2Server", "IMV2ActorCluster", "IMV2ActorRuntime", "IMV2ActorContracts",
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "FluentKit", package: "fluent-kit"),
+                .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
                 .product(name: "Crypto", package: "swift-crypto")]
         ),
         .testTarget(
             name: "IMV2ActorApplicationTests",
             dependencies: ["IMV2ServerInfrastructure", "IMV2ActorApplication", "IMV2ServerApplication", "IMV2Server", "IMV2ServerContracts", "IMV2ActorCluster", "IMV2ActorContracts",
-                .product(name: "Crypto", package: "swift-crypto")]
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "FluentPostgresDriver", package: "fluent-postgres-driver"),
+                .product(name: "SQLKit", package: "sql-kit"),
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "NIOPosix", package: "swift-nio")]
         ),
         .target(
             name: "IMV2ServerHTTP",

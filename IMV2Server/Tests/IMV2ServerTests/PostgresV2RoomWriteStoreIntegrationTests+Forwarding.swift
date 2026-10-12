@@ -1017,7 +1017,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await targetSQL.raw("UPDATE im_v2.rooms SET membership_revision = 1, owner_epoch = 1 WHERE room_id = \(bind: target.uuidValue!)").run()
             let restarted = V2PolicyAuthorizedTestWriteStore(database: targetDB, controlDatabase: sourceDB,
                     store: PostgresV2RoomWriteStore(database: targetDB).usingControlDatabase(sourceDB), shardID: "room-b", epoch: 0)
-            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 try await restarted.importForwardExport(second, capacityProfile: profile, limits: .init(maxUTF8Bytes: 1), identifiers: V2AcceptanceIDFactory().make(at: now), now: now)
             }
             #expect(try await inbox.status(exportID: second.intent.exportID) == .pending(.finalization))
@@ -1120,7 +1120,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(try await inbox.status(exportID: earlier.intent.exportID) == accepted)
             }
             if scenario == "epoch" {
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
+                await #expect(throws: V2RoomActorStateError.ownerChanged) {
                     try await write.importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: try V2AcceptanceIDFactory().make(at: now), now: now)
                 }
                 #expect(try await inbox.status(exportID: export.intent.exportID) == .pending(.admission))
@@ -1192,7 +1192,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await targetSQL.raw("DROP FUNCTION im_v2.test_reject_forward_completion()").run()
             if changesOwner {
                 try await targetSQL.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: target.roomID.uuidValue!)").run()
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
+                await #expect(throws: V2RoomActorStateError.ownerChanged) {
                     try await write.importForwardExport(export, capacityProfile: profile, limits: limits, identifiers: V2AcceptanceIDFactory().make(at: now), now: now)
                 }
                 #expect(try await inbox.status(exportID: export.intent.exportID) == .pending(.finalization))

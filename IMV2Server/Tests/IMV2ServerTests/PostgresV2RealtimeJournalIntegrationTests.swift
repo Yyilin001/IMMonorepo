@@ -450,140 +450,138 @@ struct PostgresV2RoomSubscriptionDirtyHeadTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func sameHeadControlIsAppliedByHostBeforeDirtyResponsibilityCompletes() async throws {
         try await withJournalDatabase { database, sql, schema in
-            let room = UUID(), user = UUID()
-            let roomID = RoomID(uuid: room), userID = UserID(uuid: user)
-            let token = try roomSubscriptionFixtureActivation(roomID: roomID, ownerEpoch: 0)
-            try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room),'source','standard')").run()
-            try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room),\(bind: user),0)").run()
-            try await sql.raw("""
-                INSERT INTO \(unsafeRaw: schema).room_activation_leases(room_id,activation_epoch,owner_shard_id,owner_epoch,host_id,host_incarnation_id,expires_at)
-                VALUES(\(bind: room),\(bind: token.activationEpoch.rawValue),'source',0,\(bind: token.host.hostID.rawValue),\(bind: token.host.incarnationID),clock_timestamp()+interval '60 seconds')
-                """).run()
-            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: token, schema: schema)
-            let store = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database, schema: schema)
-            let authority = V2GatewayRoomSubscriptionAuthority()
-            let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, offerEvent: { _, _ in }, offerHead: { _, _ in })
-            let gateway = V2GatewayRealtimeIdentity(nodeID: "test-gateway", serviceID: "test-gateway", incarnationID: UUID())
-            let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 8443)
-            let host = V2RoomSubscriptionHost(checkInterval: .seconds(3600), dirtyChanges: { host, cursor, limit, deadline in
-                try await store.pending(host: host, after: cursor, limit: limit, deadline: deadline)
-            }, dirtyAcknowledge: { receipts, deadline in try await store.acknowledge(receipts, deadline: deadline) })
-            let terminalGate = Mutex((offered: false, released: false))
-            try await host.configure(sendBatch: { batch, _, _ in
-                if batch.deliveries.contains(where: { $0.payload == .authorizationInvalidated }) {
-                    terminalGate.withLock { $0.offered = true }
-                    while !terminalGate.withLock({ $0.released }) {
-                        try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(1))
+            try await withNativeSubscriptionTestHost(shardID: "source") { activations in
+                let room = UUID(), user = UUID()
+                let roomID = RoomID(uuid: room), userID = UserID(uuid: user)
+                let (token, lifetime) = try await activations.activate(roomID)
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room),'source','standard')").run()
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room),\(bind: user),0)").run()
+                let source = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime, schema: schema)
+                let store = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database, schema: schema)
+                let authority = V2GatewayRoomSubscriptionAuthority()
+                let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, offerEvent: { _, _ in }, offerHead: { _, _ in })
+                let gateway = V2GatewayRealtimeIdentity(nodeID: "test-gateway", serviceID: "test-gateway", incarnationID: UUID())
+                let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 8443)
+                let host = V2RoomSubscriptionHost(checkInterval: .seconds(3600), dirtyChanges: { tokens, cursor, limit, deadline in
+                    try await store.pending(activeTokens: tokens, after: cursor, limit: limit, deadline: deadline)
+                }, dirtyAcknowledge: { receipts, deadline in try await store.acknowledge(receipts, deadline: deadline) })
+                activations.own(host)
+                let terminalGate = Mutex((offered: false, released: false))
+                try await host.configure(sendBatch: { batch, _, _ in
+                    if batch.deliveries.contains(where: { $0.payload == .authorizationInvalidated }) {
+                        terminalGate.withLock { $0.offered = true }
+                        while !terminalGate.withLock({ $0.released }) {
+                            try Task.checkCancellation(); try await Task.sleep(for: .milliseconds(1))
+                        }
                     }
-                }
-                return await ingress.applyRoomSubscriptionBatch(batch, authenticatedServiceID: "source-service", sourceShardID: "source")
-            }, maximumCalls: 1)
-            do {
-                let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: roomID, owner: token.owner,
-                    activation: token, deadline: .now + .seconds(30), trackedUserIDs: [])
-                try await host.register(owner, token: token)
-                let grant = try await owner.subscribe(gateway: gateway, userID: userID, token: token, deadline: .now + .seconds(30))
-                let installed = await ingress.install(fence: grant.fence, sourceShardID: "source", serviceID: "source-service", deadline: .now + .seconds(30))
-                #expect(installed)
-                let connection = UUID(), lifecycle = UUID()
-                await authority.registerFixtureConnection(connection, userID: userID, lifecycle: lifecycle)
-                #expect(await authority.registerRoomInterest(connectionID: connection, lifecycle: lifecycle, roomID: roomID, scopeGeneration: 1))
-                let pump = try #require(await host.currentPump())
-                try await owner.activate(to: pump, descriptor: descriptor, userID: userID, fence: grant.fence, token: token, deadline: .now + .seconds(30))
-                let deadline = ContinuousClock.now + .seconds(5)
-                while await authority.capturePermits(roomID: roomID).isEmpty {
-                    guard .now < deadline else { throw ControlTimeout.expired }; try await Task.sleep(for: .milliseconds(1))
-                }
-                let permit = try #require(await authority.capturePermits(roomID: roomID).first)
-                // No room-log entry is added: this is the actual same-H gap.
-                try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET membership_revision=1 WHERE room_id=\(bind: room)").run()
-                try await sql.raw("UPDATE \(unsafeRaw: schema).room_memberships SET left_revision=1 WHERE room_id=\(bind: room) AND user_id=\(bind: user)").run()
-                let fresh = try await source.snapshot(roomID: roomID, owner: token.owner, trackedUserIDs: [userID])
-                #expect(fresh.highWatermark == 0 && fresh.members.first?.authorized == false)
-                let pending = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5))
-                #expect(pending.changes.first?.roomControlVersion == fresh.roomControlVersion)
-                await host.checkChanges()
-                while !terminalGate.withLock({ $0.offered }) {
-                    guard .now < deadline else { throw ControlTimeout.expired }; try await Task.sleep(for: .milliseconds(1))
-                }
-                await host.checkChanges()
-                let beforeReceipt = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5))
-                #expect(!beforeReceipt.changes.isEmpty)
-                let stillLiveBeforeReceipt = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
-                #expect(stillLiveBeforeReceipt)
-                terminalGate.withLock { $0.released = true }
-                while !(await authority.requiresBaseline(fence: grant.fence)) {
-                    guard .now < deadline else { throw ControlTimeout.expired }; try await Task.sleep(for: .milliseconds(1))
-                }
-                let oldPermitAccepted = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
-                #expect(!oldPermitAccepted)
-                // Completion is retried only after the real ingress receipt.
-                await host.checkChanges()
-                while !(try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5))).changes.isEmpty {
-                    guard .now < deadline else { throw ControlTimeout.expired }; await host.checkChanges(); try await Task.sleep(for: .milliseconds(1))
-                }
-                #expect(await owner.consumedSequence() == 0)
-                await host.close()
-            } catch { terminalGate.withLock { $0.released = true }; await host.close(); throw error }
+                    return await ingress.applyRoomSubscriptionBatch(batch, authenticatedServiceID: "source-service", sourceShardID: "source")
+                }, maximumCalls: 1)
+                do {
+                    let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: roomID, owner: token.owner,
+                        activation: token, deadline: .now + .seconds(30), trackedUserIDs: [])
+                    try await host.register(owner, token: token, lifetime: lifetime)
+                    let grant = try await owner.subscribe(gateway: gateway, userID: userID, token: token, deadline: .now + .seconds(30))
+                    let installed = await ingress.install(fence: grant.fence, sourceShardID: "source", serviceID: "source-service", deadline: .now + .seconds(30))
+                    #expect(installed)
+                    let connection = UUID(), lifecycle = UUID()
+                    await authority.registerFixtureConnection(connection, userID: userID, lifecycle: lifecycle)
+                    #expect(await authority.registerRoomInterest(connectionID: connection, lifecycle: lifecycle, roomID: roomID, scopeGeneration: 1))
+                    let pump = try #require(await host.currentPump())
+                    try await owner.activate(to: pump, descriptor: descriptor, userID: userID, fence: grant.fence, token: token, deadline: .now + .seconds(30))
+                    let deadline = ContinuousClock.now + .seconds(5)
+                    while await authority.capturePermits(roomID: roomID).isEmpty {
+                        guard .now < deadline else { throw ControlTimeout.expired }; try await Task.sleep(for: .milliseconds(1))
+                    }
+                    let permit = try #require(await authority.capturePermits(roomID: roomID).first)
+                    // No room-log entry is added: this is the actual same-H gap.
+                    try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET membership_revision=1 WHERE room_id=\(bind: room)").run()
+                    try await sql.raw("UPDATE \(unsafeRaw: schema).room_memberships SET left_revision=1 WHERE room_id=\(bind: room) AND user_id=\(bind: user)").run()
+                    let fresh = try await source.snapshot(roomID: roomID, owner: token.owner, trackedUserIDs: [userID])
+                    #expect(fresh.highWatermark == 0 && fresh.members.first?.authorized == false)
+                    let pending = try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5))
+                    #expect(pending.changes.first?.roomControlVersion == fresh.roomControlVersion)
+                    await host.checkChanges()
+                    while !terminalGate.withLock({ $0.offered }) {
+                        guard .now < deadline else { throw ControlTimeout.expired }; try await Task.sleep(for: .milliseconds(1))
+                    }
+                    await host.checkChanges()
+                    let beforeReceipt = try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5))
+                    #expect(!beforeReceipt.changes.isEmpty)
+                    let stillLiveBeforeReceipt = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
+                    #expect(stillLiveBeforeReceipt)
+                    terminalGate.withLock { $0.released = true }
+                    while !(await authority.requiresBaseline(fence: grant.fence)) {
+                        guard .now < deadline else { throw ControlTimeout.expired }; try await Task.sleep(for: .milliseconds(1))
+                    }
+                    let oldPermitAccepted = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
+                    #expect(!oldPermitAccepted)
+                    // Completion is retried only after the real ingress receipt.
+                    await host.checkChanges()
+                    while !(try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5))).changes.isEmpty {
+                        guard .now < deadline else { throw ControlTimeout.expired }; await host.checkChanges(); try await Task.sleep(for: .milliseconds(1))
+                    }
+                    #expect(await owner.consumedSequence() == 0)
+                    await host.close()
+                } catch { terminalGate.withLock { $0.released = true }; await host.close(); throw error }
+            }
         }
     }
 
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func committedTriggerResponsibilitySurvivesOldReceiptAndInactiveRoom() async throws {
         try await withJournalDatabase { database, sql, schema in
-            let room = UUID(), inactive = UUID()
-            let token = try roomSubscriptionFixtureActivation(roomID: RoomID(uuid: room), ownerEpoch: 0)
-            try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room),'source','standard'),(\(bind: inactive),'source','standard')").run()
-            try await sql.raw("""
-                INSERT INTO \(unsafeRaw: schema).room_activation_leases(room_id,activation_epoch,owner_shard_id,owner_epoch,host_id,host_incarnation_id,expires_at)
-                VALUES(\(bind: room),\(bind: token.activationEpoch.rawValue),'source',0,\(bind: token.host.hostID.rawValue),\(bind: token.host.incarnationID),clock_timestamp()+interval '60 seconds')
-                """).run()
-            let store = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database, schema: schema)
-            let controlOnly = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5))
-            #expect(controlOnly.changes.count == 1 && controlOnly.changes.first?.highWatermark == 0)
-            try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room),\(bind: UUID()),0)").run()
-            try await store.acknowledge(controlOnly.changes, deadline: .now + .seconds(5))
-            let revisedControl = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5))
-            #expect(revisedControl.changes.first?.highWatermark == 0)
-            #expect((revisedControl.changes.first?.roomControlVersion ?? 0) > (controlOnly.changes.first?.roomControlVersion ?? 0))
-            #expect((revisedControl.changes.first?.revision ?? 0) > (controlOnly.changes.first?.revision ?? 0))
-            try await insertHeadEvent(sql, schema: schema, room: room, sequence: 1)
-            try await insertHeadEvent(sql, schema: schema, room: inactive, sequence: 1)
-            let first = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5)).changes
-            #expect(first.count == 1 && first.first?.highWatermark == 1)
-            // A later real transaction increments dirty revision; the old
-            // receipt must not erase its last H even with the same activation.
-            try await insertHeadEvent(sql, schema: schema, room: room, sequence: 2)
-            try await store.acknowledge(first, deadline: .now + .seconds(5))
-            let newer = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5)).changes
-            #expect(newer.count == 1 && newer.first?.highWatermark == 2)
-            try await store.acknowledge(newer, deadline: .now + .seconds(5))
-            #expect(try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5)).changes.isEmpty)
-            let retained = try await sql.raw("SELECT pending,room_sequence FROM \(unsafeRaw: schema).realtime_dirty_room_heads WHERE room_id=\(bind: inactive)").all()
-            #expect(retained.count == 1)
-            #expect(try retained.first?.decode(column: "pending", as: Bool.self) == true)
-            // Scale unrelated dirty responsibility and exercise the same pending
-            // index discovery used in production.
-            try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_dirty_room_heads(room_id,partition_id,room_sequence,owner_epoch,room_control_version) SELECT gen_random_uuid(),0,1,0,0 FROM generate_series(1,4096)").run()
-            try await sql.raw("ANALYZE \(unsafeRaw: schema).realtime_dirty_room_heads").run()
-            let query = store.pendingHostQuery(host: token.host, after: nil, limit: 128)
-            let plan = try await sql.raw("EXPLAIN (FORMAT TEXT) \(query)").all().map { try $0.decode(column: "QUERY PLAN", as: String.self) }.joined(separator: "\n")
-            #expect(!plan.contains("LockRows"))
-            #expect(plan.contains("realtime_dirty_room_heads_pending_idx"))
-            try await insertHeadEvent(sql, schema: schema, room: room, sequence: 3)
-            let invalid = try roomSubscriptionFixtureActivation(roomID: RoomID(uuid: room), ownerEpoch: 0)
-            let invalidHost = try await store.pending(host: invalid.host, after: nil, deadline: .now + .seconds(5))
-            #expect(invalidHost.changes.isEmpty)
-            let hostPage = try await store.pending(host: token.host, after: nil, limit: 1, deadline: .now + .seconds(5))
-            #expect(hostPage.changes.count == 1 && hostPage.nextCursor != nil)
-            let nextPage = try await store.pending(host: token.host, after: hostPage.nextCursor, limit: 1, deadline: .now + .seconds(5))
-            #expect(nextPage.changes.isEmpty && nextPage.nextCursor == nil)
-            #expect(try await store.pending(host: invalid.host, after: nil, deadline: .now + .seconds(5)).changes.isEmpty)
-            let live = try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5)).changes
-            let current = try #require(live.first)
-            let forgedReceipt = V2RoomSubscriptionDirtyHead(activation: invalid, highWatermark: current.highWatermark, revision: current.revision, roomControlVersion: current.roomControlVersion)
-            try await store.acknowledge([forgedReceipt], deadline: .now + .seconds(5))
-            #expect(try await store.pending(host: token.host, after: nil, deadline: .now + .seconds(5)).changes == live)
+            try await withNativeSubscriptionTestHost(shardID: "source") { activations in
+                let room = UUID(), inactive = UUID()
+                let (token, _) = try await activations.activate(RoomID(uuid: room))
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room),'source','standard'),(\(bind: inactive),'source','standard')").run()
+                let store = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database, schema: schema)
+                let controlOnly = try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5))
+                #expect(controlOnly.changes.count == 1 && controlOnly.changes.first?.highWatermark == 0)
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room),\(bind: UUID()),0)").run()
+                try await store.acknowledge(controlOnly.changes, deadline: .now + .seconds(5))
+                let revisedControl = try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5))
+                #expect(revisedControl.changes.first?.highWatermark == 0)
+                #expect((revisedControl.changes.first?.roomControlVersion ?? 0) > (controlOnly.changes.first?.roomControlVersion ?? 0))
+                #expect((revisedControl.changes.first?.revision ?? 0) > (controlOnly.changes.first?.revision ?? 0))
+                try await insertHeadEvent(sql, schema: schema, room: room, sequence: 1)
+                try await insertHeadEvent(sql, schema: schema, room: inactive, sequence: 1)
+                let first = try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5)).changes
+                #expect(first.count == 1 && first.first?.highWatermark == 1)
+                // A later real transaction increments dirty revision; the old
+                // receipt must not erase its last H even with the same activation.
+                try await insertHeadEvent(sql, schema: schema, room: room, sequence: 2)
+                try await store.acknowledge(first, deadline: .now + .seconds(5))
+                let newer = try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5)).changes
+                #expect(newer.count == 1 && newer.first?.highWatermark == 2)
+                try await store.acknowledge(newer, deadline: .now + .seconds(5))
+                #expect(try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5)).changes.isEmpty)
+                let retained = try await sql.raw("SELECT pending,room_sequence FROM \(unsafeRaw: schema).realtime_dirty_room_heads WHERE room_id=\(bind: inactive)").all()
+                #expect(retained.count == 1)
+                #expect(try retained.first?.decode(column: "pending", as: Bool.self) == true)
+                // Scale unrelated dirty responsibility and exercise the same pending
+                // index discovery used in production.
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_dirty_room_heads(room_id,partition_id,room_sequence,owner_epoch,room_control_version) SELECT gen_random_uuid(),0,1,0,0 FROM generate_series(1,4096)").run()
+                try await sql.raw("ANALYZE \(unsafeRaw: schema).realtime_dirty_room_heads").run()
+                let query = store.pendingHostQuery(activeTokens: [token], after: nil, limit: 128)
+                let plan = try await sql.raw("EXPLAIN (FORMAT TEXT) \(query)").all().map { try $0.decode(column: "QUERY PLAN", as: String.self) }.joined(separator: "\n")
+                #expect(!plan.contains("LockRows"))
+                #expect(plan.contains("realtime_dirty_room_heads_pending_idx") || plan.contains("realtime_dirty_room_heads_pkey"))
+                try await insertHeadEvent(sql, schema: schema, room: room, sequence: 3)
+                let invalid = V2RoomActivationToken(roomID: token.roomID,
+                    owner: try .init(shardID: "source", epoch: 1), activationEpoch: token.activationEpoch, host: token.host)
+                let invalidHost = try await store.pending(activeTokens: [invalid], after: nil, deadline: .now + .seconds(5))
+                #expect(invalidHost.changes.isEmpty)
+                let hostPage = try await store.pending(activeTokens: [token], after: nil, limit: 1, deadline: .now + .seconds(5))
+                #expect(hostPage.changes.count == 1 && hostPage.nextCursor != nil)
+                let nextPage = try await store.pending(activeTokens: [token], after: hostPage.nextCursor, limit: 1, deadline: .now + .seconds(5))
+                #expect(nextPage.changes.isEmpty && nextPage.nextCursor == nil)
+                #expect(try await store.pending(activeTokens: [invalid], after: nil, deadline: .now + .seconds(5)).changes.isEmpty)
+                let live = try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5)).changes
+                let current = try #require(live.first)
+                let forgedReceipt = V2RoomSubscriptionDirtyHead(activation: invalid, highWatermark: current.highWatermark, revision: current.revision, roomControlVersion: current.roomControlVersion)
+                try await store.acknowledge([forgedReceipt], deadline: .now + .seconds(5))
+                #expect(try await store.pending(activeTokens: [token], after: nil, deadline: .now + .seconds(5)).changes == live)
+            }
         }
     }
 }

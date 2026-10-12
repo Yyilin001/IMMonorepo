@@ -42,7 +42,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
     public func setAvatar(actorUserID: UserID, command: V2GroupAvatarCommand,
                           capacityProfile: V2CapacityProfile, eventID: EventID,
                           now: Date) async throws -> V2GroupCapabilitiesOutcome<V2GroupAvatarChange> {
-        guard let activationScope else { throw V2RoomActivationLeaseError.activationChanged }
+        guard let activationScope else { throw V2RoomActorStateError.activationChanged }
         return try await groupTransaction(database, withinTransaction: usesCapabilityTransaction, classifyCommitFailure: true) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let ids = try groupIDs(actorUserID, command.operationID, command.roomID)
@@ -131,7 +131,7 @@ public struct PostgresV2GroupCapabilitiesStore: V2GroupCapabilitiesStore {
     /// Recovery is scoped to the authenticated actor's command and needs no
     /// current membership. It neither reads nor mutates another actor's avatar.
     public func recoverAvatar(actorUserID: UserID, request: V2GroupAvatarRecoveryRequest) async throws -> V2GroupAvatarRecoveryResult {
-        guard let activationScope else { throw V2RoomActivationLeaseError.activationChanged }
+        guard let activationScope else { throw V2RoomActorStateError.activationChanged }
         return try await v2WithRoomScopedTransaction(database: database) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             let command = request.command, ids = try groupIDs(actorUserID, request.command.operationID, request.command.roomID)

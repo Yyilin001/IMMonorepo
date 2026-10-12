@@ -12,11 +12,10 @@ from pathlib import Path
 
 from virtual_actor_capacity_measurement import (
     MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure, freeze_calibrations,
-    resource_scope, verify_freeze,
+    require_revision, resource_scope, verify_freeze,
 )
 
 
-MAIN = "f1cdd78d6a21bf0ae23da627c0710c65115236aa"
 # Integration-owner policy, fixed before any candidate capacity observation.
 # Absolute values are derived only from three stable main calibrations.
 POLICY = {
@@ -106,9 +105,8 @@ def read_run(directory: Path) -> dict:
         mean_batch = number(dequeued, "batch requests") / batches
     peaks = phase["metricsSampledMaximum"]
     actor = {}
-    if result["source"]["sourceSHA"] != MAIN:
-        for suffix in ("peak_outstanding_commands", "peak_outstanding_bytes"):
-            actor[suffix] = number(peaks.get("im_v2_room_actor_" + suffix), suffix)
+    for suffix in ("peak_outstanding_commands", "peak_outstanding_bytes"):
+        actor[suffix] = number(peaks.get("im_v2_room_actor_" + suffix), suffix)
     return {"directory": str(directory), "resultSHA256": sha(directory / "result.json"),
             "result": result, "workload": workload, "resourceScope": scope,
             "measurements": measurements,
@@ -116,8 +114,9 @@ def read_run(directory: Path) -> dict:
             "meanPhysicalSendBatchSize": mean_batch, "actorOutstandingPeaks": actor}
 
 
-def budgets(runs: list[dict]) -> dict[str, float]:
-    if len(runs) != 3 or any(run["result"]["source"]["sourceSHA"] != MAIN for run in runs):
+def budgets(runs: list[dict], *, main_revision: str) -> dict[str, float]:
+    require_revision(main_revision)
+    if len(runs) != 3 or any(run["result"]["source"]["sourceSHA"] != main_revision for run in runs):
         raise MeasurementFailure("budgets require three main runs")
     keys = runs[0]["measurements"].keys()
     if any(run["measurements"].keys() != keys for run in runs):
@@ -167,12 +166,15 @@ def main() -> None:
     evaluate.add_argument("--freeze", type=Path, required=True)
     evaluate.add_argument("--run", type=Path, action="append", required=True)
     evaluate.add_argument("--output", type=Path, required=True)
+    for command in (freeze, evaluate):
+        command.add_argument("--main-revision", required=True)
     args = parser.parse_args()
+    require_revision(args.main_revision)
     if args.output.exists():
         parser.error("output must be new")
     if args.mode == "freeze":
         runs = [read_run(path) for path in args.main_run]
-        output = freeze_calibrations(args.main_run, budgets(runs))
+        output = freeze_calibrations(args.main_run, budgets(runs, main_revision=args.main_revision), main_revision=args.main_revision)
         output["regressionPolicy"] = POLICY
         output["policyMeaning"] = "integration-owner budget; frozen from main before candidate sampling"
     else:
@@ -197,7 +199,7 @@ def main() -> None:
                  "measurementSemanticsVersion", "resourceScope")
             ):
                 raise MeasurementFailure("assessed run changed harness or measurement topology")
-            verify_freeze(args.freeze, workload=row["workload"], layout=result["layout"],
+            verify_freeze(args.freeze, main_revision=args.main_revision, workload=row["workload"], layout=result["layout"],
                           fixture_hash=result["fixtureManifestSHA256"],
                           scenario_hash=result["scenarioSHA256"],
                           loader_hash=result["productSHA256"]["IMV2GatewayLoadGenerator"],

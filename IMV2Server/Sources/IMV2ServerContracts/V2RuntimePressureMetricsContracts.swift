@@ -90,7 +90,6 @@ public struct V2DatabaseLoanClassMetrics: Equatable, Sendable {
 public enum V2DatabaseLoanObservationMetricSource: String, CaseIterable, Sendable {
     case durableOwner = "durable_owner"
     case roomSendInitialization = "room_send_initialization"
-    case preparationOwnerRead = "preparation_owner_read"
     case controlReservation = "control_reservation"
     case policySnapshot = "policy_snapshot"
     case lifecycle, renewal, presence

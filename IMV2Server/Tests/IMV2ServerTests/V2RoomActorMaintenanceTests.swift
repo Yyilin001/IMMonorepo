@@ -12,7 +12,7 @@ import Testing
 
 @Suite("Room actor maintenance on PostgreSQL", .serialized)
 struct V2RoomActorMaintenanceTests {
-    @Test("retention scanner grants no authority; exact activation fences floor and delete")
+    @Test("retention scanner grants no authority; native execution and data ownership fence floor and delete")
     func activationFencedRetention() async throws {
         try await withMaintenanceDatabase { database, sql in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -48,19 +48,17 @@ struct V2RoomActorMaintenanceTests {
                 try await insertSummaryFixtureRoomEvent(on: sql, room: room,
                     sequence: Int64(sequence), revision: 1, message: UUID(), createdAt: now)
             }
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let old = try await maintenanceAcquire(leases, room: room, owner: owner, host: "host-a")
             let scanner = PostgresV2RoomMaintenanceScanner(database: database)
             #expect(try await scanner.retentionCandidates(limit: 10) == [.init(uuid: room)])
             let executor = V2ActorRoomMaintenanceExecutor(database: database, now: { now })
+            let command = V2RoomMaintenanceCommand.trimLog(.init(roomID: .init(uuid: room),
+                mode: .permanent, windowSeconds: 3_600))
+            try await withRoomActivation(database: database, roomID: .init(uuid: room)) { old in
             let worker = V2RoomActorMaintenanceWorker(scanner: scanner,
                 invoker: LocalMaintenanceInvoker(executor: executor, token: old))
             let worked = try await worker.runRetention(limit: 10, mode: .permanent,
                 window: 3_600)
             #expect(worked.scannedRooms == 1 && worked.advancedFloors == 1 && worked.deletedEvents == 2)
-            let command = V2RoomMaintenanceCommand.trimLog(.init(roomID: .init(uuid: room),
-                mode: .permanent, windowSeconds: 3_600))
             guard case .logTrimmed(let first) = try await executor.execute(command, token: old) else {
                 Issue.record("retention result kind mismatch"); return
             }
@@ -74,16 +72,18 @@ struct V2RoomActorMaintenanceTests {
                 """).first(decoding: MaintenanceStringRow.self))
             #expect(body.value == "inline")
 
-            #expect(try await leases.release(token: old))
-            let successor = try await maintenanceAcquire(leases, room: room, owner: owner, host: "host-b")
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind:room)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 _ = try await executor.execute(command, token: old)
             }
             #expect(try await maintenanceCount(sql, "im_v2.room_events") == 2)
+            }
+            try await withRoomActivation(database: database, roomID: .init(uuid: room), epoch: 1) { successor in
             guard case .logTrimmed(let replay) = try await executor.execute(command, token: successor) else {
                 Issue.record("retention replay kind mismatch"); return
             }
             #expect(!replay.advancedFloor && replay.deletedEvents == 0)
+            }
         }
     }
 
@@ -134,9 +134,7 @@ struct V2RoomActorMaintenanceTests {
                 CREATE TRIGGER aa_test_pause_retention_delete BEFORE DELETE ON im_v2.room_events
                 FOR EACH ROW EXECUTE FUNCTION im_v2.test_pause_retention_delete()
                 """).run()
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let token = try await maintenanceAcquire(PostgresV2RoomActivationStore(database: database),
-                room: room, owner: owner, host: "host-a")
+            try await withRoomActivation(database: database, roomID: .init(uuid: room)) { token in
             let locked = MaintenanceGate(), release = MaintenanceGate()
             let blocker = Task {
                 try await database.transaction { transaction in
@@ -146,12 +144,12 @@ struct V2RoomActorMaintenanceTests {
                     await release.wait()
                 }
             }
-            defer { Task { await release.signal() } }
             await locked.wait()
             let executor = V2ActorRoomMaintenanceExecutor(database: database, now: { now })
             let command = V2RoomMaintenanceCommand.trimLog(.init(roomID: .init(uuid: room),
                 mode: .permanent, windowSeconds: 3_600))
             let trimmer = Task { try await executor.execute(command, token: token) }
+            do {
             try await maintenanceWaitForDeleteLock(sql)
             let compaction = try await PostgresV2MessageProjectionStateBodyCompactionWorker(
                 database: database).runOnce(limit: 10)
@@ -168,6 +166,13 @@ struct V2RoomActorMaintenanceTests {
                 WHERE state_id = \(bind: state)
                 """).first(decoding: MaintenanceStringRow.self))
             #expect(storage.value == "inline")
+            } catch {
+                await release.signal()
+                _ = await blocker.result
+                _ = await trimmer.result
+                throw error
+            }
+            }
         }
     }
 
@@ -203,8 +208,7 @@ struct V2RoomActorMaintenanceTests {
                 """).run()
             try await insertSummaryFixtureRoomEvent(on: sql, room: room,
                 sequence: 2, revision: 1, message: UUID(), createdAt: now)
-            let token = try await maintenanceAcquire(PostgresV2RoomActivationStore(database: database),
-                room: room, owner: try .init(shardID: "room-a", epoch: 0), host: "host-a")
+            try await withRoomActivation(database: database, roomID: .init(uuid: room)) { token in
             let compacted = MaintenanceGate(), release = MaintenanceGate()
             // Reproduce the compactor's UPDATE while its row lock is still
             // held. The other schedule uses the actual compactor with SKIP LOCKED.
@@ -220,12 +224,12 @@ struct V2RoomActorMaintenanceTests {
                     await release.wait()
                 }
             }
-            defer { Task { await release.signal() } }
             await compacted.wait()
             let executor = V2ActorRoomMaintenanceExecutor(database: database, now: { now })
             let command = V2RoomMaintenanceCommand.trimLog(.init(roomID: .init(uuid: room),
                 mode: .permanent, windowSeconds: 3_600))
             let trimmer = Task { try await executor.execute(command, token: token) }
+            do {
             try await maintenanceWaitForMaterializationLock(sql)
             await release.signal()
             try await compactorTransaction.value
@@ -239,10 +243,17 @@ struct V2RoomActorMaintenanceTests {
                 WHERE state_id = \(bind: state)
                 """).first(decoding: MaintenanceStringRow.self))
             #expect(storage.value == "inline")
+            } catch {
+                await release.signal()
+                _ = await compactorTransaction.result
+                _ = await trimmer.result
+                throw error
+            }
+            }
         }
     }
 
-    @Test("control cleanup excludes room rows; old token cannot delete terminal jobs or operations")
+    @Test("control cleanup excludes room rows; old data owner cannot delete terminal jobs or operations")
     func activationFencedBookkeeping() async throws {
         try await withMaintenanceDatabase { database, sql in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -273,26 +284,26 @@ struct V2RoomActorMaintenanceTests {
             #expect(try await maintenanceCount(sql, "im_v2.content_review_jobs") == 1)
             #expect(try await maintenanceCount(sql, "im_v2.read_receipt_operations") == 1)
 
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let old = try await maintenanceAcquire(leases, room: room, owner: owner, host: "host-a")
-            #expect(try await leases.release(token: old))
-            let current = try await maintenanceAcquire(leases, room: room, owner: owner, host: "host-b")
             let executor = V2ActorRoomMaintenanceExecutor(database: database, now: { now })
             let command = V2RoomMaintenanceCommand.purgeBookkeeping(.init(roomID: .init(uuid: room),
                 retentionSeconds: 7 * 86_400,
                 idempotencyRetentionSeconds: V2IdempotencyPolicy.minimumServerRetention,
                 rowLimit: 100))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            try await withRoomActivation(database: database, roomID: .init(uuid: room)) { old in
+            try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind:room)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 _ = try await executor.execute(command, token: old)
             }
             #expect(try await maintenanceCount(sql, "im_v2.content_review_jobs") == 1)
             #expect(try await maintenanceCount(sql, "im_v2.read_receipt_operations") == 1)
+            }
+            try await withRoomActivation(database: database, roomID: .init(uuid: room), epoch: 1) { current in
             guard case .bookkeepingPurged(let purged) = try await executor.execute(command,
                 token: current) else { Issue.record("bookkeeping result kind mismatch"); return }
             #expect(purged.deletedReviewJobs == 1 && purged.deletedOperationRows == 1)
             #expect(try await maintenanceCount(sql, "im_v2.content_review_jobs") == 0)
             #expect(try await maintenanceCount(sql, "im_v2.read_receipt_operations") == 0)
+            }
         }
     }
 
@@ -426,16 +437,6 @@ private func maintenanceFloor(_ sql: any SQLDatabase, _ room: UUID) async throws
         SELECT log_trimmed_through_room_sequence AS value
         FROM im_v2.rooms WHERE room_id = \(bind: room)
         """).first(decoding: MaintenanceCountRow.self)).value
-}
-
-private func maintenanceAcquire(_ store: PostgresV2RoomActivationStore, room: UUID,
-                                owner: V2RoomDataOwner, host: String) async throws -> V2RoomActivationToken {
-    let identity = V2ActorHostIdentity(hostID: try .init(host), incarnationID: UUID())
-    guard case .acquired(let lease) = try await store.acquire(roomID: .init(uuid: room),
-        owner: owner, host: identity, duration: try .init(10_000)) else {
-        throw V2RoomActivationLeaseError.activationChanged
-    }
-    return lease.token
 }
 
 private func withMaintenanceDatabase(

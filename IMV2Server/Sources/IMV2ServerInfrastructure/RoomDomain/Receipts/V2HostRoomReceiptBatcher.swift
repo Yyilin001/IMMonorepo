@@ -91,7 +91,7 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
 
     package func record(_ turn: V2GrantedRoomReceiptTurn) async throws -> V2RoomReceiptResult {
         guard turn.token.roomID == turn.command.roomID else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         let id = UUID()
         return try await withTaskCancellationHandler {
@@ -291,7 +291,7 @@ public actor V2HostRoomReceiptBatcher: V2ReadReceiptBatchMetricsReading {
         case .success(let values) where values.count == selected.count:
             for (item, value) in zip(selected, values) {
                 if value == .recordFailure(.store(.ownerChanged)) {
-                    item.continuation.resume(throwing: V2RoomActivationLeaseError.activationChanged)
+                    item.continuation.resume(throwing: V2RoomActorStateError.activationChanged)
                 } else {
                     item.continuation.resume(returning: value)
                 }

@@ -90,9 +90,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(observer.operations == [replay.command.clientMessageID, before.command.clientMessageID, after.command.clientMessageID])
             let stages = metrics.sendOperationBatchMetricsSnapshot().stages
             #expect(stages.values.allSatisfy { $0.inFlight == 0 })
-            #expect(stages[.receiptPreflight, default: .init()].count == 0)
-            #expect(stages[.authorizationRoute, default: .init()].count == 0)
-            #expect(stages[.authorizationControl, default: .init()].count == 0)
             #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')", on: sql) == 0)
             #expect(try await count("pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')", on: sql) == 0)
             #expect(stages[.ownerCommit, default: .init()].count > 0)
@@ -220,7 +217,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let stages = metrics.sendOperationBatchMetricsSnapshot().stages
             #expect(stages.values.allSatisfy { $0.inFlight == 0 })
-            #expect(stages[.receiptPreflight, default: .init()].count == 0)
             #expect(stages[.ownerRollback, default: .init()].count == 1)
             #expect(stages[.ownerCommit, default: .init()].count == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 0)

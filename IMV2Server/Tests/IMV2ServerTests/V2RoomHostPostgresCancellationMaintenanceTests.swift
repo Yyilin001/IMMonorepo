@@ -4,6 +4,7 @@ import FluentKit
 import FluentPostgresDriver
 import Foundation
 import IMV2ActorContracts
+import IMV2ActorCluster
 import IMV2ActorRuntime
 import IMV2Core
 @testable import IMV2Server
@@ -17,14 +18,11 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
     @Test("queued send cancellation never reaches SQL; cancellation after SQL admission retains fence and permit",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE"] == "1"))
     func queuedAndExecutingCancellation() async throws {
-        try await withCancelMaintenanceDatabase { database, sql, fixture in
+        try await withCancelMaintenanceDatabase { database, sql, fixture, control, firstIdentity, nextIdentity in
             let admission = cancelMaintenanceAdmission()
-            let hosted = try cancelMaintenanceHost(database: database, fixture: fixture,
-                leases: PostgresV2RoomActivationStore(database: database),
-                name: "cancel-host", admission: admission)
+            let hosted = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                control: control, identity: firstIdentity, admission: admission)
             let host = hosted.host
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
             let gate = CancelMaintenanceGate()
             let advisoryKey: Int64 = 9_240_010
             try await sql.raw("""
@@ -69,9 +67,9 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 #expect(await hosted.budget.snapshot().commandCount == 1)
                 #expect((await admission.snapshot()).foregroundWrite.inFlight == 0)
                 #expect((await hosted.resources.sendOperationOwnerMetricsSnapshot()).inFlightBatches == 1)
-                #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == token.activationEpoch.rawValue)
+                #expect(try await control.snapshot().slots[0].owner.host == firstIdentity)
                 #expect(!(await host.drain(deadline: .now + .milliseconds(40))).completed)
-                #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == token.activationEpoch.rawValue)
+                #expect(try await control.snapshot().slots[0].owner.host == firstIdentity)
 
                 await gate.open()
                 try await locker.value
@@ -87,16 +85,19 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     WHERE room_id = \(bind: roomUUID) AND sender_user_id = \(bind: senderUUID)
                       AND client_message_id = \(bind: firstID)
                     """).first(decoding: CancelMaintenanceUUIDRow.self)).value
-                #expect((await host.stop(deadline: .now + .seconds(5))).completed)
-                #expect(try await leases.locate(roomID: roomID, owner: owner) == nil)
+                try await hosted.stop()
+                #expect(try await control.snapshot().slots[0].retired)
 
                 // Replaying on a fresh activation resolves the detached caller's
                 // unknown result to the exact durable operation, not a second write.
-                let successor = try cancelMaintenanceHost(database: database, fixture: fixture,
-                    leases: leases, name: "cancel-successor", admission: admission)
+                let successor = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                    control: control, identity: nextIdentity, admission: admission)
                 await successor.host.start()
+                try await control.transfer(from: host, placement: hosted.placement, to: nextIdentity,
+                    deadline: .now + .seconds(15))
+                try await successor.placement.refresh()
                 let fresh = try await cancelMaintenanceActivate(host: successor.host)
-                #expect(fresh.activationEpoch.rawValue == token.activationEpoch.rawValue + 1)
+                #expect(fresh.activationEpoch.rawValue > token.activationEpoch.rawValue)
                 let replay = try await successor.host.invoke(token: fresh,
                     request: firstRequest,
                     deadline: .now + .seconds(5))
@@ -106,11 +107,11 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 }
                 #expect(accepted.messageID.uuidValue == original)
                 #expect(try await cancelMaintenanceOperationCount(sql: sql, operation: firstID) == 1)
-                #expect((await successor.host.stop(deadline: .now + .seconds(5))).completed)
+                try await successor.stop()
             } catch {
                 await gate.open()
                 _ = try? await locker.value
-                _ = await host.stop(deadline: .now + .seconds(5))
+                try await hosted.stop()
                 throw error
             }
         }
@@ -119,7 +120,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
     @Test("retention holds its complete activation fence until DELETE commits before another host takes over",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE"] == "1"))
     func retentionCannotOverlapSuccessor() async throws {
-        try await withCancelMaintenanceDatabase { database, sql, fixture in
+        try await withCancelMaintenanceDatabase { database, sql, fixture, control, firstIdentity, nextIdentity in
             let oldDate = Date(timeIntervalSince1970: 1_750_000_000)
             try await sql.raw("""
                 UPDATE im_v2.rooms SET room_sequence = 3, membership_revision = 1
@@ -164,12 +165,11 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     await gate.hold()
                 }
             }
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let first = try cancelMaintenanceHost(database: database, fixture: fixture,
-                leases: leases, name: "retention-first", admission: cancelMaintenanceAdmission(),
+            let first = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                control: control, identity: firstIdentity, admission: cancelMaintenanceAdmission(),
                 now: { oldDate })
-            let next = try cancelMaintenanceHost(database: database, fixture: fixture,
-                leases: leases, name: "retention-next", admission: cancelMaintenanceAdmission(),
+            let next = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                control: control, identity: nextIdentity, admission: cancelMaintenanceAdmission(),
                 now: { oldDate })
             await first.host.start()
             await next.host.start()
@@ -186,12 +186,14 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 }
                 #expect(try await cancelMaintenanceFloor(sql: sql) == 0)
                 #expect(try await cancelMaintenanceRoomEventCount(sql: sql) == 3)
-                let takeover = Task { try await next.host.activate(roomID: roomID,
-                    owner: try .init(shardID: "room-a", epoch: 0), deadline: .now + .seconds(15)) }
-                try await cancelMaintenanceWaitUntil {
-                    try await cancelMaintenanceRoomLockWait(sql: sql)
+                let takeover = Task {
+                    try await control.transfer(from: first.host, placement: first.placement, to: nextIdentity,
+                        deadline: .now + .seconds(15))
+                    try await next.placement.refresh()
+                    return try await cancelMaintenanceActivate(host: next.host)
                 }
-                #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == old.activationEpoch.rawValue)
+                try await cancelMaintenanceWaitUntil { await first.host.snapshot().retiringRooms == 1 }
+                #expect(try await control.snapshot().slots[0].owner.host == firstIdentity)
                 #expect(try await cancelMaintenanceFloor(sql: sql) == 0)
                 #expect(try await cancelMaintenanceRoomEventCount(sql: sql) == 3)
                 await gate.open()
@@ -200,37 +202,29 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     throw CancelMaintenanceFailure.unexpectedResult
                 }
                 #expect(report.advancedFloor && report.deletedEvents == 2)
-                guard case .occupied(let occupied) = try await takeover.value else {
-                    throw CancelMaintenanceFailure.unexpectedResult
-                }
-                #expect(occupied.token == old)
+                let transferred = try await takeover.value
+                #expect(transferred.host == nextIdentity && transferred != old)
                 #expect(try await cancelMaintenanceFloor(sql: sql) == 3)
                 #expect(try await cancelMaintenanceRoomEventCount(sql: sql) == 1)
-                #expect((await first.host.stop(deadline: .now + .seconds(5))).completed)
+                try await first.stop()
                 let fresh = try await cancelMaintenanceActivate(host: next.host)
-                #expect(fresh.activationEpoch.rawValue == old.activationEpoch.rawValue + 1)
+                #expect(fresh.activationEpoch.rawValue > old.activationEpoch.rawValue)
                 await cancelMaintenanceExpectFailure(.notAccepted(.staleActivation), Task {
                     try await first.host.invoke(token: old, request: request,
                         deadline: .now + .seconds(5))
                 })
-                #expect(try await leases.release(token: old) == false)
-                await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                    _ = try await V2ActorRoomMaintenanceExecutor(database: database,
-                        now: { oldDate }).execute(.trimLog(.init(roomID: roomID,
-                            mode: .permanent, windowSeconds: 3_600)), token: old)
-                }
                 let freshResponse = try await next.host.invoke(token: fresh,
                     request: request, deadline: .now + .seconds(5))
                 guard case .maintenance(.logTrimmed(let noOp)) = freshResponse else {
                     throw CancelMaintenanceFailure.unexpectedResult
                 }
                 #expect(!noOp.advancedFloor && noOp.deletedEvents == 0)
-                #expect((await next.host.stop(deadline: .now + .seconds(5))).completed)
+                try await next.stop()
             } catch {
                 await gate.open()
                 _ = try? await locker.value
-                _ = await first.host.stop(deadline: .now + .seconds(5))
-                _ = await next.host.stop(deadline: .now + .seconds(5))
+                try await first.stop()
+                try await next.stop()
                 throw error
             }
         }
@@ -239,14 +233,15 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
     @Test("trusted review holds its room fence through commit; a successor only replays the terminal decision",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE"] == "1"))
     func reviewCannotOverlapSuccessor() async throws {
-        try await withCancelMaintenanceDatabase { database, sql, fixture in
+        try await withCancelMaintenanceDatabase { database, sql, fixture, control, firstIdentity, nextIdentity in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let sender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let sender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database,
+                controlDatabase: database, store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: fixture.forwardImportTestProfile(),
                 limits: .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let message) = try await sender.send(.init(roomID: roomID,
                 actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "blocked review")) else {
-                throw CancelMaintenanceFailure.unexpectedResult
+                throw CancelMaintenanceFailure.unexpectedReviewResult(phase: "initial send")
             }
             // The production write store enqueues this job with the accepted
             // message; no test-side review row is synthesized.
@@ -270,11 +265,10 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     await gate.hold()
                 }
             }
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let first = try cancelMaintenanceHost(database: database, fixture: fixture,
-                leases: leases, name: "review-first", admission: cancelMaintenanceAdmission(), now: { now })
-            let next = try cancelMaintenanceHost(database: database, fixture: fixture,
-                leases: leases, name: "review-next", admission: cancelMaintenanceAdmission(), now: { now })
+            let first = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                control: control, identity: firstIdentity, admission: cancelMaintenanceAdmission(), contentReviewMode: .enabled, now: { now })
+            let next = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                control: control, identity: nextIdentity, admission: cancelMaintenanceAdmission(), contentReviewMode: .enabled, now: { now })
             await first.host.start()
             await next.host.start()
             do {
@@ -297,10 +291,14 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     table: "im_v2.content_review_jobs WHERE completed_at IS NOT NULL") == 0)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.content_review_decisions") == 0)
-                let takeover = Task { try await next.host.activate(roomID: roomID,
-                    owner: try .init(shardID: "room-a", epoch: 0), deadline: .now + .seconds(15)) }
-                try await cancelMaintenanceWaitUntil { try await cancelMaintenanceRoomLockWait(sql: sql) }
-                #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == old.activationEpoch.rawValue)
+                let takeover = Task {
+                    try await control.transfer(from: first.host, placement: first.placement, to: nextIdentity,
+                        deadline: .now + .seconds(15))
+                    try await next.placement.refresh()
+                    return try await cancelMaintenanceActivate(host: next.host)
+                }
+                try await cancelMaintenanceWaitUntil { await first.host.snapshot().retiringRooms == 1 }
+                #expect(try await control.snapshot().slots[0].owner.host == firstIdentity)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.content_review_jobs WHERE completed_at IS NOT NULL") == 0)
 
@@ -308,19 +306,17 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 try await locker.value
                 let report = try await review.value
                 #expect(report.claimedCount == 1 && report.resolvedCount == 1 && report.redactedCount == 1)
-                guard case .occupied(let occupied) = try await takeover.value else {
-                    throw CancelMaintenanceFailure.unexpectedResult
-                }
-                #expect(occupied.token == old)
+                let transferred = try await takeover.value
+                #expect(transferred.host == nextIdentity && transferred != old)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.content_review_jobs WHERE state = 'completed' AND decision = 'violation'") == 1)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.moderation_operations") == 1)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.room_events WHERE event_type = 'message.redacted'") == 1)
-                #expect((await first.host.stop(deadline: .now + .seconds(5))).completed)
+                try await first.stop()
                 let fresh = try await cancelMaintenanceActivate(host: next.host)
-                #expect(fresh.activationEpoch.rawValue == old.activationEpoch.rawValue + 1)
+                #expect(fresh.activationEpoch.rawValue > old.activationEpoch.rawValue)
                 let safety = V2RoomRequest.administration(.trustedSafety(.init(roomID: roomID,
                     operationID: try .init(message.messageID.rawValue), action: .redactMessage,
                     messageID: message.messageID, expectedMessageRevision: 1,
@@ -333,7 +329,7 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                 guard case .administration(.trustedSafety(.idempotent(let replay))) =
                     try await next.host.invoke(token: fresh, request: encoded,
                         deadline: .now + .seconds(5)) else {
-                    throw CancelMaintenanceFailure.unexpectedResult
+                    throw CancelMaintenanceFailure.unexpectedReviewResult(phase: "successor decision replay")
                 }
                 #expect(replay.messageID == message.messageID)
                 #expect(try await cancelMaintenanceCount(sql: sql,
@@ -344,11 +340,13 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
 
                 // A separately claimed review that reaches the retired Host
                 // must remain retryable; an old turn cannot complete the job.
-                guard case .accepted(let lateMessage) = try await sender.send(.init(
-                    roomID: roomID, actorUserID: senderID,
-                    clientMessageID: .init(uuid: UUID()), text: "blocked after takeover")),
-                    let lateUUID = lateMessage.messageID.uuidValue else {
-                    throw CancelMaintenanceFailure.unexpectedResult
+                let late = try await next.host.invoke(token: fresh,
+                    request: cancelMaintenanceSendBytes(operation: UUID(), text: "blocked after takeover", now: now),
+                    deadline: .now + .seconds(5))
+                guard case .messaging(.sendOperation(.receipt(let lateProof))) = late,
+                      case .accepted(let lateMessage) = lateProof.outcome,
+                      let lateUUID = lateMessage.messageID.uuidValue else {
+                    throw CancelMaintenanceFailure.unexpectedReviewResult(phase: "successor send")
                 }
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.content_review_jobs WHERE state = 'pending'") == 1)
@@ -375,12 +373,12 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     table: "im_v2.content_review_jobs WHERE state = 'completed'") == 2)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.moderation_operations") == 2)
-                #expect((await next.host.stop(deadline: .now + .seconds(5))).completed)
+                try await next.stop()
             } catch {
                 await gate.open()
                 _ = try? await locker.value
-                _ = await first.host.stop(deadline: .now + .seconds(5))
-                _ = await next.host.stop(deadline: .now + .seconds(5))
+                try await first.stop()
+                try await next.stop()
                 throw error
             }
         }
@@ -389,35 +387,30 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
     @Test("target import holds its room fence through receive and completion before takeover",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_CANCEL_MAINT_DATABASE_IS_DISPOSABLE"] == "1"))
     func importCannotOverlapSuccessor() async throws {
-        try await withCancelMaintenanceDatabase { database, sql, fixture in
+        try await withCancelMaintenanceDatabase { database, sql, fixture, control, firstIdentity, nextIdentity in
             let now = Date(timeIntervalSince1970: 1_750_000_000)
             let sourceUUID = UUID(), sourceRoom = RoomID(uuid: sourceUUID)
             try await cancelMaintenanceSeedImportSource(sql: sql, room: sourceUUID, now: now)
             let profile = try fixture.forwardImportTestProfile()
-            let sourceSender = try V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let sourceSender = try V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(database: database,
+                controlDatabase: database, store: PostgresV2RoomWriteStore(database: database), shardID: "room-b", epoch: 0),
                 capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), now: { now })
             guard case .accepted(let sourceMessage) = try await sourceSender.send(.init(
                 roomID: sourceRoom, actorUserID: senderID,
                 clientMessageID: .init(uuid: UUID()), text: "forward source")) else {
                 throw CancelMaintenanceFailure.unexpectedResult
             }
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let sourceIdentity = V2ActorHostIdentity(hostID: try .init("import-source"),
-                incarnationID: UUID())
-            guard case .acquired(let sourceLease) = try await leases.acquire(roomID: sourceRoom,
-                owner: .init(shardID: "room-b", epoch: 0), host: sourceIdentity,
-                duration: .init(30_000)) else {
-                throw CancelMaintenanceFailure.unexpectedResult
-            }
-            let exporter = try PostgresV2ForwardExportStore(database: database)
-                .usingActivationToken(sourceLease.token)
-            let sourceReference = try V2ForwardMessageReference(roomID: sourceRoom,
-                messageID: sourceMessage.messageID, revision: .init(1))
-            guard case .export(let export) = try await exporter.prepareForDelivery(
-                actorUserID: senderID, operationID: .init(uuid: UUID()), source: sourceReference,
-                sourceRoute: .init(shardID: "room-b", epoch: 0), targetRoomID: roomID,
-                targetRoute: .init(shardID: "room-a", epoch: 0), now: now) else {
-                throw CancelMaintenanceFailure.unexpectedResult
+            let export = try await withRoomActivation(database: database, roomID: sourceRoom, shardID: "room-b") { token in
+                let exporter = try PostgresV2ForwardExportStore(database: database).usingActivationToken(token)
+                let sourceReference = try V2ForwardMessageReference(roomID: sourceRoom,
+                    messageID: sourceMessage.messageID, revision: .init(1))
+                guard case .export(let export) = try await exporter.prepareForDelivery(
+                    actorUserID: senderID, operationID: .init(uuid: UUID()), source: sourceReference,
+                    sourceRoute: .init(shardID: "room-b", epoch: 0), targetRoomID: roomID,
+                    targetRoute: .init(shardID: "room-a", epoch: 0), now: now) else {
+                    throw CancelMaintenanceFailure.unexpectedResult
+                }
+                return export
             }
             let key: Int64 = 9_240_032
             try await sql.raw("""
@@ -436,10 +429,10 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     await gate.hold()
                 }
             }
-            let first = try cancelMaintenanceHost(database: database, fixture: fixture,
-                leases: leases, name: "import-first", admission: cancelMaintenanceAdmission(), now: { now })
-            let next = try cancelMaintenanceHost(database: database, fixture: fixture,
-                leases: leases, name: "import-next", admission: cancelMaintenanceAdmission(), now: { now })
+            let first = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                control: control, identity: firstIdentity, admission: cancelMaintenanceAdmission(), now: { now })
+            let next = try await cancelMaintenanceHost(database: database, fixture: fixture,
+                control: control, identity: nextIdentity, admission: cancelMaintenanceAdmission(), now: { now })
             await first.host.start()
             await next.host.start()
             do {
@@ -454,10 +447,14 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     table: "im_v2.message_forward_inbox") == 0)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.messages") == 1)
-                let takeover = Task { try await next.host.activate(roomID: roomID,
-                    owner: try .init(shardID: "room-a", epoch: 0), deadline: .now + .seconds(15)) }
-                try await cancelMaintenanceWaitUntil { try await cancelMaintenanceRoomLockWait(sql: sql) }
-                #expect(try await cancelMaintenanceLeaseEpoch(sql: sql) == old.activationEpoch.rawValue)
+                let takeover = Task {
+                    try await control.transfer(from: first.host, placement: first.placement, to: nextIdentity,
+                        deadline: .now + .seconds(15))
+                    try await next.placement.refresh()
+                    return try await cancelMaintenanceActivate(host: next.host)
+                }
+                try await cancelMaintenanceWaitUntil { await first.host.snapshot().retiringRooms == 1 }
+                #expect(try await control.snapshot().slots[0].owner.host == firstIdentity)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.message_forward_inbox") == 0)
 
@@ -467,19 +464,17 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     try await importing.value else {
                     throw CancelMaintenanceFailure.unexpectedResult
                 }
-                guard case .occupied(let occupied) = try await takeover.value else {
-                    throw CancelMaintenanceFailure.unexpectedResult
-                }
-                #expect(occupied.token == old)
+                let transferred = try await takeover.value
+                #expect(transferred.host == nextIdentity && transferred != old)
                 #expect(try await cancelMaintenanceImportRow(sql: sql, export: export.intent.exportID,
                     message: try #require(messageID.uuidValue), sequence: Int64(sequence)))
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.message_forward_inbox") == 1)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.messages") == 2)
-                #expect((await first.host.stop(deadline: .now + .seconds(5))).completed)
+                try await first.stop()
                 let fresh = try await cancelMaintenanceActivate(host: next.host)
-                #expect(fresh.activationEpoch.rawValue == old.activationEpoch.rawValue + 1)
+                #expect(fresh.activationEpoch.rawValue > old.activationEpoch.rawValue)
                 await cancelMaintenanceExpectFailure(.notAccepted(.staleActivation), Task {
                     try await first.host.invoke(token: old, request: request,
                         deadline: .now + .seconds(5))
@@ -494,13 +489,12 @@ struct V2RoomHostPostgresCancellationMaintenanceTests {
                     table: "im_v2.message_forward_inbox") == 1)
                 #expect(try await cancelMaintenanceCount(sql: sql,
                     table: "im_v2.messages") == 2)
-                #expect((await next.host.stop(deadline: .now + .seconds(5))).completed)
-                #expect(try await leases.release(token: sourceLease.token))
+                try await next.stop()
             } catch {
                 await gate.open()
                 _ = try? await locker.value
-                _ = await first.host.stop(deadline: .now + .seconds(5))
-                _ = await next.host.stop(deadline: .now + .seconds(5))
+                try await first.stop()
+                try await next.stop()
                 throw error
             }
         }
@@ -511,17 +505,25 @@ private struct CancelMaintenanceHosted: Sendable {
     let host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>
     let budget: V2RoomCommandBudget
     let resources: V2RoomServerOwnerResources
+    let placement: V2RoomActorPlacementRuntime
+
+    func stop() async throws {
+        let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+        try await placement.retireAfterDrain(proof, shards: ["room-a"])
+        await resources.shutdownDurableSendOperations()
+    }
 }
 
 private func cancelMaintenanceHost(database: any Database,
-    fixture: PostgresV2RoomWriteStoreIntegrationTests, leases: PostgresV2RoomActivationStore,
-    name: String, admission: V2DatabaseWorkAdmissionController,
-    now: @escaping @Sendable () -> Date = Date.init) throws -> CancelMaintenanceHosted {
+    fixture: PostgresV2RoomWriteStoreIntegrationTests, control: V2NativePlacementTestControl,
+    identity: V2ActorHostIdentity, admission: V2DatabaseWorkAdmissionController,
+    contentReviewMode: V2ContentReviewMode = .disabled,
+    now: @escaping @Sendable () -> Date = Date.init) async throws -> CancelMaintenanceHosted {
     let configuration = try V2RoomRuntimeConfiguration(maximumActiveRooms: 2,
         maximumConcurrentRestores: 1, maximumPendingActivations: 2,
         maximumCommandsPerTurn: 1, maximumConcurrentReservations: 2)
     let budget = V2RoomCommandBudget(configuration: configuration)
-    let writes = PostgresV2RoomWriteStore(database: database)
+    let writes = PostgresV2RoomWriteStore(database: database, strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400), contentReviewMode: contentReviewMode)
     let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
@@ -529,15 +531,15 @@ private func cancelMaintenanceHost(database: any Database,
         receiptProjectionDelivery: CancelMaintenanceProjectionDelivery(),
         capacityProfile: fixture.forwardImportTestProfile(),
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
-        contentReviewMode: .disabled, queryBatchConfiguration: .init(),
+        contentReviewMode: contentReviewMode, queryBatchConfiguration: .init(),
         databaseWorkAdmission: admission)
     let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
         safetyActorUserID: senderID, now: now).runtimeFactory()
-    let identity = V2ActorHostIdentity(hostID: try .init(name), incarnationID: UUID())
-    return .init(host: .init(identity: identity, leaseStore: leases,
+    let placement = try await control.register(identity, shard: "room-a")
+    return .init(host: .init(identity: identity, placement: placement,
         configuration: configuration, budget: budget,
         classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory),
-        budget: budget, resources: resources)
+        budget: budget, resources: resources, placement: placement)
 }
 
 private func cancelMaintenanceAdmission() -> V2DatabaseWorkAdmissionController {
@@ -556,10 +558,10 @@ private func cancelMaintenanceActivate(
     return token
 }
 
-private func cancelMaintenanceSendBytes(operation: UUID, text: String) throws -> V2RoomRequest {
+private func cancelMaintenanceSendBytes(operation: UUID, text: String, now: Date = Date()) throws -> V2RoomRequest {
     try V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: roomID,
         senderUserID: senderID, clientMessageID: .init(uuid: operation), text: text,
-        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000) + 600_000)))
+        media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: UInt64(now.timeIntervalSince1970 * 1000) + 600_000)))
 }
 
 private func cancelMaintenanceExpectFailure<T: Sendable>(_ expected: V2RoomCallFailure,
@@ -604,7 +606,10 @@ private struct CancelMaintenanceProjectionDelivery: V2UserShardProjectionDeliver
 private struct CancelMaintenanceBoolRow: Decodable { let value: Bool }
 private struct CancelMaintenanceCountRow: Decodable { let value: Int64 }
 private struct CancelMaintenanceUUIDRow: Decodable { let value: UUID }
-private enum CancelMaintenanceFailure: Error { case phaseTimeout, unexpectedResult, schemaAlreadyExists }
+private enum CancelMaintenanceFailure: Error {
+    case phaseTimeout, unexpectedResult, schemaAlreadyExists
+    case unexpectedReviewResult(phase: String)
+}
 
 private func cancelMaintenanceCount(sql: any SQLDatabase, table: String) async throws -> Int64 {
     try #require(try await sql.raw("SELECT COUNT(*)::bigint AS value FROM \(unsafeRaw: table)")
@@ -680,15 +685,6 @@ private func cancelMaintenanceAdvisoryWait(sql: any SQLDatabase) async throws ->
         """).first(decoding: CancelMaintenanceBoolRow.self)?.value == true
 }
 
-private func cancelMaintenanceRoomLockWait(sql: any SQLDatabase) async throws -> Bool {
-    try await sql.raw("""
-        SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid <> pg_backend_pid()
-            AND wait_event_type = 'Lock' AND query LIKE '%FROM im_v2.rooms%'
-            AND query LIKE '%FOR NO KEY UPDATE%'
-            AND cardinality(pg_blocking_pids(pid)) > 0) AS value
-        """).first(decoding: CancelMaintenanceBoolRow.self)?.value == true
-}
-
 private func cancelMaintenanceOperationCount(sql: any SQLDatabase, operation: UUID) async throws -> Int64 {
     try #require(try await sql.raw("""
         SELECT COUNT(*)::bigint AS value FROM im_v2.message_send_completions
@@ -704,15 +700,6 @@ private func cancelMaintenanceFloor(sql: any SQLDatabase) async throws -> Int64 
         """).first(decoding: CancelMaintenanceCountRow.self)).value
 }
 
-/// MVCC observation deliberately avoids the production owner's locking locate
-/// operation while a fenced writer is paused inside its transaction.
-private func cancelMaintenanceLeaseEpoch(sql: any SQLDatabase) async throws -> Int64 {
-    try #require(try await sql.raw("""
-        SELECT activation_epoch AS value FROM im_v2.room_activation_leases
-        WHERE room_id = \(bind: roomUUID) AND expires_at > clock_timestamp()
-        """).first(decoding: CancelMaintenanceCountRow.self)).value
-}
-
 private func cancelMaintenanceRoomEventCount(sql: any SQLDatabase) async throws -> Int64 {
     try #require(try await sql.raw("""
         SELECT COUNT(*)::bigint AS value FROM im_v2.room_events
@@ -721,7 +708,7 @@ private func cancelMaintenanceRoomEventCount(sql: any SQLDatabase) async throws 
 }
 
 private func withCancelMaintenanceDatabase(_ operation: (any Database, any SQLDatabase,
-    PostgresV2RoomWriteStoreIntegrationTests) async throws -> Void) async throws {
+    PostgresV2RoomWriteStoreIntegrationTests, V2NativePlacementTestControl, V2ActorHostIdentity, V2ActorHostIdentity) async throws -> Void) async throws {
     let url = try #require(ProcessInfo.processInfo.environment["IMV2_ACTOR_CANCEL_MAINT_DATABASE_URL"])
     let resources = makeV2DatabaseTestResources()
     var installed = false
@@ -739,7 +726,11 @@ private func withCancelMaintenanceDatabase(_ operation: (any Database, any SQLDa
         try await fixture.installSchema(on: sql)
         try await fixture.seedRoom(on: sql)
         try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until = clock_timestamp() + INTERVAL '1 hour'").run()
-        try await operation(database, sql, fixture)
+        let first = V2ActorHostIdentity(hostID: try .init("maintenance-first"), incarnationID: UUID())
+        let next = V2ActorHostIdentity(hostID: try .init("maintenance-next"), incarnationID: UUID())
+        try await withNativePlacementTestControl(hosts: [first, next], initialHost: first, shardID: "room-a") { control in
+            try await operation(database, sql, fixture, control, first, next)
+        }
         try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
         installed = false
         try await resources.shutdown()

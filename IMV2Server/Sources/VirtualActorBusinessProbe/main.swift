@@ -9,6 +9,7 @@ import Darwin
 import Glibc
 #endif
 import IMV2ActorApplication
+import IMV2ActorCluster
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
@@ -32,6 +33,20 @@ private struct ProcessEnvironment: V2RuntimeEnvironment {
 
 private struct CountRow: Decodable { let value: Int64 }
 
+/// Fault injection belongs only to this executable. The production observer
+/// remains nonblocking; here _exit deliberately removes the entire Host after
+/// SQL commit and before the send result can leave its process.
+private struct CrashAfterCommit: V2CommittedMessageBatchObserving {
+    let directory: URL
+    func observeCommittedMessages(_ outcomes: [V2SendMessageOutcome], activation: V2RoomActivationToken) {
+        guard !outcomes.isEmpty else { return }
+        do {
+            try JSONEncoder().encode(activation).write(to: directory.appendingPathComponent("crash-committed-token.json"), options: .atomic)
+        } catch { _exit(138) }
+        _exit(137)
+    }
+}
+
 private struct ProbeResult: Encodable {
     let roomID: String
     let clientMessageID: String
@@ -43,7 +58,8 @@ private struct ProbeResult: Encodable {
     let subscriptionMembershipRevision: UInt64
     let subscriptionHighWatermark: UInt64
     let messageRows: Int64
-    let staleBusinessWriteRejected: Bool
+    let staleActivationRejected: Bool
+    let wrongDataOwnerRejected: Bool
 }
 
 private struct MultiRaceResult: Encodable {
@@ -59,37 +75,6 @@ private struct MultiRecoveryResult: Encodable {
     let messageRows: Int64
 }
 
-private struct MultiStaleResult: Encodable {
-    let renewRejected: Bool
-    let releaseRejected: Bool
-    let businessWriteRejected: Bool
-    let messageRows: Int64
-}
-
-private struct MultiLeaseRaceResult: Encodable {
-    let slot: String
-    let outcome: String
-    let token: V2RoomActivationToken
-}
-
-private struct MultiPartitionOwnerResult: Encodable {
-    let databaseReachable: Bool
-    let originalTokenRenewed: Bool
-    let activationEpoch: Int64
-}
-
-private struct MultiPartitionClientResult: Encodable {
-    let healthyRoomToken: V2RoomActivationToken
-    let healthyMessageID: String
-    let isolatedRoomRejected: Bool
-}
-
-private struct MultiPartitionRejoinResult: Encodable {
-    let token: V2RoomActivationToken
-    let messageID: String
-    let primaryMessageRows: Int64
-}
-
 private struct NoopProjectionShadow: V2UserShardProjectionDelivering {
     func deliverToCurrentShard(userID: UserID, sourceEventID: EventID,
                             projectionKinds: Set<String>) async throws -> UInt64? { nil }
@@ -100,9 +85,6 @@ enum VirtualActorBusinessProbe {
     private static let roomID = RoomID(uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000011")!)
     private static let senderID = UserID(uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000012")!)
     private static let clientID = ClientMessageID(uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000013")!)
-    private static let leaseRaceRoomID = RoomID(uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000021")!)
-    private static let healthyRoomID = RoomID(uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000031")!)
-    private static let healthyClientID = ClientMessageID(uuid: UUID(uuidString: "00000000-0000-0000-0000-000000000033")!)
 
     static func main() async {
         do {
@@ -114,11 +96,8 @@ enum VirtualActorBusinessProbe {
             case "realtime-sender": try await RealtimeCallbackProbe.run(receiver: false)
             case "host": try await host()
             case "client": try await client()
-            case "multi-host": try await multiHost()
-            case "multi-race": try await multiRace()
-            case "multi-replay": try await multiReplay()
-            case "multi-partition-client": try await multiPartitionClient()
-            case "multi-partition-rejoin": try await multiPartitionRejoin()
+            case "host-crash-after-commit": try await host(crashAfterCommit: true)
+            case "client-crash-replay": try await crashReplayClient()
             case "database-edge-host": try await DatabaseEdgeProbe.run(host: true)
             case "database-edge-client": try await DatabaseEdgeProbe.run(host: false)
             default: throw ProbeError.missingEnvironment("host|client mode")
@@ -154,50 +133,23 @@ enum VirtualActorBusinessProbe {
         }
     }
 
-    private static func databaseResources() throws -> (V2DatabaseResources, any Database,
+    private static func databaseResources(host: V2ActorHostIdentity? = nil) throws -> (V2DatabaseResources, any Database,
                                                         any SQLDatabase) {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
         let resources = V2DatabaseResources(eventLoopGroup: group,
                                             logger: Logger(label: "imv2.va.g4.database"),
                                             ownsEventLoopGroup: true)
-        resources.databases.use(try .postgres(url: required("VA_G4_DATABASE_URL"),
+        var postgres = try SQLPostgresConfiguration(url: required("VA_G4_DATABASE_URL"))
+        if let host {
+            postgres.coreConfiguration.options.additionalStartupParameters.removeAll { $0.0 == "application_name" }
+            postgres.coreConfiguration.options.additionalStartupParameters.append(("application_name", V2ActorPostgresSessionIdentity.applicationName(host)))
+        }
+        resources.databases.use(.postgres(configuration: postgres,
                                                maxConnectionsPerEventLoop: 4),
                                 as: .psql, isDefault: true)
-        let database = resources.database(.psql)
-        guard let sql = database as? any SQLDatabase else {
-            throw ProbeError.unexpectedResponse("PostgreSQL driver has no SQLDatabase")
-        }
-        return (resources, database, sql)
-    }
-
-    private static func multiEvidence(_ name: String) throws -> URL {
-        URL(fileURLWithPath: try required("VA_G6_EVIDENCE_DIR"), isDirectory: true)
-            .appendingPathComponent(name)
-    }
-
-    private static func multiMarker(_ name: String, data: Data = Data("ready".utf8)) throws {
-        try data.write(to: multiEvidence(name), options: .atomic)
-    }
-
-    private static func multiWaitFor(_ name: String, seconds: Int) async throws {
-        let deadline = ContinuousClock.now + .seconds(seconds)
-        let path = try multiEvidence(name).path
-        while !FileManager.default.fileExists(atPath: path) {
-            guard ContinuousClock.now < deadline else { throw ProbeError.markerTimeout(name) }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-    }
-
-    private static func multiDatabaseResources() throws -> (V2DatabaseResources, any Database,
-                                                              any SQLDatabase) {
-        let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
-        let resources = V2DatabaseResources(eventLoopGroup: group,
-                                            logger: Logger(label: "imv2.va.g6.database"),
-                                            ownsEventLoopGroup: true)
-        resources.databases.use(try .postgres(url: required("VA_G6_DATABASE_URL"),
-                                               maxConnectionsPerEventLoop: 4),
-                                as: .psql, isDefault: true)
-        let database = resources.database(.psql)
+        let database = try V2EventLoopBalancedDatabase(databases: [resources.database(.psql)],
+            loanPolicy: .init(maximumConnections: 4, reservedRenewalConnections: 1,
+                              maximumQueued: 32, maximumWait: .seconds(5)))
         guard let sql = database as? any SQLDatabase else {
             throw ProbeError.unexpectedResponse("PostgreSQL driver has no SQLDatabase")
         }
@@ -213,16 +165,23 @@ enum VirtualActorBusinessProbe {
         try .init(rawKey: Data((0..<32).map { _ in UInt8.random(in: 0...255) }))
     }
 
-    private static func host() async throws {
-        let (resources, database, sql) = try databaseResources()
+    private static func host(crashAfterCommit: Bool = false) async throws {
+        let actorConfiguration = try configuration(hostsRooms: true)
+        try await actorConfiguration.awaitSupervisedStartup()
+        let (resources, database, sql) = try databaseResources(host: actorConfiguration.hostIdentity)
+        V2ProcessTerminationSignal.install()
         var startedApplication: V2RoomActorApplication?
         do {
         guard try await sql.raw("SELECT 1 AS value").first(decoding: CountRow.self)?.value == 1 else {
             throw ProbeError.unexpectedResponse("PostgreSQL unavailable")
         }
+        let policyOwners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
+            dispatcher: .init(database: database, projectionDelivery: NoopProjectionShadow()))
+        let policyAuthorizations = V2RoomPolicyAuthorizationService(roomDatabase: database,
+            policyOwners: policyOwners, endpoint: "room-a", maximumRooms: 1)
         let writes = PostgresV2RoomWriteStore(database: database,
             strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-            contentReviewMode: .disabled)
+            contentReviewMode: .disabled).usingPolicyAuthorizations(policyAuthorizations)
         let capacity = try V2CapacityProfile(id: "standard", limits: .init(
             maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 3))
         let owner = try V2RoomServerOwnerResources(database: database, writes: writes,
@@ -231,29 +190,94 @@ enum VirtualActorBusinessProbe {
             invitationSecretIssuer: try invitationSecretIssuer(),
             receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
             messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
-            contentReviewMode: .disabled, queryBatchConfiguration: .init())
+            contentReviewMode: .disabled, queryBatchConfiguration: .init(),
+            committedMessageObserver: crashAfterCommit ? CrashAfterCommit(directory: try evidence(".").standardizedFileURL) : nil)
+            .usingPolicyAuthorizations(policyAuthorizations)
         let factory = try V2RoomServerActivationFactory(owners: ["room-a": owner],
                                                         safetyActorUserID: senderID)
         let application = try await V2RoomActorApplication.start(
-            configuration: configuration(hostsRooms: true),
+            configuration: actorConfiguration,
             ownerRouter: V2PostgresRoomShardRouter(database: database),
             roomDatabases: ["room-a": database], factory: factory, qualification: .standalone())
         startedApplication = application
         guard await application.readiness() else {
             throw ProbeError.unexpectedResponse("host not ready")
         }
-        try marker("host-ready")
+        let prefix = ProcessInfo.processInfo.environment["VA_G4_HOST_MARKER_PREFIX"] ?? "host"
+        try marker(prefix + "-ready")
         print("G4_HOST_READY")
-        // Orchestration SIGKILLs this process; lease expiry, not release, must
-        // let the replacement incarnation acquire this room.
-        while true {
-            try await Task.sleep(for: .seconds(1))
-            withExtendedLifetime(resources) {}
+        // Planned replacement requires the real physical drain and durable
+        // retirement. Process death or elapsed time cannot grant a successor.
+        await V2ProcessTerminationSignal.wait()
+        guard try await application.stop(deadline: .now + .seconds(30)) else {
+            throw V2RoomActorApplicationError.incompleteShutdown
         }
+        startedApplication = nil
+        try await resources.shutdown()
+        try marker(prefix + "-stopped")
+        print("G4_NATIVE_HOST_RETIRED")
         } catch {
-            if let startedApplication { _ = try? await startedApplication.stop(deadline: .now + .seconds(10)) }
+            if let startedApplication {
+                guard (try? await startedApplication.stop(deadline: .now + .seconds(30))) == true else {
+                    // Do not dispose databases under still-owned physical jobs.
+                    throw V2RoomActorApplicationError.incompleteShutdown
+                }
+            }
             try? await resources.shutdown()
             throw error
+        }
+    }
+
+    /// Keep the same caller/Directory alive through an unknown send outcome.
+    /// The harness resumes the supervisor only after the first call ends, so
+    /// a quickly recovered ACK cannot make this an ordinary successful send.
+    private static func crashReplayClient() async throws {
+        let (resources, database, sql) = try databaseResources()
+        let application = try await V2RoomActorApplication.start(configuration: configuration(hostsRooms: false),
+            ownerRouter: V2PostgresRoomShardRouter(database: database), roomDatabases: ["room-a": database])
+        do {
+            let ref = application.directory.room(roomID)
+            _ = try await callUntilAvailable(ref, request: .roomLog(.subscribe(.init(roomID: roomID, actorUserID: senderID))), seconds: 30)
+            let original = try await application.directory.resolve(roomID, deadline: .now + .seconds(10))
+            try marker("crash-client-ready", data: JSONEncoder().encode(original))
+            try await waitFor("crash-send", seconds: 90)
+            let request = try V2RoomRequest.messaging(.sendOperation(.init(command: .init(roomID: roomID,
+                senderUserID: senderID, clientMessageID: clientID, text: "crash after commit",
+                media: [], limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: frozenSendDeadline())))
+            var unknown = false
+            do { _ = try await ref.call(request, principal: .user(senderID), deadline: .now + .seconds(5)) }
+            catch { unknown = true }
+            guard unknown else { throw ProbeError.unexpectedResponse("send received an ACK before recovery") }
+            struct MessageRow: Decodable { let id: UUID }
+            guard let durable = try await sql.raw("SELECT message_id AS id FROM im_v2.messages WHERE room_id = \(bind: roomID.uuidValue!) AND client_message_id = \(bind: clientID.uuidValue!)")
+                .first(decoding: MessageRow.self),
+                try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages").first(decoding: CountRow.self)?.value == 1 else {
+                throw ProbeError.unexpectedResponse("unknown result has no committed message")
+            }
+            try marker("crash-unknown")
+            try await waitFor("crash-recover", seconds: 90)
+            let replay = try await ref.call(request, principal: .user(senderID), deadline: .now + .seconds(45))
+            guard case .messaging(.sendOperation(.receipt(let proof))) = replay,
+                  case .accepted(let accepted) = proof.outcome, accepted.messageID.uuidValue == durable.id else {
+                throw ProbeError.unexpectedResponse("replay did not recover committed message")
+            }
+            let replacement = try await application.directory.resolve(roomID, deadline: .now + .seconds(10))
+            guard replacement.host != original.host, replacement.activationEpoch.rawValue > original.activationEpoch.rawValue,
+                  try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages").first(decoding: CountRow.self)?.value == 1 else {
+                throw ProbeError.unexpectedResponse("recovery did not replace the owner exactly once")
+            }
+            struct Result: Encodable {
+                let original: V2RoomActivationToken; let replacement: V2RoomActivationToken
+                let messageID: UUID; let messageRows: Int; let originalResultUnknown: Bool
+            }
+            try marker("crash-result.json", data: JSONEncoder().encode(Result(original: original, replacement: replacement,
+                messageID: durable.id, messageRows: 1, originalResultUnknown: true)))
+            guard try await application.stop(deadline: .now + .seconds(30)) else { throw ProbeError.incompleteShutdown }
+            try await resources.shutdown()
+        } catch {
+            let failure = error
+            guard (try? await application.stop(deadline: .now + .seconds(30))) == true else { throw ProbeError.incompleteShutdown }
+            try? await resources.shutdown(); throw failure
         }
     }
 
@@ -332,18 +356,29 @@ enum VirtualActorBusinessProbe {
             let staleCommand = try V2SendMessageCommand(roomID: roomID,
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
                 text: "must be fenced", media: [], limits: .init(maxUTF8Bytes: 64))
-            let staleStore = PostgresV2RoomWriteStore(database: database,
-                strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-                contentReviewMode: .disabled).usingActivationScope(
-                try .init(tokens: [firstToken]))
+            let staleRequest = try V2RoomRequest.messaging(.sendOperation(.init(command: staleCommand,
+                firstSubmissionDeadlineMilliseconds: frozenSendDeadline())))
+            try await rejectOldActivation(firstToken, replacement: replacement, request: staleRequest)
+            // Physical incarnation is fenced by the native Actor, not SQL.
+            // SQL retains its separate data-owner epoch boundary.
+            let wrongOwnerToken = V2RoomActivationToken(roomID: roomID,
+                owner: try .init(shardID: firstToken.owner.shardID, epoch: firstToken.owner.epoch + 1),
+                activationEpoch: firstToken.activationEpoch, host: firstToken.host)
+            let readReceipts = PostgresV2ReadReceiptStore(database: database,
+                projectionDelivery: NoopProjectionShadow())
+            let wrongOwnerReceipt = try V2RecordReadReceiptCommand(roomID: roomID,
+                actorUserID: senderID, operationID: .init(uuid: UUID()),
+                readThroughRoomSequence: accepted.roomSequence)
             do {
-                _ = try await staleStore.accept(command: staleCommand,
-                    capacityProfile: try .init(id: "standard", limits: .init(
-                        maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 3)),
-                    identifiers: V2AcceptanceIDFactory().make(at: Date()), now: Date())
+                _ = try await readReceipts.recordActivationValidated(command: wrongOwnerReceipt,
+                    token: wrongOwnerToken, now: Date())
                 throw ProbeError.staleBusinessFenceAccepted
-            } catch V2RoomActivationLeaseError.activationChanged {
-                // The business write's in-transaction SQL fence rejected it.
+            } catch V2ReadReceiptStoreError.ownerChanged {
+                // SQL rejects the wrong data owner independently of Host placement.
+            }
+            guard try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.read_receipt_operations")
+                .first(decoding: CountRow.self)?.value == 0 else {
+                throw ProbeError.unexpectedResponse("wrong data owner persisted a read receipt")
             }
             guard let finalCount = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages")
                 .first(decoding: CountRow.self)?.value, finalCount == 1 else {
@@ -358,9 +393,9 @@ enum VirtualActorBusinessProbe {
                 replacementHostIncarnation: replacement.host.incarnationID,
                 subscriptionMembershipRevision: secondSubscription.membershipRevision,
                 subscriptionHighWatermark: secondSubscription.highWatermark,
-                messageRows: finalCount, staleBusinessWriteRejected: true)))
+                messageRows: finalCount, staleActivationRejected: true, wrongDataOwnerRejected: true)))
             try marker("client-done")
-            print("G4_REPLAY_AND_SQL_FENCE_OK epoch=\(replacement.activationEpoch.rawValue)")
+            print("G4_NATIVE_REPLAY_AND_OWNER_FENCE_OK epoch=\(replacement.activationEpoch.rawValue)")
             guard try await application.stop(deadline: .now + .seconds(60)) else {
                 throw ProbeError.incompleteShutdown
             }
@@ -372,199 +407,48 @@ enum VirtualActorBusinessProbe {
         }
     }
 
-    private static func multiHost() async throws {
-        let slot = try required("VA_G6_SLOT")
-        guard slot == "a" || slot == "b" else {
-            throw ProbeError.unexpectedResponse("invalid host slot")
+    private static func rejectOldActivation(_ token: V2RoomActivationToken,
+        replacement: V2RoomActivationToken, request: V2RoomRequest) async throws {
+        let config = try configuration(hostsRooms: false)
+        guard let port = Int(try required("VA_G4_STALE_CALLER_PORT")) else {
+            throw ProbeError.missingEnvironment("VA_G4_STALE_CALLER_PORT")
         }
-        let (resources, database, sql) = try multiDatabaseResources()
-        guard try await sql.raw("SELECT 1 AS value").first(decoding: CountRow.self)?.value == 1 else {
-            throw ProbeError.unexpectedResponse("PostgreSQL unavailable")
-        }
-        let writes = PostgresV2RoomWriteStore(database: database,
-            strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
-            contentReviewMode: .disabled)
-        let capacity = try V2CapacityProfile(id: "standard", limits: .init(
-            maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 3))
-        let owner = try V2RoomServerOwnerResources(database: database, writes: writes,
-            membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
-            invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
-            invitationSecretIssuer: try invitationSecretIssuer(),
-            receiptProjectionDelivery: NoopProjectionShadow(), capacityProfile: capacity,
-            messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
-            contentReviewMode: .disabled, queryBatchConfiguration: .init())
-        let factory = try V2RoomServerActivationFactory(owners: ["room-a": owner],
-                                                        safetyActorUserID: senderID)
-        let hostConfiguration = try configuration(hostsRooms: true)
-        let application = try await V2RoomActorApplication.start(
-            configuration: hostConfiguration,
-            ownerRouter: V2PostgresRoomShardRouter(database: database),
-            roomDatabases: ["room-a": database], factory: factory, qualification: .standalone())
-        guard await application.readiness() else {
-            throw ProbeError.unexpectedResponse("multi-host \(slot) not ready")
-        }
-        try multiMarker("host-\(slot)-ready")
-        print("G6_HOST_READY slot=\(slot)")
-        try await multiWaitFor("lease-race-start", seconds: 80)
-        guard let identity = hostConfiguration.hostIdentity else {
-            throw ProbeError.unexpectedResponse("host identity missing")
-        }
-        let leaseStore = PostgresV2RoomActivationStore(database: database,
-            timeouts: try .init(lockMilliseconds: 8_000,
-                                statementMilliseconds: 10_000,
-                                idleTransactionMilliseconds: 10_000))
-        let acquisition = try await leaseStore.acquire(roomID: leaseRaceRoomID,
-            owner: try .init(shardID: "room-a", epoch: 0), host: identity,
-            duration: try .init(30_000))
-        let raceResult: MultiLeaseRaceResult
-        switch acquisition {
-        case .acquired(let lease):
-            raceResult = .init(slot: slot, outcome: "acquired", token: lease.token)
-        case .occupied(let lease):
-            raceResult = .init(slot: slot, outcome: "occupied", token: lease.token)
-        }
-        try multiMarker("host-\(slot)-lease-race.json", data: JSONEncoder().encode(raceResult))
-        print("G6_LEASE_RACE slot=\(slot) outcome=\(raceResult.outcome)")
-        // The harness SIGSTOPs the owner without closing its DB or transport.
-        // After resumption, this very same process exercises all three stale
-        // paths using the token it originally owned.
-        let checkPath = try multiEvidence("host-\(slot)-check-stale").path
-        let partitionPath = try multiEvidence("host-\(slot)-check-partition").path
-        var partitionChecked = false
-        while !FileManager.default.fileExists(atPath: checkPath) {
-            if !partitionChecked && FileManager.default.fileExists(atPath: partitionPath) {
-                let original = try JSONDecoder().decode(V2RoomActivationToken.self,
-                    from: Data(contentsOf: multiEvidence("partition-token.json")))
-                guard original.host == hostConfiguration.hostIdentity else {
-                    throw ProbeError.unexpectedResponse("partition token belongs to another Host")
+        let node = V2RoomClusterClientNode(configuration: try .init(name: config.name + "-stale-probe",
+            host: config.address, port: port, tls: config.tls, threadPoolSize: 1),
+            signer: config.signer, trust: config.trust, authenticationLimits: config.authentication,
+            runtimeConfiguration: config.runtime)
+        do {
+            let transport = try await node.start(discovery: config.discovery)
+            let deadline = ContinuousClock.now + .seconds(15)
+            while true {
+                let candidates = try await transport.candidates(for: replacement.owner)
+                if candidates.contains(where: { $0.identity == replacement.host && $0.isHealthy }) { break }
+                guard ContinuousClock.now < deadline else { throw ProbeError.markerTimeout("replacement discovery") }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            do {
+                _ = try await transport.invoke(token, request: request, principal: .user(senderID),
+                    deadline: .now + .seconds(5))
+                throw ProbeError.staleBusinessFenceAccepted
+            } catch V2RoomCallFailure.notAccepted(let reason) {
+                guard reason == .staleActivation || reason == .notReady || reason == .unavailable else {
+                    throw V2RoomCallFailure.notAccepted(reason)
                 }
-                guard try await sql.raw("SELECT 1 AS value")
-                    .first(decoding: CountRow.self)?.value == 1 else {
-                    throw ProbeError.unexpectedResponse("partitioned owner cannot access PG")
-                }
-                let renewed = try await PostgresV2RoomActivationStore(database: database)
-                    .renew(token: original, duration: try .init(30_000))
-                try multiMarker("host-\(slot)-partition.json", data: JSONEncoder().encode(
-                    MultiPartitionOwnerResult(databaseReachable: true,
-                        originalTokenRenewed: renewed.token == original,
-                        activationEpoch: renewed.token.activationEpoch.rawValue)))
-                partitionChecked = true
             }
-            try await Task.sleep(for: .milliseconds(100))
-            withExtendedLifetime(resources) {}
-        }
-        let oldToken = try JSONDecoder().decode(V2RoomActivationToken.self,
-            from: Data(contentsOf: multiEvidence("old-token.json")))
-        let lease = PostgresV2RoomActivationStore(database: database)
-        var renewRejected = false
-        do {
-            _ = try await lease.renew(token: oldToken, duration: try .init(30_000))
-        } catch V2RoomActivationLeaseError.activationChanged {
-            renewRejected = true
-        }
-        let releaseRejected = try await !lease.release(token: oldToken)
-        let staleCommand = try V2SendMessageCommand(roomID: roomID,
-            senderUserID: senderID, clientMessageID: .init(uuid: UUID()),
-            text: "stale owner must fail", media: [], limits: .init(maxUTF8Bytes: 64))
-        let staleStore = writes.usingActivationScope(try .init(tokens: [oldToken]))
-        var businessWriteRejected = false
-        do {
-            _ = try await staleStore.accept(command: staleCommand,
-                capacityProfile: capacity,
-                identifiers: V2AcceptanceIDFactory().make(at: Date()), now: Date())
-        } catch V2RoomActivationLeaseError.activationChanged {
-            businessWriteRejected = true
-        }
-        guard renewRejected && releaseRejected && businessWriteRejected,
-              let rows = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages WHERE room_id = \(bind: roomID.uuidValue!)")
-                .first(decoding: CountRow.self)?.value, rows == 1 else {
-            throw ProbeError.unexpectedResponse("stale host changed lease or business state")
-        }
-        try multiMarker("host-\(slot)-stale.json", data: JSONEncoder().encode(MultiStaleResult(
-            renewRejected: renewRejected, releaseRejected: releaseRejected,
-            businessWriteRejected: businessWriteRejected, messageRows: rows)))
-        print("G6_STALE_REJECTED slot=\(slot)")
-        while true {
-            try await Task.sleep(for: .seconds(1))
-            withExtendedLifetime(resources) {}
-        }
-    }
-
-    private static func multiRace() async throws {
-        let slot = try required("VA_G6_SLOT")
-        guard slot == "a" || slot == "b" else {
-            throw ProbeError.unexpectedResponse("invalid race slot")
-        }
-        let (resources, database, _) = try multiDatabaseResources()
-        let application = try await V2RoomActorApplication.start(
-            configuration: configuration(hostsRooms: false),
-            ownerRouter: V2PostgresRoomShardRouter(database: database),
-            roomDatabases: ["room-a": database])
-        do {
-            let ref = application.directory.room(roomID)
-            let request = try multiSendRequest()
-            try multiMarker("race-\(slot)-ready")
-            try await multiWaitFor("race-start", seconds: 60)
-            let response = try await callUntilAvailable(ref, request: request, seconds: 55)
-            let messageID: String
-            let outcome: String
-            guard case .messaging(.sendOperation(.receipt(let proof))) = response,
-                  case .accepted(let accepted) = proof.outcome else {
-                throw ProbeError.unexpectedResponse("multi-race send result")
-            }
-            messageID = accepted.messageID.rawValue; outcome = "originalReceipt"
-            let token = try await application.directory.resolve(roomID,
-                deadline: .now + .seconds(10))
-            try multiMarker("race-\(slot)-result.json", data: JSONEncoder().encode(
-                MultiRaceResult(slot: slot, token: token, messageID: messageID, outcome: outcome)))
-            print("G6_RACE_OK slot=\(slot) outcome=\(outcome) epoch=\(token.activationEpoch.rawValue)")
-            guard try await application.stop(deadline: .now + .seconds(30)) else {
-                throw ProbeError.incompleteShutdown
-            }
-            try await resources.shutdown()
         } catch {
-            _ = try? await application.stop(deadline: .now + .seconds(10))
-            try? await resources.shutdown()
-            throw error
+            let failure = error
+            guard try await node.stop(deadline: .now + .seconds(30)) else {
+                throw V2RoomActorApplicationError.incompleteShutdown
+            }
+            throw failure
         }
-    }
-
-    private static func multiReplay() async throws {
-        let (resources, database, sql) = try multiDatabaseResources()
-        let application = try await V2RoomActorApplication.start(
-            configuration: configuration(hostsRooms: false),
-            ownerRouter: V2PostgresRoomShardRouter(database: database),
-            roomDatabases: ["room-a": database])
-        do {
-            let ref = application.directory.room(roomID)
-            let response = try await callUntilAvailable(ref, request: multiSendRequest(), seconds: 55)
-            guard case .messaging(.sendOperation(.receipt(let recoveredProof))) = response, case .accepted(let recovered) = recoveredProof.outcome else {
-                throw ProbeError.unexpectedResponse("takeover replay was not idempotent")
-            }
-            let token = try await application.directory.resolve(roomID,
-                deadline: .now + .seconds(10))
-            guard let rows = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages WHERE room_id = \(bind: roomID.uuidValue!)")
-                .first(decoding: CountRow.self)?.value, rows == 1 else {
-                throw ProbeError.unexpectedResponse("takeover replay inserted duplicate")
-            }
-            try multiMarker("replay-result.json", data: JSONEncoder().encode(
-                MultiRecoveryResult(token: token, messageID: recovered.messageID.rawValue,
-                                    messageRows: rows)))
-            print("G6_REPLAY_OK epoch=\(token.activationEpoch.rawValue)")
-            guard try await application.stop(deadline: .now + .seconds(30)) else {
-                throw ProbeError.incompleteShutdown
-            }
-            try await resources.shutdown()
-        } catch {
-            _ = try? await application.stop(deadline: .now + .seconds(10))
-            try? await resources.shutdown()
-            throw error
+        guard try await node.stop(deadline: .now + .seconds(30)) else {
+            throw V2RoomActorApplicationError.incompleteShutdown
         }
     }
 
     private static func frozenSendDeadline() throws -> UInt64 {
-        let environment = ProcessInfo.processInfo.environment
-        let directory = try environment["VA_G6_EVIDENCE_DIR"] ?? required("VA_G4_EVIDENCE_DIR")
+        let directory = try required("VA_G4_EVIDENCE_DIR")
         let path = URL(fileURLWithPath: directory).appendingPathComponent("send-admission-deadline-ms")
         if !FileManager.default.fileExists(atPath: path.path) {
             let temporary = path.appendingPathExtension(UUID().uuidString)
@@ -580,91 +464,6 @@ enum VirtualActorBusinessProbe {
             throw ProbeError.unexpectedResponse("invalid persisted send admission")
         }
         return value
-    }
-
-    private static func multiSendRequest() throws -> V2RoomRequest {
-        .messaging(.sendOperation(try .init(command: try .init(roomID: roomID, senderUserID: senderID,
-            clientMessageID: clientID, text: "G6 multi-host send",
-            media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: frozenSendDeadline())))
-    }
-
-    private static func multiPartitionClient() async throws {
-        let (resources, database, _) = try multiDatabaseResources()
-        let application = try await V2RoomActorApplication.start(
-            configuration: configuration(hostsRooms: false),
-            ownerRouter: V2PostgresRoomShardRouter(database: database),
-            roomDatabases: ["room-a": database])
-        do {
-            let healthyRequest = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
-                roomID: healthyRoomID, senderUserID: senderID,
-                clientMessageID: healthyClientID, text: "G6 healthy peer room",
-                media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: frozenSendDeadline())))
-            let response = try await callUntilAvailable(
-                application.directory.room(healthyRoomID), request: healthyRequest, seconds: 30)
-            guard case .messaging(.sendOperation(.receipt(let acceptedProof))) = response, case .accepted(let accepted) = acceptedProof.outcome else {
-                throw ProbeError.unexpectedResponse("survivor did not serve healthy room")
-            }
-            let healthyToken = try await application.directory.resolve(healthyRoomID,
-                deadline: .now + .seconds(10))
-            // A fresh client has no cached route. The live DB lease still
-            // points at the isolated owner; absence of peer transport must
-            // never make the survivor a second writer for this room.
-            var isolatedRoomRejected = false
-            do {
-                _ = try await application.directory.room(roomID).call(
-                    multiSendRequest(), principal: .user(senderID),
-                    deadline: .now + .seconds(10))
-            } catch {
-                isolatedRoomRejected = true
-            }
-            guard isolatedRoomRejected else {
-                throw ProbeError.unexpectedResponse("isolated owner's room unexpectedly reachable")
-            }
-            try multiMarker("partition-client-result.json", data: JSONEncoder().encode(
-                MultiPartitionClientResult(healthyRoomToken: healthyToken,
-                    healthyMessageID: accepted.messageID.rawValue,
-                    isolatedRoomRejected: isolatedRoomRejected)))
-            guard try await application.stop(deadline: .now + .seconds(30)) else {
-                throw ProbeError.incompleteShutdown
-            }
-            try await resources.shutdown()
-        } catch {
-            _ = try? await application.stop(deadline: .now + .seconds(10))
-            try? await resources.shutdown()
-            throw error
-        }
-    }
-
-    private static func multiPartitionRejoin() async throws {
-        let (resources, database, sql) = try multiDatabaseResources()
-        let application = try await V2RoomActorApplication.start(
-            configuration: configuration(hostsRooms: false),
-            ownerRouter: V2PostgresRoomShardRouter(database: database),
-            roomDatabases: ["room-a": database])
-        do {
-            let response = try await callUntilAvailable(
-                application.directory.room(roomID), request: multiSendRequest(), seconds: 45)
-            guard case .messaging(.sendOperation(.receipt(let replayProof))) = response, case .accepted(let replay) = replayProof.outcome else {
-                throw ProbeError.unexpectedResponse("network rejoin lost idempotent result")
-            }
-            let token = try await application.directory.resolve(roomID,
-                deadline: .now + .seconds(10))
-            guard let rows = try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.messages WHERE room_id = \(bind: roomID.uuidValue!)")
-                .first(decoding: CountRow.self)?.value, rows == 1 else {
-                throw ProbeError.unexpectedResponse("network rejoin duplicated business result")
-            }
-            try multiMarker("partition-rejoin-result.json", data: JSONEncoder().encode(
-                MultiPartitionRejoinResult(token: token,
-                    messageID: replay.messageID.rawValue, primaryMessageRows: rows)))
-            guard try await application.stop(deadline: .now + .seconds(30)) else {
-                throw ProbeError.incompleteShutdown
-            }
-            try await resources.shutdown()
-        } catch {
-            _ = try? await application.stop(deadline: .now + .seconds(10))
-            try? await resources.shutdown()
-            throw error
-        }
     }
 
     private static func callUntilAvailable(_ ref: V2RoomRef, request: V2RoomRequest,

@@ -7,6 +7,7 @@ import yaml
 from v2_native_background_upload_gate import NativeBackgroundUploadGate
 from v2_native_background_download_gate import NativeBackgroundDownloadGate
 from v2_native_push_wake_gate import NativePushWakeGate
+from v2_native_placement_processes import voter_arguments, start_controls
 
 REPO = Path(__file__).resolve().parents[2]
 PG = Path('/opt/homebrew/opt/postgresql@16/bin')
@@ -53,7 +54,7 @@ def main():
             with socket.socket() as listener:
                 listener.bind(('127.0.0.1',endpoint))
     required=[PG/name for name in ['initdb','pg_ctl','createdb','psql']]
-    required += [REPO/'IMV2Server/.build/debug'/name for name in ['IMV2AccountServerApp','IMV2ServerApp','IMV2LocalGatewayProbe']]
+    required += [REPO/'IMV2Server/.build/debug'/name for name in ['IMV2AccountServerApp','IMV2ServerApp','IMV2LocalGatewayProbe','IMV2PlacementControlApp']]
     if args.multi_device_ui: required.append(REPO/'IMV2Server/.build/debug/IMV2OperatorServerApp')
     missing=[str(path) for path in required if not path.is_file() or not os.access(path,os.X_OK)]
     if missing: parser.error('missing executable: '+', '.join(missing))
@@ -64,7 +65,7 @@ def main():
     signal.signal(signal.SIGTERM,interrupted)
     os.umask(0o077)
     root=Path(tempfile.mkdtemp(prefix='imv2-native-e2e-'))
-    processes=[]; logs=[]; pg_started=False; edge=None; gateway_process=None; push_gate=None; push_cleanup_error=None
+    processes=[]; placement_processes=[]; logs=[]; pg_started=False; edge=None; gateway_process=None; push_gate=None; push_cleanup_error=None
     http_responses=collections.Counter(); http_lock=threading.Lock()
     app_refresh_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_CREDENTIAL_REFRESH_ONLY') == 'true'
     background_download_mode=os.environ.get('IMAPP_LOCAL_TWO_INSTALL_BACKGROUND_DOWNLOAD_ONLY') == 'true'
@@ -75,7 +76,7 @@ def main():
     push_fixture_token=secrets.token_hex(32) if args.push_wake_ui else None
     refresh_diagnostics=dict(armed=False,injected=0,refreshResponses=0,coldRestore=False,coldFreshDeviceReads=0)
     refresh_digest=[None]  # Process-private comparison only; never exported.
-    ports={key:port() for key in ['pg','account','edge','gateway','actor_gateway','actor_account','metrics']}
+    ports={key:port() for key in ['pg','account','edge','gateway','actor_gateway','actor_account','metrics','placement_a','placement_b','placement_c']}
     if ui_requested: ports.update(edge=8443,gateway=7443)
     if args.multi_device_ui: ports['operator']=port()
     if len(set(ports.values())) != len(ports): raise RuntimeError('port collision; rerun')
@@ -87,7 +88,7 @@ def main():
         run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-f',REPO/'IMV2/sql/schema.sql'])
         run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-f',REPO/'IMV2/sql/realtime-change-journal.sql'])
         run([PG/'psql','-h','127.0.0.1','-p',ports['pg'],'-U','imv2_e2e','-d','imv2_e2e','-v','ON_ERROR_STOP=1','-c',f"INSERT INTO im_v2.shard_admission_pools(room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard','{uuid.uuid4()}',1,CURRENT_TIMESTAMP+INTERVAL '1 hour',1000)"])
-        run(['python3',REPO/'IMV2/scripts/prepare_v2_room_actor_configuration.py','--output-dir',root/'actors','--host',f'gateway=localhost:{ports["actor_gateway"]}','--caller',f'account=localhost:{ports["actor_account"]}','--shards','rooms-primary'])
+        run(['python3',REPO/'IMV2/scripts/prepare_v2_room_actor_configuration.py','--output-dir',root/'actors','--host',f'gateway=localhost:{ports["actor_gateway"]}','--caller',f'account=localhost:{ports["actor_account"]}','--shards','rooms-primary'] + voter_arguments([ports['placement_a'], ports['placement_b'], ports['placement_c']]))
         ca=root/'actors/ca/cert.pem'; cert=root/'actors/gateway/tls.pem'; key=root/'actors/gateway/tls.key'
         composition=yaml.safe_load((REPO/'IMV2/docker-compose.local-account.yml').read_text())['services']
         secret_names=re.findall(r"printf '([A-Z0-9_]+)=%s",(REPO/'IMV2/scripts/run_v2_local_account_stack.sh').read_text())
@@ -113,6 +114,8 @@ def main():
         def spawn(name,binary,env):
             log=(root/(name+'.log')).open('wb');logs.append(log)
             process=subprocess.Popen([str(binary)],env=env,stdout=log,stderr=subprocess.STDOUT);processes.append(process);return process
+        start_controls(binary=REPO/'IMV2Server/.build/debug/IMV2PlacementControlApp', actors=root/'actors',
+            shards=['rooms-primary'], log_directory=root, spawn=spawn, owned=placement_processes)
         spawn('account',REPO/'IMV2Server/.build/debug/IMV2AccountServerApp',account_env)
         gateway_process=spawn('gateway',REPO/'IMV2Server/.build/debug/IMV2ServerApp',environment('gateway'))
         def wait_listener(number):
@@ -422,11 +425,15 @@ def main():
                 (root/'message-facts.json').write_bytes(facts.stdout)
             except Exception as error:
                 (root/'message-facts-error.log').write_text(type(error).__name__+'\n')
-        for process in reversed(processes):
-            if process.poll() is None: process.terminate()
-        for process in reversed(processes):
-            try: process.wait(timeout=75)
-            except subprocess.TimeoutExpired: process.kill();process.wait()
+        # Preserve control quorum until all owned business processes settle.
+        business_processes = [process for process in processes if process not in placement_processes]
+        for group in (list(reversed(business_processes)), list(reversed(placement_processes))):
+            for process in group:
+                if process.poll() is None: process.terminate()
+            deadline = time.monotonic() + 75
+            for process in group:
+                try: process.wait(timeout=max(.1, deadline-time.monotonic()))
+                except subprocess.TimeoutExpired: process.kill();process.wait()
         for log in logs: log.close()
         if pg_started: run([PG/'pg_ctl','-D',root/'pg','-m','fast','-w','stop'])
         print('owned stack stopped; diagnostics retained at '+str(root),flush=True)

@@ -54,6 +54,6 @@ public struct V2RoomAdministrationDomainExecutor: Sendable {
     }
 
     private func requireRoom(_ roomID: RoomID) throws {
-        guard token.roomID == roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard token.roomID == roomID else { throw V2RoomActorStateError.activationChanged }
     }
 }

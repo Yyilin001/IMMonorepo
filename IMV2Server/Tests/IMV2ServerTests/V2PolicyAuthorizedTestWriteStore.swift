@@ -32,8 +32,8 @@ struct V2PolicyAuthorizedTestWriteStore: V2RoomWriteStore {
         }
     }
 
-    /// The caller owns this activation; the fixture neither acquires a competing
-    /// lease nor releases the token when its policy execution finishes.
+    /// The caller owns this native activation. Policy execution does not
+    /// create or retire a second physical room instance.
     private func accept(command: V2SendMessageCommand, capacityProfile: V2CapacityProfile,
                         identifiers: V2AcceptanceIdentifiers, now: Date,
                         token: V2RoomActivationToken) async throws -> V2SendMessageOutcome {
@@ -91,7 +91,7 @@ extension V2PolicyAuthorizedTestWriteStore: V2ForwardExportImporting {
     func importForwardExport(_ export: V2ForwardExport, capacityProfile: V2CapacityProfile,
         limits: V2MessageCommandLimits, identifiers: V2AcceptanceIdentifiers,
         now: Date) async throws -> V2ForwardImportOutcome {
-        func execute(_ token: V2RoomActivationToken) async throws -> V2ForwardImportOutcome {
+        @Sendable func execute(_ token: V2RoomActivationToken) async throws -> V2ForwardImportOutcome {
             let owners = policyOwners ?? PostgresV2PolicyOwnerDirectory(journal: .init(database: controlDatabase),
                 dispatcher: .init(database: controlDatabase,
                     projectionDelivery: V2DiscardingUserShardProjectionDelivery()))

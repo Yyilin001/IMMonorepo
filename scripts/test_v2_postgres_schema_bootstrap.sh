@@ -90,13 +90,13 @@ assert_scalar() {
   fi
 }
 
-# Fresh current72 canonical schema, including permanent typed receipts and
+# Fresh canonical schema, including permanent typed receipts and
 # remote-device security metadata. Counts include views and application-only
 # triggers; retired ledgers must remain absent rather than be recreated.
 assert_scalar 'im_v2 relation count' \
-  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '174'
+  "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'im_v2'" '173'
 assert_scalar 'im_v2 index count' \
-  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '370'
+  "SELECT count(*) FROM pg_indexes WHERE schemaname = 'im_v2'" '369'
 assert_scalar 'im_v2 application trigger count' \
   "SELECT count(*) FROM pg_trigger AS trigger JOIN pg_class AS relation ON relation.oid = trigger.tgrelid JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace WHERE namespace.nspname = 'im_v2' AND NOT trigger.tgisinternal" '58'
 assert_scalar 'im_v2 function count' \
@@ -187,10 +187,11 @@ psql -c 'ALTER TABLE im_v2.control_housekeeping_cursor ADD CONSTRAINT control_ho
 test "$(current_schema_contract)" = 't'
 
 
-# Retired operation/draft tables are forbidden even if an old deployment
+# Retired lease/operation/draft tables are forbidden even if an old deployment
 # recreates them with plausible keys. Check each independently, then restore
 # the clean schema before testing the next drift.
 for retired_table in \
+  room_activation_leases \
   group_room_operations group_room_creation_drafts group_room_creation_draft_members \
   direct_room_operations user_relationship_operations user_block_operations \
   room_pinned_message_operations group_announcement_operations \
@@ -202,11 +203,6 @@ do
   psql -c "DROP TABLE im_v2.${retired_table}" >/dev/null
   test "$(current_schema_contract)" = 't'
 done
-
-psql -c 'ALTER TABLE im_v2.room_activation_leases DROP CONSTRAINT room_activation_leases_holder_check' >/dev/null
-test "$(current_schema_contract)" = 'f'
-psql -c "ALTER TABLE im_v2.room_activation_leases ADD CONSTRAINT room_activation_leases_holder_check CHECK ((host_id IS NULL AND host_incarnation_id IS NULL AND expires_at IS NULL) OR (host_id IS NOT NULL AND length(btrim(host_id)) > 0 AND host_incarnation_id IS NOT NULL AND expires_at IS NOT NULL AND isfinite(expires_at)))" >/dev/null
-test "$(current_schema_contract)" = 't'
 
 psql -c 'CREATE INDEX rooms_last_event_at_idx ON im_v2.rooms(last_event_at DESC, room_id)' >/dev/null
 test "$(current_schema_contract)" = 'f'

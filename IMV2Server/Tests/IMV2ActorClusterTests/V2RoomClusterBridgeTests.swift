@@ -9,6 +9,227 @@ import Testing
 
 @Suite("Room Cluster bridge authenticates native distributed exchanges", .serialized)
 struct V2RoomClusterBridgeTests {
+    @Test("signed Raft voting RPC binds fixed voter role, shard and group across real TCP")
+    func remoteRaftVoting() async throws {
+        let fixture = try await Fixture(raft: true), voter = try #require(fixture.raftVoter)
+        var settings = ClusterSystemSettings(name: "v2-raft-caller", host: "127.0.0.1", port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remote = await ClusterSystem("v2-raft-caller", settings: settings)
+        let caller = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var failure: (any Error)?
+        do {
+            let descriptor = try V2RoomClusterHostDescriptor(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: [fixture.owner.shardID], availableRooms: 2, isHealthy: true)
+            try await caller.register(descriptor)
+            #expect(await fixture.inbound.quiesce(deadline: .now + .seconds(1)))
+            _ = await fixture.host.stop(deadline: .now + .seconds(1))
+            // The independent control endpoint remains available before/after
+            // room admission, without a room activation or SQL dependency.
+
+            let request = V2PlacementRaftVoteRequest(groupID: fixture.raftGroup,
+                candidate: fixture.raftCoordinatorID, term: 1, lastIndex: 0, lastTerm: 0)
+            let wire = try V2PlacementRaftWireCodec.encode(.vote(request), shard: fixture.owner.shardID)
+            let denied = try await fixture.open()
+            await expectAuthentication(.forbidden) {
+                let call = fixture.call(grant: denied, sequence: 1, request: .placementRaft(wire), principal: .service)
+                _ = try await fixture.endpoint.exchange(fixture.client.sign(call, maximumBytes: 100_000))
+            }
+            let reply = try await caller.exchangeRaft(wire, on: fixture.identity, deadline: .now + .seconds(3))
+            guard case .vote(let vote) = try V2PlacementRaftWireCodec.decodeReply(reply, shard: fixture.owner.shardID) else {
+                throw V2PlacementRaftError.invalidMessage
+            }
+            #expect(vote.granted && vote.term == 1 && vote.groupID == fixture.raftGroup)
+            #expect(await voter.inspection().state.votedFor == fixture.raftCoordinatorID)
+            let spoof = try V2PlacementRaftWireCodec.encode(.vote(.init(groupID: fixture.raftGroup,
+                candidate: fixture.identity.hostID, term: 99, lastIndex: 0, lastTerm: 0)), shard: fixture.owner.shardID)
+            await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+                _ = try await caller.exchangeRaft(spoof, on: fixture.identity, deadline: .now + .seconds(3))
+            }
+            let wrongGroup = try V2PlacementRaftWireCodec.encode(.vote(.init(groupID: UUID(),
+                candidate: fixture.raftCoordinatorID, term: 99, lastIndex: 0, lastTerm: 0)), shard: fixture.owner.shardID)
+            await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+                _ = try await caller.exchangeRaft(wrongGroup, on: fixture.identity, deadline: .now + .seconds(3))
+            }
+            #expect(await voter.inspection().state.term == 1)
+            let append = V2PlacementRaftAppendRequest(groupID: fixture.raftGroup, leader: fixture.raftCoordinatorID,
+                term: 1, previousIndex: 0, previousTerm: 0, entries: [.init(term: 1, payload: Data())], leaderCommit: 1, readID: UUID())
+            let appendWire = try V2PlacementRaftWireCodec.encode(.append(append), shard: fixture.owner.shardID)
+            let appendReply = try await caller.exchangeRaft(appendWire, on: fixture.identity, deadline: .now + .seconds(3))
+            guard case .append(let value) = try V2PlacementRaftWireCodec.decodeReply(appendReply, shard: fixture.owner.shardID) else {
+                throw V2PlacementRaftError.invalidMessage
+            }
+            #expect(value.accepted && value.matchedIndex == 1 && value.readID == append.readID)
+            #expect(await voter.inspection().state.commitIndex == 1)
+            let wrongShard = V2PlacementRaftWire(shardID: "not-allowed", payload: appendWire.payload)
+            await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+                _ = try await caller.exchangeRaft(wrongShard, on: fixture.identity, deadline: .now + .seconds(3))
+            }
+        } catch { failure = error }
+        _ = await caller.quiesce(deadline: .now + .seconds(3))
+        await fixture.raftControl?.stop()
+        await voter.stop()
+        _ = await fixture.host.stop(deadline: .now + .seconds(3))
+        await fixture.inbound.stop()
+        try await remote.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
+    @Test("signed remote placement drain authenticates authority and waits for actual room work")
+    func remotePlacementDrain() async throws {
+        let gate = RestoreGate()
+        let fixture = try await Fixture(executeGate: gate, nativePlacement: true)
+        let log = try #require(fixture.placementLog)
+        var settings = ClusterSystemSettings(name: "v2-placement-caller", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remote = await ClusterSystem("v2-placement-caller", settings: settings)
+        let caller = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        let denied = V2RoomClusterClient(system: remote, signer: fixture.client,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var work: Task<V2RoomResponse, any Error>?
+        var drain: Task<V2ActorPlacementDrainReceipt, any Error>?
+        var failure: (any Error)?
+        do {
+            let descriptor = try V2RoomClusterHostDescriptor(identity: fixture.identity,
+                endpointID: fixture.endpoint.id, address: "127.0.0.1", port: fixture.port,
+                accessibleShardIDs: [fixture.owner.shardID], availableRooms: 2, isHealthy: true)
+            try await caller.register(descriptor)
+            try await denied.register(descriptor)
+            guard case .ready(let token) = try await fixture.host.activate(roomID: fixture.room,
+                owner: fixture.owner, deadline: .now + .seconds(3)) else {
+                throw V2RoomCallFailure.notAccepted(.notReady)
+            }
+            let initial = await log.load(), transferID = UUID()
+            let successor = fixture.placementSuccessor
+            let command = V2ActorPlacementCommand.beginTransfer(partition: 0,
+                expected: initial.slots[0].owner, transfer: .init(id: transferID, successor: successor))
+            var machine = V2ActorPlacementStateMachine(snapshot: initial)
+            try machine.apply(command, revision: initial.revision + 1)
+            let request = V2ActorPlacementDrainWire(shardID: fixture.owner.shardID, partition: 0,
+                committedSnapshot: try V2ActorPlacementProtobuf.encode(machine.snapshot))
+            let denialGrant = try await fixture.open()
+            await expectAuthentication(.forbidden) {
+                let call = fixture.call(grant: denialGrant, sequence: 1, request: .drainPlacement(request))
+                _ = try await fixture.endpoint.exchange(fixture.client.sign(call, maximumBytes: 100_000))
+            }
+            // The public transport deliberately classifies failed dispatched
+            // RPCs as unknown. The receiver above proves the exact denial.
+            await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+                _ = try await denied.drainPlacement(request, on: fixture.identity, deadline: .now + .seconds(3))
+            }
+            await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+                _ = try await caller.drainPlacement(request, on: fixture.identity, deadline: .now + .seconds(3))
+            }
+            #expect(await fixture.host.isReady(token: token))
+            #expect(await log.load() == initial)
+            work = Task {
+                try await fixture.host.invoke(token: token,
+                    request: .recovery(.init(roomID: fixture.room, actorUserID: .init(uuid: UUID()), kind: .state)),
+                    deadline: .now + .seconds(5))
+            }
+            try await gate.waitForEntry()
+            let withdrawn = try await log.append(command, expected: initial, requestID: transferID)
+            drain = Task { try await caller.drainPlacement(request, on: fixture.identity, deadline: .now + .seconds(5)) }
+            try await waitUntil { await fixture.host.snapshot().retiringRooms == 1 }
+            #expect(await log.load() == withdrawn)
+            await gate.openAndRemainOpen()
+            _ = try await work?.value
+            let proof = try await #require(drain).value
+            #expect(proof.owner == initial.slots[0].owner && proof.transferID == transferID)
+            #expect(await fixture.host.snapshot().activeRooms == 0)
+            let repeated = try await caller.drainPlacement(request, on: fixture.identity, deadline: .now + .seconds(3))
+            #expect(repeated.clusterID == proof.clusterID && repeated.partition == proof.partition &&
+                    repeated.owner == proof.owner && repeated.transferID == proof.transferID)
+            // A fresh signature need not have identical bytes. Both certificates
+            // must independently authenticate the same native drain result.
+            for result in [proof, repeated] {
+                let certificate = try #require(result.certificate)
+                guard case .partition(let verified) = try V2PlacementDrainCertificate.verify(certificate,
+                    shard: fixture.owner.shardID, groupID: initial.clusterID, trust: fixture.trust) else {
+                    throw V2PlacementRaftError.invalidMessage
+                }
+                #expect(verified.owner == result.owner && verified.transferID == result.transferID)
+            }
+            _ = try await log.append(.completeTransfer(partition: 0, expected: initial.slots[0].owner,
+                transferID: transferID), expected: withdrawn, requestID: transferID)
+            await #expect(throws: V2RoomCallFailure.outcomeUnknown) {
+                _ = try await caller.drainPlacement(request, on: fixture.identity, deadline: .now + .seconds(3))
+            }
+            #expect(await log.load().slots[0].owner.host == successor)
+        } catch { failure = error }
+        await gate.openAndRemainOpen()
+        _ = await work?.result
+        _ = await drain?.result
+        _ = await caller.quiesce(deadline: .now + .seconds(3))
+        _ = await denied.quiesce(deadline: .now + .seconds(3))
+        _ = await fixture.host.stop(deadline: .now + .seconds(3))
+        await fixture.inbound.stop()
+        try await remote.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
+    @Test("production transfer pipeline drains over RPC and recovers a lost final commit reply")
+    func remotePartitionTransfer() async throws {
+        let fixture = try await Fixture(nativePlacement: true)
+        let runtime = try #require(fixture.placementRuntime), log = try #require(fixture.placementLog)
+        var settings = ClusterSystemSettings(name: "v2-transfer-caller", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remote = await ClusterSystem("v2-transfer-caller", settings: settings)
+        let client = V2RoomClusterClient(system: remote, signer: fixture.coordinator,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var failure: (any Error)?
+        do {
+            try await client.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: [fixture.owner.shardID],
+                availableRooms: 2, isHealthy: true))
+            guard case .ready(let token) = try await fixture.host.activate(roomID: fixture.room,
+                owner: fixture.owner, deadline: .now + .seconds(3)) else {
+                throw V2RoomCallFailure.notAccepted(.notReady)
+            }
+            let initial = await log.load(), transferID = UUID()
+            let successor = fixture.placementSuccessor
+            let authorizations = ExecutionCount()
+            let authorize: @Sendable (V2ActorHostIdentity) async throws -> Void = { identity in
+                guard identity == successor else { throw V2ActorAuthenticationError.forbidden }
+                await authorizations.record()
+            }
+            await log.loseNextCompletionResponse()
+            await #expect(throws: V2ActorPlacementError.unavailable) {
+                try await runtime.transfer(shard: fixture.owner.shardID, partition: 0, expected: initial.slots[0].owner,
+                    successor: successor, transferID: transferID, originRevision: initial.revision, client: client, deadline: .now + .seconds(3),
+                    authorizeSuccessor: authorize)
+            }
+            #expect(await authorizations.snapshot() == 2)
+            #expect(await log.load().revision == 3)
+            #expect(await fixture.host.snapshot().activeRooms == 0)
+            try await runtime.transfer(shard: fixture.owner.shardID, partition: 0, expected: initial.slots[0].owner,
+                successor: successor, transferID: transferID, originRevision: initial.revision, client: client, deadline: .now + .seconds(3),
+                authorizeSuccessor: authorize)
+            #expect(await log.load().revision == 3)
+            #expect(await authorizations.snapshot() == 2)
+            let grant = try runtime.grant(roomID: fixture.room, owner: fixture.owner)
+            #expect(grant.host == successor && grant.epoch == 2)
+            #expect(throws: V2RoomCallFailure.notAccepted(.staleActivation)) { try runtime.admission(for: token) }
+        } catch { failure = error }
+        _ = await client.quiesce(deadline: .now + .seconds(3))
+        _ = await fixture.host.stop(deadline: .now + .seconds(3))
+        await fixture.inbound.stop()
+        try await remote.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
     @Test("concurrent discovery and suspension publish the actual Peer state")
     func concurrentDirectoryPublication() async throws {
         let fixture = try await Fixture()
@@ -867,6 +1088,13 @@ struct V2RoomClusterBridgeTests {
         let trust: V2ActorTrustStore
         let generation = UUID()
         let executionCount: ExecutionCount
+        let placementRuntime: V2RoomActorPlacementRuntime?
+        let placementLog: PlacementTestLog?
+        let placementSuccessor = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let raftVoter: V2PlacementRaftVoter?
+        let raftControl: V2PlacementRaftInboundService?
+        let raftGroup = UUID()
+        let raftCoordinatorID = V2ActorHostID(uuid: UUID())
 
         init(restoreGate: RestoreGate? = nil, executeGate: RestoreGate? = nil,
              invalidationGate: RestoreGate? = nil,
@@ -875,7 +1103,7 @@ struct V2RoomClusterBridgeTests {
              maximumActiveRooms: Int = 2, restoreGateRoom: RoomID? = nil,
              coordinatorUserCalls: Bool = false, recoveryBatchGate: RecoveryBatchGate? = nil,
              maximumActivationWaitersPerHost: Int = 2, maximumConcurrentReservations: Int = 1,
-             ownerShardID: String = "allowed") async throws {
+             ownerShardID: String = "allowed", nativePlacement: Bool = false, raft: Bool = false) async throws {
             owner = try .init(shardID: ownerShardID, epoch: 0)
             identity = .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             let clientKey = Curve25519.Signing.PrivateKey()
@@ -892,9 +1120,9 @@ struct V2RoomClusterBridgeTests {
                       permissions: [.userRoomCalls]),
                 .init(serviceID: coordinator.serviceID,
                       publicKey: coordinatorKey.publicKey.rawRepresentation,
-                      permissions: coordinatorUserCalls ? [.roomCoordination, .userRoomCalls] : [.roomCoordination]),
+                      permissions: (coordinatorUserCalls ? Set<V2ActorServicePermission>([.roomCoordination, .userRoomCalls]) : [.roomCoordination]).union(raft ? [.placementVote] : [])),
                 .init(serviceID: signer.serviceID, publicKey: hostKey.publicKey.rawRepresentation,
-                      permissions: [], hostedIDs: [identity.hostID]),
+                      permissions: raft ? [.placementVote] : [], hostedIDs: [identity.hostID]),
             ])
             configuration = try V2RoomRuntimeConfiguration(
                 maximumActiveRooms: maximumActiveRooms, maximumConcurrentRestores: 1,
@@ -905,8 +1133,19 @@ struct V2RoomClusterBridgeTests {
             )
             let count = ExecutionCount()
             executionCount = count
+            let placement: any V2RoomActorPlacementRouting
+            if nativePlacement {
+                let snapshot = try V2ActorPlacementSnapshot(clusterID: UUID(), revision: 1,
+                    slots: [.init(owner: .init(host: identity, epoch: 1), transfer: nil)],
+                    hosts: [.init(host: identity, retired: false), .init(host: placementSuccessor, retired: false)])
+                let log = PlacementTestLog(snapshot)
+                let runtime = try V2RoomActorPlacementRuntime(logs: [owner.shardID: log], snapshots: [owner.shardID: snapshot])
+                placementLog = log; placementRuntime = runtime; placement = runtime
+            } else {
+                placementLog = nil; placementRuntime = nil; placement = PlacementFixedHostFixture(host: identity)
+            }
             host = .init(
-                identity: identity, leaseStore: LeaseStore(), configuration: configuration,
+                identity: identity, placement: placement, configuration: configuration,
                 budget: V2RoomCommandBudget(configuration: configuration), classify: { _ in .barrier },
                 factory: .init(recoveryBatch: { items in
                     if let recoveryBatchGate { await recoveryBatchGate.execute(items.count) }
@@ -940,6 +1179,17 @@ struct V2RoomClusterBridgeTests {
             settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
             system = await ClusterSystem("v2-room-bridge-test", settings: settings)
             limits = try V2ActorAuthenticationLimits()
+            let raftEndpoint: V2PlacementRaftEndpoint?
+            if raft {
+                let third = V2ActorHostID(uuid: UUID())
+                let roster: Set<V2ActorHostID> = [identity.hostID, raftCoordinatorID, third]
+                let voter = try await V2PlacementRaftVoter.open(id: identity.hostID, groupID: raftGroup, voters: roster,
+                    storage: RaftTestStorage(.init(groupID: raftGroup, voterID: identity.hostID, voters: roster)))
+                raftVoter = voter
+                raftEndpoint = try await .open(voters: [owner.shardID: voter], localID: identity.hostID,
+                    roles: [signer.serviceID: identity.hostID, coordinator.serviceID: raftCoordinatorID,
+                        client.serviceID: third], readers: [:], writers: [:], roomHosts: [:])
+            } else { raftVoter = nil; raftEndpoint = nil }
             inbound = try .init(
                 identity: identity, host: host,
                 authenticator: .init(host: identity, trust: trust, limits: limits), signer: signer,
@@ -947,9 +1197,17 @@ struct V2RoomClusterBridgeTests {
                 serviceShardAccess: [client.serviceID: [owner.shardID],
                                      coordinator.serviceID: [owner.shardID]],
                 maximumInboundRequests: maximumInboundRequests,
-                localGeneration: generation, actorSystem: system
+                localGeneration: generation, actorSystem: system, placementDrain: placementRuntime?.drainageService(host: host)
             )
-            endpoint = V2RoomHostEndpoint(actorSystem: system, service: inbound)
+            if let raftEndpoint {
+                let control = try V2PlacementRaftInboundService(identity: identity, signer: signer, trust: trust,
+                    limits: limits, endpoint: raftEndpoint)
+                raftControl = control
+                endpoint = V2RoomHostEndpoint(actorSystem: system, service: control)
+            } else {
+                raftControl = nil
+                endpoint = V2RoomHostEndpoint(actorSystem: system, service: inbound)
+            }
             await host.start()
             await inbound.startWatching()
         }
@@ -968,43 +1226,6 @@ struct V2RoomClusterBridgeTests {
                   recipient: identity, sessionID: grant.sessionID, sequence: sequence,
                   attemptID: UUID(), traceID: UUID(), remainingBudget: try! .init(2_000),
                   principal: principal, request: request)
-        }
-    }
-
-    private actor LeaseStore: V2RoomActivationLeaseStore {
-        private var current: [RoomID: V2RoomActivationLease] = [:]
-        private var epoch: Int64 = 0
-
-        func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
-            current[roomID]
-        }
-        func acquire(roomID: RoomID, owner: V2RoomDataOwner, host: V2ActorHostIdentity,
-                     duration: V2ActorMilliseconds) async throws -> V2RoomActivationAcquisition {
-            if let lease = current[roomID] { return .occupied(lease) }
-            epoch += 1
-            let token = V2RoomActivationToken(roomID: roomID, owner: owner,
-                                              activationEpoch: try .init(epoch), host: host)
-            let lease = try makeLease(token, duration: duration)
-            current[roomID] = lease
-            return .acquired(lease)
-        }
-        func renew(token: V2RoomActivationToken,
-                   duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
-            guard current[token.roomID]?.token == token else { throw V2RoomActivationLeaseError.activationChanged }
-            let lease = try makeLease(token, duration: duration)
-            current[token.roomID] = lease
-            return lease
-        }
-        func release(token: V2RoomActivationToken) async throws -> Bool {
-            guard current[token.roomID]?.token == token else { return false }
-            current.removeValue(forKey: token.roomID)
-            return true
-        }
-        private func makeLease(_ token: V2RoomActivationToken,
-                               duration: V2ActorMilliseconds) throws -> V2RoomActivationLease {
-            let observed = Date(timeIntervalSince1970: 1_000)
-            return try .init(token: token, databaseObservedAt: observed,
-                             expiresAt: observed.addingTimeInterval(Double(duration.rawValue) / 1_000))
         }
     }
 

@@ -41,17 +41,17 @@ struct V2RoomTransactionAttemptTests {
         let token = try makeToken()
         let scope = try V2RoomActivationWriteScope(tokens: [token])
         #expect(try scope.token(for: token.roomID.uuidValue!) == token)
-        #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+        #expect(throws: V2RoomActorStateError.activationChanged) {
             try scope.token(for: UUID())
         }
-        #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+        #expect(throws: V2RoomActorStateError.activationChanged) {
             try V2RoomActivationWriteScope(tokens: [token, token])
         }
         let other = try makeToken(shard: "other")
-        #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+        #expect(throws: V2RoomActorStateError.activationChanged) {
             try V2RoomActivationWriteScope(tokens: [token, other])
         }
-        #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+        #expect(throws: V2RoomActorStateError.activationChanged) {
             try V2RoomActivationWriteScope(tokens: [])
         }
     }

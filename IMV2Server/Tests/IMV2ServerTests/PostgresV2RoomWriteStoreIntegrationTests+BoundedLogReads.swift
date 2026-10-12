@@ -108,70 +108,65 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await seedBoundedLog(count: count, messageEvery: 100, on: sql)
             try await sql.raw("ANALYZE im_v2.messages").run()
             try await sql.raw("ANALYZE im_v2.room_events").run()
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let activations = PostgresV2RoomActivationStore(database: database)
-            guard case .acquired(let lease) = try await activations.acquire(roomID: roomID, owner: owner,
-                host: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()), duration: .init(30_000)) else {
-                Issue.record("expected fresh activation"); return
-            }
-            let queries = V2ActorRoomQueryExecutor(database: database)
-            let base = Date(timeIntervalSince1970: 1_750_000_000)
-            let writes = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
-                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0,
-                activationToken: lease.token)
-            let sender = try V2SendMessageService(store: writes, capacityProfile: forwardImportTestProfile(),
-                limits: .init(maxUTF8Bytes: 64), now: { base })
-            let config = try V2RoomRuntimeConfiguration()
-            let budget = V2RoomCommandBudget(configuration: config)
-            let started = Mutex<ContinuousClock.Instant?>(nil)
-            let lane = V2RoomTurnLane<BoundedLogTurn, UInt64>(token: lease.token,
-                configuration: config, budget: budget, classify: { $0 == .send ? .send : .barrier },
-                execute: { turn in
-                    do {
-                        var results: [UInt64] = []
-                        for item in turn.items {
-                            switch item.request {
-                            case .read:
-                                started.withLock { $0 = .now }
-                                let wire = try V2ActorRoomLogPullWire(roomID: roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 100)
-                                guard case .page(let page) = try await queries.log(.pull(wire), token: lease.token) else {
-                                    Issue.record("expected log page"); return .rolledBack(.invalidRequest)
+            try await withRoomActivation(database: database, roomID: roomID) { token in
+                let queries = V2ActorRoomQueryExecutor(database: database)
+                let base = Date(timeIntervalSince1970: 1_750_000_000)
+                let writes = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0,
+                    activationToken: token)
+                let sender = try V2SendMessageService(store: writes, capacityProfile: forwardImportTestProfile(),
+                    limits: .init(maxUTF8Bytes: 64), now: { base })
+                let config = try V2RoomRuntimeConfiguration()
+                let budget = V2RoomCommandBudget(configuration: config)
+                let started = Mutex<ContinuousClock.Instant?>(nil)
+                let lane = V2RoomTurnLane<BoundedLogTurn, UInt64>(token: token,
+                    configuration: config, budget: budget, classify: { $0 == .send ? .send : .barrier },
+                    execute: { turn in
+                        do {
+                            var results: [UInt64] = []
+                            for item in turn.items {
+                                switch item.request {
+                                case .read:
+                                    started.withLock { $0 = .now }
+                                    let wire = try V2ActorRoomLogPullWire(roomID: roomID, actorUserID: senderID, afterRoomSequence: 0, pageSize: 100)
+                                    guard case .page(let page) = try await queries.log(.pull(wire), token: token) else {
+                                        Issue.record("expected log page"); return .rolledBack(.invalidRequest)
+                                    }
+                                    #expect(page.events.count == 100 && page.hasMore)
+                                    results.append(page.nextRoomSequence)
+                                case .send:
+                                    let began = try #require(started.withLock { $0 })
+                                    let wait = began.duration(to: .now)
+                                    guard case .accepted(let accepted) = try await sender.send(.init(roomID: roomID, actorUserID: senderID,
+                                        clientMessageID: .init(uuid: UUID()), text: "after historical read")) else {
+                                        Issue.record("expected accepted send"); return .rolledBack(.invalidRequest)
+                                    }
+                                    print("BOUNDED_ROOM_LOG_SEND history=\(count) readTurnWait=\(wait) readAndSend=\(began.duration(to: .now))")
+                                    results.append(accepted.roomSequence)
                                 }
-                                #expect(page.events.count == 100 && page.hasMore)
-                                results.append(page.nextRoomSequence)
-                            case .send:
-                                let began = try #require(started.withLock { $0 })
-                                let wait = began.duration(to: .now)
-                                guard case .accepted(let accepted) = try await sender.send(.init(roomID: roomID, actorUserID: senderID,
-                                    clientMessageID: .init(uuid: UUID()), text: "after historical read")) else {
-                                    Issue.record("expected accepted send"); return .rolledBack(.invalidRequest)
-                                }
-                                print("BOUNDED_ROOM_LOG_SEND history=\(count) readTurnWait=\(wait) readAndSend=\(began.duration(to: .now))")
-                                results.append(accepted.roomSequence)
                             }
+                            return .committed(results)
+                        } catch {
+                            Issue.record(error)
+                            return .outcomeUnknown
                         }
-                        return .committed(results)
-                    } catch {
-                        Issue.record(error)
-                        return .outcomeUnknown
-                    }
-                }, onUncertain: { _ in })
-            // Hold dispatch only while queuing a read followed by a send. Timing
-            // starts inside the real read turn and excludes this synchronization.
-            let reservation = try await lane.reserve(requestID: UUID(), deadline: .now + .seconds(10))
-            let read = Task { try await lane.submit(request: BoundedLogTurn.read, deadline: .now + .seconds(10)) }
-            let queueDeadline = ContinuousClock.now + .seconds(5)
-            while await lane.snapshot().queuedCount < 1, ContinuousClock.now < queueDeadline { await Task.yield() }
-            #expect(await lane.snapshot().queuedCount == 1)
-            let send = Task { try await lane.submit(request: BoundedLogTurn.send, deadline: .now + .seconds(10)) }
-            while await lane.snapshot().queuedCount < 2, ContinuousClock.now < queueDeadline { await Task.yield() }
-            #expect(await lane.snapshot().queuedCount == 2)
-            #expect(await lane.abortReservation(reservation))
-            let readResult = await read.result, sendResult = await send.result
-            await lane.beginDrain()
-            #expect(try readResult.get() == 100)
-            #expect(try sendResult.get() == UInt64(count + 1))
-            #expect(try await activations.release(token: lease.token))
+                    }, onUncertain: { _ in })
+                // Hold dispatch only while queuing a read followed by a send. Timing
+                // starts inside the real read turn and excludes this synchronization.
+                let reservation = try await lane.reserve(requestID: UUID(), deadline: .now + .seconds(10))
+                let read = Task { try await lane.submit(request: BoundedLogTurn.read, deadline: .now + .seconds(10)) }
+                let queueDeadline = ContinuousClock.now + .seconds(5)
+                while await lane.snapshot().queuedCount < 1, ContinuousClock.now < queueDeadline { await Task.yield() }
+                #expect(await lane.snapshot().queuedCount == 1)
+                let send = Task { try await lane.submit(request: BoundedLogTurn.send, deadline: .now + .seconds(10)) }
+                while await lane.snapshot().queuedCount < 2, ContinuousClock.now < queueDeadline { await Task.yield() }
+                #expect(await lane.snapshot().queuedCount == 2)
+                #expect(await lane.abortReservation(reservation))
+                let readResult = await read.result, sendResult = await send.result
+                await lane.beginDrain()
+                #expect(try readResult.get() == 100)
+                #expect(try sendResult.get() == UInt64(count + 1))
+            }
         }
     }
 

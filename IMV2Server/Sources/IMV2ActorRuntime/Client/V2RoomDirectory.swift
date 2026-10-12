@@ -122,7 +122,7 @@ public actor V2RoomDirectory {
     // 可写调用仍保留完整截止时间和结果未知处理。
     private static let locationLookupTimeout: Duration = .seconds(3)
     private let owners: any V2RoomDataOwnerResolving
-    private let leases: any V2RoomActivationLeaseStore
+    private let placement: any V2RoomActorPlacementRouting
     private let hosts: any V2RoomHostDiscovering
     private let transport: any V2RoomClientTransport
     private let configuration: V2RoomRuntimeConfiguration
@@ -162,11 +162,11 @@ public actor V2RoomDirectory {
     private var recoveryMailboxes: [UUID: RecoveryMailbox] = [:]
     private var recoveryStageStarts: [V2RoomDirectoryRecoveryStage: [ContinuousClock.Instant: Int]] = [:]
 
-    public init(owners: any V2RoomDataOwnerResolving, leases: any V2RoomActivationLeaseStore,
+    public init(owners: any V2RoomDataOwnerResolving, placement: any V2RoomActorPlacementRouting,
                 hosts: any V2RoomHostDiscovering, transport: any V2RoomClientTransport,
                 configuration: V2RoomRuntimeConfiguration) {
         self.owners = owners
-        self.leases = leases
+        self.placement = placement
         self.hosts = hosts
         self.transport = transport
         self.configuration = configuration
@@ -186,7 +186,6 @@ public actor V2RoomDirectory {
             cacheMisses: cacheMisses, locationInvalidations: locationInvalidations,
             recoveryAttempts: recoveryAttempts, recoveryWaits: recoveryWaits,
             recoveringRooms: pending.values.filter { $0.demandRecovery && $0.started && $0.recoveryPhase == .recovering }.count,
-            waitingForLeaseRooms: pending.values.filter { $0.demandRecovery && $0.started && $0.recoveryPhase == .waitingForLease }.count,
             recoveryWarmItems: recoveryWarmItems, recoveryColdItems: recoveryColdItems,
             recoveryHostCohorts: recoveryHostCohorts, recoveryHostItems: recoveryHostItems,
             recoveryStages: recoveryStageSnapshot())
@@ -387,7 +386,7 @@ public actor V2RoomDirectory {
             try checkDeadline(deadline)
             var installed = cache[request.roomID]
             do {
-                if !forceRecovery, let cached = installed {
+                if !forceRecovery, let cached = installed, cached.admission() {
                     count(&cachedCalls)
                     switch try await transport.tryInvokeCached(cached.token, request: request,
                         principal: principal, deadline: min(deadline, clock.now + configuration.callTimeout.duration)) {
@@ -425,9 +424,9 @@ public actor V2RoomDirectory {
                     switch failure {
                     case .notAccepted(.staleActivation), .rolledBack(.staleActivation),
                          .notAccepted(.retired), .rolledBack(.retired),
-                         .notAccepted(.leaseLost), .rolledBack(.leaseLost):
+                         .notAccepted(.authorityLost), .rolledBack(.authorityLost):
                         if let installed { invalidate(installed) }
-                    default: break // availability is not an owner/lease invalidation
+                    default: break // unavailability does not revoke committed ownership
                     }
                 case .retryRead, .retrySameOperation:
                     forceRecovery = false // exact request/ID is retained; suspect handling belongs to transport
@@ -480,7 +479,7 @@ public actor V2RoomDirectory {
                     switch failure {
                     case .notAccepted(.staleActivation), .rolledBack(.staleActivation),
                          .notAccepted(.retired), .rolledBack(.retired),
-                         .notAccepted(.leaseLost), .rolledBack(.leaseLost):
+                         .notAccepted(.authorityLost), .rolledBack(.authorityLost):
                         if let installed { invalidate(installed) }
                     default: break
                     }
@@ -763,7 +762,7 @@ public actor V2RoomDirectory {
                 switch failure {
                 case .notAccepted(.staleActivation), .rolledBack(.staleActivation),
                      .notAccepted(.retired), .rolledBack(.retired),
-                     .notAccepted(.leaseLost), .rolledBack(.leaseLost):
+                     .notAccepted(.authorityLost), .rolledBack(.authorityLost):
                     if let cached = cache[value.token.roomID], cached.token == value.token { invalidate(cached) }
                 default: break
                 }
@@ -889,13 +888,7 @@ public actor V2RoomDirectory {
             do {
                 if entry.demandRecovery { count(&recoveryAttempts) }
                 entry.recoveryPhase = .recovering
-                if let held = entry.heldLease, clock.now < held.recheckAfter {
-                    entry.recoveryPhase = .waitingForLease
-                    return .confirmed(try await confirm(held.lease.token, roomID: roomID,
-                        owner: held.lease.token.owner, deadline: deadline, recoveryEntry: entry))
-                }
-                entry.heldLease = nil
-                if !entry.requiresPhysicalConfirmation, let cached = entry.cachedRecovery,
+                if !entry.requiresPhysicalConfirmation, let cached = entry.cachedRecovery, cached.admission(),
                    cacheMatches(cached) {
                     entry.cachedRecovery = nil
                     let local = await transport.canInvokeCachedLocally(cached.token)
@@ -912,7 +905,7 @@ public actor V2RoomDirectory {
                     catch {
                         switch error as? V2RoomCallFailure {
                         case .notAccepted(.notReady), .notAccepted(.staleActivation),
-                             .notAccepted(.retired), .notAccepted(.leaseLost),
+                             .notAccepted(.retired), .notAccepted(.authorityLost),
                              .notAccepted(.unavailable), .notAccepted(.deadlineExceeded):
                             found = false
                         default: throw error // overload/authentication/unknown is not location evidence
@@ -930,26 +923,13 @@ public actor V2RoomDirectory {
                     recoveryEntry: entry.demandRecovery ? entry : nil)
             } catch {
                 guard entry.demandRecovery, !entry.waiters.isEmpty else { throw error }
-                if let timeout = error as? DemandLeaseProbeTimeout {
-                    guard entry.heldLease?.lease.token == timeout.token else {
-                        throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
-                    }
-                    // Only confirm of this authoritative lease produces this
-                    // error. An expired observation is re-read on the next round.
-                } else {
-                    guard let failure = error as? V2RoomCallFailure else { throw error }
-                    switch failure {
-                    case .notAccepted(.notReady), .notAccepted(.unavailable),
-                         .notAccepted(.retired), .notAccepted(.leaseLost):
-                        break
-                    case .notAccepted(.staleActivation):
-                        // A restarted Host can reject an old incarnation while
-                        // its authoritative lease still prevents a new acquire.
-                        guard let held = entry.heldLease, clock.now < held.recheckAfter else { throw failure }
-                    default: throw failure // unknown activation must not start another acquire
-                    }
+                guard let failure = error as? V2RoomCallFailure else { throw error }
+                switch failure {
+                case .notAccepted(.notReady), .notAccepted(.unavailable), .notAccepted(.retired),
+                     .notAccepted(.authorityLost), .notAccepted(.staleActivation): break
+                default: throw failure
                 }
-                entry.recoveryPhase = entry.heldLease == nil ? .recovering : .waitingForLease
+                entry.recoveryPhase = .recovering
                 try checkDeadline(deadline)
                 count(&recoveryWaits)
                 try await clock.sleep(until: min(deadline, clock.now + backoff))
@@ -965,7 +945,7 @@ public actor V2RoomDirectory {
         do { owner = try await owners.owner(for: roomID) }
         catch { throw mapBeforeDispatch(error) }
         try checkDeadline(deadline)
-        if let cached = cache[roomID], cached.owner == owner, recoveryEntry?.authoritativeRecovery != true,
+        if let cached = cache[roomID], cached.admission(), cached.owner == owner, recoveryEntry?.authoritativeRecovery != true,
            recoveryEntry?.failedCacheProbe.map({ cacheMatches($0) }) != true {
             if let hintEntry {
                 let canInvoke = await transport.canInvokeCachedLocally(cached.token)
@@ -983,87 +963,23 @@ public actor V2RoomDirectory {
                 if try await transport.lookup(cached.token, deadline: locationLookupDeadline(deadline)), cacheMatches(cached) {
                     return .confirmed(cached.token)
                 }
-            } catch { /* 以如下数据库查找结果为准；绝不抢占有效租约。 */ }
-            // Unavailability does not prove the owner or lease changed. Keep
+            } catch { /* 继续读取已提交归属；不可达不能授权抢占。 */ }
+            // Unavailability does not prove committed ownership changed. Keep
             // this location hint until authoritative resolution replaces it.
         }
-        let located: V2RoomActivationLease?
-        let leaseReadStarted = clock.now
-        do { located = try await leases.locate(roomID: roomID, owner: owner) }
-        catch { throw mapBeforeDispatch(error) }
+        let grant = try placement.grant(roomID: roomID, owner: owner)
+        let candidates = try await hosts.candidates(for: owner)
+        guard candidates.contains(where: {
+            $0.identity == grant.host && $0.isHealthy && $0.accessibleShardIDs.contains(owner.shardID)
+        }) else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+        try checkDeadline(deadline)
         recoveryEntry?.authoritativeRecovery = false
-        if let lease = located {
-            retainLease(lease, in: recoveryEntry, observedFrom: leaseReadStarted)
-            return .confirmed(try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline, recoveryEntry: recoveryEntry))
+        let resolution = try await transport.activate(on: grant.host, roomID: roomID, owner: owner, deadline: deadline)
+        switch resolution {
+        case .ready(let token):
+            guard grant.matches(token) else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+            return .confirmed(try await confirm(token, roomID: roomID, owner: owner, deadline: deadline))
         }
-        let candidates: [V2RoomHostCandidate]
-        do { candidates = try await hosts.candidates(for: owner) }
-        catch { throw mapBeforeDispatch(error) }
-        let eligible = candidates.filter {
-            $0.isHealthy && $0.availableRooms > 0 && $0.accessibleShardIDs.contains(owner.shardID)
-        }.map { candidate in
-            (candidate: candidate, score: Self.placementScore(roomID: roomID, hostID: candidate.identity.hostID))
-        }.sorted { left, right in
-            if left.candidate.availableRooms != right.candidate.availableRooms {
-                return left.candidate.availableRooms > right.candidate.availableRooms
-            }
-            if left.score != right.score { return right.score.lexicographicallyPrecedes(left.score) }
-            return left.candidate.identity.hostID.rawValue < right.candidate.identity.hostID.rawValue
-        }
-        for ranked in eligible {
-            let candidate = ranked.candidate
-            try checkDeadline(deadline)
-            do {
-                let activationStarted = clock.now
-                let resolution = try await transport.activate(
-                    on: candidate.identity, roomID: roomID, owner: owner, deadline: deadline
-                )
-                switch resolution {
-                case .ready(let token):
-                    guard token.host == candidate.identity else {
-                        throw V2RoomCallFailure.notAccepted(.staleActivation)
-                    }
-                    return .confirmed(try await confirm(token, roomID: roomID, owner: owner, deadline: deadline))
-                case .occupied(let lease):
-                    retainLease(lease, in: recoveryEntry, observedFrom: activationStarted)
-                    return .confirmed(try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline, recoveryEntry: recoveryEntry))
-                }
-            } catch {
-                // 获取操作可能已在传输故障前提交。
-                // 考虑其他候选节点前须重新检查数据库。
-                let recheckStarted = clock.now
-                if let lease = try await leases.locate(roomID: roomID, owner: owner) {
-                    retainLease(lease, in: recoveryEntry, observedFrom: recheckStarted)
-                    return .confirmed(try await confirm(lease.token, roomID: roomID, owner: owner, deadline: deadline, recoveryEntry: recoveryEntry))
-                }
-                // 此次观测中不存在记录，不能证明执行中或结果不明的获取操作已回滚。
-                // 这种情况下不能启动第二个宿主的获取操作。
-                if (error as? V2RoomCallFailure) == .outcomeUnknown {
-                    throw V2RoomCallFailure.outcomeUnknown
-                }
-            }
-        }
-        throw V2RoomCallFailure.notAccepted(.unavailable)
-    }
-
-    private func retainLease(_ lease: V2RoomActivationLease, in entry: Pending?,
-                             observedFrom start: ContinuousClock.Instant) {
-        let remaining = max(0, lease.expiresAt.timeIntervalSince(lease.databaseObservedAt))
-        entry?.heldLease = (lease, start + .seconds(remaining))
-    }
-
-    /// Fixed-version rendezvous score for cold placement only. Incarnation is
-    /// deliberately absent: a restart preserves host affinity, while SQL
-    /// leases and full activation identities remain the authority for access.
-    private static func placementScore(roomID: RoomID, hostID: V2ActorHostID) -> [UInt8] {
-        var input = Data("IMV2.room-placement.rendezvous.v1\u{0}".utf8)
-        for component in [roomID.rawValue, hostID.rawValue] {
-            let bytes = Data(component.utf8)
-            var length = UInt64(bytes.count).bigEndian
-            withUnsafeBytes(of: &length) { input.append(contentsOf: $0) }
-            input.append(bytes)
-        }
-        return Array(SHA256.hash(data: input))
     }
 
     private func confirm(_ token: V2RoomActivationToken, roomID: RoomID,
@@ -1075,17 +991,10 @@ public actor V2RoomDirectory {
         }
         let observedCache = cache[roomID]
         let probeDeadline = locationLookupDeadline(deadline)
-        let found: Bool
-        do { found = try await transport.lookup(token, deadline: probeDeadline) }
-        catch {
-            if error as? V2RoomCallFailure == .notAccepted(.deadlineExceeded),
-               probeDeadline < deadline, clock.now < deadline, !Task.isCancelled,
-               let recoveryEntry, recoveryEntry.demandRecovery,
-               recoveryEntry.heldLease?.lease.token == token {
-                throw DemandLeaseProbeTimeout(token: token)
-            }
-            throw error
-        }
+        let admission = try placement.admission(for: token)
+        guard admission() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+        let found = try await transport.lookup(token, deadline: probeDeadline)
+        guard admission() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
         guard found else { throw V2RoomCallFailure.notAccepted(.notReady) }
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
         let installationChanged = observedCache.map { !cacheMatches($0) } ?? (cache[roomID] != nil)
@@ -1120,9 +1029,9 @@ public actor V2RoomDirectory {
         if let old = cache[token.roomID]?.token, old != token {
             guard token.isNewer(than: old) else { return }
         }
-        guard nextCacheRevision < UInt64.max else { return }
+        guard let admission = try? placement.admission(for: token), admission(), nextCacheRevision < UInt64.max else { return }
         nextCacheRevision += 1
-        cache.remember(Cached(owner: token.owner, token: token, revision: nextCacheRevision),
+        cache.remember(Cached(owner: token.owner, token: token, revision: nextCacheRevision, admission: admission),
             for: token.roomID)
     }
 
@@ -1177,7 +1086,7 @@ public actor V2RoomDirectory {
     }
 
     private func mapBeforeDispatch(_ error: any Error) -> V2RoomCallFailure {
-        if error as? V2RoomActivationLeaseError == .roomNotFound { return .notAccepted(.notFound) }
+        if error as? V2RoomActorStateError == .roomNotFound { return .notAccepted(.notFound) }
         return error as? V2RoomCallFailure ?? .notAccepted(.unavailable)
     }
 
@@ -1185,11 +1094,10 @@ public actor V2RoomDirectory {
         let owner: V2RoomDataOwner
         let token: V2RoomActivationToken
         let revision: UInt64
+        let admission: @Sendable () -> Bool
     }
 
-    private struct DemandLeaseProbeTimeout: Error { let token: V2RoomActivationToken }
-
-    private enum RecoveryPhase: Equatable { case usable, recovering, waitingForLease }
+    private enum RecoveryPhase: Equatable { case usable, recovering }
 
     private enum Resolution {
         case confirmed(V2RoomActivationToken)
@@ -1217,7 +1125,6 @@ public actor V2RoomDirectory {
         var authoritativeRecovery = false
         var cachedRecovery: Cached?
         var failedCacheProbe: Cached?
-        var heldLease: (lease: V2RoomActivationLease, recheckAfter: ContinuousClock.Instant)?
         var recoveryPhase: RecoveryPhase = .usable
         var waiters: [UUID: Waiter] = [:]
         init(roomID: RoomID) { self.roomID = roomID }

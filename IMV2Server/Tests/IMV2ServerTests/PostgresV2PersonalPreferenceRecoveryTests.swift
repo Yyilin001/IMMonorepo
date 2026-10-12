@@ -26,15 +26,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         roomID: roomID, actorUserID: senderID, clientMessageID: .init(uuid: UUID()),
                         text: "favorite receipt fixture"))
             else { throw CancellationError() }
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("preference-host"), incarnationID: UUID())
-            guard
-                case .acquired(let lease) = try await leases.acquire(
-                    roomID: roomID, owner: owner, host: host, duration: try .init(30_000))
-            else { throw V2RoomActivationLeaseError.activationChanged }
+            try await withRoomActivation(database: database, roomID: roomID) { token in
             let service = PostgresV2ConversationCapabilitiesStore(
-                database: database, activationScope: try .init(tokens: [lease.token]))
+                database: database, activationScope: try .init(tokens: [token]))
             func command(_ operation: UUID, revision: UInt64, desired: Bool, deadline: UInt64 = UInt64(Int64.max))
                 throws -> (
                     V2OperationIdentity, V2OperationFingerprint,
@@ -145,8 +139,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 default: Issue.record("unexpected race outcome")
                 }
             }
-            #expect(try await leases.release(token: lease.token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind:roomUUID)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 _ = try await service.recover(
                     actorUserID: senderID, request: .init(identity: a.0, fingerprint: a.1, action: .query), now: now)
             }
@@ -156,6 +150,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             await #expect(throws: (any Error).self) {
                 try await sql.raw("UPDATE im_v2.personal_preference_operation_receipts SET outcome_kind='closed'").run()
+            }
             }
         }
     }

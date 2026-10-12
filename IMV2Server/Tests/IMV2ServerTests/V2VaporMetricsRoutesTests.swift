@@ -113,13 +113,13 @@ struct V2VaporMetricsRoutesTests {
         defer { Task { try? await app.shutdown() } }
         let telemetry = V2PrometheusTelemetrySink()
         let operations = V2SendOperationBatchMetrics()
-        operations.recordSQLResultSettled(source: .lifecycleLeases)
-        operations.recordSQLTaskResumed(source: .lifecycleLeases, duration: .milliseconds(2))
-        operations.recordSQLNextDispatch(source: .lifecycleLeases, duration: .milliseconds(3))
-        operations.recordSQLResultSettled(source: .lifecycleLeases)
-        operations.recordSQLTaskResumed(source: .lifecycleLeases, duration: .milliseconds(4))
-        operations.recordSQLNoNextDispatch(source: .lifecycleLeases)
-        operations.recordSQLResultSettled(source: .lifecycleLeases)
+        operations.recordSQLResultSettled(source: .scalarFenceRooms)
+        operations.recordSQLTaskResumed(source: .scalarFenceRooms, duration: .milliseconds(2))
+        operations.recordSQLNextDispatch(source: .scalarFenceRooms, duration: .milliseconds(3))
+        operations.recordSQLResultSettled(source: .scalarFenceRooms)
+        operations.recordSQLTaskResumed(source: .scalarFenceRooms, duration: .milliseconds(4))
+        operations.recordSQLNoNextDispatch(source: .scalarFenceRooms)
+        operations.recordSQLResultSettled(source: .scalarFenceRooms)
         operations.recordSQLResultSettled(source: .durableFenceRooms)
         operations.recordSQLTaskResumed(source: .durableFenceRooms, duration: .milliseconds(5))
         operations.recordOwnerAdmissionHandoff(path: .multiGroup,
@@ -398,7 +398,7 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_send_operation_stage_completed_total{stage=\"owner_body\"} 1"))
             #expect(body.contains("im_v2_send_operation_stage_in_flight{stage=\"owner_commit\"} 1"))
             #expect(body.contains("im_v2_send_operation_stage_started_total{stage=\"owner_commit\"} 1"))
-            #expect(body.contains("im_v2_send_operation_stage_completed_total{stage=\"receipt_preflight\"} 0"))
+            #expect(!body.contains("stage=\"receipt_preflight\""))
             #expect(body.contains("im_v2_send_operation_stage_duration_milliseconds_sum{stage=\"owner_rollback\"} 0.0"))
             #expect(body.components(separatedBy: "\n").filter { $0.hasPrefix("im_v2_send_operation_stage_in_flight{") }.count == V2SendOperationStage.allCases.count)
             #expect(body.contains("im_v2_database_work_in_flight{class=\"foreground_control_write\"} 0"))
@@ -426,20 +426,20 @@ struct V2VaporMetricsRoutesTests {
             #expect(body.contains("im_v2_gateway_event_loop_lag_milliseconds_count 4"))
             for source in V2RoomSQLContinuationSource.allCases {
                 let label = "{source=\"\(source.rawValue)\"}"
-                let settledPending = source == .lifecycleLeases ? 1 : 0
+                let settledPending = source == .scalarFenceRooms ? 1 : 0
                 let resumedPending = source == .durableFenceRooms ? 1 : 0
-                let noNext = source == .lifecycleLeases ? 1 : 0
+                let noNext = source == .scalarFenceRooms ? 1 : 0
                 #expect(body.contains("im_v2_send_operation_sql_continuation_settled_not_resumed\(label) \(settledPending)"))
                 #expect(body.contains("im_v2_send_operation_sql_continuation_resumed_not_dispatched\(label) \(resumedPending)"))
                 #expect(body.contains("im_v2_send_operation_sql_continuation_no_next_dispatch_total\(label) \(noNext)"))
                 for part in ["settled_to_resumed", "resumed_to_dispatch"] {
                     let labels = "{source=\"\(source.rawValue)\",part=\"\(part)\"}"
                     let firstPart = part == "settled_to_resumed"
-                    let count = source == .lifecycleLeases ? (firstPart ? 2 : 1)
+                    let count = source == .scalarFenceRooms ? (firstPart ? 2 : 1)
                         : source == .durableFenceRooms && firstPart ? 1 : 0
-                    let sum: Double = source == .lifecycleLeases ? (firstPart ? 6 : 3)
+                    let sum: Double = source == .scalarFenceRooms ? (firstPart ? 6 : 3)
                         : source == .durableFenceRooms && firstPart ? 5 : 0
-                    let maximum: Double = source == .lifecycleLeases ? (firstPart ? 4 : 3)
+                    let maximum: Double = source == .scalarFenceRooms ? (firstPart ? 4 : 3)
                         : source == .durableFenceRooms && firstPart ? 5 : 0
                     #expect(body.contains("im_v2_send_operation_sql_continuation_duration_milliseconds_count\(labels) \(count)"))
                     #expect(body.contains("im_v2_send_operation_sql_continuation_duration_milliseconds_sum\(labels) \(sum)"))

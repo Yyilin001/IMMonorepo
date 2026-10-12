@@ -1,5 +1,7 @@
 # Room Virtual Actor 故障验证入口
 
+> 历史 SQL 房间租约方案的验收归档。下文的模式、命令和表结构不适用于当前原生分布式 Actor。旧 G6 启动器已经删除；旧 G4 入口已改为原生生命周期验证，不再接受下文的旧环境参数。当前实现与验收状态见[房间分布式 Actor 合同](../room-virtual-actor-contract.md)。历史成功结果不能证明当前崩溃接管完成。
+
 使用下面已经实际运行的专项入口。最初 W0 的未实现 `IMV2VAFaultProbe` / `file-v1` 脚手架已移除；它的退出码 78 从来不是故障验收证据。完整 21 项范围仍以[任务卡](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/00-foundation/virtual-actor-task-cards.md#v1-验证与证据)和[逐项审查](final-coverage-audit.md)为准，不把某一个脚本等同于整个矩阵。
 
 | 入口 | 实际边界 | 证据 |

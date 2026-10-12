@@ -33,7 +33,7 @@ public struct V2ActorRoomQueryExecutor: Sendable {
     /// Pure authorized snapshot: does not serialize behind uncommitted room
     /// commands, but validates the full activation and viewer in PostgreSQL.
     public func pullSnapshot(_ request: V2ActorRoomLogPullWire, token: V2RoomActivationToken) async throws -> V2RoomLogQueryResult {
-        guard request.roomID == token.roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard request.roomID == token.roomID else { throw V2RoomActorStateError.activationChanged }
         let id = UUID()
         let item = V2GrantedRoomLogPull(id: id, token: token, query: request,
             callDeadline: V2RoomSQLDeadline.current ?? .now.advanced(by: .seconds(10)))
@@ -162,7 +162,7 @@ public struct V2ActorRoomQueryExecutor: Sendable {
         for (ordinal, item) in items.enumerated() {
             guard item.query.roomID == item.token.roomID,
                   tokens[item.token.roomID].map({ $0 == item.token }) ?? true else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
             tokens[item.token.roomID] = item.token
             do { input.append(try .init(ordinal: ordinal, query: item.query)) }
@@ -262,7 +262,7 @@ public struct V2ActorRoomQueryExecutor: Sendable {
         var keys: [V2RoomStateReadKey] = []
         var seen: Set<V2RoomStateReadKey> = []
         for turn in turns {
-            if let old = tokens[turn.token.roomID], old != turn.token { throw V2RoomActivationLeaseError.activationChanged }
+            if let old = tokens[turn.token.roomID], old != turn.token { throw V2RoomActorStateError.activationChanged }
             tokens[turn.token.roomID] = turn.token
             let key = V2RoomStateReadKey(roomID: turn.token.roomID, viewerUserID: turn.actorUserID)
             if seen.insert(key).inserted { keys.append(key) }
@@ -308,7 +308,7 @@ public struct V2ActorRoomQueryExecutor: Sendable {
               roomIDs.count == tokens.count,
               Set(roomIDs).count == roomIDs.count,
               Set(tokens.map(\.roomID)) == Set(roomIDs) else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         let attempt = V2RoomTransactionAttempt()
         do {

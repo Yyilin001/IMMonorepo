@@ -108,7 +108,8 @@ struct PostgresV2PolicyFactsSnapshotTests {
                     snapshotPublisher: index == 0 ? publisher : nil, leaseSeconds: 0.05,
                     ownsScope: { _ in index == 0 })
             }
-            var stores: [V2RoomServerLeaseStore] = []
+            var controls: [V2NativePlacementTestControl] = []
+            var placements: [V2RoomActorPlacementRuntime] = []
             var hosts: [V2RoomActivationHost<V2RoomRequest, V2RoomResponse>] = []
             var inbounds: [V2RoomClusterInboundService] = []
             var endpoints: [V2RoomHostEndpoint] = []
@@ -116,16 +117,26 @@ struct PostgresV2PolicyFactsSnapshotTests {
             func stop() async {
                 for client in clients { await client.stop() }
                 for inbound in inbounds { await inbound.stop() }
-                for host in hosts { _ = await host.stop(deadline: .now + .seconds(5)) }
-                for store in stores { await store.shutdownLifecycle(); await store.shutdownRenewals() }
+                for (index, host) in hosts.enumerated() {
+                    let drained = await host.stop(deadline: .now + .seconds(10))
+                    if let proof = drained.proof {
+                        try? await placements[index].retireAfterDrain(proof, shards: [names[index]])
+                    }
+                }
+                for control in controls { try? await control.close() }
                 for directory in directories { await directory.shutdown() }
                 for cache in caches { await cache.shutdown() }
                 for system in systems { try? await system.shutdown().wait() }
             }
             do {
                 for index in 0..<2 {
-                    let leases = try V2RoomServerLeaseStore(databases: [names[index]: database]); stores.append(leases)
-                    let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identities[index], leaseStore: leases,
+                    // Each endpoint serves a distinct shard; competing owners
+                    // never receive separate logs for the same placement group.
+                    let control = try await V2NativePlacementTestControl.open(host: identities[index], shardID: names[index])
+                    controls.append(control)
+                    let placement = try await control.register(identities[index], shard: names[index])
+                    placements.append(placement)
+                    let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identities[index], placement: placement,
                         configuration: configuration, budget: .init(configuration: configuration), classify: { $0.turnSchedulingClass },
                         factory: .init { _ in .init(restore: { _ in }, execute: { _ in .rolledBack(.invalidRequest) }, invalidateReservation: { _ in }, close: {}) })
                     hosts.append(host); await host.start()

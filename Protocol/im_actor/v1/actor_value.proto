@@ -1,5 +1,125 @@
 syntax = "proto3";
 package im.actor.v1;
+
+// Infrequent placement control records. They never carry message bodies.
+message PlacementOwner { HostIdentity host = 1; uint64 epoch = 2; }
+message PlacementTransfer { bytes id = 1; HostIdentity successor = 2; }
+message PlacementSlot { PlacementOwner owner = 1; PlacementTransfer transfer = 2; bool retired = 3; }
+message PlacementHostRegistration { HostIdentity host = 1; bool retired = 2; }
+message PlacementSnapshot {
+  bytes cluster_id = 1; uint64 revision = 2; repeated PlacementSlot slots = 3;
+  repeated PlacementHostRegistration hosts = 4;
+}
+message PlacementCommand {
+  enum Kind { UNSPECIFIED = 0; BEGIN_TRANSFER = 1; COMPLETE_TRANSFER = 2; CANCEL_TRANSFER = 3; RETIRE_HOST = 4; REGISTER_HOST = 5; }
+  Kind kind = 1;
+  uint32 partition = 2;
+  PlacementOwner expected = 3;
+  PlacementTransfer transfer = 4;
+  bytes transfer_id = 5;
+  HostIdentity previous_host = 6;
+  HostIdentity successor_host = 7;
+}
+// Fixed-three-voter state lives on stable local storage, independently of rooms.
+// A bootstrap or CAS command applied only from the committed Raft prefix.
+message PlacementRaftOperation {
+  bytes bootstrap_snapshot = 1;
+  bytes request_id = 2;
+  bytes expected_snapshot = 3;
+  bytes command = 4;
+  uint64 origin_revision = 5;
+}
+// A compact application checkpoint retains successful command identities.
+// Replaying these commands from genesis reconstructs historical ACK results.
+message PlacementRaftCheckpointReceipt { bytes request_id = 1; bytes command = 2; uint64 revision = 3; uint64 origin_revision = 4; }
+message PlacementRaftApplicationCheckpoint {
+  bytes group_id = 1; uint64 applied_index = 2; bytes genesis_snapshot = 3;
+  repeated PlacementRaftCheckpointReceipt receipts = 4;
+  bytes bootstrap_digest = 5;
+  repeated PlacementRaftCheckpointReceipt pinned_receipts = 6;
+}
+message PlacementRaftEntry { uint64 term = 1; bytes payload = 2; }
+message PlacementRaftState {
+  bytes group_id = 1; repeated string voter_ids = 2; uint64 current_term = 3;
+  optional string voted_for = 4; repeated PlacementRaftEntry entries = 5; uint64 commit_index = 6;
+  string local_voter_id = 7;
+  uint64 snapshot_index = 8; uint64 snapshot_term = 9; bytes application_checkpoint = 10;
+}
+message PlacementRaftVoteRequest {
+  bytes group_id = 1; string candidate = 2; uint64 term = 3; uint64 last_index = 4; uint64 last_term = 5;
+}
+message PlacementRaftVoteReply { bytes group_id = 1; uint64 term = 2; bool granted = 3; }
+message PlacementRaftAppendRequest {
+  bytes group_id = 1; string leader = 2; uint64 term = 3; uint64 previous_index = 4;
+  uint64 previous_term = 5; repeated PlacementRaftEntry entries = 6;
+  uint64 leader_commit = 7; bytes read_id = 8;
+}
+message PlacementRaftAppendReply {
+  bytes group_id = 1; uint64 term = 2; bool accepted = 3; uint64 matched_index = 4; bytes read_id = 5;
+}
+// Portable lifecycle evidence signed only after native physical completion.
+message PlacementDrainCertificate {
+  enum Kind { UNSPECIFIED = 0; PARTITION = 1; HOST = 2; EXCLUDED_HOST = 3; }
+  Kind kind = 1; bytes group_id = 2; string shard_id = 3; HostIdentity host = 4;
+  uint32 partition = 5; uint64 epoch = 6; bytes transfer_id = 7;
+  HostIdentity registration_previous = 8; bytes registration_request_id = 9;
+  bytes exclusion_request_id = 10;
+}
+message PlacementSignedCertificate { string signer_id = 1; bytes body = 2; bytes signature = 3; }
+message PlacementRaftWriteRequest { bytes operation = 1; PlacementSignedCertificate evidence = 2; }
+message PlacementRaftWriteReply {
+  bytes group_id = 1; bytes snapshot = 2; string leader_hint = 3; uint32 rejection = 4;
+}
+message PlacementRaftReadRequest { bytes group_id = 1; bool include_archive_usage = 2; }
+message PlacementRaftArchiveUsage {
+  uint64 receipts = 1; uint64 bytes = 2;
+  uint64 reserved_receipts = 3; uint64 reserved_bytes = 4;
+}
+// Local supervisor intent, never a process-exclusion certificate.
+message RoomHostRecoveryOperation {
+  string host_id = 1; bytes incarnation_id = 2; bytes operation_id = 3; bool completed = 4;
+}
+message RoomHostRecoveryJournal {
+  uint32 version = 1; string supervisor_id = 2; repeated string host_ids = 3;
+  repeated RoomHostRecoveryOperation operations = 4;
+}
+message RoomHostRecoveryJournalFile { bytes journal = 1; bytes sha256 = 2; }
+message DockerRoomHostBinding {
+  string host_id = 1; bytes incarnation_id = 2; string container_id = 3; string started_at = 4;
+}
+message DockerRoomHostInventory {
+  uint32 version = 1; string supervisor_id = 2; string daemon_id = 3; string socket_path = 4;
+  repeated string host_ids = 5; repeated DockerRoomHostBinding bindings = 6;
+}
+message DockerRoomHostInventoryFile { bytes inventory = 1; bytes sha256 = 2; }
+message RoomHostStartupHello {
+  string host_id = 1; bytes incarnation_id = 2; bytes launch_token = 3;
+  string supervisor_id = 4; string service_id = 5; int64 process_id = 6;
+}
+message RoomHostStartupRelease { bytes hello_sha256 = 1; string supervisor_id = 2; }
+message DockerRoomHostLaunch {
+  uint32 version = 1; string supervisor_id = 2; string daemon_id = 3; string socket_path = 4;
+  string host_id = 5; string service_id = 6; string gate_directory = 7;
+  bytes launch_token = 8; bytes create_request = 9; string container_id = 10;
+  string started_at = 11; bytes incarnation_id = 12; bool released = 13;
+}
+message DockerRoomHostLaunchFile { bytes launch = 1; bytes sha256 = 2; }
+message PlacementRaftReadReply {
+  bytes group_id = 1; bytes snapshot = 2; string leader_hint = 3;
+  PlacementRaftArchiveUsage archive_usage = 4;
+}
+message PlacementRaftSnapshotChunk {
+  bytes group_id = 1; string leader = 2; uint64 term = 3; bytes transfer_id = 4;
+  uint64 snapshot_index = 5; uint64 snapshot_term = 6; bytes digest = 7;
+  uint32 total_bytes = 8; uint32 offset = 9; bytes chunk = 10;
+}
+message PlacementRaftSnapshotReply {
+  bytes group_id = 1; uint64 term = 2; bytes transfer_id = 3;
+  uint64 snapshot_index = 4; bool accepted = 5; uint32 next_offset = 6; bool installed = 7;
+}
+message PlacementRaftRequest { oneof body { PlacementRaftVoteRequest vote = 1; PlacementRaftAppendRequest append = 2; PlacementRaftSnapshotChunk snapshot = 3; } }
+message PlacementRaftReply { oneof body { PlacementRaftVoteReply vote = 1; PlacementRaftAppendReply append = 2; PlacementRaftSnapshotReply snapshot = 3; } }
+message PlacementRaftFile { uint32 format = 1; bytes state = 2; bytes digest = 3; }
 // Closed Swift Codable contracts carried as typed Protobuf values. No JSON
 // text or base64 is embedded. Keys preserve the domain's CodingKeys; changing
 // an enum case or key is an internal protocol change requiring joint rollout.

@@ -53,7 +53,7 @@ public struct PostgresV2ForwardReceiptStore: Sendable {
                 let token = try activationScope.token(for: original.sourceRoomID)
                 guard token.owner.shardID == original.sourceShardID,
                       token.owner.epoch == original.sourceEpoch else {
-                    throw V2RoomActivationLeaseError.activationChanged
+                    throw V2RoomActorStateError.activationChanged
                 }
                 try await activationScope.require([original.sourceRoomID], sql: sql)
             }

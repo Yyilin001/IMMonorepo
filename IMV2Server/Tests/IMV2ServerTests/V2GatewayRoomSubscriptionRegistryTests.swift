@@ -655,7 +655,7 @@ struct V2GatewayRoomSubscriptionRegistryTests {
 
     @Test("typed stale and uncertain renewal failures recover through bounded Directory confirmation",
         arguments: [V2RoomCallFailure.rolledBack(.staleActivation), .notAccepted(.retired),
-            .notAccepted(.leaseLost), .notAccepted(.notReady), .outcomeUnknown], [false, true])
+            .notAccepted(.authorityLost), .notAccepted(.notReady), .outcomeUnknown], [false, true])
     func typedRouteRecovery(failure: V2RoomCallFailure, partialFailure: Bool) async throws {
         let f = try RegistryFixture(), other = UserID(uuid: UUID())
         let replacement = V2RoomSubscriptionFence(activation: .init(roomID: f.room,

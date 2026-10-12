@@ -105,103 +105,98 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     contentReviewMode: .disabled)
             }
             let database = resources.database(.psql)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let host = V2ActorHostIdentity(hostID: try .init("multi-shard-write-test"), incarnationID: UUID())
-            var acquired: [RoomID: V2RoomActivationToken] = [:]
-            for target in roomActors {
-                guard case .acquired(let lease) = try await leases.acquire(roomID: target.roomID,
-                    owner: .init(shardID: target.shardID, epoch: 0), host: host, duration: .init(120_000)) else {
-                    throw V2RoomActivationLeaseError.activationChanged
+            let targets = roomActors
+            let activationOwners = try Dictionary(uniqueKeysWithValues: targets.map {
+                ($0.roomID, try V2RoomDataOwner(shardID: $0.shardID, epoch: 0))
+            })
+            try await withRoomActivations(database: database, owners: activationOwners) { active in
+                let tokens = Dictionary(uniqueKeysWithValues: active.map { ($0.roomID, $0) })
+                // Warm each room through its real authorization and activation.
+                for target in targets {
+                    let command = try V2SendMessageCommand(roomID: target.roomID, senderUserID: target.actorUserID,
+                        clientMessageID: .init(UUID().uuidString), text: "预热房间", limits: .init(maxUTF8Bytes: 128))
+                    let writer = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                        store: writers[0], shardID: target.shardID, epoch: 0,
+                        activationToken: try #require(tokens[target.roomID]))
+                    guard case .accepted = try await writer.accept(command: command, capacityProfile: profile,
+                        identifiers: .init(messageID: .init(UUID().uuidString), eventID: .init(UUID().uuidString)),
+                        now: now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 }
-                acquired[target.roomID] = lease.token
-            }
-            let tokens = acquired
-            // Warm each room through its real authorization and activation.
-            for target in roomActors {
-                let command = try V2SendMessageCommand(roomID: target.roomID, senderUserID: target.actorUserID,
-                    clientMessageID: .init(UUID().uuidString), text: "预热房间", limits: .init(maxUTF8Bytes: 128))
-                let writer = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
-                    store: writers[0], shardID: target.shardID, epoch: 0,
-                    activationToken: try #require(tokens[target.roomID]))
-                guard case .accepted = try await writer.accept(command: command, capacityProfile: profile,
-                    identifiers: .init(messageID: .init(UUID().uuidString), eventID: .init(UUID().uuidString)),
-                    now: now) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-            }
-            let deadlocksBefore = try #require(try await sql.raw("""
-                SELECT deadlocks::bigint AS value
-                FROM pg_stat_database
-                WHERE datname = current_database()
-                """).first(decoding: CountRow.self)).value
-            let messagesBefore = try await count("im_v2.messages", on: sql)
-            let shardUsageBefore = try #require(try await sql.raw("""
-                SELECT SUM(command_window_used)::bigint AS value
-                FROM im_v2.shard_admission_pools
-                WHERE capacity_profile_id = \(bind: profile.id)
-                """).first(decoding: CountRow.self)).value
+                let deadlocksBefore = try #require(try await sql.raw("""
+                    SELECT deadlocks::bigint AS value
+                    FROM pg_stat_database
+                    WHERE datname = current_database()
+                    """).first(decoding: CountRow.self)).value
+                let messagesBefore = try await count("im_v2.messages", on: sql)
+                let shardUsageBefore = try #require(try await sql.raw("""
+                    SELECT SUM(command_window_used)::bigint AS value
+                    FROM im_v2.shard_admission_pools
+                    WHERE capacity_profile_id = \(bind: profile.id)
+                    """).first(decoding: CountRow.self)).value
 
-            let rounds = 32
-            for round in 0 ..< rounds {
-                let gate = V2IntegrationAsyncBarrier(parties: batches.count)
-                let acceptedCount = try await withThrowingTaskGroup(of: Int.self) { group in
-                    for index in batches.indices {
-                        let batch = batches[index]
-                        let writer = writers[index]
-                        group.addTask {
-                            await gate.wait()
-                            let requests = try batch.enumerated().map { itemIndex, target in
-                                V2RoomWriteRequest(
-                                    command: try .init(
-                                        roomID: target.roomID,
-                                        senderUserID: target.actorUserID,
-                                        clientMessageID: .init(UUID().uuidString),
-                                        text: "有序锁并发批次 \(round)-\(index)-\(itemIndex)",
-                                        limits: .init(maxUTF8Bytes: 128)
-                                    ),
-                                    capacityProfile: profile,
-                                    identifiers: try .init(
-                                        messageID: .init(UUID().uuidString),
-                                        eventID: .init(UUID().uuidString)
-                                    ),
-                                    now: now.addingTimeInterval(Double(round))
-                                )
-                            }
-                            var accepted = 0
-                            for (target, input) in zip(batch, requests) {
-                                let authorized = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
-                                    store: writer, shardID: target.shardID, epoch: 0,
-                                    activationToken: try #require(tokens[target.roomID]))
-                                guard case .accepted = try await authorized.accept(command: input.command,
-                                    capacityProfile: input.capacityProfile, identifiers: input.identifiers, now: input.now) else {
-                                    throw V2RoomWriteStoreError.corruptPersistenceState
+                let rounds = 32
+                for round in 0 ..< rounds {
+                    let gate = V2IntegrationAsyncBarrier(parties: batches.count)
+                    let acceptedCount = try await withThrowingTaskGroup(of: Int.self) { group in
+                        for index in batches.indices {
+                            let batch = batches[index]
+                            let writer = writers[index]
+                            group.addTask {
+                                await gate.wait()
+                                let requests = try batch.enumerated().map { itemIndex, target in
+                                    V2RoomWriteRequest(
+                                        command: try .init(
+                                            roomID: target.roomID,
+                                            senderUserID: target.actorUserID,
+                                            clientMessageID: .init(UUID().uuidString),
+                                            text: "有序锁并发批次 \(round)-\(index)-\(itemIndex)",
+                                            limits: .init(maxUTF8Bytes: 128)
+                                        ),
+                                        capacityProfile: profile,
+                                        identifiers: try .init(
+                                            messageID: .init(UUID().uuidString),
+                                            eventID: .init(UUID().uuidString)
+                                        ),
+                                        now: now.addingTimeInterval(Double(round))
+                                    )
                                 }
-                                accepted += 1
+                                var accepted = 0
+                                for (target, input) in zip(batch, requests) {
+                                    let authorized = V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                                        store: writer, shardID: target.shardID, epoch: 0,
+                                        activationToken: try #require(tokens[target.roomID]))
+                                    guard case .accepted = try await authorized.accept(command: input.command,
+                                        capacityProfile: input.capacityProfile, identifiers: input.identifiers, now: input.now) else {
+                                        throw V2RoomWriteStoreError.corruptPersistenceState
+                                    }
+                                    accepted += 1
+                                }
+                                return accepted
                             }
-                            return accepted
                         }
+                        var total = 0
+                        for try await count in group { total += count }
+                        return total
                     }
-                    var total = 0
-                    for try await count in group { total += count }
-                    return total
+                    #expect(acceptedCount == 6)
                 }
-                #expect(acceptedCount == 6)
+
+                let deadlocksAfter = try #require(try await sql.raw("""
+                    SELECT deadlocks::bigint AS value
+                    FROM pg_stat_database
+                    WHERE datname = current_database()
+                    """).first(decoding: CountRow.self)).value
+                #expect(deadlocksAfter == deadlocksBefore)
+                #expect(try await count("im_v2.messages", on: sql) - messagesBefore == rounds * 6)
+                let shardUsageAfter = try #require(try await sql.raw("""
+                    SELECT SUM(command_window_used)::bigint AS value
+                    FROM im_v2.shard_admission_pools
+                    WHERE capacity_profile_id = \(bind: profile.id)
+                    """).first(decoding: CountRow.self)).value
+                #expect(shardUsageAfter == shardUsageBefore)
+
+                try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
             }
-
-            let deadlocksAfter = try #require(try await sql.raw("""
-                SELECT deadlocks::bigint AS value
-                FROM pg_stat_database
-                WHERE datname = current_database()
-                """).first(decoding: CountRow.self)).value
-            #expect(deadlocksAfter == deadlocksBefore)
-            #expect(try await count("im_v2.messages", on: sql) - messagesBefore == rounds * 6)
-            let shardUsageAfter = try #require(try await sql.raw("""
-                SELECT SUM(command_window_used)::bigint AS value
-                FROM im_v2.shard_admission_pools
-                WHERE capacity_profile_id = \(bind: profile.id)
-                """).first(decoding: CountRow.self)).value
-            #expect(shardUsageAfter == shardUsageBefore)
-
-            try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
-            for token in tokens.values { _ = try await leases.release(token: token) }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
         } catch {
@@ -297,121 +292,109 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     window: 86_400
                 ),
                 contentReviewMode: .disabled)
-            let leases = PostgresV2RoomActivationStore(database: resources.database(.psql))
-            let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let host = V2ActorHostIdentity(hostID: try .init("receipt-lock-test"), incarnationID: UUID())
-            var tokens: [RoomID: V2RoomActivationToken] = [:]
-            for room in [roomUUID, secondRoom] {
-                let roomID = RoomID(uuid: room)
-                guard case .acquired(let lease) = try await leases.acquire(roomID: roomID,
-                    owner: owner, host: host, duration: .init(120_000)) else {
-                    throw V2RoomActivationLeaseError.activationChanged
-                }
-                tokens[roomID] = lease.token
-            }
-            let roomTokens = tokens
-            let receiptStore = PostgresV2ReadReceiptStore(database: resources.database(.psql))
-            let rooms = [roomUUID, secondRoom]
+            try await withRoomActivations(database: resources.database(.psql),
+                roomIDs: [RoomID(uuid: roomUUID), RoomID(uuid: secondRoom)]) { active in
+                let roomTokens = Dictionary(uniqueKeysWithValues: active.map { ($0.roomID, $0) })
+                let receiptStore = PostgresV2ReadReceiptStore(database: resources.database(.psql))
+                let rooms = [roomUUID, secondRoom]
 
-            @Sendable func appendRequests(round: Int) throws -> [V2RoomWriteRequest] {
-                try rooms.enumerated().map { index, room in
-                    V2RoomWriteRequest(
-                        command: try .init(
-                            roomID: .init(room.uuidString),
-                            senderUserID: senderID,
-                            clientMessageID: .init(UUID().uuidString),
-                            text: "append/receipt lock regression \(round)-\(index)",
-                            limits: .init(maxUTF8Bytes: 128)
-                        ),
-                        capacityProfile: profile,
-                        identifiers: try .init(
-                            messageID: .init(UUID().uuidString),
-                            eventID: .init(UUID().uuidString)
-                        ),
-                        now: now.addingTimeInterval(Double(round))
-                    )
+                @Sendable func appendRequests(round: Int) throws -> [V2RoomWriteRequest] {
+                    try rooms.enumerated().map { index, room in
+                        V2RoomWriteRequest(
+                            command: try .init(
+                                roomID: .init(room.uuidString),
+                                senderUserID: senderID,
+                                clientMessageID: .init(UUID().uuidString),
+                                text: "append/receipt lock regression \(round)-\(index)",
+                                limits: .init(maxUTF8Bytes: 128)
+                            ),
+                            capacityProfile: profile,
+                            identifiers: try .init(
+                                messageID: .init(UUID().uuidString),
+                                eventID: .init(UUID().uuidString)
+                            ),
+                            now: now.addingTimeInterval(Double(round))
+                        )
+                    }
                 }
-            }
 
-            @Sendable func append(round: Int) async throws -> Int {
-                let inputs = try appendRequests(round: round)
-                var completed = 0
-                for input in inputs {
-                    let token = try #require(roomTokens[input.command.roomID])
-                    let writer = V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql),
-                        controlDatabase: resources.database(.psql), store: localWriter,
-                        shardID: "room-a", epoch: 0, activationToken: token)
-                    guard case .accepted = try await writer.accept(command: input.command,
-                        capacityProfile: input.capacityProfile, identifiers: input.identifiers, now: input.now) else {
-                        throw V2RoomWriteStoreError.corruptPersistenceState
-                    }
-                    completed += 1
-                }
-                return completed
-            }
-            #expect(try await append(round: 0) == 2)
-            let deadlocksBefore = try #require(try await sql.raw("""
-                SELECT deadlocks::bigint AS value
-                FROM pg_stat_database
-                WHERE datname = current_database()
-                """).first(decoding: CountRow.self)).value
-            let rounds = 32
-            for round in 1 ... rounds {
-                let gate = V2IntegrationAsyncBarrier(parties: 2)
-                let completed = try await withThrowingTaskGroup(of: Int.self) { group in
-                    group.addTask {
-                        await gate.wait()
-                        return try await append(round: round)
-                    }
-                    group.addTask {
-                        await gate.wait()
-                        let requests = try rooms.reversed().map { room in
-                            V2ReadReceiptRecordRequest(
-                                command: try .init(
-                                    roomID: try .init(room.uuidString),
-                                    actorUserID: senderID,
-                                    operationID: try .init(UUID().uuidString),
-                                    readThroughRoomSequence: 1
-                                ),
-                                now: now.addingTimeInterval(Double(round))
-                            )
+                @Sendable func append(round: Int) async throws -> Int {
+                    let inputs = try appendRequests(round: round)
+                    var completed = 0
+                    for input in inputs {
+                        let token = try #require(roomTokens[input.command.roomID])
+                        let writer = V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql),
+                            controlDatabase: resources.database(.psql), store: localWriter,
+                            shardID: "room-a", epoch: 0, activationToken: token)
+                        guard case .accepted = try await writer.accept(command: input.command,
+                            capacityProfile: input.capacityProfile, identifiers: input.identifiers, now: input.now) else {
+                            throw V2RoomWriteStoreError.corruptPersistenceState
                         }
-                        let results: [V2GroupReadReceiptBatchResult]
-                        if ownerValidatedReceipts {
-                            results = try await receiptStore.recordBatchActivationValidated(requests,
-                                scope: .init(tokens: Array(roomTokens.values))).map { result in
-                                    switch result {
-                                    case .success(let outcome): .success(.handled(outcome))
-                                    case .failure(let error): .failure(error)
+                        completed += 1
+                    }
+                    return completed
+                }
+                #expect(try await append(round: 0) == 2)
+                let deadlocksBefore = try #require(try await sql.raw("""
+                    SELECT deadlocks::bigint AS value
+                    FROM pg_stat_database
+                    WHERE datname = current_database()
+                    """).first(decoding: CountRow.self)).value
+                let rounds = 32
+                for round in 1 ... rounds {
+                    let gate = V2IntegrationAsyncBarrier(parties: 2)
+                    let completed = try await withThrowingTaskGroup(of: Int.self) { group in
+                        group.addTask {
+                            await gate.wait()
+                            return try await append(round: round)
+                        }
+                        group.addTask {
+                            await gate.wait()
+                            let requests = try rooms.reversed().map { room in
+                                V2ReadReceiptRecordRequest(
+                                    command: try .init(
+                                        roomID: try .init(room.uuidString),
+                                        actorUserID: senderID,
+                                        operationID: try .init(UUID().uuidString),
+                                        readThroughRoomSequence: 1
+                                    ),
+                                    now: now.addingTimeInterval(Double(round))
+                                )
+                            }
+                            let results: [V2GroupReadReceiptBatchResult]
+                            if ownerValidatedReceipts {
+                                results = try await receiptStore.recordBatchActivationValidated(requests,
+                                    scope: .init(tokens: Array(roomTokens.values))).map { result in
+                                        switch result {
+                                        case .success(let outcome): .success(.handled(outcome))
+                                        case .failure(let error): .failure(error)
+                                        }
                                     }
-                                }
-                        } else { results = try await receiptStore.recordGroups(requests) }
-                        guard results.allSatisfy({ result in
-                            if case .success(.handled(.recorded)) = result { return true }
-                            return false
-                        }) else {
-                            throw V2ReadReceiptStoreError.corruptPersistenceState
+                            } else { results = try await receiptStore.recordGroups(requests) }
+                            guard results.allSatisfy({ result in
+                                if case .success(.handled(.recorded)) = result { return true }
+                                return false
+                            }) else {
+                                throw V2ReadReceiptStoreError.corruptPersistenceState
+                            }
+                            return results.count
                         }
-                        return results.count
+                        var total = 0
+                        for try await count in group { total += count }
+                        return total
                     }
-                    var total = 0
-                    for try await count in group { total += count }
-                    return total
+                    #expect(completed == 4)
                 }
-                #expect(completed == 4)
-            }
 
-            let deadlocksAfter = try #require(try await sql.raw("""
-                SELECT deadlocks::bigint AS value
-                FROM pg_stat_database
-                WHERE datname = current_database()
-                """).first(decoding: CountRow.self)).value
-            #expect(deadlocksAfter == deadlocksBefore)
-            #expect(try await count("im_v2.messages", on: sql) == 2 + rounds * 2)
-            #expect(try await count("im_v2.read_receipt_operations", on: sql) == rounds * 2)
+                let deadlocksAfter = try #require(try await sql.raw("""
+                    SELECT deadlocks::bigint AS value
+                    FROM pg_stat_database
+                    WHERE datname = current_database()
+                    """).first(decoding: CountRow.self)).value
+                #expect(deadlocksAfter == deadlocksBefore)
+                #expect(try await count("im_v2.messages", on: sql) == 2 + rounds * 2)
+                #expect(try await count("im_v2.read_receipt_operations", on: sql) == rounds * 2)
 
-            for token in roomTokens.values {
-                _ = try await leases.release(token: token)
             }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
@@ -1148,7 +1131,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let later = now.addingTimeInterval(V2IdempotencyPolicy.minimumServerRetention + 1)
             let worker = V2ControlPlaneHousekeepingWorker(store: PostgresV2ControlPlaneHousekeepingStore(database: resources.database(.psql)), now: { later })
             _ = try await worker.runOnce(limit: 65_536)
-            _ = try await PostgresV2RoomBookkeepingStore(database: resources.database(.psql)).purge(token: operations.token, now: later, retention: 7 * 86_400, idempotencyRetention: V2IdempotencyPolicy.minimumServerRetention, rowLimit: 1_000)
+            _ = try await purgeRoomBookkeeping(database: resources.database(.psql), roomID: operations.roomID.uuidValue!, now: later)
             #expect(try await count("im_v2.group_invitation_receipts", on: sql) == 3)
             #expect(try await count("im_v2.membership_operation_receipts", on: sql) == 2)
             let retainedReceipt = try await sql.raw("SELECT receipt::text AS value FROM im_v2.group_invitation_receipts WHERE actor_user_id = \(bind: senderUUID) AND operation_id = \(bind: decisionOperation.uuidValue!)").first(decoding: StringValueRow.self)?.value
@@ -1888,7 +1871,6 @@ private actor V2IntegrationAsyncBarrier {
 private struct CleanupInvitationOperations: Sendable {
     let database: any Database
     let controlDatabase: any Database
-    let token: V2RoomActivationToken
     let coordinator: V2ActorInvitationCoordinator
     let issuer: V2GroupInviteSecretIssuer
     let profile: V2CapacityProfile
@@ -1896,32 +1878,14 @@ private struct CleanupInvitationOperations: Sendable {
     let roomID: RoomID
 
     static func make(database: any Database, controlDatabase: any Database, roomID: RoomID, profile: V2CapacityProfile, now: Date) async throws -> Self {
-        let leases = PostgresV2RoomActivationStore(database: database)
-        guard case .acquired(let grant) = try await leases.acquire(roomID: roomID,
-            owner: .init(shardID: "room-a", epoch: 0),
-            host: .init(hostID: .init("cleanup-invitation-fixture"), incarnationID: UUID()),
-            duration: .init(30_000)) else { throw V2RoomActivationLeaseError.activationChanged }
         let issuer = try V2GroupInviteSecretIssuer(rawKey: Data(repeating: 8, count: 32))
-        let identities = PostgresV2GroupInvitationIdentityReader(database: controlDatabase)
-        let executor = try V2RoomInvitationDomainExecutor(database: database, token: grant.token,
-            identities: identities, capacityProfile: profile, now: { now })
-        @Sendable func owner(_ intent: V2GroupInvitationOperationIntent) throws -> PostgresV2GroupInvitationOperationStore {
-            let invite: GroupInviteID?
-            switch intent.action { case .submit(let id, _, _), .revoke(let id, _): invite = id; default: invite = nil }
-            return try .init(database: database, activationToken: grant.token, identities: identities,
-                issuer: issuer, policy: .standard, capacity: profile, inviteID: invite)
-        }
-        let reads = try PostgresV2GroupInvitationOperationStore(database: database, activationToken: grant.token,
-            identities: identities, issuer: issuer, policy: .standard, capacity: profile)
-        let operations = V2GroupInvitationOperationRoomPort(baseline: { query, _ in
-            try await reads.baseline(roomID: query.roomID, actorUserID: query.actorUserID)
-        }, admit: { intent, _ in try await owner(intent).admit(intent, now: now) },
-           submit: { request, _ in try await owner(request.command.intent).submit(request, now: now) },
-           recover: { request, _ in try await owner(request.intent).recover(request, now: now) })
-        return .init(database: database, controlDatabase: controlDatabase, token: grant.token,
+        return .init(database: database, controlDatabase: controlDatabase,
             coordinator: .init(controlDatabase: controlDatabase,
-                room: .init(query: { query, _ in try await executor.execute(query) }),
-                operations: operations, secretIssuer: issuer, now: { now }),
+                room: invitationRoomPort(control: controlDatabase, owner: database,
+                    capacityProfile: profile, now: { now }),
+                operations: invitationOperationPort(control: controlDatabase, owner: database,
+                    issuer: issuer, capacityProfile: profile, now: { now }),
+                secretIssuer: issuer, now: { now }),
             issuer: issuer, profile: profile, now: now, roomID: roomID)
     }
     var deadline: ContinuousClock.Instant { ContinuousClock.now.advanced(by: .seconds(25)) }
@@ -1972,13 +1936,17 @@ private struct CleanupInvitationOperations: Sendable {
         let snapshot = try await V2PostgresMembershipIdentitySnapshotValidator(database: controlDatabase).snapshot(actorUserID: actor, targetUserID: target)
         let intent = try V2MembershipIntent(roomID: roomID, actorUserID: actor, operationID: operation, targetUserID: target,
             action: action, expectedMembershipRevision: revision, confirmedUntilMilliseconds: UInt64(now.timeIntervalSince1970 * 1_000) + 120_000)
-        guard case .admitted(let admission) = try await store.admit(intent, identitySnapshot: snapshot, token: token) else { throw V2MembershipOperationValidationError.invalidAdmission }
-        return try .init(intent: intent, admission: admission)
+        return try await withRoomActivation(database: database, roomID: roomID) { token in
+            guard case .admitted(let admission) = try await store.admit(intent, identitySnapshot: snapshot, token: token) else { throw V2MembershipOperationValidationError.invalidAdmission }
+            return try .init(intent: intent, admission: admission)
+        }
     }
     func executeMembership(_ command: V2MembershipOperationCommand) async throws -> V2MembershipRecoveryResult {
         let snapshot = try await V2PostgresMembershipIdentitySnapshotValidator(database: controlDatabase).snapshot(actorUserID: command.intent.actorUserID, targetUserID: command.intent.targetUserID)
-        let result = try await PostgresV2MembershipOperationStore(database: database, clock: { now }).submit(command, token: token,
-            capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: snapshot)
+        let result = try await withRoomActivation(database: database, roomID: roomID) { token in
+            try await PostgresV2MembershipOperationStore(database: database, clock: { now }).submit(command, token: token,
+                capacityProfile: profile, eventID: .init(uuid: UUID()), identitySnapshot: snapshot)
+        }
         if case .receipt(let proof) = result { guard proof.validates(command: command) else { throw V2MembershipOperationValidationError.invalidReceipt } }
         return result
     }

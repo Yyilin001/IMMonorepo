@@ -1,5 +1,5 @@
 # Local-only account service image. Source is compiled in a disposable build
-# stage; the final image contains only the four release executables and their
+# stage; the final image contains only the required release executables and their
 # bundled SwiftPM runtime artifacts. Keeping `.build` and source out of the
 # runtime stage prevents repeated local verification from retaining several
 # gigabytes of compiler products per image.
@@ -36,6 +36,8 @@ RUN set -eu; \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2OperatorServerApp \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2LocalGatewayProbe \
     && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2ResourceImageWorker \
+    && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2PlacementControlApp \
+    && swift build --disable-automatic-resolution -c release --jobs 1 --package-path IMV2Server --product IMV2RoomHostSupervisorApp \
     && bin_path="$(swift build --disable-automatic-resolution -c release --package-path IMV2Server --show-bin-path)" \
     && mkdir -p /runtime/IMV2Server/.build/release \
     && cp "${bin_path}/IMV2AccountServerApp" \
@@ -43,6 +45,8 @@ RUN set -eu; \
           "${bin_path}/IMV2OperatorServerApp" \
           "${bin_path}/IMV2LocalGatewayProbe" \
           "${bin_path}/IMV2ResourceImageWorker" \
+          "${bin_path}/IMV2PlacementControlApp" \
+          "${bin_path}/IMV2RoomHostSupervisorApp" \
           /runtime/IMV2Server/.build/release/ \
     && rm -rf /workspace/IMV2Server/.build /root/.cache/org.swift.swiftpm
 
@@ -58,7 +62,7 @@ COPY IMV2Server/Resources/imagemagick-policy.xml /etc/ImageMagick-6/policy.xml
 WORKDIR /workspace
 # The package products statically contain their SwiftPM dependencies; the
 # runtime image already supplies the Swift/Foundation shared libraries. Keep
-# the existing Compose command paths, but copy only the four executable
+# the existing Compose command paths, but copy only the required executable
 # products instead of SwiftPM's multi-gigabyte object/module/compiler cache.
 COPY --from=build /runtime/IMV2Server/.build/release ./IMV2Server/.build/release
 

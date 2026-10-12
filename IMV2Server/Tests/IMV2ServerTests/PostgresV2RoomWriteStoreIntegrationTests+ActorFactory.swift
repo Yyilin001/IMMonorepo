@@ -1,6 +1,7 @@
 @testable import IMV2ServerApplication
 @testable import IMV2ServerContracts
 import Foundation
+import IMV2ActorCluster
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
@@ -10,58 +11,6 @@ import SQLKit
 import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("explicit physical lease aliases share lifecycle and renewal actors and reject incomplete private mappings",
-          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
-    func leasePhysicalAliasesShareRenewalCoordinator() async throws {
-        try await withForwardOwnerDatabases(mode: .standard) { database, _, _, _, _ in
-            // The physical identity is explicitly supplied, even when all three
-            // logical handles happen to use this fixture's same database value.
-            let databases = ["lease-a": database, "lease-b": database, "lease-c": database]
-            let privateKey = "postgresql://fixture-user:credential-secret@fixture/owner"
-            let keys = ["lease-a": privateKey, "lease-b": privateKey, "lease-c": "independent-owner"]
-            let shared = try V2RoomServerLeaseStore(databases: databases, physicalRegistrationKeys: keys)
-            let legacy = try V2RoomServerLeaseStore(databases: databases)
-            let sharedIDs = shared.renewalBatcherIdentities
-            let legacyIDs = legacy.renewalBatcherIdentities
-            #expect(Set(sharedIDs.keys) == Set(databases.keys))
-            #expect(sharedIDs["lease-a"] != nil)
-            #expect(sharedIDs["lease-a"] == sharedIDs["lease-b"])
-            #expect(sharedIDs["lease-a"] != sharedIDs["lease-c"])
-            #expect(legacyIDs["lease-a"] != nil)
-            #expect(legacyIDs["lease-a"] != legacyIDs["lease-b"])
-            let lifecycleIDs = shared.lifecycleBatcherIdentities
-            let legacyLifecycleIDs = legacy.lifecycleBatcherIdentities
-            #expect(Set(lifecycleIDs.keys) == Set(databases.keys))
-            #expect(lifecycleIDs["lease-a"] != nil)
-            #expect(lifecycleIDs["lease-a"] == lifecycleIDs["lease-b"])
-            #expect(lifecycleIDs["lease-a"] != lifecycleIDs["lease-c"])
-            #expect(legacyLifecycleIDs["lease-a"] != nil)
-            #expect(legacyLifecycleIDs["lease-a"] != legacyLifecycleIDs["lease-b"])
-            var missing = keys; missing.removeValue(forKey: "lease-c")
-            var extra = keys; extra["lease-extra"] = privateKey
-            var empty = keys; empty["lease-c"] = ""
-            var whitespace = keys; whitespace["lease-c"] = " \t\n"
-            for invalidKeys in [missing, extra, empty, whitespace] {
-                do {
-                    let unexpected = try V2RoomServerLeaseStore(databases: databases,
-                        physicalRegistrationKeys: invalidKeys)
-                    await unexpected.shutdownRenewals()
-                    await unexpected.shutdownLifecycle()
-                    Issue.record("invalid physical registration mapping was accepted")
-                } catch {
-                    #expect((error as? V2ActorContractError) == .invalidConfiguration("room lease physical registration keys"))
-                    let diagnostic = String(reflecting: error)
-                    #expect(!diagnostic.contains(privateKey))
-                    #expect(!diagnostic.contains("credential-secret"))
-                }
-            }
-            await shared.shutdownRenewals()
-            await legacy.shutdownRenewals()
-            await shared.shutdownLifecycle()
-            await legacy.shutdownLifecycle()
-        }
-    }
-
     @Test("concrete room factory sends, reads and recovers the same operation after retirement",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func actorFactoryRestoresSendAndQueries() async throws {
@@ -92,33 +41,29 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                 contentReviewMode: .disabled, queryBatchConfiguration: .init(),
                 databaseWorkAdmission: admission)
-            let leases = try V2RoomServerLeaseStore(databases: ["room-a": database],
-                sqlContinuationMetricsByOwner: ["room-a": ownerResources.sendOperationMetrics])
             let factory = try V2RoomServerActivationFactory(owners: ["room-a": ownerResources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
-                safetyActorUserID: senderID, now: { now }).runtimeFactory(validation: {
-                    try await leases.validate(token: $0)
-                })
+                safetyActorUserID: senderID, now: { now }).runtimeFactory()
             let configuration = try V2RoomRuntimeConfiguration()
             let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-            let makeHost = { () throws -> V2RoomActivationHost<V2RoomRequest, V2RoomResponse> in
-                .init(identity: .init(hostID: try .init("factory-host"), incarnationID: UUID()),
-                    leaseStore: leases, configuration: configuration, budget: .init(configuration: configuration),
-                    classify: { $0.turnSchedulingClass }, factory: factory)
-            }
-            let first = try makeHost(), next = try makeHost()
+            let firstIdentity = V2ActorHostIdentity(hostID: try .init("factory-host"), incarnationID: UUID())
+            let nextIdentity = V2ActorHostIdentity(hostID: firstIdentity.hostID, incarnationID: UUID())
+            try await withNativePlacementTestControl(host: firstIdentity, shardID: owner.shardID) { control in
+            let firstPlacement = try await control.register(firstIdentity, shard: owner.shardID)
+            let first = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: firstIdentity,
+                placement: firstPlacement, configuration: configuration, budget: .init(configuration: configuration),
+                classify: { $0.turnSchedulingClass }, factory: factory)
+            var next: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>?
             await first.start()
-            await next.start()
             do {
                 guard case .ready(let token) = try await first.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }
-                #expect(database.loanMetricsSnapshot().classes[.activation]?.granted == 3)
+                #expect(database.loanMetricsSnapshot().classes[.activation]?.granted == 1)
                 #expect(database.loanMetricsSnapshot().classes[.ordinary]?.granted == 0)
-                let initialSQL = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations
-                for source in [V2RoomSQLContinuationSource.lifecycleRooms, .lifecycleLeases] {
-                    #expect(initialSQL[source]?.settledToResumedCount == 2)
-                    #expect(initialSQL[source]?.resumedToDispatchCount == 2)
-                    #expect(initialSQL[source]?.settledNotResumed == 0)
-                    #expect(initialSQL[source]?.resumedNotDispatched == 0)
+                let staleDataOwner = try V2RoomDataOwner(shardID: "room-a", epoch: 1)
+                let staleToken = V2RoomActivationToken(roomID: roomID, owner: staleDataOwner,
+                    activationEpoch: try .init(1), host: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()))
+                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
+                    try await v2RestoreRoomSendInitialization(database: database, token: staleToken)
                 }
                 let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID, senderUserID: senderID,
                     clientMessageID: .init(uuid: UUID()), text: "factory send", limits: .init(maxUTF8Bytes: 64)),
@@ -139,8 +84,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(durableMetrics.inFlightBatches == 0)
                 // Actor lifetime and prepared authorization replace the former
                 // standalone owner fence.
-                for source in [V2RoomSQLContinuationSource.durableFenceCombined,
-                    .durableFenceRooms, .durableFenceLeases] {
+                for source in [V2RoomSQLContinuationSource.durableFenceRooms] {
                     #expect(durableMetrics.sqlContinuations[source]?.settledToResumedCount == 0)
                 }
                 let read = try V2ActorRecordReadReceiptWire(roomID: roomID, actorUserID: senderID,
@@ -171,11 +115,19 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(admissionSnapshot.foregroundWrite.admittedRequests == 1)
                 #expect(admissionSnapshot.interactiveRead.admittedRequests == 2)
                 #expect(admissionSnapshot.interactiveRead.inFlight == 0)
-                #expect(await first.stop(deadline: .now + .seconds(10)).completed)
-                guard case .ready(let replacement) = try await next.activate(roomID: roomID, owner: owner,
+                let drained = await first.stop(deadline: .now + .seconds(10))
+                #expect(drained.completed)
+                try await firstPlacement.retireAfterDrain(try #require(drained.proof), shards: [owner.shardID])
+                let nextPlacement = try await control.register(nextIdentity, shard: owner.shardID)
+                let successor = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: nextIdentity,
+                    placement: nextPlacement, configuration: configuration, budget: .init(configuration: configuration),
+                    classify: { $0.turnSchedulingClass }, factory: factory)
+                next = successor
+                await successor.start()
+                guard case .ready(let replacement) = try await successor.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }
                 #expect(replacement.activationEpoch.rawValue > token.activationEpoch.rawValue)
-                let repeated = try await next.invoke(token: replacement, request: bytes,
+                let repeated = try await successor.invoke(token: replacement, request: bytes,
                     deadline: .now + .seconds(10))
                 guard case .messaging(.sendOperation(.receipt(let replay))) = repeated,
                       case .accepted(let recovered) = replay.outcome else {
@@ -184,9 +136,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(replay == originalProof)
                 #expect(recovered.messageID == receipt.messageID)
                 #expect(try await count("im_v2.messages", on: sql) == 1)
-                #expect(await next.stop(deadline: .now + .seconds(10)).completed)
+                #expect(await successor.stop(deadline: .now + .seconds(10)).completed)
                 let loans = database.loanMetricsSnapshot()
-                #expect((loans.classes[.activation]?.granted ?? 0) >= 6)
+                #expect((loans.classes[.activation]?.granted ?? 0) == 2)
                 #expect((loans.classes[.ordinary]?.granted ?? 0) > 0)
                 #expect(loans.classes.values.allSatisfy { $0.inFlight == 0 && $0.queued == 0 })
                 for source in [V2DatabaseLoanSource.durableOwner, .groupEventSubscribe, .roomRecovery, .lifecycle] {
@@ -200,14 +152,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let sqlContinuations = ownerResources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations
                 #expect((sqlContinuations[.scalarFenceRooms]?.settledToResumedCount ?? 0) > 0)
                 #expect(sqlContinuations.values.allSatisfy { $0.settledNotResumed == 0 && $0.resumedNotDispatched == 0 })
-                await leases.shutdownLifecycle()
                 await database.shutdownLoans()
             } catch {
                 _ = await first.stop(deadline: .now + .seconds(10))
-                _ = await next.stop(deadline: .now + .seconds(10))
-                await leases.shutdownLifecycle()
+                _ = await next?.stop(deadline: .now + .seconds(10))
                 await database.shutdownLoans()
                 throw error
+            }
             }
         }
     }
@@ -241,10 +192,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let route = try await V2PostgresRoomShardRouter(database: control).route(for: room)
             let selectedOwner = try V2RoomDataOwner(shardID: route.shardID, epoch: route.epoch)
             #expect(selectedOwner.shardID == "room-b")
-            await #expect(throws: V2RoomActivationLeaseError.roomNotFound) {
-                _ = try await PostgresV2RoomActivationStore(database: control)
-                    .locate(roomID: room, owner: selectedOwner)
-            }
 
             let writes = PostgresV2RoomWriteStore(database: ownerDatabase)
                 .usingControlDatabase(control)
@@ -266,10 +213,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 owners: ["room-b": resources.usingFixturePolicyAuthorizations(controlDatabase: control, endpoint: "room-b")], safetyActorUserID: senderID, now: { now }
             ).runtimeFactory()
             let configuration = try V2RoomRuntimeConfiguration()
-            let leases = try V2RoomServerLeaseStore(databases: ["room-b": ownerDatabase])
+            let identity = V2ActorHostIdentity(hostID: try .init("remote-send-host"), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: selectedOwner.shardID) { placementControl in
+            let placement = try await placementControl.register(identity, shard: selectedOwner.shardID)
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(
-                identity: .init(hostID: try .init("remote-send-host"), incarnationID: UUID()),
-                leaseStore: leases, configuration: configuration,
+                identity: identity, placement: placement, configuration: configuration,
                 budget: .init(configuration: configuration),
                 classify: { $0.canShareSendTurn ? .send : .barrier }, factory: factory
             )
@@ -296,6 +244,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             } catch {
                 _ = await host.stop(deadline: .now + .seconds(10))
                 throw error
+            }
             }
         }
     }

@@ -22,6 +22,7 @@ struct GatewayRoomOwnerAssembly {
     /// 转发目标、创建执行器和 Actor 激活工厂随后使用同一映射，避免同址分片重复占用额度。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
+        actorConfiguration: V2RoomActorApplicationConfiguration,
         topology: GatewayDatabaseTopology,
         userShardProjectionDelivery: V2PostgresUserShardProjectionDelivery,
         databaseWorkAdmission: V2DatabaseWorkAdmissionController,
@@ -40,12 +41,6 @@ struct GatewayRoomOwnerAssembly {
                     roomShardStorage: configuration.roomShardStorage.filter { $0.databaseURL == url },
                     maximumReadQueued: configuration.interactiveReadDatabaseWorkMaximumQueued))
             }))
-        let actorConfiguration = try V2RoomActorApplicationConfiguration(
-            environment: ProcessRuntimeEnvironment(), hostsRooms: nil,
-            configuredShardIDs: Set(configuration.roomShardStorage.map(\.shardID)),
-            batchWaitMilliseconds: Int64(max(
-                configuration.roomTurnBatchMaximumDelayMilliseconds,
-                configuration.readReceiptBatchMaximumDelayMilliseconds)))
         let durableSchedulingConfiguration = configuration.durableSendSchedulingConfiguration()
         var ownerResources: [String: V2RoomServerOwnerResources] = [:]
         var physicalResources: [String: V2RoomServerOwnerResources] = [:]

@@ -153,7 +153,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let router = V2PostgresRoomShardRouter(database: control)
             let operation = UUID()
             let identities = V2PostgresMembershipIdentitySnapshotValidator(database: control)
-            let host=V2ActorHostIdentity(hostID:try .init("routed-mutation"),incarnationID:UUID())
             @Sendable func run(_ router:any V2RoomShardRouting,on database:any Database,operationID:UUID,local:Bool = false) async throws -> String {
                 let selected=try await router.route(for:room)
                 guard selected.shardID=="room-b" else { throw V2RoomShardStorageRegistryError.unknownShardID }
@@ -161,24 +160,23 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let selectedSQL=try #require(transaction as? any SQLDatabase)
                     try await v2RequireRoomOwner(roomID:room.uuidValue!,route:selected,sql:selectedSQL)
                 }
-                let acquisition=try await PostgresV2RoomActivationStore(database:database).acquire(roomID:room,owner:.init(shardID:selected.shardID,epoch:selected.epoch),host:host,duration:.init(30_000))
-                let lease:V2RoomActivationLease
-                switch acquisition { case .acquired(let value),.occupied(let value): lease=value }
-                guard lease.token.host==host else { throw CancellationError() }
+                return try await withRoomActivation(database: database, roomID: room,
+                    shardID: selected.shardID, epoch: selected.epoch) { token in
                 let deadline=UInt64(now.timeIntervalSince1970*1000)+60_000
                 let mutations=PostgresV2MessageMutationOperationStore(database:database,contentReviewMode:.disabled,identities:identities,clock:{now})
                 switch kind {
                 case "edit":
                     let command=try V2MessageEditOperationCommand(command:.init(roomID:room,actorUserID:senderID,operationID:.init(uuid:operationID),messageID:message.messageID,expectedMessageRevision:1,text:"edited",maximumUTF8Bytes:64),firstSubmissionDeadlineMilliseconds:deadline)
-                    guard case .receipt(let receipt)=try await mutations.edit(command,token:lease.token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1),maximumUTF8Bytes:64),case .committed=receipt.outcome else { throw CancellationError() }
+                    guard case .receipt(let receipt)=try await mutations.edit(command,token:token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1),maximumUTF8Bytes:64),case .committed=receipt.outcome else { throw CancellationError() }
                 case "withdraw":
                     let command=try V2MessageWithdrawalOperationCommand(command:.init(roomID:room,actorUserID:senderID,operationID:.init(uuid:operationID),messageID:message.messageID,expectedMessageRevision:1),firstSubmissionDeadlineMilliseconds:deadline)
-                    guard case .receipt(let receipt)=try await mutations.withdraw(command,token:lease.token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1)),case .committed=receipt.outcome else { throw CancellationError() }
+                    guard case .receipt(let receipt)=try await mutations.withdraw(command,token:token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1)),case .committed=receipt.outcome else { throw CancellationError() }
                 default:
                     let command=try V2MessageReactionOperationCommand(command:.init(roomID:room,actorUserID:senderID,operationID:.init(uuid:operationID),messageID:message.messageID,reaction:"👍",action:.add),expectedReactionRevision:0,firstSubmissionDeadlineMilliseconds:deadline)
-                    guard case .receipt(let receipt)=try await PostgresV2MessageReactionOperationStore(database:database,clock:{now}).change(command,token:lease.token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1)),case .committed=receipt.outcome else { throw CancellationError() }
+                    guard case .receipt(let receipt)=try await PostgresV2MessageReactionOperationStore(database:database,clock:{now}).change(command,token:token,capacityProfile:profile,eventID:.init(uuid:UUID()),now:now.addingTimeInterval(1)),case .committed=receipt.outcome else { throw CancellationError() }
                 }
                 return "committed"
+                }
             }
             let table = kind == "reaction" ? "message_reaction_receipts" : "message_mutation_receipts"
             let before = try await ownerSQL.raw("SELECT to_jsonb(x)::text AS value FROM im_v2.messages x WHERE message_id=\(bind: message.messageID.uuidValue!)").first(decoding: StringValueRow.self)?.value
@@ -404,7 +402,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             }
             let original = try await candidate()
             ownerSwitch.set(epoch: 1)
-            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await coordinator.submitOperation(original, deadline: invitationTestDeadline()) }
+            await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await coordinator.submitOperation(original, deadline: invitationTestDeadline()) }
             #expect(try await sql.raw("SELECT COUNT(*) AS value FROM im_v2.group_invite_directory").first(decoding: CountRow.self)?.value == 0)
             ownerSwitch.set(epoch: 0)
             try await sql.raw("CREATE FUNCTION im_v2.fail_invite_ready() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'test publication failure'; END;$$").run()
@@ -601,15 +599,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 let unauthorized = try capabilityInvitationIntent(actor: rejectedApplicant, room: roomB, reference: .groupInvite(.init(uuid: UUID())), action: .create(lifetimeSeconds: 3_600, maximumApprovedUses: 5, expectedMembershipRevision: 1), confirmedAt: now)
                 #expect(try await operations.admitOperation(.init(intent: unauthorized), deadline: invitationTestDeadline()) == .currentUnavailable(.permissionDenied))
                 switchB.set(epoch: 1)
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await reads.activeInvites(roomID: roomB, actorUserID: actor) }
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await reads.activeInvites(roomID: roomB, actorUserID: actor) }
                 try await sqlB.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomB.uuidValue!)").run()
                 _ = try await reads.activeInvites(roomID: roomB, actorUserID: actor)
                 let stale = coordinator { (ownerB, "room-b", 0) }, approval = try #require(approvals.last)
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.recoverOperation(.init(intent: approval.command.intent, action: .query), deadline: invitationTestDeadline()) }
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await stale.recoverOperation(.init(intent: approval.command.intent, action: .query), deadline: invitationTestDeadline()) }
                 let creation = try #require(lastCreation)
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.submitOperation(creation, deadline: invitationTestDeadline()) }
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await stale.submitOperation(creation, deadline: invitationTestDeadline()) }
                 let misplaced = V2ActorGroupInvitationClient(coordinator: coordinator { (ownerA, "room-b", 1) })
-                await #expect(throws: V2RoomActivationLeaseError.roomNotFound) { _ = try await misplaced.activeInvites(roomID: roomB, actorUserID: actor) }
+                await #expect(throws: V2RoomActorStateError.roomNotFound) { _ = try await misplaced.activeInvites(roomID: roomB, actorUserID: actor) }
                 let auth = RoutedInvitationTestAuthenticator(user: actor)
                 V2VaporGroupInvitationRoutes(authenticator: auth, invitations: reads).register(on: app)
                 V2VaporGroupInvitationOperationRoutes(authenticator: auth, coordinator: operations).register(on: app)

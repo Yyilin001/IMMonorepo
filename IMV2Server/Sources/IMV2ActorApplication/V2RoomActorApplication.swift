@@ -46,7 +46,11 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     private let client: V2RoomClusterClient
     private let trust: V2ActorTrustStore
     private let node: Node
-    private let leases: V2RoomServerLeaseStore
+    private let control: V2PlacementControlRuntime
+    private let placement: V2RoomActorPlacementRuntime
+    private let placementShards: Set<String>
+    private let placementPeers: [V2RoomDiscoveryPeer]
+    private let placementRefresh: Task<Void, Never>
     private let qualificationChanged: @Sendable () async -> Void
     private let metrics: @Sendable () async -> V2RoomRuntimeMetricsSnapshot
 
@@ -56,7 +60,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
     }
 
     private init(policyPlacement: V2PolicyOwnerPlacement?, forwardPairs: V2RoomForwardPairService?, client: V2RoomClusterClient, trust: V2ActorTrustStore, callerIncarnation: UUID, directory: V2RoomDirectory, reservations: V2RoomReservationCoordinator,
-                 configuration: V2RoomRuntimeConfiguration, node: Node, leases: V2RoomServerLeaseStore,
+                 configuration: V2RoomRuntimeConfiguration, node: Node, control: V2PlacementControlRuntime, placement: V2RoomActorPlacementRuntime, placementShards: Set<String>, placementPeers: [V2RoomDiscoveryPeer],
                  qualificationChanged: @escaping @Sendable () async -> Void,
                  serviceQualification: V2ActorServiceQualification?,
                  metrics: @escaping @Sendable () async -> V2RoomRuntimeMetricsSnapshot) {
@@ -65,11 +69,27 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         self.client = client
         self.trust = trust
         self.callerIncarnation = callerIncarnation
+        self.control = control
         self.directory = directory
         self.reservations = reservations
         self.configuration = configuration
         self.node = node
-        self.leases = leases
+        self.placement = placement
+        self.placementShards = placementShards
+        self.placementPeers = placementPeers
+        self.placementRefresh = Task {
+            while !Task.isCancelled {
+                do {
+                    try await ContinuousClock().sleep(for: .seconds(1))
+                    try Task.checkCancellation()
+                    try await placement.refresh()
+                } catch {
+                    if Task.isCancelled { return }
+                    // Retain the last committed snapshot. Refresh failure never
+                    // supplies exclusion evidence or publishes another owner.
+                }
+            }
+        }
         self.qualificationChanged = qualificationChanged
         self.serviceQualification = serviceQualification
         self.metrics = metrics
@@ -99,7 +119,6 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                              ownerRouter: any V2RoomShardRouting,
                              roomDatabases: [String: any Database],
                              factory: V2RoomServerActivationFactory? = nil,
-                             physicalRegistrationKeys: [String: String]? = nil,
                              qualification: V2ActorServiceQualification? = nil,
                              policyServices: V2PolicyHostedServices? = nil) async throws -> V2RoomActorApplication {
         if let services = policyServices {
@@ -109,9 +128,13 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
             throw V2RoomActorApplicationError.invalidRole
         }
         let policyPlacement = try configuration.policyPlacement.map(V2PolicyOwnerPlacement.init)
-        let leases = try V2RoomServerLeaseStore(databases: roomDatabases,
-            physicalRegistrationKeys: physicalRegistrationKeys,
-            sqlContinuationMetricsByOwner: factory?.sqlContinuationMetricsByOwner ?? [:])
+        // Fixed control voters have independent process lifetimes. Stopping
+        // room applications must not dismantle quorum before other Hosts retire.
+        guard configuration.placementControl.identity == nil else { throw V2RoomActorApplicationError.invalidRole }
+        try await configuration.awaitSupervisedStartup()
+        let control = V2PlacementControlRuntime(configuration: configuration)
+        do {
+        let placement = try await control.start()
         let client: V2RoomClusterClient
         let node: Node
         let runtimeHost: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>?
@@ -126,10 +149,8 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
             let runtime = configuration.runtime
             let budget = V2RoomCommandBudget(configuration: runtime)
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
-                leaseStore: leases, configuration: runtime, budget: budget,
-                classify: { $0.turnSchedulingClass }, factory: factory.runtimeFactory(validation: {
-                    try await leases.validate(token: $0)
-                }), qualification: qualification)
+                placement: placement, configuration: runtime, budget: budget,
+                classify: { $0.turnSchedulingClass }, factory: factory.runtimeFactory(), qualification: qualification)
             runtimeHost = host
             runtimeBudget = budget
             let hostNode = V2RoomClusterNode(configuration: try .init(name: configuration.name,
@@ -139,29 +160,30 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 signer: configuration.signer, trust: configuration.trust,
                 authenticationLimits: configuration.authentication, runtimeConfiguration: runtime,
                 policyOwnership: policyServices?.ownership, policyMutations: policyServices?.mutations,
-                forwardPairs: policyServices?.forwardPairs)
+                forwardPairs: policyServices?.forwardPairs, placementDrain: placement.drainageService(host: host))
             do {
+                try await placement.register(identity, shards: configuration.allowedShards)
                 _ = try await hostNode.start()
                 client = try await hostNode.makeClient(signer: configuration.signer,
                     trust: configuration.trust, limits: configuration.authentication)
                 _ = try await hostNode.startDiscovery(client: client, configuration: configuration.discovery)
                 try await policyServices?.clientBinding?.bind(client)
                 directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: ownerRouter),
-                    leases: leases, hosts: client, transport: client, configuration: configuration.runtime)
+                    placement: placement, hosts: client, transport: client, configuration: configuration.runtime)
                 reservations = V2RoomReservationCoordinator(operations: await directory.reservationOperations(),
                     configuration: configuration.runtime)
                 try await policyServices?.forwardPairs?.bind(reservations)
                 node = .host(hostNode)
             } catch {
                 let startupError = error
-                let stopped: Bool
+                let drained: V2RoomActivationDrainResult
                 do {
-                    stopped = try await hostNode.stop(deadline: .now + runtime.drainTimeout.duration).completed
-                } catch {
-                    throw V2RoomActorApplicationError.incompleteShutdown
-                }
-                guard stopped else { throw V2RoomActorApplicationError.incompleteShutdown }
-                await leases.shutdownLifecycle()
+                    drained = try await hostNode.stop(deadline: .now + runtime.drainTimeout.duration)
+                    guard drained.completed, let proof = drained.proof else {
+                        throw V2RoomActorApplicationError.incompleteShutdown
+                    }
+                    try await placement.retireAfterDrain(proof, shards: configuration.allowedShards)
+                } catch { throw V2RoomActorApplicationError.incompleteShutdown }
                 throw startupError
             }
         } else {
@@ -176,7 +198,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
             do {
                 client = try await caller.start(discovery: configuration.discovery)
                 directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: ownerRouter),
-                    leases: leases, hosts: client, transport: client, configuration: configuration.runtime)
+                    placement: placement, hosts: client, transport: client, configuration: configuration.runtime)
                 reservations = V2RoomReservationCoordinator(operations: await directory.reservationOperations(),
                     configuration: configuration.runtime)
                 node = .caller(caller)
@@ -189,12 +211,11 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                     throw V2RoomActorApplicationError.incompleteShutdown
                 }
                 guard stopped else { throw V2RoomActorApplicationError.incompleteShutdown }
-                await leases.shutdownLifecycle()
                 throw startupError
             }
         }
         return .init(policyPlacement: policyPlacement, forwardPairs: policyServices?.forwardPairs, client: client, trust: configuration.trust, callerIncarnation: client.callerIncarnation, directory: directory, reservations: reservations,
-                     configuration: configuration.runtime, node: node, leases: leases, qualificationChanged: { await runtimeHost?.qualificationDidChange() },
+                     configuration: configuration.runtime, node: node, control: control, placement: placement, placementShards: configuration.allowedShards, placementPeers: configuration.discovery.peers, qualificationChanged: { await runtimeHost?.qualificationDidChange() },
                      serviceQualification: qualification, metrics: {
                          let location = await directory.snapshot()
                          return await .init(host: runtimeHost?.snapshot(), commands: runtimeBudget?.snapshot(),
@@ -203,6 +224,35 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                              directoryCalls: directory.callMetricsSnapshot(),
                              transportCalls: client.callMetricsSnapshot())
                      })
+        } catch {
+            let startupError = error
+            guard try await control.stop(deadline: .now + configuration.runtime.drainTimeout.duration) else {
+                throw V2RoomActorApplicationError.incompleteShutdown
+            }
+            throw startupError
+        }
+    }
+
+    /// Server control-plane entry. The previous process must answer the signed
+    /// drain RPC; timeout, discovery loss and gossip never authorize takeover.
+    /// Freeze originRevision from the first committed inspection. Every retry
+    /// retains that version, transferID and expected owner, including across caller restarts.
+    public func transferRoomPartition(shardID: String, partition: Int,
+        expectedHost: V2ActorHostIdentity, expectedEpoch: UInt64,
+        successor: V2ActorHostIdentity, transferID: UUID, originRevision: UInt64, deadline: ContinuousClock.Instant) async throws {
+        guard placementShards.contains(shardID), expectedEpoch > 0, originRevision > 0,
+              expectedEpoch <= V2RoomActorPlacementGrant.maximumEpoch else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        let peers = placementPeers, client = client
+        try await placement.transfer(shard: shardID, partition: partition,
+            expected: .init(host: expectedHost, epoch: expectedEpoch), successor: successor,
+            transferID: transferID, originRevision: originRevision, client: client, deadline: deadline, authorizeSuccessor: { identity in
+                guard peers.contains(where: { $0.hostID == identity.hostID && $0.accessibleShardIDs.contains(shardID) }),
+                      try client.resolvePolicyHost(hostID: identity.hostID, endpoint: shardID) == identity else {
+                    throw V2RoomCallFailure.notAccepted(.unavailable)
+                }
+            })
     }
 
     /// Uses the actual resolved activation and its unique configured publisher;
@@ -293,9 +343,13 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         await directory.drain()
         async let directoryStopped = directory.quiesce(deadline: deadline)
         let nodeStopped: Bool
+        var proof: V2RoomHostDrainProof?
         do {
             switch node {
-            case .host(let host): nodeStopped = try await host.stop(deadline: deadline).completed
+            case .host(let host):
+                let result = try await host.stop(deadline: deadline)
+                nodeStopped = result.completed
+                proof = result.proof
             case .caller(let caller): nodeStopped = try await caller.stop(deadline: deadline)
             }
         } catch {
@@ -305,10 +359,9 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         let resolutionsStopped = await directoryStopped
         guard nodeStopped && resolutionsStopped else { return false }
         await forwardPairs?.close()
-        // Host retirement can be followed by another Host using the same Store.
-        // Only the owning application's final stop closes lifecycle admission,
-        // after Directory work and every Host lease release have settled.
-        await leases.shutdownLifecycle()
-        return true
+        if let proof { try await placement.retireAfterDrain(proof, shards: placementShards) }
+        placementRefresh.cancel()
+        await placementRefresh.value
+        return try await control.stop(deadline: deadline)
     }
 }

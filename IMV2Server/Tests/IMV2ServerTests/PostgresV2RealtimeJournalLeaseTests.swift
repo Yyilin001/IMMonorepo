@@ -30,7 +30,7 @@ struct PostgresV2RealtimeJournalLeaseTests {
             let successor = try await store.claim(partitionIDs: [2], identity: b, token: UUID(), leaseDuration: 15)
             #expect(successor.first?.epoch == first.epoch + 1)
             #expect(try await store.renew(claimed, leaseDuration: 15).isEmpty)
-            await #expect(throws: V2RealtimeJournalError.leaseLost) {
+            await #expect(throws: V2RealtimeJournalError.authorityLost) {
                 _ = try await store.publishPending(lease: first, limit: 128)
             }
             try await store.release(claimed)

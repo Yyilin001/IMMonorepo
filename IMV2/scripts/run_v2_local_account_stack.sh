@@ -88,6 +88,9 @@ if [[ ! -d "${actor_configuration_directory}" ]]; then
   python3 "${script_dir}/prepare_v2_room_actor_configuration.py" \
     --output-dir "${actor_configuration_directory}" \
     --host gateway=gateway:7337 --caller account=account:7338 --caller operator=operator:7339 \
+    --placement-voter placement-a=placement-a:7336 \
+    --placement-voter placement-b=placement-b:7336 \
+    --placement-voter placement-c=placement-c:7336 \
     --shards rooms-primary --user-buckets users-primary --mount-root /run/im-v2-room-actor \
     --policy-partitions 16
 fi
@@ -150,6 +153,22 @@ test "${schema_is_current}" = 't' || {
 "${script_dir}/install_v2_realtime_journal.sh" --print-sql |
   compose exec -T postgres psql -X --set=ON_ERROR_STOP=1 -U im_v2 -d im_v2 > /dev/null
 v2_seed_local_admission_pool
+# Provision only a wholly fresh control group. A partially missing group must
+# be recovered explicitly; restarting must never erase a voter's history.
+placement_files=0
+for voter in placement-a placement-b placement-c; do
+  [[ ! -e "${actor_configuration_directory}/${voter}/placement/0.pb" ]] || placement_files=$((placement_files + 1))
+done
+if [[ "${placement_files}" == 0 ]]; then
+  for voter in placement-a placement-b placement-c; do
+    compose run --rm --no-deps "${voter}" \
+      /workspace/IMV2Server/.build/release/IMV2PlacementControlApp --provision
+  done
+elif [[ "${placement_files}" != 3 ]]; then
+  printf 'Incomplete placement control history; restore the missing voter before starting this stack.\n' >&2
+  exit 1
+fi
+compose up -d --wait --force-recreate placement-a placement-b placement-c
 # Caddy's development leaf certificate is intentionally short-lived. Recreate
 # the local TLS edge on every explicit start so a retained Compose project
 # cannot stay "healthy" after its certificate expires. The local CA volume is

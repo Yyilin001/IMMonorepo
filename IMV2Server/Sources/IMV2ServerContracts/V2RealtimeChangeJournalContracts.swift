@@ -42,7 +42,7 @@ public struct V2RealtimeJournalBatch: Codable, Equatable, Sendable {
 }
 
 public enum V2RealtimeJournalError: Error, Equatable, Sendable {
-    case invalidInput, leaseLost, corruptPersistenceState
+    case invalidInput, authorityLost, corruptPersistenceState
 }
 
 public protocol V2RealtimeChangeJournalStore: V2RealtimePartitionLeaseStore {

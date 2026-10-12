@@ -24,38 +24,38 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
                     VALUES (\(bind: UUID()),\(bind: room),\(bind: sequence),'room.created','{}'::jsonb,1,now())
                     """).run()
             }
-            let activation = PostgresV2RoomActivationStore(database: database)
-            let token = try await acquire(activation, room: room,
-                owner: .init(shardID: "owner-a", epoch: 0), host: "host-a")
-            let executor = V2ActorRoomQueryExecutor(database: database)
-            let query = try V2ActorRoomLogPullWire(roomID: .init(uuid: room), actorUserID: .init(uuid: actor),
-                afterRoomSequence: 0, pageSize: 1)
-            let input = try V2GroupEventPullBatchInput(ordinal: 0, query: query)
-            let packed = try await v2PackedGroupEventPulls([input], tokens: [token.roomID: token], maximumBytes: 1024, sql: sql)
-            #expect(packed.selected == [0])
-            #expect(packed.rows[0]?.count == 1)
-            #expect(packed.metadata[0]?.hasMore == true)
-            guard case .page(let first) = try await executor.pullSnapshot(query, token: token) else {
-                Issue.record("missing first page"); return
-            }
-            #expect(first.events.count == 1 && first.nextRoomSequence == 1 && first.hasMore)
-            let occupied = ActorQueryGate()
-            let blocker = Task {
-                try await database.transaction { transaction in
-                    let lockedSQL = try #require(transaction as? any SQLDatabase)
-                    try await lockedSQL.raw("SELECT room_id FROM im_v2.rooms WHERE room_id=\(bind: room) FOR UPDATE").run()
-                    await occupied.signal()
-                    try await ContinuousClock().sleep(for: .milliseconds(500))
+            try await withRoomActivation(database: database, roomID: .init(uuid: room),
+                                             shardID: "owner-a") { token in
+                let executor = V2ActorRoomQueryExecutor(database: database)
+                let query = try V2ActorRoomLogPullWire(roomID: .init(uuid: room), actorUserID: .init(uuid: actor),
+                    afterRoomSequence: 0, pageSize: 1)
+                let input = try V2GroupEventPullBatchInput(ordinal: 0, query: query)
+                let packed = try await v2PackedGroupEventPulls([input], tokens: [token.roomID: token], maximumBytes: 1024, sql: sql)
+                #expect(packed.selected == [0])
+                #expect(packed.rows[0]?.count == 1)
+                #expect(packed.metadata[0]?.hasMore == true)
+                guard case .page(let first) = try await executor.pullSnapshot(query, token: token) else {
+                    Issue.record("missing first page"); return
                 }
-            }
-            await occupied.wait()
-            let start = ContinuousClock.now
-            _ = try await executor.pullSnapshot(query, token: token)
-            #expect(start.duration(to: .now) < .milliseconds(350))
-            try await blocker.value
-            #expect(try await activation.release(token: token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+                #expect(first.events.count == 1 && first.nextRoomSequence == 1 && first.hasMore)
+                let occupied = ActorQueryGate()
+                let blocker = Task {
+                    try await database.transaction { transaction in
+                        let lockedSQL = try #require(transaction as? any SQLDatabase)
+                        try await lockedSQL.raw("SELECT room_id FROM im_v2.rooms WHERE room_id=\(bind: room) FOR UPDATE").run()
+                        await occupied.signal()
+                        try await ContinuousClock().sleep(for: .milliseconds(500))
+                    }
+                }
+                await occupied.wait()
+                let start = ContinuousClock.now
                 _ = try await executor.pullSnapshot(query, token: token)
+                #expect(start.duration(to: .now) < .milliseconds(350))
+                try await blocker.value
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                    _ = try await executor.pullSnapshot(query, token: token)
+                }
             }
         }
     }
@@ -64,8 +64,6 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
     func packedPullBounds() async throws {
         try await withActorQueryDatabase { database, sql in
             let actor = UUID(), roomA = UUID(), roomB = UUID()
-            let activation = PostgresV2RoomActivationStore(database: database)
-            var tokens: [RoomID: V2RoomActivationToken] = [:]
             var inputs: [V2GroupEventPullBatchInput] = []
             for (ordinal, room) in [roomA, roomB].enumerated() {
                 try await seedRoom(sql: sql, room: room, actor: actor, sequence: 1)
@@ -74,26 +72,28 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
                     INSERT INTO im_v2.room_events(event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at)
                     VALUES (\(bind: UUID()),\(bind: room),1,'room.created',\(bind: payload)::jsonb,1,now())
                     """).run()
-                let token = try await acquire(activation, room: room,
-                    owner: .init(shardID: "owner-a", epoch: 0), host: "host-a")
-                tokens[token.roomID] = token
-                inputs.append(try .init(ordinal: ordinal, query: .init(roomID: token.roomID,
+                inputs.append(try .init(ordinal: ordinal, query: .init(roomID: .init(uuid: room),
                     actorUserID: .init(uuid: actor), afterRoomSequence: 0, pageSize: 10)))
             }
-            let packed = try await v2PackedGroupEventPulls(inputs, tokens: tokens, maximumBytes: 1500, sql: sql)
-            #expect(packed.selected == [0])
-            #expect(packed.rows[0]?.count == 1 && packed.rows[1] == nil)
-            #expect(packed.byteHints.count == 2)
-            let tokenA = try #require(tokens[RoomID(uuid: roomA)])
-            #expect(try await activation.release(token: tokenA))
-            let mixed = try await v2PackedGroupEventPulls(inputs, tokens: tokens, maximumBytes: 4000, sql: sql)
-            #expect(mixed.failures[0] != nil && mixed.rows[0] == nil)
-            #expect(mixed.rows[1]?.count == 1)
-            let stranger = try V2ActorRoomLogPullWire(roomID: .init(uuid: roomB), actorUserID: .init(uuid: UUID()),
-                afterRoomSequence: 0, pageSize: 10)
-            await #expect(throws: V2GroupEventLogError.actorNotMember) {
-                _ = try await V2ActorRoomQueryExecutor(database: database).pullSnapshot(stranger,
-                    token: tokens[RoomID(uuid: roomB)]!)
+            let selectedInputs = inputs
+            try await withRoomActivations(database: database,
+                roomIDs: [.init(uuid: roomA), .init(uuid: roomB)], shardID: "owner-a") { references in
+                let inputs = selectedInputs
+                let tokens = Dictionary(uniqueKeysWithValues: references.map { ($0.roomID, $0) })
+                let packed = try await v2PackedGroupEventPulls(inputs, tokens: tokens, maximumBytes: 1500, sql: sql)
+                #expect(packed.selected == [0])
+                #expect(packed.rows[0]?.count == 1 && packed.rows[1] == nil)
+                #expect(packed.byteHints.count == 2)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomA)").run()
+                let mixed = try await v2PackedGroupEventPulls(inputs, tokens: tokens, maximumBytes: 4000, sql: sql)
+                #expect(mixed.failures[0] != nil && mixed.rows[0] == nil)
+                #expect(mixed.rows[1]?.count == 1)
+                let stranger = try V2ActorRoomLogPullWire(roomID: .init(uuid: roomB), actorUserID: .init(uuid: UUID()),
+                    afterRoomSequence: 0, pageSize: 10)
+                await #expect(throws: V2GroupEventLogError.actorNotMember) {
+                    _ = try await V2ActorRoomQueryExecutor(database: database).pullSnapshot(stranger,
+                        token: tokens[RoomID(uuid: roomB)]!)
+                }
             }
         }
     }
@@ -103,39 +103,41 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         try await withActorQueryDatabase { database, sql in
             let room = UUID(), actor = UUID()
             try await seedRoom(sql: sql, room: room, actor: actor, sequence: 1)
-            let activation = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
-            let old = try await acquire(activation, room: room, owner: owner, host: "host-a")
             let receipt = V2ActorRoomReceiptExecutor(database: database,
                 projectionDelivery: SuccessfulProjectionDelivery())
             let operation = ReadReceiptOperationID(uuid: UUID())
             let request = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: room),
                 actorUserID: .init(uuid: actor), operationID: operation, readThroughRoomSequence: 1)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let first = try await receipt.command(.record(request), token: old, ingressAt: now)
-            guard case .record(.recorded(let recorded)) = first else {
-                Issue.record("first receipt did not record"); return
+            try await withRoomActivation(database: database, roomID: .init(uuid: room),
+                                         shardID: "owner-a") { old in
+                let first = try await receipt.command(.record(request), token: old, ingressAt: now)
+                guard case .record(.recorded(let recorded)) = first else {
+                    Issue.record("first receipt did not record"); return
+                }
+                #expect(recorded.readThroughRoomSequence == 1)
+                let replay = try await receipt.command(.record(request), token: old, ingressAt: now)
+                guard case .record(.idempotent(let prior)) = replay else {
+                    Issue.record("receipt replay was not idempotent"); return
+                }
+                #expect(prior.readThroughRoomSequence == 1)
+                let readers = try V2ActorReadReceiptReadersQueryWire(roomID: .init(uuid: room),
+                    messageID: .init(uuid: UUID()), actorUserID: .init(uuid: actor), cursor: nil, pageSize: 10)
+                let missing = try await receipt.query(.readerCandidates(readers), token: old)
+                #expect(missing == .readersFailure(.messageNotFound))
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                    _ = try await receipt.command(.record(request), token: old, ingressAt: now)
+                }
             }
-            #expect(recorded.readThroughRoomSequence == 1)
-            let replay = try await receipt.command(.record(request), token: old, ingressAt: now)
-            guard case .record(.idempotent(let prior)) = replay else {
-                Issue.record("receipt replay was not idempotent"); return
+            try await withRoomActivation(database: database, roomID: .init(uuid: room),
+                                         shardID: "owner-a", epoch: 1) { successor in
+                let retry = try await receipt.command(.record(request), token: successor, ingressAt: now)
+                guard case .record(.idempotent) = retry else { Issue.record("successor did not recover replay"); return }
+                let row = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")
+                    .first(decoding: ActorQueryCountRow.self))
+                #expect(row.value == 1)
             }
-            #expect(prior.readThroughRoomSequence == 1)
-            let readers = try V2ActorReadReceiptReadersQueryWire(roomID: .init(uuid: room),
-                messageID: .init(uuid: UUID()), actorUserID: .init(uuid: actor), cursor: nil, pageSize: 10)
-            let missing = try await receipt.query(.readerCandidates(readers), token: old)
-            #expect(missing == .readersFailure(.messageNotFound))
-            #expect(try await activation.release(token: old))
-            let successor = try await acquire(activation, room: room, owner: owner, host: "host-b")
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                _ = try await receipt.command(.record(request), token: old, ingressAt: now)
-            }
-            let retry = try await receipt.command(.record(request), token: successor, ingressAt: now)
-            guard case .record(.idempotent) = retry else { Issue.record("successor did not recover replay"); return }
-            let row = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")
-                .first(decoding: ActorQueryCountRow.self))
-            #expect(row.value == 1)
         }
     }
 
@@ -145,38 +147,38 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             let roomA = UUID(), roomB = UUID(), actor = UUID()
             try await seedRoom(sql: sql, room: roomA, actor: actor, sequence: 1)
             try await seedRoom(sql: sql, room: roomB, actor: actor, sequence: 1)
-            let activation = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
-            let oldA = try await acquire(activation, room: roomA, owner: owner, host: "host-a")
-            let currentB = try await acquire(activation, room: roomB, owner: owner, host: "host-a")
-            let executor = V2ActorRoomReceiptExecutor(database: database,
-                projectionDelivery: SuccessfulProjectionDelivery())
-            let user = UserID(uuid: actor), now = Date(timeIntervalSince1970: 1_750_000_000)
-            let oldOperation = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: roomA),
-                actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
-            _ = try await executor.command(.record(oldOperation), token: oldA, ingressAt: now)
-            #expect(try await activation.release(token: oldA))
-            _ = try await acquire(activation, room: roomA, owner: owner, host: "host-b")
-            let staleNewOperation = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: roomA),
-                actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
-            let validOperation = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: roomB),
-                actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
-            let batch = try V2ActorReadReceiptRecordBatchWire(requests: [oldOperation, staleNewOperation, validOperation])
-            let result = try await executor.recordBatch(batch, scope: .init(tokens: [oldA, currentB]), ingressAt: now)
-            #expect(result.results.count == 3)
-            #expect(result.results[0] == .failure(.ownerChanged))
-            #expect(result.results[1] == .failure(.ownerChanged))
-            guard case .success(.recorded) = result.results[2] else {
-                Issue.record("valid receipt did not commit beside stale rows"); return
+            try await withRoomActivations(database: database,
+                roomIDs: [.init(uuid: roomA), .init(uuid: roomB)], shardID: "owner-a") { tokens in
+                let oldA = try #require(tokens.first { $0.roomID == .init(uuid: roomA) })
+                let currentB = try #require(tokens.first { $0.roomID == .init(uuid: roomB) })
+                let executor = V2ActorRoomReceiptExecutor(database: database,
+                    projectionDelivery: SuccessfulProjectionDelivery())
+                let user = UserID(uuid: actor), now = Date(timeIntervalSince1970: 1_750_000_000)
+                let oldOperation = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: roomA),
+                    actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
+                _ = try await executor.command(.record(oldOperation), token: oldA, ingressAt: now)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomA)").run()
+                let staleNewOperation = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: roomA),
+                    actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
+                let validOperation = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: roomB),
+                    actorUserID: user, operationID: .init(uuid: UUID()), readThroughRoomSequence: 1)
+                let batch = try V2ActorReadReceiptRecordBatchWire(requests: [oldOperation, staleNewOperation, validOperation])
+                let result = try await executor.recordBatch(batch, scope: .init(tokens: [oldA, currentB]), ingressAt: now)
+                #expect(result.results.count == 3)
+                #expect(result.results[0] == .failure(.ownerChanged))
+                #expect(result.results[1] == .failure(.ownerChanged))
+                guard case .success(.recorded) = result.results[2] else {
+                    Issue.record("valid receipt did not commit beside stale rows"); return
+                }
+                let operationCount = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")
+                    .first(decoding: ActorQueryCountRow.self))
+                #expect(operationCount.value == 2)
+                let staleCount = try #require(try await sql.raw("""
+                    SELECT count(*) AS value FROM im_v2.read_receipt_operations
+                    WHERE operation_id = \(bind: staleNewOperation.operationID.uuidValue!)
+                    """).first(decoding: ActorQueryCountRow.self))
+                #expect(staleCount.value == 0)
             }
-            let operationCount = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")
-                .first(decoding: ActorQueryCountRow.self))
-            #expect(operationCount.value == 2)
-            let staleCount = try #require(try await sql.raw("""
-                SELECT count(*) AS value FROM im_v2.read_receipt_operations
-                WHERE operation_id = \(bind: staleNewOperation.operationID.uuidValue!)
-                """).first(decoding: ActorQueryCountRow.self))
-            #expect(staleCount.value == 0)
         }
     }
 
@@ -185,35 +187,35 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         try await withActorQueryDatabase { database, sql in
             let room = UUID(), actor = UUID()
             try await seedRoom(sql: sql, room: room, actor: actor, sequence: 1)
-            let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
-            let token = try await acquire(PostgresV2RoomActivationStore(database: database),
-                room: room, owner: owner, host: "host-a")
-            let locked = ActorQueryGate()
-            let blocker = Task {
-                defer { Task { await locked.signal() } }
-                try await database.transaction { transaction in
-                    let txSQL = try #require(transaction as? any SQLDatabase)
-                    try await txSQL.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE").run()
-                    await locked.signal()
-                    try await Task.sleep(for: .milliseconds(300))
+            try await withRoomActivation(database: database, roomID: .init(uuid: room),
+                                             shardID: "owner-a") { token in
+                let locked = ActorQueryGate()
+                let blocker = Task {
+                    defer { Task { await locked.signal() } }
+                    try await database.transaction { transaction in
+                        let txSQL = try #require(transaction as? any SQLDatabase)
+                        try await txSQL.raw("SELECT room_id FROM im_v2.rooms WHERE room_id = \(bind: room) FOR UPDATE").run()
+                        await locked.signal()
+                        try await Task.sleep(for: .milliseconds(300))
+                    }
                 }
+                await locked.wait()
+                let executor = V2ActorRoomReceiptExecutor(database: database,
+                    projectionDelivery: SuccessfulProjectionDelivery(),
+                    timeouts: try .init(lockMilliseconds: 75, statementMilliseconds: 1_000,
+                        idleTransactionMilliseconds: 1_000))
+                let request = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: room),
+                    actorUserID: .init(uuid: actor), operationID: .init(uuid: UUID()),
+                    readThroughRoomSequence: 1)
+                await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
+                    _ = try await executor.command(.record(request), token: token,
+                        ingressAt: Date(timeIntervalSince1970: 1_750_000_000))
+                }
+                try await blocker.value
+                let rows = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")
+                    .first(decoding: ActorQueryCountRow.self))
+                #expect(rows.value == 0)
             }
-            await locked.wait()
-            let executor = V2ActorRoomReceiptExecutor(database: database,
-                projectionDelivery: SuccessfulProjectionDelivery(),
-                timeouts: try .init(lockMilliseconds: 75, statementMilliseconds: 1_000,
-                    idleTransactionMilliseconds: 1_000))
-            let request = try V2ActorRecordReadReceiptWire(roomID: .init(uuid: room),
-                actorUserID: .init(uuid: actor), operationID: .init(uuid: UUID()),
-                readThroughRoomSequence: 1)
-            await #expect(throws: V2RoomCallFailure.rolledBack(.unavailable)) {
-                _ = try await executor.command(.record(request), token: token,
-                    ingressAt: Date(timeIntervalSince1970: 1_750_000_000))
-            }
-            try await blocker.value
-            let rows = try #require(try await sql.raw("SELECT count(*) AS value FROM im_v2.read_receipt_operations")
-                .first(decoding: ActorQueryCountRow.self))
-            #expect(rows.value == 0)
         }
     }
 
@@ -223,50 +225,50 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             let actor = UUID(), roomA = UUID(), roomB = UUID()
             try await seedRoom(sql: sql, room: roomA, actor: actor, sequence: 0)
             try await seedRoom(sql: sql, room: roomB, actor: actor, sequence: 0)
-            let activation = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
-            let tokenA = try await acquire(activation, room: roomA, owner: owner, host: "host-a")
-            let tokenB = try await acquire(activation, room: roomB, owner: owner, host: "host-a")
-            let executor = V2ActorRoomQueryExecutor(database: database)
-            let ids = [RoomID(uuid: roomA), RoomID(uuid: roomB)]
-            let user = UserID(uuid: actor)
-            let wire = try V2ActorRoomRecoveryBatchQueryWire(roomIDs: ids, actorUserID: user)
-            let stateResult = try await executor.recovery(.states(wire), tokens: [tokenA, tokenB])
-            guard case .states(let stateBatch) = stateResult else { Issue.record("state batch missing"); return }
-            let states = try stateBatch.domainValue(expectedRoomIDs: ids)
-            #expect(states.count == 2)
-            for id in ids {
-                guard case .state(let state)? = states[id] else { Issue.record("state unavailable"); continue }
-                #expect(state.ownerEpoch == 0 && state.head == 0 && state.viewerMembershipRevision == 1)
-            }
-            let latestResult = try await executor.recovery(.latestVisible(wire), tokens: [tokenA, tokenB])
-            guard case .latestVisible(let latestBatch) = latestResult else { Issue.record("latest batch missing"); return }
-            let latest = try latestBatch.domainValue(expectedRoomIDs: ids)
-            #expect(latest.count == 2)
-            for id in ids {
-                guard case .snapshot(let snapshot)? = latest[id] else { Issue.record("latest unavailable"); continue }
-                #expect(snapshot.latest == nil && snapshot.head == 0)
-            }
-            let subscription = try await executor.log(.subscribe(.init(roomID: ids[0], actorUserID: user)), token: tokenA)
-            guard case .subscription(let sub) = subscription else { Issue.record("subscription missing"); return }
-            #expect(sub.highWatermark == 0 && sub.membershipRevision == 1)
-            let pull = try V2ActorRoomLogPullWire(roomID: ids[0], actorUserID: user,
-                afterRoomSequence: 0, pageSize: 10)
-            let logPage = try await executor.log(.pull(pull), token: tokenA)
-            guard case .page(let pageWire) = logPage else { Issue.record("log page missing"); return }
-            #expect(pageWire.events.isEmpty && pageWire.nextRoomSequence == 0)
-            let membership = try V2ActorMembershipDirectoryQueryWire(roomID: ids[0], actorUserID: user,
-                cursor: nil, pageSize: 10)
-            let directory = try await executor.directory(.membership(membership), token: tokenA)
-            guard case .membership(let page) = directory else { Issue.record("directory missing"); return }
-            #expect(page.entries.map(\.userID) == [user])
-            let baseline = try await executor.directory(.roleBaseline(.init(roomID: ids[0], actorUserID: user)), token: tokenA)
-            guard case .roleBaseline(let policy) = baseline else { Issue.record("baseline missing"); return }
-            #expect(policy.permissionRevision == 1 && policy.membershipRevision == 1)
-            #expect(try await activation.release(token: tokenA))
-            _ = try await acquire(activation, room: roomA, owner: owner, host: "host-b")
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                _ = try await executor.recovery(.states(wire), tokens: [tokenA, tokenB])
+            try await withRoomActivations(database: database,
+                roomIDs: [.init(uuid: roomA), .init(uuid: roomB)], shardID: "owner-a") { tokens in
+                let tokenA = try #require(tokens.first { $0.roomID == .init(uuid: roomA) })
+                let tokenB = try #require(tokens.first { $0.roomID == .init(uuid: roomB) })
+                let executor = V2ActorRoomQueryExecutor(database: database)
+                let ids = [RoomID(uuid: roomA), RoomID(uuid: roomB)]
+                let user = UserID(uuid: actor)
+                let wire = try V2ActorRoomRecoveryBatchQueryWire(roomIDs: ids, actorUserID: user)
+                let stateResult = try await executor.recovery(.states(wire), tokens: [tokenA, tokenB])
+                guard case .states(let stateBatch) = stateResult else { Issue.record("state batch missing"); return }
+                let states = try stateBatch.domainValue(expectedRoomIDs: ids)
+                #expect(states.count == 2)
+                for id in ids {
+                    guard case .state(let state)? = states[id] else { Issue.record("state unavailable"); continue }
+                    #expect(state.ownerEpoch == 0 && state.head == 0 && state.viewerMembershipRevision == 1)
+                }
+                let latestResult = try await executor.recovery(.latestVisible(wire), tokens: [tokenA, tokenB])
+                guard case .latestVisible(let latestBatch) = latestResult else { Issue.record("latest batch missing"); return }
+                let latest = try latestBatch.domainValue(expectedRoomIDs: ids)
+                #expect(latest.count == 2)
+                for id in ids {
+                    guard case .snapshot(let snapshot)? = latest[id] else { Issue.record("latest unavailable"); continue }
+                    #expect(snapshot.latest == nil && snapshot.head == 0)
+                }
+                let subscription = try await executor.log(.subscribe(.init(roomID: ids[0], actorUserID: user)), token: tokenA)
+                guard case .subscription(let sub) = subscription else { Issue.record("subscription missing"); return }
+                #expect(sub.highWatermark == 0 && sub.membershipRevision == 1)
+                let pull = try V2ActorRoomLogPullWire(roomID: ids[0], actorUserID: user,
+                    afterRoomSequence: 0, pageSize: 10)
+                let logPage = try await executor.log(.pull(pull), token: tokenA)
+                guard case .page(let pageWire) = logPage else { Issue.record("log page missing"); return }
+                #expect(pageWire.events.isEmpty && pageWire.nextRoomSequence == 0)
+                let membership = try V2ActorMembershipDirectoryQueryWire(roomID: ids[0], actorUserID: user,
+                    cursor: nil, pageSize: 10)
+                let directory = try await executor.directory(.membership(membership), token: tokenA)
+                guard case .membership(let page) = directory else { Issue.record("directory missing"); return }
+                #expect(page.entries.map(\.userID) == [user])
+                let baseline = try await executor.directory(.roleBaseline(.init(roomID: ids[0], actorUserID: user)), token: tokenA)
+                guard case .roleBaseline(let policy) = baseline else { Issue.record("baseline missing"); return }
+                #expect(policy.permissionRevision == 1 && policy.membershipRevision == 1)
+                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomA)").run()
+                await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                    _ = try await executor.recovery(.states(wire), tokens: [tokenA, tokenB])
+                }
             }
         }
     }
@@ -277,33 +279,36 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
             let actor = UUID(), roomA = UUID(), roomB = UUID()
             try await seedRoom(sql: sql, room: roomA, actor: actor, sequence: 0)
             try await seedRoom(sql: sql, room: roomB, actor: actor, sequence: 0)
-            let activation = PostgresV2RoomActivationStore(database: database)
-            let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
-            let tokenA = try await acquire(activation, room: roomA, owner: owner, host: "host-a")
-            let tokenB = try await acquire(activation, room: roomB, owner: owner, host: "host-a")
-            let batcher = V2HostRoomRecoveryQueryBatcher(executor: .init(database: database),
-                configuration: try .init(maximumItems: 2))
-            let batchDeadline = ContinuousClock.now.advanced(by: .milliseconds(50))
-            let callDeadline = ContinuousClock.now.advanced(by: .seconds(2)), user = UserID(uuid: actor)
-            let first = Task { try await batcher.state(.init(token: tokenA, actorUserID: user,
-                batchDeadline: batchDeadline, callDeadline: callDeadline)) }
-            let second = Task { try await batcher.state(.init(token: tokenB, actorUserID: user,
-                batchDeadline: batchDeadline, callDeadline: callDeadline)) }
-            guard case .state(let stateA) = try await first.value,
-                  case .state(let stateB) = try await second.value else {
-                Issue.record("granted batch did not return both states"); return
-            }
-            #expect(stateA.roomID == .init(uuid: roomA) && stateB.roomID == .init(uuid: roomB))
-            guard case .snapshot(let latest) = try await batcher.latestVisible(.init(token: tokenA,
-                actorUserID: user, batchDeadline: ContinuousClock.now.advanced(by: .milliseconds(-1)),
-                callDeadline: ContinuousClock.now.advanced(by: .seconds(2)))) else {
-                Issue.record("granted latest-visible turn did not complete"); return
-            }
-            #expect(latest.roomID == .init(uuid: roomA) && latest.latest == nil)
-            await #expect(throws: V2HostRoomRecoveryBatchError.deadlineExceeded) {
-                _ = try await batcher.state(.init(token: tokenA, actorUserID: user,
-                    batchDeadline: ContinuousClock.now.advanced(by: .milliseconds(-1)),
-                    callDeadline: ContinuousClock.now.advanced(by: .milliseconds(-1))))
+            try await withRoomActivations(database: database,
+                roomIDs: [.init(uuid: roomA), .init(uuid: roomB)], shardID: "owner-a") { tokens in
+                let tokenA = try #require(tokens.first { $0.roomID == .init(uuid: roomA) })
+                let tokenB = try #require(tokens.first { $0.roomID == .init(uuid: roomB) })
+                let batcher = V2HostRoomRecoveryQueryBatcher(executor: .init(database: database),
+                    configuration: try .init(maximumItems: 2))
+                let batchDeadline = ContinuousClock.now.advanced(by: .milliseconds(50))
+                let callDeadline = ContinuousClock.now.advanced(by: .seconds(2)), user = UserID(uuid: actor)
+                let first = Task { try await batcher.state(.init(token: tokenA, actorUserID: user,
+                    batchDeadline: batchDeadline, callDeadline: callDeadline)) }
+                let second = Task { try await batcher.state(.init(token: tokenB, actorUserID: user,
+                    batchDeadline: batchDeadline, callDeadline: callDeadline)) }
+                let a = await first.result
+                let b = await second.result
+                guard case .state(let stateA) = try a.get(),
+                      case .state(let stateB) = try b.get() else {
+                    Issue.record("granted batch did not return both states"); return
+                }
+                #expect(stateA.roomID == .init(uuid: roomA) && stateB.roomID == .init(uuid: roomB))
+                guard case .snapshot(let latest) = try await batcher.latestVisible(.init(token: tokenA,
+                    actorUserID: user, batchDeadline: ContinuousClock.now.advanced(by: .milliseconds(-1)),
+                    callDeadline: ContinuousClock.now.advanced(by: .seconds(2)))) else {
+                    Issue.record("granted latest-visible turn did not complete"); return
+                }
+                #expect(latest.roomID == .init(uuid: roomA) && latest.latest == nil)
+                await #expect(throws: V2HostRoomRecoveryBatchError.deadlineExceeded) {
+                    _ = try await batcher.state(.init(token: tokenA, actorUserID: user,
+                        batchDeadline: ContinuousClock.now.advanced(by: .milliseconds(-1)),
+                        callDeadline: ContinuousClock.now.advanced(by: .milliseconds(-1))))
+                }
             }
         }
     }
@@ -313,16 +318,16 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
         try await withActorQueryDatabase { database, sql in
             let actor = UUID(), room = UUID()
             try await seedRoom(sql: sql, room: room, actor: actor, sequence: 0)
-            let owner = try V2RoomDataOwner(shardID: "owner-a", epoch: 0)
-            let token = try await acquire(PostgresV2RoomActivationStore(database: database),
-                room: room, owner: owner, host: "host-a")
-            let batcher = V2HostRoomRecoveryQueryBatcher(executor: .init(database: database),
-                configuration: try .init(maximumItems: 2))
-            let result = try await batcher.state(.init(token: token, actorUserID: .init(uuid: actor),
-                batchDeadline: ContinuousClock.now.advanced(by: .seconds(-1)),
-                callDeadline: ContinuousClock.now.advanced(by: .seconds(2))))
-            guard case .state(let state) = result else { Issue.record("state was not dispatched"); return }
-            #expect(state.roomID == .init(uuid: room))
+            try await withRoomActivation(database: database, roomID: .init(uuid: room),
+                                             shardID: "owner-a") { token in
+                let batcher = V2HostRoomRecoveryQueryBatcher(executor: .init(database: database),
+                    configuration: try .init(maximumItems: 2))
+                let result = try await batcher.state(.init(token: token, actorUserID: .init(uuid: actor),
+                    batchDeadline: ContinuousClock.now.advanced(by: .seconds(-1)),
+                    callDeadline: ContinuousClock.now.advanced(by: .seconds(2))))
+                guard case .state(let state) = result else { Issue.record("state was not dispatched"); return }
+                #expect(state.roomID == .init(uuid: room))
+            }
         }
     }
 
@@ -486,16 +491,6 @@ private func seedRoom(sql: any SQLDatabase, room: UUID, actor: UUID, sequence: I
         VALUES (\(bind: actor), \(bind: "actor_" + actor.uuidString.prefix(8).lowercased()), 'Actor', now(), now())
         ON CONFLICT (user_id) DO NOTHING
         """).run()
-}
-
-private func acquire(_ store: PostgresV2RoomActivationStore, room: UUID,
-                     owner: V2RoomDataOwner, host: String) async throws -> V2RoomActivationToken {
-    let identity = V2ActorHostIdentity(hostID: try .init(host), incarnationID: UUID())
-    guard case .acquired(let lease) = try await store.acquire(roomID: .init(uuid: room), owner: owner,
-        host: identity, duration: try .init(10_000)) else {
-        throw V2RoomActivationLeaseError.activationChanged
-    }
-    return lease.token
 }
 
 private func withActorQueryDatabase(

@@ -16,6 +16,7 @@ from virtual_actor_capacity_measurement import MeasurementFailure, freeze_calibr
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--main-revision", required=True, help="full revision of the native Placement baseline")
     parser.add_argument("--main-run", type=Path, action="append", required=True,
                         help="repeat exactly three times with distinct private main evidence directories")
     parser.add_argument("--thresholds-json", type=Path, required=True,
@@ -27,7 +28,7 @@ def main() -> int:
     thresholds = json.loads(args.thresholds_json.read_text())
     if not isinstance(thresholds, dict):
         parser.error("thresholds JSON must be an object")
-    frozen = freeze_calibrations([path.resolve() for path in args.main_run], thresholds)
+    frozen = freeze_calibrations([path.resolve() for path in args.main_run], thresholds, main_revision=args.main_revision)
     with args.output.open("x", encoding="utf-8") as stream:
         os.fchmod(stream.fileno(), 0o600)
         json.dump(frozen, stream, indent=2, sort_keys=True)

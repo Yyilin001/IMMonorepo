@@ -18,7 +18,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let expired = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
                 senderUserID: senderID, clientMessageID: operation, text: "expired input",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_749_999_999_000)
-            func query(_ command: V2MessageSendOperationCommand) throws -> V2MessageSendOperationRecoveryRequest {
+            @Sendable func query(_ command: V2MessageSendOperationCommand) throws -> V2MessageSendOperationRecoveryRequest {
                 try .init(identity: command.identity, fingerprint: command.fingerprint,
                     domainFingerprint: command.command.fingerprint)
             }
@@ -67,7 +67,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 projectionDelivery: SuccessfulProjectionDelivery()) { owners in
                 let preferences = PostgresV2AccountPreferenceOperationStore(database: database,
                     projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
-                func setPermission(_ allowed: Bool) async throws {
+                @Sendable func setPermission(_ allowed: Bool) async throws {
                     guard case .receipt(let receipt) = try await preferences.executePreferenceFixture(
                         owner: recipient, operation: .strangerMessagePreference(.init(uuid: UUID())),
                         value: .strangerMessage(allowed ? .allow : .deny), now: Date()),

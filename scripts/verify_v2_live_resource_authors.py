@@ -32,6 +32,8 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'IMV2/scripts'))
+from v2_native_placement_processes import voter_arguments, start_controls
 
 
 def free_port():
@@ -209,7 +211,7 @@ def main():
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(('IMV2_', 'IM_V2_'))}
     with (output / 'build.log').open('w') as log:
-        products = ['IMV2AccountServerApp', 'IMV2ServerApp', 'IMV2ResourceImageWorker']
+        products = ['IMV2PlacementControlApp', 'IMV2AccountServerApp', 'IMV2ServerApp', 'IMV2ResourceImageWorker']
         if args.extended_acceptance:
             products.append('IMV2OperatorServerApp')
         for product in products:
@@ -237,9 +239,9 @@ def main():
                 return subprocess.check_output(['psql', '-X', *database_args, '-d', 'im_live_resources',
                     '-v', 'ON_ERROR_STOP=1', '-tA', '-c', statement], env=environment, text=True).strip()
 
-            def launch(name, config):
+            def launch(name, config, executable=None):
                 log = (output / (name + '.log')).open('w'); logs.append(log)
-                process = subprocess.Popen([str(binary / name)], env=dict(environment, **config),
+                process = subprocess.Popen([str(executable or binary / name)], env=dict(environment, **config),
                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
                 process._owned_process_group = process.pid
                 processes.append(process)
@@ -257,7 +259,12 @@ def main():
                      '-f', str(ROOT / 'IMV2/sql/realtime-change-journal.sql')])
                 run([sys.executable, str(ROOT / 'IMV2/scripts/prepare_v2_room_actor_configuration.py'),
                      '--output-dir', str(private / 'actors'), '--host', f'gateway=localhost:{free_port()}',
-                     '--caller', f'account=localhost:{free_port()}', '--shards', 'rooms-primary'])
+                     '--caller', f'account=localhost:{free_port()}', '--shards', 'rooms-primary']
+                     + voter_arguments([free_port() for _ in range(3)]))
+                placement_processes = []
+                start_controls(binary=binary / 'IMV2PlacementControlApp', actors=private / 'actors',
+                    shards=['rooms-primary'], log_directory=output, owned=placement_processes,
+                    spawn=lambda name, executable, config: launch(name, config, executable))
                 certificate = private / 'actors/gateway/tls.pem'
                 key = private / 'actors/gateway/tls.key'
                 run(['openssl', 'x509', '-in', str(private / 'actors/gateway/ca.pem'),

@@ -22,11 +22,14 @@ class LocalPolicyConfigurationTests(unittest.TestCase):
         cls.command = [sys.executable, str(SCRIPTS / "prepare_v2_room_actor_configuration.py"),
                        "--output-dir", str(cls.generated), "--host", "gateway=gateway:7337",
                        "--caller", "account=account:7338", "--caller", "operator=operator:7339",
+                       "--placement-voter", "placement-a=placement-a:7336",
+                       "--placement-voter", "placement-b=placement-b:7336",
+                       "--placement-voter", "placement-c=placement-c:7336",
                        "--shards", "rooms-primary", "--user-buckets", "users-primary",
                        "--mount-root", "/run/im-v2-room-actor", "--policy-partitions", "16"]
         subprocess.run(cls.command, check=True, capture_output=True)
         cls.documents = {name: json.loads((cls.generated / name / "configuration.json").read_text())
-                         for name in ("gateway", "account", "operator")}
+                         for name in ("gateway", "account", "operator", "placement-a", "placement-b", "placement-c")}
 
     @classmethod
     def tearDownClass(cls):
@@ -46,10 +49,13 @@ class LocalPolicyConfigurationTests(unittest.TestCase):
         for name, document in self.documents.items():
             self.assertEqual(document["serviceID"], name)
             self.assertTrue((self.generated / name / "signing.key").is_file())
-            self.assertEqual(document["policyPlacement"], self.documents["gateway"]["policyPlacement"])
+            if name in ("gateway", "account", "operator"):
+                self.assertEqual(document["policyPlacement"], self.documents["gateway"]["policyPlacement"])
+            else:
+                self.assertNotIn("policyPlacement", document)
 
     def test_legacy_or_different_writer_placement_is_rejected(self):
-        for name in self.documents:
+        for name in ("gateway", "account", "operator"):
             with self.subTest(process=name):
                 documents = copy.deepcopy(self.documents)
                 documents[name].pop("policyPlacement")
@@ -71,7 +77,8 @@ class LocalPolicyConfigurationTests(unittest.TestCase):
 
     def test_incomplete_partition_ownership_is_rejected(self):
         documents = copy.deepcopy(self.documents)
-        for document in documents.values():
+        for name in ("gateway", "account", "operator"):
+            document = documents[name]
             document["policyPlacement"]["owners"][0]["partitions"].pop()
         with self.assertRaises(ValueError):
             self.validate_documents(documents)
@@ -84,6 +91,22 @@ class LocalPolicyConfigurationTests(unittest.TestCase):
         after = {path.relative_to(self.generated): path.read_bytes()
                  for path in self.generated.rglob("*") if path.is_file()}
         self.assertEqual(before, after)
+
+    def test_missing_or_cohosted_control_is_rejected(self):
+        documents = copy.deepcopy(self.documents)
+        documents["gateway"].pop("placementControl")
+        with self.assertRaises(ValueError):
+            self.validate_documents(documents)
+        documents = copy.deepcopy(self.documents)
+        documents["placement-a"]["hostID"] = documents["gateway"]["hostID"]
+        with self.assertRaises(ValueError):
+            self.validate_documents(documents)
+
+    def test_reader_with_different_quorum_is_rejected(self):
+        documents = copy.deepcopy(self.documents)
+        documents["account"]["placementControl"]["voters"][0]["hostID"] = "different-voter"
+        with self.assertRaises(ValueError):
+            self.validate_documents(documents)
 
 
 if __name__ == "__main__":

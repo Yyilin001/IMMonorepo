@@ -16,12 +16,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .large) { database, _, sql, _, _ in
             let peer = RoomID(uuid: UUID())
             try await actorBatchSeedPeerRoom(peer, on: sql)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let first = try await actorBatchLease(leases, room: roomID)
-            let second = try await actorBatchLease(leases, room: peer)
+            try await withRoomActivations(database: database, roomIDs: [roomID, peer]) { tokens in
             let roomIDs = try [roomID, peer].map { try #require($0.uuidValue) }
                 .sorted { $0.uuidString > $1.uuidString }
-            let scope = try V2RoomActivationWriteScope(tokens: [first, second])
+            let scope = try V2RoomActivationWriteScope(tokens: tokens)
             let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
             let routes = Dictionary(uniqueKeysWithValues: roomIDs.map { ($0, route) })
             let kinds = Dictionary(uniqueKeysWithValues: roomIDs.map { ($0, "group") })
@@ -31,21 +29,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 unusedAfterSuccess.withLock { $0 = context }
             }
             let endedUnused = try #require(unusedAfterSuccess.withLock { $0 })
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            await #expect(throws: V2RoomActorStateError.activationChanged) {
                 try await endedUnused.requireSelectedOwnersAndActivations(
                     roomIDs: roomIDs, expectedRoutes: routes,
                     expectedKinds: kinds, scope: scope)
             }
             let unusedAfterThrow = Mutex<V2ConfiguredRoomFenceContext?>(nil)
-            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 let _: Void = try await v2WithRoomActivationTransactionWithContext(
                     database: database, deadline: .now + .seconds(3)) { _, context in
                     unusedAfterThrow.withLock { $0 = context }
-                    throw V2RoomActivationLeaseError.ownerChanged
+                    throw V2RoomActorStateError.ownerChanged
                 }
             }
             let rolledBackUnused = try #require(unusedAfterThrow.withLock { $0 })
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            await #expect(throws: V2RoomActorStateError.activationChanged) {
                 try await rolledBackUnused.requireSelectedOwnersAndActivations(
                     roomIDs: roomIDs, expectedRoutes: routes,
                     expectedKinds: kinds, scope: scope)
@@ -59,7 +57,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 escaped.withLock { $0 = context }
             }
             let ended = try #require(escaped.withLock { $0 })
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            await #expect(throws: V2RoomActorStateError.activationChanged) {
                 try await ended.requireSelectedOwnersAndActivations(
                     roomIDs: roomIDs, expectedRoutes: routes,
                     expectedKinds: kinds, scope: scope)
@@ -103,12 +101,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         expectedKinds: kinds, scope: scope)
                 }
             }
-            try await sql.raw("""
-                UPDATE im_v2.room_activation_leases
-                SET expires_at = clock_timestamp() - interval '1 second'
-                WHERE room_id = \(bind: roomIDs[0])
-                """).run()
-            await #expect(throws: V2RoomActivationLeaseError.leaseExpired) {
+            try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomIDs[0])").run()
+            await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
                 try await v2WithRoomActivationTransactionWithContext(
                     database: database, deadline: .now + .seconds(3)) { _, context in
                     try await context.requireSelectedOwnersAndActivations(
@@ -117,20 +111,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
             #expect(try await count("im_v2.messages", on: sql) == 0)
-            let valid = first.roomID.uuidValue == roomIDs[0] ? second : first
-            #expect(try await leases.release(token: valid))
+            }
         }
     }
 
-    @Test("configured single-room fence preserves owner, route, kind and exact lease errors",
+    @Test("configured single-room fence preserves data owner, route, kind and scope errors",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"
               && ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_URL"] != nil
               && ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"] != nil))
     func configuredSingleRoomFence() async throws {
         try await withForwardOwnerDatabases(mode: .large) { database, _, sql, _, _ in
             let room = try #require(roomID.uuidValue)
-            let leases = PostgresV2RoomActivationStore(database: database)
-            let token = try await actorBatchLease(leases, room: roomID)
+            let missingRoom = RoomID(uuid: UUID())
+            try await withRoomActivations(database: database, roomIDs: [roomID, missingRoom]) { tokens in
+            let token = try #require(tokens.first { $0.roomID == roomID })
+            let missingToken = try #require(tokens.first { $0.roomID == missingRoom })
             let scope = try V2RoomActivationWriteScope(tokens: [token])
             let route = try V2RoomShardRoute(shardID: "room-a", epoch: 0)
             let routes = [room: route]
@@ -188,12 +183,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
             }
 
-            let missingRoom = RoomID(uuid: UUID())
             let missingID = try #require(missingRoom.uuidValue)
-            let missingToken = V2RoomActivationToken(roomID: missingRoom, owner: token.owner,
-                activationEpoch: token.activationEpoch, host: token.host)
             let missingScope = try V2RoomActivationWriteScope(tokens: [missingToken])
-            await #expect(throws: V2RoomActivationLeaseError.roomNotFound) {
+            await #expect(throws: V2RoomActorStateError.roomNotFound) {
                 try await v2WithRoomActivationTransactionWithContext(
                     database: database, deadline: .now + .seconds(3)) { _, context in
                     try await context.requireSelectedOwnersAndActivations(
@@ -210,7 +202,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         expectedKinds: nil, scope: missingScope)
                 }
             }
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            await #expect(throws: V2RoomActorStateError.activationChanged) {
                 try await v2WithRoomActivationTransactionWithContext(
                     database: database, deadline: .now + .seconds(3)) { _, context in
                     try await context.requireSelectedOwnersAndActivations(
@@ -218,60 +210,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         expectedKinds: kinds, scope: missingScope)
                 }
             }
-            let differentOwner = try V2RoomDataOwner(shardID: "room-a", epoch: 1)
-            let wrongOwnerToken = V2RoomActivationToken(roomID: roomID, owner: differentOwner,
-                activationEpoch: token.activationEpoch, host: token.host)
-            let wrongOwnerScope = try V2RoomActivationWriteScope(tokens: [wrongOwnerToken])
-            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) {
+            // Actor identity is fenced by the native Host, not a second SQL
+            // activation row. SQL continues to reject data-owner changes.
+            try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 try await v2WithRoomActivationTransactionWithContext(
                     database: database, deadline: .now + .seconds(3)) { _, context in
                     try await context.requireSelectedOwnersAndActivations(
-                        roomIDs: [room], expectedRoutes: routes,
-                        expectedKinds: kinds, scope: wrongOwnerScope)
-                }
-            }
-
-            #expect(try await leases.release(token: token))
-            let successor = try await actorBatchLease(leases, room: roomID)
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
-                try await v2WithRoomActivationTransactionWithContext(
-                    database: database, deadline: .now + .seconds(3)) { _, context in
-                    try await context.requireSelectedOwnersAndActivations(
-                        roomIDs: [room], expectedRoutes: routes,
+                        roomIDs: [room], expectedRoutes: nil,
                         expectedKinds: kinds, scope: scope)
                 }
             }
-            let currentScope = try V2RoomActivationWriteScope(tokens: [successor])
-            try await sql.raw("""
-                UPDATE im_v2.room_activation_leases
-                SET expires_at = clock_timestamp() - interval '1 second'
-                WHERE room_id = \(bind: room)
-                """).run()
-            await #expect(throws: V2RoomActivationLeaseError.leaseExpired) {
-                try await v2WithRoomActivationTransactionWithContext(
-                    database: database, deadline: .now + .seconds(3)) { _, context in
-                    try await context.requireSelectedOwnersAndActivations(
-                        roomIDs: [room], expectedRoutes: routes,
-                        expectedKinds: kinds, scope: currentScope)
-                }
-            }
             #expect(try await count("im_v2.messages", on: sql) == 0)
+            }
         }
     }
-
-
-
-    private func actorBatchLease(_ leases: PostgresV2RoomActivationStore, room: RoomID) async throws -> V2RoomActivationToken {
-        let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
-        let host = V2ActorHostIdentity(hostID: try .init("batch-host"), incarnationID: UUID())
-        guard case .acquired(let lease) = try await leases.acquire(roomID: room,
-            owner: owner, host: host, duration: .init(30_000)) else {
-            throw V2RoomActivationLeaseError.activationChanged
-        }
-        return lease.token
-    }
-
-
 
 
 

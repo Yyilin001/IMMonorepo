@@ -8,6 +8,50 @@ import IMV2Core
 import Synchronization
 
 actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
+    package func writePlacement(_ request: V2PlacementRaftWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
+        guard request.isBounded else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        let response = try await exchange(.placementWrite(request), on: host,
+            principal: .service, deadline: deadline, roomToken: nil)
+        if case .failure(let failure) = response { throw failure }
+        guard case .placementWrite(let reply) = response, reply.isBounded, reply.shardID == request.shardID else {
+            throw V2RoomCallFailure.outcomeUnknown
+        }
+        return reply
+    }
+    package func readPlacement(_ request: V2PlacementRaftWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
+        guard request.isBounded else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        let response = try await exchange(.placementRead(request), on: host,
+            principal: .service, deadline: deadline, roomToken: nil)
+        if case .failure(let failure) = response { throw failure }
+        guard case .placementRead(let reply) = response, reply.isBounded, reply.shardID == request.shardID else {
+            throw V2RoomCallFailure.outcomeUnknown
+        }
+        return reply
+    }
+    package func exchangeRaft(_ request: V2PlacementRaftWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
+        guard request.isBounded else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        let response = try await exchange(.placementRaft(request), on: host,
+            principal: .service, deadline: deadline, roomToken: nil)
+        if case .failure(let failure) = response { throw failure }
+        guard case .placementRaft(let reply) = response, reply.isBounded, reply.shardID == request.shardID else {
+            throw V2RoomCallFailure.outcomeUnknown
+        }
+        return reply
+    }
+    package func drainPlacement(_ request: V2ActorPlacementDrainWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws -> V2ActorPlacementDrainReceipt {
+        guard request.isBounded else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        let response = try await exchange(.drainPlacement(request), on: host,
+            principal: .service, deadline: deadline, roomToken: nil)
+        if case .failure(let failure) = response { throw failure }
+        guard case .placementDrained(let receipt) = response,
+              try receipt.matches(request, host: host) else { throw V2RoomCallFailure.outcomeUnknown }
+        return receipt.receipt
+    }
+
     package func forwardPair(_ pair: V2ActorForwardPairWire, token: V2RoomActivationToken,
         deadline: ContinuousClock.Instant) async throws -> V2ActorForwardMessageResultWire {
         let response = try await exchange(.forwardPair(token: token, pair: pair), on: token.host,
@@ -298,11 +342,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 try rememberPhysical(physical, token: token)
             }
             return .ready(token)
-        case .occupied(let lease):
-            guard lease.token.roomID == roomID, lease.token.owner == owner else {
-                throw V2RoomCallFailure.notAccepted(.staleActivation)
-            }
-            return .occupied(lease)
         case .failure(let failure): throw failure
         default: throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
@@ -1506,8 +1545,8 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
 
     private func isExplicitlyStale(_ failure: V2RoomCallFailure) -> Bool {
         switch failure {
-        case .notAccepted(.staleActivation), .notAccepted(.retired), .notAccepted(.leaseLost),
-             .rolledBack(.staleActivation), .rolledBack(.retired), .rolledBack(.leaseLost): true
+        case .notAccepted(.staleActivation), .notAccepted(.retired), .notAccepted(.authorityLost),
+             .rolledBack(.staleActivation), .rolledBack(.retired), .rolledBack(.authorityLost): true
         default: false
         }
     }

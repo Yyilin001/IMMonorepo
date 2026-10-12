@@ -1,5 +1,7 @@
 # G5 隔离真实发送 canary
 
+> 历史 V1 记录：本文的固定旧 revision、NET_ADMIN 诊断选项及旧容量结果不属于当前原生分布式 Actor 的可运行协议。当前入口要求显式原生基线 revision、三个 Placement 节点和一致的 Actor 指标检查，见[当前契约](../room-virtual-actor-contract.md)。
+
 `IMV2/scripts/test_v2_virtual_actor_capacity_canary.py` 用同一份容量 fixture 对冻结 main 或 candidate 各执行一次真实 TLS/protobuf Gateway 发送。它不编译、不修改源码，不依赖用户默认 Compose；每次随机创建 `imv2-va-cap-*` 项目、loopback 随机端口、control + N 个 owner PG、Gateway 和单次 loader，最后只销毁该项目的容器/卷。源码 checkout 必须干净且与 `--source-sha` 完全相等。Gateway 和 loader 都来自显式 Linux Release 产品目录；runner 用已完成的 `result.json` 核对源码、lockfile、固定 Swift 镜像和 ELF SHA-256，再复制到本次私有运行目录并重新哈希。
 
 正式对照应给 main 与 candidate **同一个修正 TCP socket option 的 Release loader**；它可以来自独立于服务源码的构建。传 `--loader-products-dir` 与 `--loader-build-result` 两项，runner 会核对并在结果中记录 loader 自身的 source/lockfile/build-result/ELF SHA。未传时才使用所选版本的原始 loader。冻结 main 的原始 loader 把 TCP_NODELAY 误传为 SOL_SOCKET/SO_DEBUG，在普通 Linux 容器中会因 EPERM 失败。`--legacy-loader-net-admin` 仅供临时诊断已冻结原始 main 二进制，且只给一次性 loader 容器 NET_ADMIN；正式 canary 和容量采样均不使用该参数。

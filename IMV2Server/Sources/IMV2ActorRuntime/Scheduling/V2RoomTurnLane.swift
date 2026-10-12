@@ -26,7 +26,7 @@ public struct V2RoomTurnContext: Sendable {
     public let turnID: UUID
     /// 共享数据库批处理器使用此预算的剩余部分，不能再启动独立的批处理等待。
     public let batchDeadline: ContinuousClock.Instant
-    /// Exact Host-confirmed authority, capped by room lease safety and service qualification.
+    /// Exact Host-confirmed authority, capped by local service qualification.
     /// Filled at dispatch by the Host, never decoded from a remote request.
     public let activationValidUntil: ContinuousClock.Instant?
     public let queueWaitDuration: Duration
@@ -261,7 +261,7 @@ public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
         if completion == .outcomeUnknown {
             phase = .uncertain
             unresolved.append(held.entry.permit)
-            await rejectQueued(reason: .leaseLost)
+            await rejectQueued(reason: .authorityLost)
             await onUncertain(token)
         } else {
             budget.release(held.entry.permit)
@@ -279,11 +279,11 @@ public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
     }
 
     /// 租约丢失会独立于业务消费方关闭准入。已分发的事务仍保有完成结果和已扣的许可。
-    public func loseLease() async {
+    public func loseExecutionAuthority() async {
         guard phase != .stopped, phase != .uncertain else { return }
         phase = .uncertain
         quarantineReservation()
-        await rejectQueued(reason: .leaseLost)
+        await rejectQueued(reason: .authorityLost)
         await onUncertain(token)
     }
 
@@ -347,7 +347,7 @@ public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
     }
 
     private func rejection() -> V2RoomCallFailure {
-        .notAccepted(phase == .uncertain ? .leaseLost : .retired)
+        .notAccepted(phase == .uncertain ? .authorityLost : .retired)
     }
 
     private func startConsumerIfNeeded() {
@@ -481,7 +481,7 @@ public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
                 forgetDeadline(entry.id)
                 entry.continuation?.resume(throwing: V2RoomCallFailure.rolledBack(reason))
             }
-            if reason == .leaseLost || reason == .staleActivation { uncertain = true }
+            if reason == .authorityLost || reason == .staleActivation { uncertain = true }
         case .outcomeUnknown, .committed:
             // 格式错误的执行器结果无法安全地与调用方逐一对应。
             uncertain = true
@@ -493,7 +493,7 @@ public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
         if uncertain {
             phase = .uncertain
             unresolved.append(contentsOf: entries.map(\.permit))
-            await rejectQueued(reason: .leaseLost)
+            await rejectQueued(reason: .authorityLost)
             await onUncertain(token)
         } else {
             for entry in entries { budget.release(entry.permit) }
@@ -518,7 +518,7 @@ public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
             // 即使分发确认丢失，也要退役此纪元。
             phase = .uncertain
             quarantineReservation()
-            await rejectQueued(reason: .leaseLost)
+            await rejectQueued(reason: .authorityLost)
             await onUncertain(token)
         }
     }

@@ -27,10 +27,10 @@ import uuid
 
 from virtual_actor_capacity_measurement import (
     HARNESS_FILE_KEYS, MeasurementFailure, capture_runtime, capture_snapshot, create_scenario, phase_delta,
-    supports_recovery_loader, verify_freeze,
+    require_revision, supports_recovery_loader, verify_freeze,
 )
 from virtual_actor_capacity_lifecycle import (
-    LEASE_COUNTS_SQL, OwnerFailureWindow, validate_cold_retirement,
+    OwnerFailureWindow, validate_cold_retirement,
     validate_fault_unavailable_results,
 )
 
@@ -43,6 +43,7 @@ HEX64 = re.compile(r"[a-f0-9]{64}\Z")
 HEX40 = re.compile(r"[a-f0-9]{40}\Z")
 CAPACITY_NOFILE = 65_536
 CADDY_IMAGE = "caddy:2.8-alpine@sha256:af32e97399febea808609119bb21544d0265c58a02836576e32a2d082c262c17"
+PLACEMENT_VOTERS = ("placement-a", "placement-b", "placement-c")
 
 
 class CanaryFailure(Exception):
@@ -231,6 +232,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-checkout", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--measurement-main-revision", help="full native Placement baseline revision")
     parser.add_argument("--release-dir", required=True, type=Path)
     parser.add_argument("--build-result", required=True, type=Path,
                         help="completed independent Linux Release build result.json")
@@ -238,8 +240,6 @@ def parse_args() -> argparse.Namespace:
                         help="corrected Linux Release loader product directory, for both revisions")
     parser.add_argument("--loader-build-result", type=Path,
                         help="independent corrected-loader build result.json")
-    parser.add_argument("--legacy-loader-net-admin", action="store_true",
-                        help="diagnostic only: run the frozen SOL_SOCKET/SO_DEBUG loader with NET_ADMIN")
     parser.add_argument("--fixture-dir", required=True, type=Path)
     parser.add_argument("--layout", required=True, choices=LAYOUTS)
     parser.add_argument("--docker-context", required=True)
@@ -262,10 +262,12 @@ def parse_args() -> argparse.Namespace:
         if (args.layout != "mixed" or args.canary_recovery or args.canary_connections is not None or
                 args.measurement_workload is not None or args.measurement_connections is not None or
                 args.measurement_rate_scale != 1.0 or args.measurement_freeze_file is not None or
-                args.legacy_loader_net_admin):
-            parser.error("functional owner fault requires mixed layout and no canary, measurement, freeze or NET_ADMIN controls")
+                args.measurement_main_revision is not None):
+            parser.error("functional owner fault requires mixed layout and no canary, measurement or freeze controls")
         args.measurement_workload = "fault"
         args.measurement_connections = 100
+        # Functional recovery does not compare revisions or freeze capacity.
+        args.measurement_main_revision = args.source_sha
     for name in ("source_checkout", "release_dir", "fixture_dir"):
         path = getattr(args, name).expanduser().resolve()
         if not path.is_dir():
@@ -277,8 +279,6 @@ def parse_args() -> argparse.Namespace:
     if (args.loader_products_dir is None) != (args.loader_build_result is None):
         parser.error("loader-products-dir and loader-build-result must be provided together")
     if args.loader_products_dir is not None:
-        if args.legacy_loader_net_admin:
-            parser.error("legacy NET_ADMIN is only for the frozen checkout's own loader")
         args.loader_products_dir = args.loader_products_dir.expanduser().resolve()
         args.loader_build_result = args.loader_build_result.expanduser().resolve()
         if not args.loader_products_dir.is_dir() or args.loader_products_dir.is_relative_to(args.source_checkout):
@@ -294,10 +294,12 @@ def parse_args() -> argparse.Namespace:
     if not args.docker_context or args.docker_context == "default":
         parser.error("an explicit non-default Docker context is required")
     if args.measurement_workload:
+        try:
+            require_revision(args.measurement_main_revision)
+        except MeasurementFailure as error:
+            parser.error(str(error))
         if args.canary_recovery or args.canary_connections is not None:
             parser.error("canary controls cannot be combined with measurement")
-        if args.legacy_loader_net_admin:
-            parser.error("measurement never grants legacy NET_ADMIN")
         if args.loader_build_result == args.build_result:
             parser.error("measurement requires the separately verified common corrected loader")
         if args.measurement_connections is None:
@@ -306,10 +308,11 @@ def parse_args() -> argparse.Namespace:
         if required_layout != args.layout:
             parser.error("measurement workload must match fixture layout")
         if (not args.functional_owner_fault and
-                args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa" and
+                args.source_sha != args.measurement_main_revision and
                 args.measurement_freeze_file is None):
             parser.error("candidate measurement requires a main calibration freeze file")
-    elif args.measurement_connections is not None or args.measurement_rate_scale != 1.0:
+    elif (args.measurement_connections is not None or args.measurement_rate_scale != 1.0
+          or args.measurement_main_revision is not None):
         parser.error("measurement controls require measurement-workload")
     if args.canary_connections is not None and not 1 <= args.canary_connections <= 10_000:
         parser.error("canary-connections must be 1..10000")
@@ -455,6 +458,26 @@ def capture_runtime_provenance(*, docker: list[str], compose: list[str],
                 "ownerMembershipCounts": manifest["layouts"][layout]["ownerMembershipCounts"]}}
 
 
+def install_placement_services(*, document: dict, services: dict,
+                               runtime: Path, shards: list[str]) -> None:
+    """Retain three independent durable control processes in the owned stack."""
+    if not set(PLACEMENT_VOTERS) <= document["services"].keys():
+        raise CanaryFailure("source deployment lacks the three native Placement voters")
+    for name in PLACEMENT_VOTERS:
+        voter = deepcopy(document["services"][name])
+        voter["image"] = IMAGE
+        voter["command"] = ["/run/va-products/IMV2PlacementControlApp"]
+        voter["environment"]["IMV2_PLACEMENT_SHARD_IDS"] = ",".join(shards)
+        voter.pop("restart", None)
+        voter.pop("ports", None)
+        voter.setdefault("volumes", []).append({"type": "bind", "source": str(runtime),
+            "target": "/run/va-products", "read_only": True})
+        services[name] = voter
+    for name in ("gateway", "account"):
+        services[name].setdefault("depends_on", {}).update({voter: {
+            "condition": "service_healthy", "required": True} for voter in PLACEMENT_VOTERS})
+
+
 def install_account_services(*, document: dict, services: dict, private: Path,
                              runtime: Path, tls: Path, gateway_environment: dict,
                              database_names: dict) -> None:
@@ -578,22 +601,16 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
         raise MeasurementFailure("Gateway container ID unavailable")
     metrics_url = "http://127.0.0.1:9464/metrics"
     initial_metrics = capture_runtime(docker, {"gateway": gateway_id}, metrics_url, execute)["metrics"]
-    if args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa":
-        required = {"active_rooms", "pending_rooms", "restoring_rooms", "retiring_rooms",
-                    "activation_waiters", "outstanding_commands", "outstanding_bytes",
-                    "peak_outstanding_commands", "peak_outstanding_bytes", "reservations",
-                    "command_rooms", "cached_locations", "pending_resolutions",
-                    "active_resolutions", "resolution_waiters"}
-        if not all("im_v2_room_actor_" + name in initial_metrics for name in required):
-            raise MeasurementFailure("candidate room actor metrics are missing")
+    required = {"active_rooms", "pending_rooms", "restoring_rooms", "retiring_rooms",
+                "activation_waiters", "outstanding_commands", "outstanding_bytes",
+                "peak_outstanding_commands", "peak_outstanding_bytes", "reservations",
+                "command_rooms", "cached_locations", "pending_resolutions",
+                "active_resolutions", "resolution_waiters"}
+    if not all("im_v2_room_actor_" + name in initial_metrics for name in required):
+        raise MeasurementFailure("native room actor metrics are missing")
     fault = OwnerFailureWindow(compose, execute) if args.measurement_workload == "fault" else None
     if fault and set(services) != {"postgres", "owner00", "owner01"}:
         raise MeasurementFailure("fault requires exactly two owner databases")
-    cold_before = None
-    if args.measurement_workload == "cold" and args.source_sha != "f1cdd78d6a21bf0ae23da627c0710c65115236aa":
-        cold_before = {service: json.loads(psql(service, database, LEASE_COUNTS_SQL,
-                            log="measurement-cold-leases.log", timeout=15))
-                       for service, database in services.items() if service.startswith("owner")}
     loader_id = execute(compose + ["run", "-d", "--no-deps", "loader"],
                         "measurement-loader-start.log", 60).strip()
     if not re.fullmatch(r"[a-f0-9]{64}", loader_id):
@@ -601,7 +618,7 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
     loader_open_file_limits_hash = capture_detached_loader_open_file_limits(
         run=run, docker=docker, loader_id=loader_id, execute=execute)
     application_containers = {name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
-                              for name in ("account", "caddy")}
+                              for name in ("account", "caddy", *PLACEMENT_VOTERS)}
     containers = {**application_containers, **{name: execute(compose + ["ps", "-q", name], "measurement.log", 10).strip()
                      for name in services}, "gateway": gateway_id, "loader": loader_id}
     if any(not re.fullmatch(r"[a-f0-9]{64}", container) for container in containers.values()):
@@ -733,21 +750,8 @@ def run_measurement(*, args: argparse.Namespace, run: Path, compose: list[str], 
             batch_covered = True
         cold_evidence = None
         if args.measurement_workload == "cold":
-            if cold_before is None:
-                cold_evidence = {"scope": "not-applicable-frozen-main-without-actor-leases"}
-            else:
-                cold_after = {service: json.loads(psql(service, database, LEASE_COUNTS_SQL,
-                                   log="measurement-cold-leases.log", timeout=15))
-                              for service, database in services.items() if service.startswith("owner")}
-                cold_evidence = validate_cold_retirement(cold_before, cold_after)
-                active_metric = "im_v2_room_actor_active_rooms"
-                active_at_cooldown = boundaries["cooldown"]["metrics"].get(active_metric)
-                active_at_end = boundaries["end"]["metrics"].get(active_metric)
-                if (active_at_cooldown is None or active_at_end is None or
-                        active_at_end >= active_at_cooldown):
-                    raise MeasurementFailure("cold workload did not reduce active room gauge during cooldown")
-                cold_evidence["activeRoomsAtCooldownStart"] = active_at_cooldown
-                cold_evidence["activeRoomsAtEnd"] = active_at_end
+            cold_evidence = validate_cold_retirement(
+                boundaries["cooldown"]["metrics"], boundaries["end"]["metrics"])
         fault_evidence = fault.finish() if fault else None
         write_private(run / "measurement-snapshots.json", json.dumps({
             "boundaries": boundaries, "periodic": observations, "scenario": scenario_detail,
@@ -793,11 +797,18 @@ def main() -> int:
             or build_result["lockfileSHA256"] != source["packageResolvedSHA256"]):
         raise CanaryFailure("Linux Release build result does not match source/lockfile/image")
     loader_build_result = read_build_result(args.loader_build_result)
+    server_products = build_result.get("products")
+    if not isinstance(server_products, dict) or not {
+        "IMV2AccountServerApp", "IMV2ServerApp", "IMV2PlacementControlApp"
+    } <= server_products.keys():
+        raise CanaryFailure("Linux Release build must include the native Placement control executable")
     products = {
         "IMV2AccountServerApp": verify_product(args.release_dir, "IMV2AccountServerApp",
             build_result["products"]["IMV2AccountServerApp"]),
         "IMV2ServerApp": verify_product(args.release_dir, "IMV2ServerApp",
                                          build_result["products"]["IMV2ServerApp"]),
+        "IMV2PlacementControlApp": verify_product(args.release_dir, "IMV2PlacementControlApp",
+            build_result["products"]["IMV2PlacementControlApp"]),
         "IMV2GatewayLoadGenerator": verify_product(args.loader_products_dir,
             "IMV2GatewayLoadGenerator", loader_build_result["products"]["IMV2GatewayLoadGenerator"]),
     }
@@ -820,8 +831,8 @@ def main() -> int:
         protocol_file = RUNNER_ROOT / "IMV2/scripts/virtual-actor-fixtures/capacity-main-v1.json"
         require_regular(protocol_file, "frozen capacity protocol")
         protocol = json.loads(protocol_file.read_text())
-        if protocol.get("mainRevision") != "f1cdd78d6a21bf0ae23da627c0710c65115236aa":
-            raise MeasurementFailure("frozen main revision changed")
+        if protocol.get("baselineRevisionPolicy") != "explicit-native-placement-revision":
+            raise MeasurementFailure("native baseline revision policy is missing")
         scenario_document, scenario_detail = create_scenario(
             args.source_checkout, protocol, manifest, args.measurement_workload,
             args.measurement_connections, args.measurement_rate_scale)
@@ -829,7 +840,7 @@ def main() -> int:
         scenario_bytes = (json.dumps(scenario_document, indent=2, sort_keys=True) + "\n").encode()
         scenario_hash = hashlib.sha256(scenario_bytes).hexdigest()
         if args.measurement_freeze_file:
-            verify_freeze(args.measurement_freeze_file, workload=args.measurement_workload,
+            verify_freeze(args.measurement_freeze_file, main_revision=args.measurement_main_revision, workload=args.measurement_workload,
                           layout=args.layout, fixture_hash=fixture_info["manifestSHA256"],
                           scenario_hash=scenario_hash,
                           loader_hash=products["IMV2GatewayLoadGenerator"],
@@ -873,7 +884,7 @@ def main() -> int:
         "mode": result_mode(args, scenario_document),
         "formalSamplingEligible": False,
         "swiftImage": IMAGE, "postgresImage": POSTGRES_IMAGE, "caddyImage": CADDY_IMAGE,
-        "legacyLoaderNETADMIN": args.legacy_loader_net_admin,
+        "measurementMainRevision": args.measurement_main_revision,
         "mainCalibrationFreezeSHA256": sha256(args.measurement_freeze_file)
         if args.measurement_freeze_file else None,
         "startedAt": time.time(),
@@ -931,12 +942,15 @@ def main() -> int:
                                 for name in secret_names))
         tls = make_tls(private, execute)
         shards = manifest["layouts"][args.layout]["shardIDs"]
-        if "IMV2_ROOM_ACTOR_CONFIGURATION_FILE" in (args.source_checkout / "IMV2/docker-compose.local-account.yml").read_text():
-            actor_tool = args.source_checkout / "IMV2/scripts/prepare_v2_room_actor_configuration.py"
-            require_regular(actor_tool, "actor configuration generator")
-            execute([sys.executable, str(actor_tool), "--output-dir", str(private / "local-room-actors"),
-                     "--host", "gateway=gateway:7337", "--caller", "account=account:7338", "--shards", ",".join(shards),
-                     "--mount-root", "/run/im-v2-room-actor"], "actor-configuration.log", 60)
+        actor_tool = args.source_checkout / "IMV2/scripts/prepare_v2_room_actor_configuration.py"
+        require_regular(actor_tool, "actor configuration generator")
+        actor_command = [sys.executable, str(actor_tool), "--output-dir", str(private / "local-room-actors"),
+            "--host", "gateway=gateway:7337", "--caller", "account=account:7338",
+            "--shards", ",".join(shards), "--user-buckets", manifest["userBucket"],
+            "--mount-root", "/run/im-v2-room-actor"]
+        for voter in PLACEMENT_VOTERS:
+            actor_command += ["--placement-voter", voter + "=" + voter + ":7336"]
+        execute(actor_command, "actor-configuration.log", 60)
         phase = "compose configuration"
         config_command = docker + ["compose", "--project-directory", str(private), "--env-file", str(env_file),
                                    "--file", str(args.source_checkout / "IMV2/docker-compose.local-account.yml"),
@@ -999,6 +1013,7 @@ def main() -> int:
         install_account_services(document=document, services=services, private=private,
                                  runtime=runtime, tls=tls, gateway_environment=gateway_env,
                                  database_names=db_names)
+        install_placement_services(document=document, services=services, runtime=runtime, shards=shards)
         result["accountEdgeConfigurationSHA256"] = sha256(private / "Caddyfile")
         result["accountClientRateLimitMaxRequests"] = int(services["account"]["environment"]["IM_V2_ACCOUNT_CLIENT_RATE_LIMIT_MAX_REQUESTS"])
         connections = (args.measurement_connections if scenario_document is not None else
@@ -1033,12 +1048,6 @@ def main() -> int:
             ],
         }
         set_capacity_open_file_limits(services)
-        if args.legacy_loader_net_admin:
-            # Diagnostic compatibility for the frozen main binary only. Its
-            # socketOption(.tcp_nodelay) accidentally sets SO_DEBUG on Linux.
-            # Formal canaries use one corrected Release loader for both builds
-            # and do not grant NET_ADMIN to any service.
-            services["loader"]["cap_add"] = ["NET_ADMIN"]
         document["services"] = services
         for key, volume in document.get("volumes", {}).items():
             volume["name"] = project + "-" + key
@@ -1099,6 +1108,16 @@ def main() -> int:
                                  "SELECT count(*) FROM pg_extension WHERE extname = 'pg_stat_statements';")
                 if installed.strip() != "1":
                     raise MeasurementFailure("pg_stat_statements not installed on disposable database")
+        phase = "Placement provisioning"
+        # Only this fresh project's directories may be provisioned. A failed
+        # provision aborts; normal startup never recreates retained history.
+        for voter in PLACEMENT_VOTERS:
+            execute(compose + ["run", "--rm", "--no-deps", voter,
+                "/run/va-products/IMV2PlacementControlApp", "--provision"],
+                "placement-provision.log", 60)
+        phase = "Placement startup"
+        execute(compose + ["up", "-d", "--wait", "--wait-timeout", "90", *PLACEMENT_VOTERS],
+                "placement-startup.log", 120)
         phase = "gateway startup"
         execute(compose + ["up", "-d", "--wait", "--wait-timeout", "120", "gateway", "account"], "startup.log", 180)
         phase = "account HTTPS startup"
@@ -1116,7 +1135,7 @@ def main() -> int:
         provenance = capture_runtime_provenance(
             docker=docker, compose=compose, services=db_names, manifest=manifest,
             layout=args.layout, execute=execute, psql=psql,
-            application_services=("gateway", "account", "caddy"))
+            application_services=("gateway", "account", "caddy", *PLACEMENT_VOTERS))
         if (provenance["projectContainers"]["gateway"]["containerID"] != gateway_id or
                 provenance["projectContainers"]["account"]["containerID"] != account_id):
             raise CanaryFailure("application changed after PID 1 open-file limit check")

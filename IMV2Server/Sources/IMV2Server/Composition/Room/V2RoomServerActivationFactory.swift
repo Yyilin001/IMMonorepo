@@ -13,9 +13,9 @@ import IMV2Core
 public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsReading {
     let sendDatabase: any Database
     let database: any Database
-    /// Only restoration validation uses the lifecycle sublimit. Business
+    /// Only restoration initialization uses the lifecycle sublimit. Business
     /// handlers retain `database`, and both facades share the same physical gate.
-    let activationValidationDatabase: any Database
+    let activationInitializationDatabase: any Database
     private(set) var writes: PostgresV2RoomWriteStore
     let mutations: PostgresV2MessageMutationOperationStore
     let identities: any V2MembershipIdentitySnapshotValidating
@@ -37,8 +37,7 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
     fileprivate let committedFacts: V2RoomCommittedFactsFeed
     fileprivate var policyAuthorizations: V2RoomPolicyAuthorizationService?
 
-    /// Bind before the physical-owner factory is installed. Production cutover
-    /// also requires the account/pair writers and revocation transport.
+    /// Bind the required memory policy service before installing the owner factory.
     package func usingPolicyAuthorizations(_ service: V2RoomPolicyAuthorizationService) throws -> Self {
         guard durableOwner.current == nil else {
             throw V2ActorContractError.invalidConfiguration("policy authorization factory already bound")
@@ -70,8 +69,8 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         }
         let dirtyHeads = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database, databaseWorkAdmission: databaseWorkAdmission)
         let host = V2RoomSubscriptionHost(maximumRooms: maximumActiveRooms,
-            maximumBindings: maximumRoomSubscriptionBindings, dirtyChanges: { host, cursor, limit, deadline in
-            try await dirtyHeads.pending(host: host, after: cursor, limit: limit, deadline: deadline)
+            maximumBindings: maximumRoomSubscriptionBindings, dirtyChanges: { tokens, cursor, limit, deadline in
+            try await dirtyHeads.pending(activeTokens: tokens, after: cursor, limit: limit, deadline: deadline)
         }, dirtyAcknowledge: { heads, deadline in
             try await dirtyHeads.acknowledge(heads, deadline: deadline)
         })
@@ -83,7 +82,7 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         self.durableSendSchedulingConfiguration = durableSendSchedulingConfiguration
         self.database = database
         self.sendDatabase = sendDatabase ?? database
-        self.activationValidationDatabase = (database as? V2EventLoopBalancedDatabase)?
+        self.activationInitializationDatabase = (database as? V2EventLoopBalancedDatabase)?
             .usingLoanClass(.activation) ?? database
         self.mutations = .init(database:database,contentReviewMode:contentReviewMode,identities:membershipIdentities,committedMessageObserver:facts)
         self.writes = writes
@@ -247,9 +246,7 @@ public struct V2RoomServerActivationFactory: Sendable {
         owners.mapValues(\.sendOperationMetrics)
     }
 
-    public func runtimeFactory(
-        validation: (@Sendable (V2RoomActivationToken) async throws -> Void)? = nil
-    ) -> V2RoomActivationFactory<V2RoomRequest, V2RoomResponse> {
+    public func runtimeFactory() -> V2RoomActivationFactory<V2RoomRequest, V2RoomResponse> {
         .init(recoveryBatch: { items in
             guard let first = items.first, let resources = owners[first.token.owner.shardID],
                   items.allSatisfy({ $0.token.owner == first.token.owner && $0.query.kind == .state }) else {
@@ -329,11 +326,11 @@ public struct V2RoomServerActivationFactory: Sendable {
             }
         }) { token in
             let instance = V2RoomServerActivation(token: token, resources: owners[token.owner.shardID],
-                safetyActorUserID: safetyActorUserID, now: now, validation: validation)
+                safetyActorUserID: safetyActorUserID, now: now)
             let recorder = owners[token.owner.shardID]?.sendOperationMetrics
-            return .init(restore: { deadline in
+            return .init(restore: { context in
                 try await V2RoomSQLContinuationObservation.$metrics.withValue(recorder) {
-                    try await instance.restore(deadline: deadline)
+                    try await instance.restore(context: context)
                 }
             }, execute: { turn in
                 await V2RoomSQLContinuationObservation.$metrics.withValue(recorder) {
@@ -354,45 +351,52 @@ private actor V2RoomServerActivation {
     private let resources: V2RoomServerOwnerResources?
     private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
-    private let validation: (@Sendable (V2RoomActivationToken) async throws -> Void)?
     private var subscriptionOwner: V2RoomSubscriptionOwner?
     private var restoringSubscription = false
     private var subscriptionRestoreWaiters: [CheckedContinuation<Void, Never>] = []
+    private var lifetime: V2RoomActivationLifetime?
     private var handlers: Handlers?
     private var closed = false
 
     init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResources?,
-         safetyActorUserID: UserID?, now: @escaping @Sendable () -> Date,
-         validation: (@Sendable (V2RoomActivationToken) async throws -> Void)?) {
+         safetyActorUserID: UserID?, now: @escaping @Sendable () -> Date) {
         self.token = token
         self.resources = resources
         self.safetyActorUserID = safetyActorUserID
         self.now = now
-        self.validation = validation
     }
 
-    func restore(deadline: ContinuousClock.Instant) async throws {
+    func restore(context: V2RoomActivationRestorationContext) async throws {
+        guard context.token == token else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+        try await context.validate()
+        let deadline = context.deadline
         guard !closed, handlers == nil, let resources else {
             throw V2RoomCallFailure.notAccepted(.unavailable)
         }
         guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        let created = try Handlers(token: token, resources: resources, now: now)
+        self.lifetime = context.lifetime
+        let created = try Handlers(token: token, lifetime: context.lifetime, resources: resources, now: now)
         let token = self.token
-        let validation = self.validation
         let initialization = try await V2RoomSQLDeadline.withDeadline(deadline) {
-            if let validation { try await validation(token) }
-            return try await v2RestoreRoomSendInitialization(database: resources.activationValidationDatabase,
-                token: token, validateActivation: validation == nil)
+            return try await v2RestoreRoomSendInitialization(database: resources.activationInitializationDatabase,
+                token: token)
         }
         guard !closed, ContinuousClock.now < deadline else {
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
         }
+        try await context.validate()
         try await resources.policyAuthorizations?.installRoomInitialization(initialization)
         await resources.durableOwner.current?.store.installSendInitialization(initialization)
         guard !closed, ContinuousClock.now < deadline else {
             await resources.durableOwner.current?.store.invalidateSendState(token: token)
             await resources.policyAuthorizations?.retire(token: token)
             throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
+        do { try await context.validate() }
+        catch {
+            await resources.durableOwner.current?.store.invalidateSendState(token: token)
+            await resources.policyAuthorizations?.retire(token: token)
+            throw error
         }
         handlers = created
     }
@@ -510,7 +514,7 @@ private actor V2RoomServerActivation {
             guard command.roomID == token.roomID else { return .roomSubscription(.failure(.invalidRequest)) }
             do {
                 guard let activationValidUntil, activationValidUntil > .now else {
-                    throw V2RoomActivationLeaseError.leaseExpired
+                    throw V2RoomCallFailure.notAccepted(.authorityLost)
                 }
                 let grantValidUntil = min(activationValidUntil, .now + V2RoomSubscriptionHost.controlFreshnessLimit)
                 let owner = try await subscriptions(resources: resources, deadline: callDeadline)
@@ -557,7 +561,7 @@ private actor V2RoomServerActivation {
         case .forward(let command):
             do { return .forward(try await handlers.forwarding.execute(command)) }
             catch V2ForwardExportError.ownerChanged, V2ForwardInboxError.ownerChanged {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             } catch {
                 if let failure = V2ActorForwardFailureWire(domainError: error) { return .forward(.failure(failure)) }
                 throw error
@@ -626,12 +630,13 @@ private actor V2RoomServerActivation {
             let waiters = subscriptionRestoreWaiters; subscriptionRestoreWaiters.removeAll()
             for waiter in waiters { waiter.resume() }
         }
-        let source = try PostgresV2RoomSubscriptionSource(database: resources.database, activation: token, databaseWorkAdmission: resources.databaseWorkAdmission)
+        guard let lifetime else { throw V2RoomCallFailure.notAccepted(.notReady) }
+        let source = try PostgresV2RoomSubscriptionSource(database: resources.database, activation: token, lifetime: lifetime, databaseWorkAdmission: resources.databaseWorkAdmission)
         let host = resources.subscriptionHost
         let roomID = token.roomID
         let created = try await V2RoomSubscriptionOwner.restore(source: source, roomID: token.roomID, owner: token.owner, activation: token, deadline: deadline, trackedUserIDs: [], notifyChanged: { host.signal(gateway: .init(roomID: roomID, gateway: $0)) })
         guard !closed else { try await created.close(); throw V2RoomSubscriptionOwnerError.closed }
-        try await host.register(created, token: token)
+        try await host.register(created, token: token, lifetime: lifetime)
         subscriptionOwner = created
         return created
     }
@@ -650,6 +655,7 @@ private actor V2RoomServerActivation {
         await resources?.subscriptionHost.unregister(token: token)
         subscriptionOwner = nil
         handlers = nil
+        lifetime = nil
         await resources?.durableOwner.current?.store.invalidateSendState(token: token)
         await resources?.writes.closeActorState(token: token)
         await resources?.policyAuthorizations?.retire(token: token)
@@ -666,11 +672,11 @@ private actor V2RoomServerActivation {
         let queries: any V2RoomQueryExecuting
         let receipts: any V2RoomReceiptQueryExecuting
 
-        init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResources,
+        init(token: V2RoomActivationToken, lifetime: V2RoomActivationLifetime, resources: V2RoomServerOwnerResources,
              now: @escaping @Sendable () -> Date) throws {
             forwarding = try .init(database: resources.database, token: token, write: resources.writes,
                 capacityProfile: resources.capacity, limits: resources.messageLimits, now: now)
-            media = try V2RoomMediaAuthorizationDomainExecutor(database: resources.database, token: token)
+            media = try V2RoomMediaAuthorizationDomainExecutor(database: resources.database, token: token, lifetime: lifetime)
             queries = V2BoundRoomQueries(token: token, executor: resources.queries)
             receipts = V2BoundRoomReceiptQueries(token: token, executor: resources.receipts)
             maintenance = .init(database: resources.database, now: now)
@@ -740,7 +746,7 @@ private struct V2BoundRoomReceiptQueries: V2RoomReceiptQueryExecuting {
 /// One bounded drain worker and transport pump per physical owner. Commit
 /// notifications coalesce synchronously; transactions never await network work.
 package actor V2RoomSubscriptionHost {
-    private struct Entry: Sendable { let token: V2RoomActivationToken; let owner: V2RoomSubscriptionOwner }
+    private struct Entry: Sendable { let token: V2RoomActivationToken; let lifetime: V2RoomActivationLifetime; let owner: V2RoomSubscriptionOwner }
     private struct HeadRefresh: Sendable { let token: V2RoomActivationToken; let highWatermark: UInt64 }
     private struct Pending: Sendable {
         var registeredRooms: Set<RoomID> = []
@@ -815,11 +821,12 @@ package actor V2RoomSubscriptionHost {
         }
     }
     func currentPump() -> V2RoomSubscriptionDeliveryPump? { closed ? nil : pump }
-    func register(_ owner: V2RoomSubscriptionOwner, token: V2RoomActivationToken) async throws {
+    func register(_ owner: V2RoomSubscriptionOwner, token: V2RoomActivationToken, lifetime: V2RoomActivationLifetime) async throws {
+        guard lifetime.token == token else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
         guard !closed, pump != nil, entries[token.roomID] == nil, entries.count < maximumRooms else {
             throw V2RoomSubscriptionOwnerError.overloaded
         }
-        entries[token.roomID] = .init(token: token, owner: owner)
+        entries[token.roomID] = .init(token: token, lifetime: lifetime, owner: owner)
         pending.withLock { $0.registeredRooms.insert(token.roomID) }
         if let feed = factsFeed.withLock({ $0 }), !feed.register(activation: token) {
             entries.removeValue(forKey: token.roomID)
@@ -839,7 +846,7 @@ package actor V2RoomSubscriptionHost {
     }
     /// One host-level durable control feed. No stationary-room lease/head probes.
     package func checkChanges() async {
-        guard !closed, !checkingChanges, let host = entries.values.first?.token.host else { return }
+        guard !closed, !checkingChanges, !entries.isEmpty else { return }
         checkingChanges = true; defer { checkingChanges = false }
         // A durable ACK may have committed before its response was lost. The
         // pending query can then be empty; retained exact receipts still need
@@ -849,7 +856,7 @@ package actor V2RoomSubscriptionHost {
         if dirtyCursor == nil { controlCycleStarted = now() }
         do {
             for _ in 0..<64 {
-                let page = try await dirtyChanges(host, dirtyCursor, 128, deadline)
+                let page = try await dirtyChanges(entries.values.map(\.token), dirtyCursor, 128, deadline)
                 guard !closed else { return }
                 dirtyCursor = page.nextCursor
                 for change in page.changes {
@@ -880,7 +887,7 @@ package actor V2RoomSubscriptionHost {
             throw V2RoomSubscriptionOwnerError.catchUpRequired
         }
         let checkpoint = await entry.owner.renewalCheckpoint()
-        guard !closed, entries[token.roomID]?.token == token else { throw V2RoomActivationLeaseError.activationChanged }
+        guard !closed, entries[token.roomID]?.token == token else { throw V2RoomActorStateError.activationChanged }
         let dirty = dirtyHeads[token.roomID]
         guard dirty.map({ $0.roomControlVersion == checkpoint.controlVersion }) ?? true else {
             throw V2RoomSubscriptionOwnerError.catchUpRequired
@@ -999,7 +1006,7 @@ package actor V2RoomSubscriptionHost {
                 // Sequence/persistence loss closes the Owner; only a new
                 // trusted activation may restore this stream.
             } catch is V2RoomSubscriptionRelayError {
-            } catch is V2RoomActivationLeaseError {
+            } catch is V2RoomActorStateError {
             } catch V2RoomSubscriptionOwnerError.closed {
             } catch {
                 // Admission/timeouts/transient DB failures do not transfer or
@@ -1015,7 +1022,12 @@ package actor V2RoomSubscriptionHost {
                     && dirtyHeads[receipt.activation.roomID] == receipt
             }
             do {
-                try await dirtyAcknowledge(Array(ready), .now + .seconds(10))
+                let deadline = ContinuousClock.now + .seconds(10)
+                let lifetimes = ready.compactMap { entries[$0.activation.roomID]?.lifetime }
+                guard lifetimes.count == ready.count else { return }
+                try await withPinnedAcknowledgement(lifetimes: lifetimes[...], deadline: deadline) { bounded in
+                    try await dirtyAcknowledge(Array(ready), bounded)
+                }
                 for receipt in ready where dirtyHeads[receipt.activation.roomID] == receipt {
                     dirtyHeads.removeValue(forKey: receipt.activation.roomID)
                     completedDirty.removeValue(forKey: receipt.activation.roomID)
@@ -1023,6 +1035,17 @@ package actor V2RoomSubscriptionHost {
             } catch { /* Keep exact receipts; the independent change cycle retries. */ }
         }
     }
+    private func withPinnedAcknowledgement(
+        lifetimes: ArraySlice<V2RoomActivationLifetime>, deadline: ContinuousClock.Instant,
+        operation: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void
+    ) async throws {
+        guard let first = lifetimes.first else { try await operation(deadline); return }
+        try await first.withPin(deadline: deadline) { bounded in
+            try await self.withPinnedAcknowledgement(lifetimes: lifetimes.dropFirst(),
+                deadline: bounded, operation: operation)
+        }
+    }
+
     func close() async {
         guard !closed else { return }; closed = true
         pending.withLock { $0.closed = true; $0.rooms.removeAll(); $0.deliveryRooms.removeAll(); $0.heads.removeAll(); $0.registeredRooms.removeAll() }
@@ -1045,7 +1068,7 @@ package actor V2RoomSubscriptionHost {
 package func v2RoomSubscriptionFailure(for error: any Error) throws -> V2RoomSubscriptionFailure {
     if let value = error as? V2RoomSubscriptionOwnerError {
         switch value {
-        case .closed: throw V2RoomActivationLeaseError.activationChanged
+        case .closed: throw V2RoomActorStateError.activationChanged
         case .unauthorized: return .unauthorized
         case .busy, .overloaded, .catchUpRequired: return .overloaded
         case .invalidInput: return .invalidRequest
@@ -1057,18 +1080,18 @@ package func v2RoomSubscriptionFailure(for error: any Error) throws -> V2RoomSub
         switch value {
         case .invalidInput: return .invalidRequest
         case .wrongOwner, .roomNotFound, .snapshotRequired, .corruptPersistence:
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
     }
-    if error is V2RoomSubscriptionRelayError { throw V2RoomActivationLeaseError.activationChanged }
-    if let value = error as? V2RoomActivationLeaseError { throw value }
+    if error is V2RoomSubscriptionRelayError { throw V2RoomActorStateError.activationChanged }
+    if let value = error as? V2RoomActorStateError { throw value }
     if error is V2ActorContractError { return .invalidRequest }
     if let value = error as? V2RoomCallFailure {
         switch value {
         case .notAccepted(.overloaded), .rolledBack(.overloaded): return .overloaded
         case .notAccepted(.staleActivation), .rolledBack(.staleActivation),
-             .notAccepted(.leaseLost), .rolledBack(.leaseLost):
-            throw V2RoomActivationLeaseError.activationChanged
+             .notAccepted(.authorityLost), .rolledBack(.authorityLost):
+            throw V2RoomActorStateError.activationChanged
         default: return .unavailable
         }
     }

@@ -39,7 +39,7 @@ public struct V2RoomForwardDomainExecutor: Sendable {
     }
 
     public func execute(_ command: V2RoomForwardCommand) async throws -> V2RoomForwardResult {
-        guard command.roomID == token.roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard command.roomID == token.roomID else { throw V2RoomActorStateError.activationChanged }
         switch command {
         case .sameOwnerPair:
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
@@ -68,7 +68,7 @@ public struct V2RoomForwardDomainExecutor: Sendable {
             guard value.intent.targetRoomID == token.roomID.uuidValue,
                   value.intent.targetShardID == token.owner.shardID,
                   value.intent.targetEpoch == token.owner.epoch else {
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             }
             return .imported(.init(domain: try await importExport(value, token, now())))
         }

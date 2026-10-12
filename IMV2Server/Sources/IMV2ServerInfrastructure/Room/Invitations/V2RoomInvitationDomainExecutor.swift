@@ -30,7 +30,7 @@ public struct V2RoomInvitationDomainExecutor: Sendable {
     }
 
     private func store(roomID: RoomID, inviteID: GroupInviteID? = nil) throws -> PostgresV2GroupInvitationStore {
-        guard roomID == token.roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard roomID == token.roomID else { throw V2RoomActorStateError.activationChanged }
         return try .init(database: database, identities: identities,
                          activationToken: token, inviteID: inviteID)
     }

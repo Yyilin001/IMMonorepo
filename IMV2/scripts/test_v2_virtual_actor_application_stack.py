@@ -24,11 +24,14 @@ import sys
 import time
 import uuid
 
+from v2_native_placement_inspection import inspect_placement, room_placement, require_live_owner, same_owner
+
 
 PROBE_SEND_DEADLINE_MS = str(int(time.time() * 1000) + 86_400_000)
 ROOT = Path(__file__).resolve().parents[2]
 IMAGE = "swift:6.4-jammy@sha256:a6053d2de72091906bfa064f76f145e3f28830664cae250e1b84aa8c499a8ee6"
-PRODUCTS = ["IMV2AccountServerApp", "IMV2ServerApp", "IMV2OperatorServerApp", "IMV2LocalGatewayProbe"]
+PRODUCTS = ["IMV2AccountServerApp", "IMV2ServerApp", "IMV2OperatorServerApp", "IMV2LocalGatewayProbe", "IMV2PlacementControlApp"]
+PLACEMENT_VOTERS = ["placement-a", "placement-b", "placement-c"]
 PRODUCT_INPUTS = ["IMV2Server/Sources", "IMV2Server/Vendor", "IMV2Server/Package.swift",
                   "IMV2Server/Package.resolved", "IMV2Core", "IMV2Compression", "IMV2/sql"]
 
@@ -111,12 +114,9 @@ def cross_entry_disable_smoke(*, root: Path, run: Path, private: Path,
         for value in (room_id, device_id, user_id, baseline_message_id):
             uuid.UUID(value)
         operation_id = str(uuid.uuid4())
-        lease_before = psql("SELECT COALESCE(host_id, ''), activation_epoch, "
-            f"COALESCE((expires_at > clock_timestamp())::text, 'false') "
-            f"FROM im_v2.room_activation_leases WHERE room_id = '{room_id}'").split("|")
-        if len(lease_before) != 3 or lease_before[0].lower() != actor_host_id.lower() or \
-                lease_before[2] != "true":
-            raise RuntimeError("warm room lease is not held by the separate Actor Host")
+        placement_before = room_placement(inspect_placement(
+            compose=compose, root=root, environment=environment), room_id)
+        require_live_owner(placement_before, actor_host_id)
         baseline_count = int(psql(f"SELECT count(*) FROM im_v2.messages WHERE room_id = '{room_id}'"))
         if baseline_count < 1:
             raise RuntimeError("warm room has no accepted baseline message")
@@ -124,7 +124,7 @@ def cross_entry_disable_smoke(*, root: Path, run: Path, private: Path,
         actor_started = container_state(actor_container)["StartedAt"]
         evidence.update({"stage": "warm-room-observed", "roomID": room_id,
             "userID": user_id, "clientMessageID": operation_id, "baselineMessageID": baseline_message_id,
-            "baselineMessageCount": baseline_count, "leaseBefore": lease_before})
+            "baselineMessageCount": baseline_count, "placementBefore": placement_before})
 
         for name, mode in (("send", "heldRoomSend"), ("read", "heldRoomRead")):
             values = {"IM_V2_GATEWAY_PROBE_MODE": mode,
@@ -231,13 +231,14 @@ def cross_entry_disable_smoke(*, root: Path, run: Path, private: Path,
         if smoke is None or smoke.wait(timeout=90) != 0:
             raise RuntimeError("ordinary Account/Gateway/Operator smoke failed after the disable")
         smoke = None
-        lease_after = psql("SELECT COALESCE(host_id, ''), activation_epoch "
-            f"FROM im_v2.room_activation_leases WHERE room_id = '{room_id}'").split("|")
-        if lease_after != lease_before[:2] or \
+        placement_after = room_placement(inspect_placement(
+            compose=compose, root=root, environment=environment), room_id)
+        require_live_owner(placement_after, actor_host_id)
+        if not same_owner(placement_before, placement_after) or \
                 container_state(gateway_container)["StartedAt"] != gateway_started or \
                 container_state(actor_container)["StartedAt"] != actor_started:
             raise RuntimeError("cross-entry assertion did not retain the original Gateway and Actor Host")
-        evidence.update({"stage": "cross-entry-revocation-verified", "leaseAfter": lease_after,
+        evidence.update({"stage": "cross-entry-revocation-verified", "placementAfter": placement_after,
             "originalGatewayAndActorHostRetained": True})
     finally:
         warm_release.touch(mode=0o600, exist_ok=True)
@@ -278,7 +279,7 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
                        actor_container: str, gateway_container: str,
                        actor_host_id: str,
                        evidence: dict[str, object]) -> None:
-    """Signal a real Actor Host while its fenced send waits on PG admission."""
+    """Signal a real Actor Host while its send waits on the PG room state row."""
     fixture = private / "busy-term-fixture"
     release = private / "busy-term-release"
     smoke_environment = dict(environment)
@@ -352,17 +353,14 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
         if not actor_ip:
             raise RuntimeError("Actor Host has no container network address")
         evidence["actorDatabaseClientIP"] = actor_ip
-        lease_before = psql("SELECT COALESCE(host_id, ''), activation_epoch, "
-            f"COALESCE((expires_at > clock_timestamp())::text, 'false') "
-            f"FROM im_v2.room_activation_leases WHERE room_id = '{room_id}'").split("|")
-        if len(lease_before) != 3 or lease_before[0].lower() != actor_host_id.lower() or \
-                lease_before[2] != "true":
-            raise RuntimeError("Actor Host did not hold the target room before the signal")
-        evidence["leaseBefore"] = lease_before
+        placement_before = room_placement(inspect_placement(
+            compose=compose, root=root, environment=environment), room_id)
+        require_live_owner(placement_before, actor_host_id)
+        evidence["placementBefore"] = placement_before
 
         marker = "va_busy_term_" + uuid.uuid4().hex
         holder_sql = ("BEGIN; "
-            f"SELECT 1 FROM im_v2.room_admission WHERE room_id = '{room_id}' FOR UPDATE; "
+            f"SELECT 1 FROM im_v2.rooms WHERE room_id = '{room_id}' FOR UPDATE; "
             f"SELECT pg_sleep(20) /* {marker} */; COMMIT;")
         with (run / "busy-lock-holder.log").open("a") as output:
             holder = subprocess.Popen(compose + ["exec", "-T", "postgres", "psql", "-X", "-q",
@@ -376,18 +374,20 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
                 f"AND wait_event = 'PgSleep' AND query LIKE '%{marker}%' LIMIT 1")
             return int(value) if value else None
 
-        holder_pid = await_stage(held_pid, seconds=5, stage="PG room admission lock held")
-        evidence.update({"stage": "admission-row-locked", "holderBackendPID": holder_pid})
+        holder_pid = await_stage(held_pid, seconds=5, stage="PG room state lock held")
+        evidence.update({"stage": "room-state-row-locked", "holderBackendPID": holder_pid})
 
         probe_environment = dict(environment)
-        probe_environment.update({"IM_V2_GATEWAY_PROBE_MODE": "sendDirectMessage",
+        # The fixture already opened the room. Reopening it here would block
+        # Gateway's room bootstrap before the remote Host ever receives send.
+        probe_environment.update({"IM_V2_GATEWAY_PROBE_MODE": "sendKnownRoomMessage",
             "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN": access_token,
             "IM_V2_GATEWAY_PROBE_DEVICE_ID": device_id,
-            "IM_V2_GATEWAY_PROBE_TARGET_USER_ID": target_user_id,
+            "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID": room_id,
             "IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID": operation_id,
             "IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS": PROBE_SEND_DEADLINE_MS})
         probe_flags = [part for key in ("IM_V2_GATEWAY_PROBE_MODE", "IM_V2_GATEWAY_PROBE_ACCESS_TOKEN",
-            "IM_V2_GATEWAY_PROBE_DEVICE_ID", "IM_V2_GATEWAY_PROBE_TARGET_USER_ID",
+            "IM_V2_GATEWAY_PROBE_DEVICE_ID", "IM_V2_GATEWAY_PROBE_EXPECTED_ROOM_ID",
             "IM_V2_GATEWAY_PROBE_CLIENT_MESSAGE_ID", "IM_V2_GATEWAY_PROBE_SEND_DEADLINE_MS")
             for part in ("--env", key + "=" + probe_environment[key])]
         with (run / "busy-send-probe.log").open("a") as output:
@@ -445,17 +445,12 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
         evidence.update({"stage": "actor-host-exited", "actorExitCode": stopped["ExitCode"],
                          "actorExitedAt": time.time()})
 
-        def retired_lease() -> list[str] | None:
-            row = psql("SELECT COALESCE(host_id, ''), activation_epoch, "
-                f"COALESCE((expires_at <= clock_timestamp())::text, 'true') "
-                f"FROM im_v2.room_activation_leases WHERE room_id = '{room_id}'").split("|")
-            if len(row) != 3 or row[1] != lease_before[1]:
-                raise RuntimeError("room epoch changed before the Actor Host restart")
-            return row if not row[0] or (row[0].lower() == actor_host_id.lower() and row[2] == "true") else None
-
-        retired = await_stage(retired_lease, seconds=35, stage="old Host lease released or expired")
-        evidence.update({"stage": "lease-no-longer-live", "leaseAfterExit": retired,
-                         "leaseNoLongerLiveAt": time.time()})
+        retired = room_placement(inspect_placement(
+            compose=compose, root=root, environment=environment), room_id)
+        if not same_owner(placement_before, retired) or not retired["hostRetired"] or not retired["retired"]:
+            raise RuntimeError("old Host exited without committed native retirement")
+        evidence.update({"stage": "native-host-retired", "placementAfterExit": retired,
+                         "hostRetiredObservedAt": time.time()})
         if message_state(room_id, sender_user_id, operation_id) != durable:
             raise RuntimeError("durable send changed during Host retirement")
 
@@ -575,6 +570,13 @@ def busy_sigterm_smoke(*, root: Path, run: Path, private: Path, docker: list[str
                 replay_ids[1].lower() != message_id.lower() or \
                 message_state(room_id, sender_user_id, operation_id) != durable:
             raise RuntimeError("original send operation did not replay its durable result")
+        placement_after = room_placement(inspect_placement(
+            compose=compose, root=root, environment=environment), room_id)
+        require_live_owner(placement_after, actor_host_id)
+        if placement_after["incarnationID"] == placement_before["incarnationID"] or \
+                placement_after["epoch"] <= placement_before["epoch"]:
+            raise RuntimeError("Host restart did not commit a new native incarnation and epoch")
+        evidence["placementAfterRestart"] = placement_after
         evidence.update({"stage": "idempotent-replay-verified", "replayMessageID": replay_ids[1]})
         current_gateway = subprocess.check_output(compose + ["ps", "-q", "gateway"],
             cwd=root, env=environment, text=True, timeout=10).strip()
@@ -671,8 +673,16 @@ def main() -> int:
     def execute(command: list[str], log: str, *, timeout: int = 180,
                 input_text: str | None = None) -> None:
         with (run / log).open("a") as output:
-            subprocess.run(command, cwd=ROOT, env=environment, input=input_text, text=True,
-                           stdout=output, stderr=subprocess.STDOUT, timeout=timeout, check=True)
+            try:
+                subprocess.run(command, cwd=ROOT, env=environment, input=input_text, text=True,
+                               stdout=output, stderr=subprocess.STDOUT, timeout=timeout, check=True)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+                # Record the evidence file, never the command/environment: they
+                # can contain this disposable stack's credentials.
+                result.setdefault("failedStage", log)
+                if isinstance(error, subprocess.CalledProcessError):
+                    result.setdefault("failedExitCode", error.returncode)
+                raise
 
     try:
         resolved_sha = hashlib.sha256((ROOT / "IMV2Server/Package.resolved").read_bytes()).hexdigest()
@@ -740,8 +750,12 @@ def main() -> int:
         actor_configuration = [sys.executable, str(ROOT / "IMV2/scripts/prepare_v2_room_actor_configuration.py"),
             "--output-dir", str(private / "local-room-actors"),
             "--host", "actor-host=actor-host:7337" if args.remote_gateway else "gateway=gateway:7337",
-            "--caller", "account=account:7338", "--shards", "rooms-primary",
+            "--caller", "account=account:7338", "--caller", "operator=operator:7339",
+            "--caller", "placement-inspector=placement-inspector:7340",
+            "--shards", "rooms-primary",
             "--mount-root", "/run/im-v2-room-actor"]
+        for voter in PLACEMENT_VOTERS:
+            actor_configuration.extend(["--placement-voter", voter + "=" + voter + ":7336"])
         if args.remote_gateway:
             actor_configuration.extend(["--caller", "gateway=gateway:7337",
                                         "--worker-caller", "gateway"])
@@ -777,6 +791,24 @@ def main() -> int:
             for port in service.get("ports", []):
                 port["published"] = "0"
                 port["host_ip"] = "127.0.0.1"
+        for voter in PLACEMENT_VOTERS:
+            service = document["services"][voter]
+            service["image"] = IMAGE
+            service["command"] = ["/workspace/IMV2Server/.build/release/IMV2PlacementControlApp"]
+            service.setdefault("volumes", []).append({"type": "bind", "source": str(runtime),
+                "target": "/workspace/IMV2Server/.build/release", "read_only": True})
+            service.pop("restart", None)
+        document["services"]["placement-inspector"] = {
+            "image": IMAGE, "profiles": ["inspection"],
+            "command": ["/workspace/IMV2Server/.build/release/IMV2PlacementControlApp", "--inspect"],
+            "environment": {"IMV2_ROOM_ACTOR_CONFIGURATION_FILE": "/run/im-v2-room-actor/configuration.json",
+                            "IMV2_PLACEMENT_SHARD_IDS": "rooms-primary"},
+            "volumes": [{"type": "bind", "source": str(runtime),
+                         "target": "/workspace/IMV2Server/.build/release", "read_only": True},
+                        {"type": "bind", "source": str(private / "local-room-actors" / "placement-inspector"),
+                         "target": "/run/im-v2-room-actor", "read_only": True}],
+            "networks": copy.deepcopy(document["services"][PLACEMENT_VOTERS[0]].get("networks", {})),
+            "mem_limit": "512m", "pids_limit": 128}
         # Caddy needs the Account container's network namespace to issue its
         # private CA. Keep that container running, but defer its Actor join until
         # the configured Host and Gateway have registered their Compose names.
@@ -791,7 +823,8 @@ def main() -> int:
         if args.remote_gateway:
             actor_host = copy.deepcopy(document["services"]["gateway"])
             actor_host["ports"] = []
-            actor_host["environment"]["IM_V2_GATEWAY_NODE_ID"] = "local-actor-host-1"
+            # The generated trust roster binds this identity to actor-host.
+            actor_host["environment"]["IM_V2_GATEWAY_NODE_ID"] = "actor-host"
             actor_host["volumes"] = [
                 {**volume, "source": str(private / "local-room-actors" / "actor-host")}
                 if volume.get("target") == "/run/im-v2-room-actor" else volume
@@ -823,6 +856,12 @@ def main() -> int:
             time.sleep(1)
         execute(compose + ["exec", "-T", "postgres", "psql", "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2"],
                 "seed.log", input_text="INSERT INTO im_v2.shard_admission_pools (room_shard_id,capacity_profile_id,lease_id,generation,valid_until,command_window_limit) VALUES ('rooms-primary','standard','" + str(uuid.uuid4()) + "',1,CURRENT_TIMESTAMP + INTERVAL '24 hours',1000);\n")
+        # This is a newly created, task-owned topology. Provision each voter
+        # explicitly before any normal startup; never rebuild retained history.
+        for voter in PLACEMENT_VOTERS:
+            execute(compose + ["run", "--rm", "--no-deps", voter,
+                "/workspace/IMV2Server/.build/release/IMV2PlacementControlApp", "--provision"], "placement-provision.log")
+        execute(compose + ["up", "-d", "--wait", "--wait-timeout", "90", *PLACEMENT_VOTERS], "placement-startup.log")
         execute(compose + ["up", "-d", "account", "caddy", "operator"], "startup.log")
         account_container = subprocess.check_output(compose + ["ps", "-q", "account"],
             env=environment, text=True, timeout=15).strip()
@@ -906,28 +945,17 @@ def main() -> int:
             if "local V2 gateway direct chat: auth, open, accept, recipient room-log delivery verified" not in (
                     run / "smoke.log").read_text():
                 raise RuntimeError("Gateway send/read black-box phase did not complete")
-            # The black-box smoke has sent a direct message and read it through
-            # Gateway TCP. Every persisted message room must still have a live
-            # lease held by the separate Actor Host, never this caller.
-            query = ("SELECT m.room_id::text, COALESCE(l.host_id, ''), "
-                     "COALESCE(l.activation_epoch::text, ''), "
-                     "COALESCE((l.expires_at > clock_timestamp())::text, 'false') "
-                     "FROM (SELECT DISTINCT room_id FROM im_v2.messages) AS m "
-                     "LEFT JOIN im_v2.room_activation_leases AS l ON l.room_id = m.room_id "
-                     "ORDER BY m.room_id")
-            rows = subprocess.check_output(compose + ["exec", "-T", "postgres", "psql",
-                "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2", "-tA", "-F", "|", "-c", query],
+            query = "SELECT DISTINCT room_id::text FROM im_v2.messages ORDER BY room_id::text"
+            rooms = subprocess.check_output(compose + ["exec", "-T", "postgres", "psql",
+                "-v", "ON_ERROR_STOP=1", "-U", "im_v2", "-d", "im_v2", "-tA", "-c", query],
                 env=environment, text=True, timeout=15).strip().splitlines()
-            leases = [row.split("|") for row in rows if row]
-            # UUID/epoch/liveness are safe to retain even on a failed run;
-            # the private database and Compose configuration are discarded.
-            result["remoteTopology"]["observedLeaseRows"] = leases
-            if not leases or any(len(row) != 4 or row[1].lower() != expected_host.lower() or row[3] != "true"
-                                 for row in leases):
-                raise RuntimeError("message room lease was not held by the remote Actor Host")
-            result["remoteTopology"]["messageRoomLeases"] = [
-                {"roomID": room, "hostID": host, "activationEpoch": int(epoch)}
-                for room, host, epoch, _ in leases]
+            if not rooms:
+                raise RuntimeError("remote topology produced no message rooms")
+            placement = inspect_placement(compose=compose, root=ROOT, environment=environment)
+            states = [room_placement(placement, room) for room in rooms]
+            result["remoteTopology"]["messageRoomPlacements"] = states
+            for state in states:
+                require_live_owner(state, expected_host)
         execute([sys.executable, str(ROOT / "IMV2/scripts/verify_v2_virtual_actor_http_paths.py"),
                  "--account-url", environment["V2_LOCAL_HTTP_BASE_URL"],
                  "--ca", str(ca), "--compose-file", str(compose_file), "--env-file", str(env_file),

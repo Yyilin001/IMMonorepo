@@ -43,7 +43,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
 
     static func build(configuration: V2GatewayRuntimeConfiguration, prepared: GatewayPreparedAssembly,
                       roomServices: GatewayRoomServicesAssembly, actors: V2RoomActorApplication,
-                      actorFactory: V2RoomServerActivationFactory) async throws -> GatewayActorRealtimeRuntime {
+                      actorFactory: V2RoomServerActivationFactory?) async throws -> GatewayActorRealtimeRuntime {
         let metrics = V2ActorRealtimeMetrics()
         let actor = prepared.roomOwners.actorConfiguration
         guard let serviceQualification = actors.serviceQualification else {
@@ -53,7 +53,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         let identity = V2GatewayRealtimeIdentity(nodeID: configuration.gatewayNodeID,
             serviceID: actor.signer.serviceID.rawValue, incarnationID: actors.callerIncarnation)
         // Deployment snapshots describe the business source, never recipients.
-        // Authority and activation fences remain in the actual transactions.
+        // Durable data-owner checks remain in transactions; Actor lifetime governs execution.
         let userRouter = try await V2DatabaseLoanObservationContext.$source.withValue(.realtimeOwnerSnapshot) {
             try await V2StaticUserShardRouter.load(database: prepared.topology.database)
         }
@@ -135,7 +135,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             serviceOwnerAccess: actor.realtimeServiceOwnerAccess,
             limits: .init(maximumConcurrentCalls: maximumCallbackCalls))
         do {
-            try await actorFactory.configureRoomSubscriptionDelivery(sendBatch: { batch, shard, target in
+            try await actorFactory?.configureRoomSubscriptionDelivery(sendBatch: { batch, shard, target in
                 try await handle.sendRoomSubscriptionBatch(batch, sourceShardID: shard, to: target)
             }, maximumCalls: maximumCallbackCalls)
             let roomIngress = try await registry.configureRoomSubscriptionIngress(
@@ -171,7 +171,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             try await registry.configureRoomSubscriptionPorts(ports, ingress: roomIngress,
                 maximumRelations: configuration.onlineDeliveryMaximumRelations, maximumConcurrentCalls: 32)
         } catch {
-            await actorFactory.shutdownRoomSubscriptionDelivery()
+            await actorFactory?.shutdownRoomSubscriptionDelivery()
             _ = await handle.stop(deadline: .now + .seconds(60))
             await roomRouter.shutdown()
             throw error
@@ -268,7 +268,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         let stop: @Sendable () async -> Bool = {
             var success = true
             shutdownLogger.notice("Realtime component drain started", metadata: ["stage": "room_delivery"])
-            await actorFactory.shutdownRoomSubscriptionDelivery()
+            await actorFactory?.shutdownRoomSubscriptionDelivery()
             shutdownLogger.notice("Realtime component drain finished", metadata: ["stage": "room_delivery"])
             shutdownLogger.notice("Realtime component drain started", metadata: ["stage": "partition_control"])
             do { try await control.shutdown() } catch { success = false }

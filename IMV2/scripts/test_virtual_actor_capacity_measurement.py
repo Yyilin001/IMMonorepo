@@ -34,7 +34,7 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual(detail["connectionsPerWorker"], 10_000 if workload == "mixed" else 100)
             self.assertEqual(detail["latencyScope"], "single-process-phase-samples")
             self.assertEqual(detail["measurementSemanticsVersion"], MEASUREMENT_SEMANTICS_VERSION)
-            self.assertEqual(detail["resourceScope"], ["gateway", "account", "caddy"])
+            self.assertEqual(detail["resourceScope"], ["gateway", "account", "caddy", "placement-a", "placement-b", "placement-c"])
             self.assertEqual(scenario["phases"][0]["messagesPerSecond"],
                              scenario["phases"][1]["messagesPerSecond"])
             self.assertTrue(all(scenario["phases"][2].get(name, 0) == 0 for name in
@@ -91,8 +91,8 @@ class MeasurementTests(unittest.TestCase):
             phase_delta(before, after, samples)
 
     def test_resource_scopes_include_http_send_path(self) -> None:
-        self.assertEqual(resource_scope("hot"), ("gateway", "account", "caddy"))
-        self.assertEqual(resource_scope("fault"), ("gateway",))
+        self.assertEqual(resource_scope("hot"), ("gateway", "account", "caddy", "placement-a", "placement-b", "placement-c"))
+        self.assertEqual(resource_scope("fault"), ("gateway", "placement-a", "placement-b", "placement-c"))
 
     def test_cleanly_exited_loader_only_truncates_its_own_tail(self) -> None:
         exit_code = [0]
@@ -176,7 +176,7 @@ class MeasurementTests(unittest.TestCase):
                 content = json.dumps(steady)
                 (run / "measurement-steady.json").write_text(content)
                 result = {"passed": True, "mode": "measurement", "layout": "hot",
-                          "source": {"sourceSHA": PROTOCOL["mainRevision"]},
+                          "source": {"sourceSHA": ("1" * 40)},
                           "harness": {"revision": "e" * 40, "trackedClean": True,
                                       "filesSHA256": harness_files},
                           "fixtureManifestSHA256": "a" * 64, "scenarioSHA256": "b" * 64,
@@ -190,36 +190,40 @@ class MeasurementTests(unittest.TestCase):
                                           "phaseFiles": {"steady": hashlib.sha256(content.encode()).hexdigest()}}}
                 (run / "result.json").write_text(json.dumps(result))
                 paths.append(run)
-            freeze = freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0})
+            for revision in ("2" * 40, "not-a-revision", None):
+                with self.assertRaises(MeasurementFailure):
+                    freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0}, main_revision=revision)
+            freeze = freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0}, main_revision="1" * 40)
+            self.assertEqual(freeze["mainRevision"], "1" * 40)
             output = root / "freeze.json"
             output.write_text(json.dumps(freeze))
-            verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
+            verify_freeze(output, main_revision="1" * 40, workload="hot", layout="hot", fixture_hash="a" * 64,
                           scenario_hash="b" * 64, loader_hash="c" * 64,
                           connections_per_worker=100, harness_revision="e" * 40,
                           harness_files=harness_files)
             self.assertEqual(freeze["loaderWorkers"], 1)
             self.assertEqual(freeze["connectionsPerWorker"], 100)
-            self.assertEqual(freeze["resourceScope"], ["gateway", "account", "caddy"])
+            self.assertEqual(freeze["resourceScope"], ["gateway", "account", "caddy", "placement-a", "placement-b", "placement-c"])
             wrong_scope = dict(freeze, resourceScope=["gateway"])
             output.write_text(json.dumps(wrong_scope))
             with self.assertRaises(MeasurementFailure):
-                verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
+                verify_freeze(output, main_revision="1" * 40, workload="hot", layout="hot", fixture_hash="a" * 64,
                               scenario_hash="b" * 64, loader_hash="c" * 64,
                               connections_per_worker=100, harness_revision="e" * 40,
                               harness_files=harness_files)
             output.write_text(json.dumps(freeze))
             with self.assertRaises(MeasurementFailure):
-                verify_freeze(output, workload="mixed", layout="hot", fixture_hash="a" * 64,
+                verify_freeze(output, main_revision="1" * 40, workload="mixed", layout="hot", fixture_hash="a" * 64,
                               scenario_hash="b" * 64, loader_hash="c" * 64,
                               connections_per_worker=100, harness_revision="e" * 40,
                               harness_files=harness_files)
             with self.assertRaises(MeasurementFailure):
-                verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
+                verify_freeze(output, main_revision="1" * 40, workload="hot", layout="hot", fixture_hash="a" * 64,
                               scenario_hash="b" * 64, loader_hash="c" * 64,
                               connections_per_worker=5_000, harness_revision="e" * 40,
                               harness_files=harness_files)
             with self.assertRaises(MeasurementFailure):
-                verify_freeze(output, workload="hot", layout="hot", fixture_hash="a" * 64,
+                verify_freeze(output, main_revision="1" * 40, workload="hot", layout="hot", fixture_hash="a" * 64,
                               scenario_hash="b" * 64, loader_hash="c" * 64,
                               connections_per_worker=100, harness_revision="f" * 40,
                               harness_files=harness_files)
@@ -227,7 +231,7 @@ class MeasurementTests(unittest.TestCase):
             wrong_topology["measurement"]["scenario"]["loaderWorkers"] = 2
             (paths[2] / "result.json").write_text(json.dumps(wrong_topology))
             with self.assertRaises(MeasurementFailure):
-                freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0})
+                freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0}, main_revision="1" * 40)
             wrong_topology["measurement"]["scenario"]["loaderWorkers"] = 1
             (paths[2] / "result.json").write_text(json.dumps(wrong_topology))
             revised = json.loads((paths[2] / "measurement-steady.json").read_text())
@@ -238,7 +242,7 @@ class MeasurementTests(unittest.TestCase):
             result["measurement"]["phaseFiles"]["steady"] = hashlib.sha256(content.encode()).hexdigest()
             (paths[2] / "result.json").write_text(json.dumps(result))
             with self.assertRaises(MeasurementFailure):
-                freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0})
+                freeze_calibrations(paths, {"messagesAcknowledgedPerSecondMinimum": 9.0}, main_revision="1" * 40)
 
 
 if __name__ == "__main__":

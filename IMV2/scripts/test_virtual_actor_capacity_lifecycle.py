@@ -12,7 +12,7 @@ from virtual_actor_capacity_lifecycle import (
 )
 from virtual_actor_capacity_measurement import (
     HARNESS_FILE_KEYS, MEASUREMENT_SEMANTICS_VERSION, MeasurementFailure,
-    create_scenario, freeze_calibrations, phase_delta, verify_freeze,
+    create_scenario, freeze_calibrations, phase_delta, resource_scope, verify_freeze,
 )
 
 
@@ -41,14 +41,17 @@ class LifecycleTests(unittest.TestCase):
         with self.assertRaises(MeasurementFailure):
             create_scenario(ROOT, PROTOCOL, fixture, "cold", 500, 1.0)
 
-    def test_cold_requires_actual_release(self) -> None:
-        before = {"owner00": {"rows": 0}, "owner01": {"rows": 0}}
-        after = {"owner00": {"rows": 2, "released": 1, "reacquired": 0},
-                 "owner01": {"rows": 1, "released": 0, "reacquired": 0}}
-        self.assertEqual(validate_cold_retirement(before, after)["releasedRoomsAtEnd"], 1)
-        after["owner00"]["released"] = 0
-        with self.assertRaises(MeasurementFailure):
-            validate_cold_retirement(before, after)
+    def test_cold_requires_completed_native_idle_drain(self) -> None:
+        active = "im_v2_room_actor_active_rooms"
+        retired = "im_v2_room_actor_completed_idle_retirements_total"
+        before = {active: 3, retired: 2}
+        after = {active: 2, retired: 3}
+        self.assertEqual(validate_cold_retirement(before, after)["completedIdleRetirements"], 1)
+        for invalid in ({active: 2, retired: 2}, {active: 0, retired: 3},
+                        {active: 3, retired: 3}, {active: 2, retired: 0},
+                        {active: 2}, {active: 2, retired: float("nan")}):
+            with self.subTest(invalid=invalid), self.assertRaises(MeasurementFailure):
+                validate_cold_retirement(before, invalid)
 
     def test_fault_unavailable_results_are_zero_in_every_phase_and_family(self) -> None:
         phases = [{"name": name,
@@ -170,7 +173,10 @@ class LifecycleTests(unittest.TestCase):
             for index, items in enumerate((3000, 3050, 2950)):
                 directory = Path(temporary) / f"main-{index}"
                 directory.mkdir()
-                steady = {"nativeLoader": {"completed": True, "workloadFailed": 0,
+                steady = {"containers": {name: {"cpuUsageUsec": 1_000_000,
+                                                 "sampledPeakProcessRSSBytes": 1024}
+                                         for name in resource_scope("fault")},
+                          "nativeLoader": {"completed": True, "workloadFailed": 0,
                            "observedDurationSeconds": 300, "messagesSent": 0,
                            "messagesAcknowledged": 0,
                            "roomSyncStateBatch": {"successfulRooms": items},
@@ -178,7 +184,7 @@ class LifecycleTests(unittest.TestCase):
                 content = json.dumps(steady)
                 (directory / "measurement-steady.json").write_text(content)
                 result = {"passed": True, "mode": "measurement", "layout": "mixed",
-                          "source": {"sourceSHA": PROTOCOL["mainRevision"]},
+                          "source": {"sourceSHA": ("1" * 40)},
                           "harness": {"revision": "e" * 40, "trackedClean": True,
                                       "filesSHA256": harness_files},
                           "fixtureManifestSHA256": "a" * 64, "scenarioSHA256": "b" * 64,
@@ -187,16 +193,17 @@ class LifecycleTests(unittest.TestCase):
                                           "scenario": {"workload": "fault", "loaderWorkers": 1,
                                                        "connectionsPerWorker": 1500,
                                                        "latencyScope": "single-process-phase-samples",
-                                                       "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION},
+                                                       "measurementSemanticsVersion": MEASUREMENT_SEMANTICS_VERSION,
+                                                       "resourceScope": list(resource_scope("fault"))},
                              "phaseFiles": {"steady": hashlib.sha256(content.encode()).hexdigest()}}}
                 (directory / "result.json").write_text(json.dumps(result))
                 paths.append(directory)
-            freeze = freeze_calibrations(paths, {"successfulRoomItemsPerSecondMinimum": 9.0})
+            freeze = freeze_calibrations(paths, {"successfulRoomItemsPerSecondMinimum": 9.0}, main_revision="1" * 40)
             self.assertEqual(freeze["acceptedUnit"], "successfulRecoveryRoomItemsPerSecond")
             self.assertEqual(freeze["mainSteadyAcceptedPerSecond"][0], 20)
             output = Path(temporary) / "freeze.json"
             output.write_text(json.dumps(freeze))
-            verify_freeze(output, workload="fault", layout="mixed", fixture_hash="a" * 64,
+            verify_freeze(output, main_revision="1" * 40, workload="fault", layout="mixed", fixture_hash="a" * 64,
                           scenario_hash="b" * 64, loader_hash="c" * 64,
                           connections_per_worker=1500, harness_revision="e" * 40,
                           harness_files=harness_files)

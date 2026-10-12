@@ -5,7 +5,6 @@ import IMV2Core
 
 public enum V2RoomActivationResolution: Equatable, Sendable {
     case ready(V2RoomActivationToken)
-    case occupied(V2RoomActivationLease)
 }
 
 
@@ -13,15 +12,18 @@ public enum V2RoomActivationResolution: Equatable, Sendable {
 public struct V2RoomActivationDrainResult: Sendable {
     public let completed: Bool
     public let remainingRooms: Int
+    public let proof: V2RoomHostDrainProof?
 }
 
-/// 负责一个进程实例的有界激活、租约续期和退役。
-/// 每个回调在修改房间条目前，都要与本地代次和完整数据库令牌核对。
+/// 负责一个进程实例的有界激活和物理退役。
+/// 每个回调在修改房间条目前，都要与本地代次和完整激活令牌核对。
 public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     private nonisolated let hostAdmission = V2RoomHostAdmission()
     private nonisolated let executionHandles = Mutex<[RoomID: V2RoomExecutionHandle<Request, Response>]>([:])
     private let identity: V2ActorHostIdentity
-    private let leaseStore: any V2RoomActivationLeaseStore
+    private let placement: any V2RoomActorPlacementRouting
+    private var activationCounter: UInt32 = 0
+    private var completedIdleRetirements: UInt64 = 0
     private let qualification: V2ActorServiceQualification
     private let configuration: V2RoomRuntimeConfiguration
     private let budget: V2RoomCommandBudget
@@ -29,8 +31,10 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     private let factory: V2RoomActivationFactory<Request, Response>
     private let clock = ContinuousClock()
     private var started = false
+    private var draining = false
     private var accepting = false
     private var entries: [RoomID: Entry] = [:]
+    private var placementAdmissions: [String: @Sendable (RoomID) -> Bool] = [:]
     private var activationQueue: [RoomID] = []
     private var runningActivations = 0
     private var pendingRooms = 0
@@ -52,7 +56,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
 
     public init(
         identity: V2ActorHostIdentity,
-        leaseStore: any V2RoomActivationLeaseStore,
+        placement: any V2RoomActorPlacementRouting,
         configuration: V2RoomRuntimeConfiguration,
         budget: V2RoomCommandBudget,
         classify: @escaping @Sendable (Request) -> V2RoomTurnSchedulingClass,
@@ -60,7 +64,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         qualification: V2ActorServiceQualification = .standalone()
     ) {
         self.identity = identity
-        self.leaseStore = leaseStore
+        self.placement = placement
         self.configuration = configuration
         self.budget = budget
         self.classify = classify
@@ -69,7 +73,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     }
 
     public func start() {
-        guard !started else { return }
+        guard !started, !draining else { return }
         started = true
         accepting = true
         hostAdmission.open()
@@ -123,7 +127,8 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
             pendingRooms: pendingRooms,
             activationWaiters: waiterCount,
             restoringRooms: runningActivations,
-            retiringRooms: entries.values.filter { $0.phase == .draining || $0.phase == .uncertain }.count
+            retiringRooms: entries.values.filter { $0.phase == .draining || $0.phase == .uncertain }.count,
+            completedIdleRetirements: completedIdleRetirements
         )
     }
 
@@ -174,6 +179,9 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         deadline: ContinuousClock.Instant
     ) async throws -> V2RoomActivationResolution {
         guard started, accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
+        guard placementAdmissions[owner.shardID]?(roomID) != false else {
+            throw V2RoomCallFailure.notAccepted(.staleActivation)
+        }
         guard let proof = liveQualification() else { throw V2RoomCallFailure.notAccepted(.unavailable) }
         guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
         guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
@@ -183,14 +191,14 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         if let entry = entries[roomID] {
             guard hasQualification(entry) else {
                 beginRetirement(entry, uncertain: true)
-                throw V2RoomCallFailure.notAccepted(.leaseLost)
+                throw V2RoomCallFailure.notAccepted(.authorityLost)
             }
             guard entry.owner == owner else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
             switch entry.phase {
             case .ready:
                 guard let token = entry.token, isSafe(entry) else {
-                    if let token = entry.token { scheduleLeaseLoss(roomID: roomID, generation: entry.generation, token: token) }
-                    throw V2RoomCallFailure.notAccepted(.leaseLost)
+                    if let token = entry.token { scheduleAuthorityLoss(roomID: roomID, generation: entry.generation, token: token) }
+                    throw V2RoomCallFailure.notAccepted(.authorityLost)
                 }
                 return .ready(token)
             case .acquiring, .restoring: break
@@ -283,7 +291,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         }
         let entry = try readyEntry(token)
         guard let validUntil = entry.executionAuthority?.deadline() else {
-            throw V2RoomCallFailure.notAccepted(.leaseLost)
+            throw V2RoomCallFailure.notAccepted(.authorityLost)
         }
         return try await invokePinnedRead(entry: entry, token: token,
             request: request, deadline: deadline, execute: { token, request, deadline in
@@ -323,12 +331,12 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         switch completion {
         case .committed(let value):
             // Graceful drain closes new admission but permits an already owned
-            // read to finish while the exact lease and qualification remain safe.
+            // read to finish while the exact placement and qualification remain safe.
             guard entries[token.roomID] === entry, entry.token == token,
                   entry.phase == .ready || entry.phase == .draining else {
                 throw V2RoomCallFailure.notAccepted(.staleActivation)
             }
-            guard isSafe(entry) else { throw V2RoomCallFailure.notAccepted(.leaseLost) }
+            guard isSafe(entry) else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
             guard clock.now < deadline, !Task.isCancelled else {
                 throw V2RoomCallFailure.notAccepted(Task.isCancelled ? .cancelled : .deadlineExceeded)
             }
@@ -355,7 +363,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                   (entry.phase == .ready || entry.phase == .draining),
                   isSafe(entry), !Task.isCancelled else {
                 _ = await lane.abortReservation(grant)
-                throw V2RoomCallFailure.notAccepted(.leaseLost)
+                throw V2RoomCallFailure.notAccepted(.authorityLost)
             }
             entry.heldReservation = grant
             entry.reservationDispatched = false
@@ -376,9 +384,9 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         try await lane.markReservationDispatched(grant)
         guard entries[grant.token.roomID] === entry, entry.heldReservation == grant,
               (entry.phase == .ready || entry.phase == .draining), isSafe(entry) else {
-            scheduleLeaseLoss(roomID: grant.token.roomID, generation: entry.generation,
+            scheduleAuthorityLoss(roomID: grant.token.roomID, generation: entry.generation,
                               token: grant.token)
-            throw V2RoomCallFailure.notAccepted(.leaseLost)
+            throw V2RoomCallFailure.notAccepted(.authorityLost)
         }
         entry.reservationDispatched = true
     }
@@ -418,7 +426,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         guard snapshot.hasReservation, entries[grant.token.roomID] === entry,
               entry.token == grant.token, isSafe(entry),
               entry.phase == .ready || entry.phase == .draining else {
-            if !isSafe(entry) { scheduleLeaseLoss(roomID: grant.token.roomID,
+            if !isSafe(entry) { scheduleAuthorityLoss(roomID: grant.token.roomID,
                                                    generation: entry.generation, token: grant.token) }
             return false
         }
@@ -429,7 +437,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         guard entries[grant.token.roomID] === entry,
               entry.token == grant.token, entry.finishingReservation == grant,
               isSafe(entry), entry.phase == .ready || entry.phase == .draining else {
-            if !isSafe(entry) { scheduleLeaseLoss(roomID: grant.token.roomID,
+            if !isSafe(entry) { scheduleAuthorityLoss(roomID: grant.token.roomID,
                                                    generation: entry.generation, token: grant.token) }
             return false
         }
@@ -448,6 +456,10 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     /// 在向任何通道让出执行权前关闭准入。已接受的调用和预留
     /// 继续持有租约，直到其事务结束。
     public func beginDrain() async {
+        // A successful drain proof permanently closes this Host instance,
+        // including when startup has not yet reached start(). Otherwise a late
+        // startup callback could reopen admission after ownership was retired.
+        draining = true
         guard accepting else { return }
         accepting = false
         hostAdmission.close()
@@ -462,8 +474,34 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
             do { try await clock.sleep(for: .milliseconds(10)) }
             catch { break }
         }
-        if entries.isEmpty { await leaseStore.shutdownRenewals() }
-        return .init(completed: entries.isEmpty, remainingRooms: entries.count)
+        return .init(completed: entries.isEmpty, remainingRooms: entries.count,
+                     proof: entries.isEmpty ? .init(host: identity) : nil)
+    }
+
+    /// Called only with a capability bound to a committed withdrawal. Close
+    /// all matching admission synchronously before suspending; retirement owns
+    /// each physical executor until actual work and close have settled.
+    package func drainPlacement(_ withdrawal: V2RoomPlacementWithdrawal,
+                                deadline: ContinuousClock.Instant) async throws -> V2RoomPlacementDrainProof {
+        guard withdrawal.host == identity, withdrawal.isCurrent() else {
+            throw V2RoomCallFailure.notAccepted(.staleActivation)
+        }
+        placementAdmissions[withdrawal.shardID] = withdrawal.admits
+        func matches(_ entry: Entry) -> Bool {
+            entry.owner.shardID == withdrawal.shardID && withdrawal.contains(entry.roomID)
+        }
+        for entry in Array(entries.values) where matches(entry) {
+            beginRetirement(entry, uncertain: false)
+        }
+        while entries.values.contains(where: matches) {
+            guard withdrawal.isCurrent() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+            try Task.checkCancellation()
+            guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            try await clock.sleep(until: min(deadline, clock.now + .milliseconds(10)))
+        }
+        guard withdrawal.isCurrent() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+        return .init(host: identity, clusterID: withdrawal.clusterID, shardID: withdrawal.shardID,
+            partition: withdrawal.partition, epoch: withdrawal.epoch, transferID: withdrawal.transferID)
     }
 
     public func stop(deadline: ContinuousClock.Instant) async -> V2RoomActivationDrainResult {
@@ -476,15 +514,15 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         }
         guard entry.phase == .ready else { throw V2RoomCallFailure.notAccepted(.retired) }
         guard isSafe(entry) else {
-            scheduleLeaseLoss(roomID: token.roomID, generation: entry.generation, token: token)
-            throw V2RoomCallFailure.notAccepted(.leaseLost)
+            scheduleAuthorityLoss(roomID: token.roomID, generation: entry.generation, token: token)
+            throw V2RoomCallFailure.notAccepted(.authorityLost)
         }
         return entry
     }
 
     private func isSafe(_ entry: Entry) -> Bool {
-        guard hasQualification(entry), let safetyUntil = entry.safetyUntil else { return false }
-        return clock.now < safetyUntil
+        guard hasQualification(entry) else { return false }
+        return entry.phase == .draining || entry.placementAdmission?() == true
     }
 
     private func pumpActivations() {
@@ -505,98 +543,84 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         guard let entry = entries[roomID], entry.generation == generation,
               entry.phase == .acquiring else { return }
         guard accepting, hasQualification(entry) else { beginRetirement(entry, uncertain: true); return }
-        let startedAt = clock.now
         do {
-            let acquisition = try await leaseStore.acquire(
-                roomID: roomID, owner: entry.owner, host: identity, duration: configuration.leaseDuration
-            )
-            switch acquisition {
-            case .occupied(let lease):
-                guard hasQualification(entry), entry.phase == .acquiring else {
-                    beginRetirement(entry, uncertain: true); return
-                }
-                if lease.token.roomID == roomID, lease.token.owner == entry.owner {
-                    finishPending(entry, result: .success(.occupied(lease)))
-                } else {
-                    finishPending(entry, result: .failure(V2RoomCallFailure.notAccepted(.unavailable)))
-                }
-            case .acquired(let lease):
-                guard lease.token.roomID == roomID, lease.token.owner == entry.owner,
-                      lease.token.host == identity else {
-                    // 即使存储响应损坏，也可能持有已提交的令牌。
-                    // 保留容量，并重试按条件释放。
-                    entry.token = lease.token
-                    entry.lease = lease
+            let grant = try placement.grant(roomID: roomID, owner: entry.owner)
+            guard grant.host == identity, activationCounter < UInt32.max else {
+                throw V2RoomCallFailure.notAccepted(.staleActivation)
+            }
+            activationCounter += 1
+            let token = V2RoomActivationToken(roomID: roomID, owner: entry.owner,
+                activationEpoch: try grant.activationEpoch(counter: activationCounter), host: identity)
+            let admission = try placement.admission(for: token)
+            guard admission(), hasQualification(entry) else {
+                throw V2RoomCallFailure.notAccepted(.staleActivation)
+            }
+            entry.token = token
+            entry.placementAdmission = admission
+            entry.phase = .restoring
+            let executor = factory.make(token)
+            entry.executor = executor
+            entry.restoreInFlight = true
+            let restoreDeadline = min(clock.now + configuration.callTimeout.duration,
+                                      liveQualification()?.validUntil ?? clock.now)
+            entry.restoreTimer = Task { [weak self] in
+                do { try await ContinuousClock().sleep(until: restoreDeadline) }
+                catch { return }
+                await self?.restoreTimedOut(roomID: roomID, generation: generation,
+                                            token: token)
+            }
+            do {
+                let restoration = V2RoomActivationRestorationContext(token: token,
+                    deadline: restoreDeadline, lifetime: lifetime(token: token, generation: generation), check: { [weak self] in
+                        guard let self else { throw V2RoomCallFailure.notAccepted(.retired) }
+                        try await self.validateRestoration(token: token, generation: generation)
+                    })
+                try await restoration.validate()
+                try await executor.restore(restoration)
+                entry.restoreInFlight = false
+                entry.restoreTimer?.cancel()
+                guard entries[roomID] === entry else { await executor.close(); return }
+                guard entry.phase == .restoring, isSafe(entry), clock.now < restoreDeadline else {
                     beginRetirement(entry, uncertain: true)
                     return
                 }
-                guard adoptLease(entry, lease: lease, callStartedAt: startedAt) else { return }
-                let executor = factory.make(lease.token)
-                entry.executor = executor
-                entry.restoreInFlight = true
-                let restoreDeadline = min(clock.now + configuration.callTimeout.duration,
-                                          entry.safetyUntil ?? clock.now)
-                entry.restoreTimer = Task { [weak self] in
-                    do { try await ContinuousClock().sleep(until: restoreDeadline) }
-                    catch { return }
-                    await self?.restoreTimedOut(roomID: roomID, generation: generation,
-                                                token: lease.token)
-                }
-                do {
-                    try await executor.restore(restoreDeadline)
-                    entry.restoreInFlight = false
-                    entry.restoreTimer?.cancel()
-                    guard entries[roomID] === entry else { await executor.close(); return }
-                    guard entry.phase == .restoring, isSafe(entry), clock.now < restoreDeadline else {
-                        beginRetirement(entry, uncertain: true)
-                        return
+                let authority = V2RoomExecutionAuthority(admission: admission,
+                    qualification: qualification, generation: entry.qualificationGeneration, hostAdmission: hostAdmission)
+                entry.executionAuthority = authority
+                entry.lane = V2RoomTurnLane(
+                    token: token, configuration: configuration, budget: budget,
+                    classify: classify, execute: { [authority] turn in
+                        // Retirement closes authority synchronously before the lane's
+                        // asynchronous drain callback; already dispatched SQL retains ownership.
+                        guard let validUntil = authority.deadline() else { return .rolledBack(.authorityLost) }
+                        let context = V2RoomTurnContext(token: turn.context.token, turnID: turn.context.turnID,
+                            batchDeadline: turn.context.batchDeadline, activationValidUntil: validUntil,
+                            queueWaitDuration: turn.context.queueWaitDuration)
+                        return await executor.execute(.init(context: context, items: turn.items))
+                    },
+                    onUncertain: { [weak self] token in
+                        // 通道消费方绝不等待退役完成。
+                        await self?.scheduleAuthorityLoss(roomID: token.roomID,
+                                                      generation: generation, token: token)
                     }
-                    let authority = V2RoomExecutionAuthority(safetyUntil: entry.safetyUntil!,
-                        qualification: qualification, generation: entry.qualificationGeneration, hostAdmission: hostAdmission)
-                    entry.executionAuthority = authority
-                    entry.lane = V2RoomTurnLane(
-                        token: lease.token, configuration: configuration, budget: budget,
-                        classify: classify, execute: { [authority] turn in
-                            // Retirement closes authority synchronously before the lane's
-                            // asynchronous drain callback; already dispatched SQL retains ownership.
-                            guard let validUntil = authority.deadline() else { return .rolledBack(.leaseLost) }
-                            let context = V2RoomTurnContext(token: turn.context.token, turnID: turn.context.turnID,
-                                batchDeadline: turn.context.batchDeadline, activationValidUntil: validUntil,
-                                queueWaitDuration: turn.context.queueWaitDuration)
-                            return await executor.execute(.init(context: context, items: turn.items))
-                        },
-                        onUncertain: { [weak self] token in
-                            // 通道消费方绝不等待退役完成。
-                            await self?.scheduleLeaseLoss(roomID: token.roomID,
-                                                          generation: generation, token: token)
-                        }
-                    )
-                    entry.phase = .ready
-                    authority.setPhase(.ready)
-                    let handle = V2RoomExecutionHandle(token: lease.token, lane: entry.lane!, authority: authority)
-                    executionHandles.withLock { $0[roomID] = handle }
-                    clearPending(entry)
-                    signalChange()
-                    completeWaiters(entry, result: .success(.ready(lease.token)))
-                } catch {
-                    entry.restoreInFlight = false
-                    entry.restoreTimer?.cancel()
-                    guard entries[roomID] === entry else { await executor.close(); return }
-                    completeWaiters(entry, result: .failure(V2RoomCallFailure.notAccepted(.unavailable)))
-                    beginRetirement(entry, uncertain: false)
-                }
+                )
+                entry.phase = .ready
+                authority.setPhase(.ready)
+                let handle = V2RoomExecutionHandle(token: token, lane: entry.lane!, authority: authority)
+                executionHandles.withLock { $0[roomID] = handle }
+                clearPending(entry)
+                signalChange()
+                completeWaiters(entry, result: .success(.ready(token)))
+            } catch {
+                entry.restoreInFlight = false
+                entry.restoreTimer?.cancel()
+                guard entries[roomID] === entry else { await executor.close(); return }
+                completeWaiters(entry, result: .failure(V2RoomCallFailure.notAccepted(.unavailable)))
+                beginRetirement(entry, uncertain: false)
             }
         } catch {
             guard entries[roomID] === entry else { return }
-            if error as? V2RoomActivationLeaseError == .outcomeUnknown {
-                // 可能已有提交的租约，却没有返回令牌可供恢复或释放。
-                // 该租约会保持占用直到数据库判定过期。
-                finishPending(entry, result: .failure(V2RoomCallFailure.outcomeUnknown))
-                return
-            }
-            let reason: V2RoomFailureReason = error as? V2RoomActivationLeaseError == .roomNotFound
-                ? .notFound : .unavailable
-            finishPending(entry, result: .failure(V2RoomCallFailure.notAccepted(reason)))
+            finishPending(entry, result: .failure(error))
         }
     }
 
@@ -608,120 +632,66 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         pumpActivations()
     }
 
+    private func lifetime(token: V2RoomActivationToken, generation: UUID) -> V2RoomActivationLifetime {
+        .init(token: token, begin: { [weak self] id, deadline in
+            guard let self else { throw V2RoomCallFailure.notAccepted(.retired) }
+            return try await self.beginLifetimePin(token: token, generation: generation, id: id, deadline: deadline)
+        }, validate: { [weak self] in
+            guard let self else { throw V2RoomCallFailure.notAccepted(.retired) }
+            try await self.validateLifetime(token: token, generation: generation)
+        }, finish: { [weak self] id in
+            await self?.finishLifetimePin(token: token, generation: generation, id: id)
+        })
+    }
+
+    private func validateLifetime(token: V2RoomActivationToken, generation: UUID) throws {
+        guard accepting, let entry = entries[token.roomID], entry.generation == generation,
+              entry.token == token, entry.phase == .restoring || entry.phase == .ready,
+              isSafe(entry) else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+    }
+
+    private func beginLifetimePin(token: V2RoomActivationToken, generation: UUID,
+                                  id: UUID, deadline: ContinuousClock.Instant) throws -> ContinuousClock.Instant {
+        try Task.checkCancellation()
+        try validateLifetime(token: token, generation: generation)
+        guard let entry = entries[token.roomID], let proof = liveQualification(), clock.now < deadline else {
+            throw V2RoomCallFailure.notAccepted(.deadlineExceeded)
+        }
+        // Public authorization TTL remains finite without per-room ownership
+        // expiry. It cannot outlive this scope or process qualification.
+        let validUntil = min(deadline, min(proof.validUntil, clock.now + .seconds(30)))
+        guard entry.lifetimePins.insert(id).inserted else {
+            throw V2RoomCallFailure.notAccepted(.invalidRequest)
+        }
+        entry.inFlightCalls += 1
+        return validUntil
+    }
+
+    private func finishLifetimePin(token: V2RoomActivationToken, generation: UUID, id: UUID) {
+        guard let entry = entries[token.roomID], entry.generation == generation,
+              entry.token == token, entry.lifetimePins.remove(id) != nil else { return }
+        precondition(entry.inFlightCalls > 0)
+        entry.inFlightCalls -= 1
+    }
+
+    private func validateRestoration(token: V2RoomActivationToken, generation: UUID) throws {
+        guard accepting, let entry = entries[token.roomID], entry.generation == generation,
+              entry.token == token, entry.phase == .restoring, entry.restoreInFlight else {
+            throw V2RoomCallFailure.notAccepted(.staleActivation)
+        }
+        guard isSafe(entry) else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
+        guard placementAdmissions[token.owner.shardID]?(token.roomID) != false else {
+            throw V2RoomCallFailure.notAccepted(.staleActivation)
+        }
+    }
+
     private func restoreTimedOut(roomID: RoomID, generation: UUID, token: V2RoomActivationToken) {
         guard let entry = entries[roomID], entry.generation == generation,
               entry.token == token, entry.restoreInFlight, entry.phase == .restoring else { return }
         beginRetirement(entry, uncertain: true)
     }
 
-    private func adoptLease(_ entry: Entry, lease: V2RoomActivationLease,
-                            callStartedAt: ContinuousClock.Instant) -> Bool {
-        guard entries[entry.roomID] === entry else { return false }
-        entry.token = lease.token
-        entry.lease = lease
-        guard entry.phase == .acquiring, hasQualification(entry),
-              let safety = safetyDeadline(lease, callStartedAt: callStartedAt), safety > clock.now else {
-            beginRetirement(entry, uncertain: true)
-            return false
-        }
-        entry.safetyUntil = safety
-        entry.phase = .restoring
-        let roomID = entry.roomID
-        let generation = entry.generation
-        entry.renewTask = Task { [weak self] in
-            await self?.renewLoop(roomID: roomID, generation: generation, token: lease.token)
-        }
-        setWatchdog(entry, until: safety)
-        return true
-    }
-
-    /// 数据库观测只提供时长，不提供本地墙上时钟的过期时刻。
-    /// 从数据库调用开始计时，会保守地将网络与等锁时间计入已用时长。
-    private func safetyDeadline(_ lease: V2RoomActivationLease,
-                                callStartedAt: ContinuousClock.Instant) -> ContinuousClock.Instant? {
-        let milliseconds = Int64((lease.expiresAt.timeIntervalSince(lease.databaseObservedAt) * 1_000).rounded(.down))
-        guard milliseconds > configuration.renewalSafetyMargin.rawValue else { return nil }
-        return callStartedAt + .milliseconds(milliseconds - configuration.renewalSafetyMargin.rawValue)
-    }
-
-    private func renewLoop(roomID: RoomID, generation: UUID, token: V2RoomActivationToken) async {
-        while true {
-            do { try await clock.sleep(for: configuration.renewalInterval.duration) }
-            catch { return }
-            guard let entry = entries[roomID], entry.generation == generation,
-                  entry.token == token,
-                  entry.phase == .restoring || entry.phase == .ready || entry.phase == .draining
-            else { return }
-            guard isSafe(entry) else {
-                scheduleLeaseLoss(roomID: roomID, generation: generation, token: token)
-                return
-            }
-            let startedAt = clock.now
-            do {
-                entry.renewalInFlight = true
-                defer { entry.renewalInFlight = false }
-                let lease = try await leaseStore.renew(token: token, duration: configuration.leaseDuration)
-                guard entries[roomID] === entry, entry.token == token,
-                      entry.phase == .restoring || entry.phase == .ready || entry.phase == .draining
-                else { return }
-                guard isSafe(entry) else {
-                    scheduleLeaseLoss(roomID: roomID, generation: generation, token: token)
-                    return
-                }
-                guard lease.token == token,
-                      let safety = safetyDeadline(lease, callStartedAt: startedAt),
-                      safety > clock.now else {
-                    scheduleLeaseLoss(roomID: roomID, generation: generation, token: token)
-                    return
-                }
-                entry.lease = lease
-                entry.safetyUntil = safety
-                entry.executionAuthority?.renew(until: safety)
-                setWatchdog(entry, until: safety)
-            } catch V2RoomActivationLeaseError.renewalDeferred {
-                // A confirmed unsuccessful attempt supplies no new authority.
-                // Keep the original watchdog and lease untouched; the next
-                // attempt follows the normal interval and rechecks safety.
-                guard entries[roomID] === entry, entry.generation == generation,
-                      entry.token == token,
-                      entry.phase == .restoring || entry.phase == .ready || entry.phase == .draining
-                else { return }
-                guard isSafe(entry) else {
-                    scheduleLeaseLoss(roomID: roomID, generation: generation, token: token)
-                    return
-                }
-            } catch {
-                scheduleLeaseLoss(roomID: roomID, generation: generation, token: token)
-                return
-            }
-        }
-    }
-
-    private func setWatchdog(_ entry: Entry, until deadline: ContinuousClock.Instant) {
-        let probe = V2SynchronousActorTurnProbe.start("host_watchdog_update")
-        defer { probe?.finish() }
-        entry.watchdogTask?.cancel()
-        let roomID = entry.roomID
-        let generation = entry.generation
-        let token = entry.token
-        entry.watchdogTask = Task { [weak self] in
-            do { try await ContinuousClock().sleep(until: deadline) }
-            catch { return }
-            guard let token else { return }
-            await self?.watchdogExpired(roomID: roomID, generation: generation,
-                                        token: token, expectedDeadline: deadline)
-        }
-    }
-
-    private func watchdogExpired(roomID: RoomID, generation: UUID, token: V2RoomActivationToken,
-                                 expectedDeadline: ContinuousClock.Instant) {
-        guard let entry = entries[roomID], entry.generation == generation,
-              entry.token == token, entry.safetyUntil == expectedDeadline,
-              !isSafe(entry) else { return }
-        scheduleLeaseLoss(roomID: roomID, generation: generation, token: token)
-    }
-
-    private func scheduleLeaseLoss(roomID: RoomID, generation: UUID, token: V2RoomActivationToken) {
+    private func scheduleAuthorityLoss(roomID: RoomID, generation: UUID, token: V2RoomActivationToken) {
         guard let entry = entries[roomID], entry.generation == generation,
               entry.token == token else { return }
         beginRetirement(entry, uncertain: true)
@@ -731,7 +701,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         guard entries[entry.roomID] === entry, entry.phase != .stopped else { return }
         if entry.phase == .uncertain || (entry.phase == .draining && !uncertain) { return }
         let wasReady = entry.phase == .ready
-        if uncertain { entry.phase = .uncertain }
+        if uncertain { entry.phase = .uncertain; entry.idleRetirement = false }
         else if entry.phase != .uncertain { entry.phase = .draining }
         entry.executionAuthority?.setPhase(entry.phase)
         // Keep a closed handle until retirement completes so exact callers retain
@@ -743,11 +713,11 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         }
         if wasReady { signalChange() }
         completeWaiters(entry, result: .failure(V2RoomCallFailure.notAccepted(
-            uncertain ? .leaseLost : .retired
+            uncertain ? .authorityLost : .retired
         )))
         if let lane = entry.lane {
             Task {
-                if uncertain { await lane.loseLease() }
+                if uncertain { await lane.loseExecutionAuthority() }
                 else { await lane.beginDrain() }
             }
         }
@@ -763,7 +733,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         var retryDelayMilliseconds: Int64 = 25
         while true {
             guard let entry = entries[roomID], entry.generation == generation else { return }
-            if !entry.activationJobRunning && !entry.restoreInFlight && !entry.renewalInFlight &&
+            if !entry.activationJobRunning && !entry.restoreInFlight &&
                 entry.inFlightCalls == 0 && (entry.executionAuthority?.inFlight ?? 0) == 0 && entry.finishingReservation == nil {
                 let laneSnapshot = await entry.lane?.snapshot()
                 guard entries[roomID] === entry else { return }
@@ -785,16 +755,9 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
             await entry.executor?.close()
         }
         guard entries[entry.roomID] === entry else { return true }
-        if let token = entry.token {
-            do { _ = try await leaseStore.release(token: token) }
-            catch { return false }
-        }
-        guard entries[entry.roomID] === entry else { return true }
         if let lane = entry.lane {
             guard await lane.completeRetirement() else { return false }
         }
-        entry.renewTask?.cancel()
-        entry.watchdogTask?.cancel()
         entry.restoreTimer?.cancel()
         clearPending(entry)
         entry.phase = .stopped
@@ -803,6 +766,9 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
             if handles[entry.roomID]?.token == entry.token { handles.removeValue(forKey: entry.roomID) }
         }
         entries.removeValue(forKey: entry.roomID)
+        // Count the completed native lifecycle, never an idle scan or the
+        // start of a drain which may still own SQL, pins or reservations.
+        if entry.idleRetirement { completedIdleRetirements += 1 }
         return true
     }
 
@@ -842,7 +808,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         waiter.timer.cancel()
         waiter.continuation.resume(throwing: V2RoomCallFailure.notAccepted(reason))
         // Acquiring jobs become actual owners before their Task is created.
-        // Never remove started work or a lease just because its caller leaves.
+        // Never remove started work or execution authority just because its caller leaves.
         if entry.waiters.isEmpty, !entry.activationJobRunning, entry.phase == .acquiring {
             activationQueue.removeAll { $0 == roomID }
             clearPending(entry)
@@ -865,7 +831,10 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                 let claimed = await lane.beginIdleDrain(ifLastActivityAtOrBefore: cutoff)
                 probe = V2SynchronousActorTurnProbe.start("host_idle_scan")
                 guard entries[entry.roomID] === entry, entry.phase == .ready else { continue }
-                if claimed { beginRetirement(entry, uncertain: false) }
+                if claimed {
+                    entry.idleRetirement = true
+                    beginRetirement(entry, uncertain: false)
+                }
             }
             probe?.finish()
         }
@@ -880,20 +849,18 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         var activationJobRunning = false
         var waiters: [UUID: Waiter] = [:]
         var token: V2RoomActivationToken?
-        var lease: V2RoomActivationLease?
-        var safetyUntil: ContinuousClock.Instant?
+        var placementAdmission: (@Sendable () -> Bool)?
         var executionAuthority: V2RoomExecutionAuthority?
         var lane: V2RoomTurnLane<Request, Response>?
         var executor: V2RoomActivationExecutor<Request, Response>?
         var executorClosed = false
+        var idleRetirement = false
         var restoreInFlight = false
-        var renewalInFlight = false
+        var lifetimePins: Set<UUID> = []
         var inFlightCalls = 0
         var finishingReservation: V2RoomReservation?
         var heldReservation: V2RoomReservation?
         var reservationDispatched = false
-        var renewTask: Task<Void, Never>?
-        var watchdogTask: Task<Void, Never>?
         var restoreTimer: Task<Void, Never>?
         var retireTask: Task<Void, Never>?
 
@@ -995,7 +962,7 @@ public extension V2RoomActivationHost where Request == V2RoomRequest, Response =
                 if Task.isCancelled { failure = .notAccepted(.cancelled) }
                 else if clock.now >= min(end, items[index].deadline) { failure = .notAccepted(.deadlineExceeded) }
                 else if entries[token.roomID] !== pin || pin.token != token { failure = .notAccepted(.staleActivation) }
-                else if !isSafe(pin) { failure = .notAccepted(.leaseLost) }
+                else if !isSafe(pin) { failure = .notAccepted(.authorityLost) }
                 else if !accepting || pin.phase != .ready { failure = .notAccepted(.retired) }
                 else { failure = nil }
                 // Preserve unknown as unknown; never turn it into safe retry.

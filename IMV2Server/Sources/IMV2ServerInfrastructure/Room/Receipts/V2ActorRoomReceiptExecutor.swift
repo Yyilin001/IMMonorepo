@@ -21,7 +21,7 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
 
     public func command(_ command: V2RoomReceiptCommand, token: V2RoomActivationToken,
                         ingressAt: Date) async throws -> V2RoomReceiptResult {
-        guard token.roomID == command.roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard token.roomID == command.roomID else { throw V2RoomActorStateError.activationChanged }
         switch command {
         case .record(let wire):
             do {
@@ -32,7 +32,7 @@ public struct V2ActorRoomReceiptExecutor: Sendable {
                 // 优化后的回执存储报告逐项所有者错误。
                 // 在此逐条房间边界，它表示激活权限已过期，
                 // 因此目录必须让位置失效并重新解析。
-                throw V2RoomActivationLeaseError.activationChanged
+                throw V2RoomActorStateError.activationChanged
             } catch let error as V2ReadReceiptStoreError {
                 return .recordFailure(.init(error))
             }

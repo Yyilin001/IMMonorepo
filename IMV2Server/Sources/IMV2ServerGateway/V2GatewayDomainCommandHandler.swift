@@ -717,7 +717,7 @@ private func messageFailureReason(_ reason: V2RoomFailureReason) -> V2MessageSen
     case .staleActivation: .staleActivation
     case .notReady: .notReady
     case .retired: .retired
-    case .leaseLost: .leaseLost
+    case .authorityLost: .authorityLost
     case .unavailable: .unavailable
     case .overloaded: .overloaded
     case .deadlineExceeded: .deadlineExceeded

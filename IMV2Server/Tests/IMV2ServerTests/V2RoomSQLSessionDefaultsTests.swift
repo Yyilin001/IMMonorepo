@@ -18,6 +18,10 @@ struct V2RoomSQLSessionDefaultsTests {
         let resources = makeV2DatabaseTestResources()
         var configuration = try SQLPostgresConfiguration(url: url)
         configuration.coreConfiguration.options.additionalStartupParameters += V2RoomActivationSQLTimeouts.default.startupParameters
+        let host = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let applicationName = V2ActorPostgresSessionIdentity.applicationName(host)
+        #expect(applicationName.utf8.count == 37)
+        configuration.coreConfiguration.options.additionalStartupParameters.append(("application_name", applicationName))
         resources.databases.use(.postgres(configuration: configuration, maxConnectionsPerEventLoop: 1), as: .psql)
         do {
             let pool = try V2EventLoopDatabasePool(databases: resources.databases,
@@ -26,7 +30,13 @@ struct V2RoomSQLSessionDefaultsTests {
                 loanPolicy: .init(maximumConnections: 1, reservedRenewalConnections: 0,
                     maximumQueued: 8, maximumWait: .seconds(2)), sessionTimeouts: .default)
             let database = pool.database
-            try await V2PostgresSessionReadiness.verify(database: database, timeouts: .default)
+            try await V2PostgresSessionReadiness.verify(database: database, timeouts: .default,
+                applicationName: applicationName)
+            await #expect(throws: V2PostgresSessionReadinessError.applicationNameMismatch) {
+                try await V2PostgresSessionReadiness.verify(database: database, timeouts: .default,
+                    applicationName: V2ActorPostgresSessionIdentity.applicationName(
+                        .init(hostID: host.hostID, incarnationID: UUID())))
+            }
             func sqlCount() -> UInt64 {
                 database.loanMetricsSnapshot().observations.values.reduce(0) { sum, source in
                     sum + source.sqlPhases.values.reduce(0) { $0 + $1.count }
@@ -79,6 +89,8 @@ struct V2RoomSQLSessionDefaultsTests {
             #expect(reconnected.pid != first.pid)
             #expect(reconnected.lock == first.lock && reconnected.statement == first.statement && reconnected.idle == first.idle)
             #expect(sqlCount() - reconnectBefore == 3)
+            try await V2PostgresSessionReadiness.verify(database: database, timeouts: .default,
+                applicationName: applicationName)
             try await resources.shutdown()
         } catch {
             try? await resources.shutdown()

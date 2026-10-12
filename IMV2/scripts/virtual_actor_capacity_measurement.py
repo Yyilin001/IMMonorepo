@@ -10,6 +10,7 @@ from copy import deepcopy
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import statistics
 import subprocess
@@ -17,9 +18,9 @@ from typing import Any
 
 
 PHASES = ("warmup", "steady", "cooldown")
-MEASUREMENT_SEMANTICS_VERSION = "single-loader-phase-counters-v3"
-SEND_RESOURCE_SCOPE = ("gateway", "account", "caddy")
-FAULT_RESOURCE_SCOPE = ("gateway",)
+MEASUREMENT_SEMANTICS_VERSION = "native-placement-single-loader-phase-counters-v4"
+SEND_RESOURCE_SCOPE = ("gateway", "account", "caddy", "placement-a", "placement-b", "placement-c")
+FAULT_RESOURCE_SCOPE = ("gateway", "placement-a", "placement-b", "placement-c")
 HARNESS_FILE_KEYS = (
     "IMV2/scripts/test_v2_virtual_actor_capacity_canary.py",
     "IMV2/scripts/virtual_actor_capacity_measurement.py",
@@ -72,8 +73,14 @@ def supports_recovery_loader(binary: Path, *, require_timeout: bool = False) -> 
     return False
 
 
-def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
-    """Build provenance for three successful frozen-main calibration runs."""
+def require_revision(value: str) -> None:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise MeasurementFailure("an explicit full native baseline revision is required")
+
+
+def freeze_calibrations(runs: list[Path], thresholds: dict[str, float], *, main_revision: str) -> dict:
+    """Build provenance for three successful native baseline runs."""
+    require_revision(main_revision)
     if len(runs) != 3 or len(set(runs)) != 3 or not thresholds:
         raise MeasurementFailure("three distinct main calibrations and numeric thresholds required")
     if any(not isinstance(value, (int, float)) or isinstance(value, bool) or
@@ -88,7 +95,7 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
         result = json.loads(result_file.read_text())
         steady = json.loads(steady_file.read_text())
         if (result.get("passed") is not True or result.get("mode") != "measurement" or
-            result.get("source", {}).get("sourceSHA") != "f1cdd78d6a21bf0ae23da627c0710c65115236aa" or
+            result.get("source", {}).get("sourceSHA") != main_revision or
             result.get("measurement", {}).get("phaseFiles", {}).get("steady") != digest(steady_file)):
             raise MeasurementFailure("main calibration evidence is incomplete")
         loader = steady.get("nativeLoader", {})
@@ -161,7 +168,7 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
     (layout, fixture_hash, scenario_hash, loader_hash, workload, workers, per_worker,
      latency_scope, semantics_version, scoped_services, harness_identity) = identities[0]
     unit = "successfulRecoveryRoomItemsPerSecond" if workload == "fault" else "messagesAcknowledgedPerSecond"
-    return {"schemaVersion": 1, "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
+    return {"schemaVersion": 1, "mainRevision": main_revision,
             "workload": workload, "layout": layout, "fixtureManifestSHA256": fixture_hash,
             "scenarioSHA256": scenario_hash, "commonLoaderSHA256": loader_hash,
             "loaderWorkers": workers, "connectionsPerWorker": per_worker,
@@ -176,11 +183,12 @@ def freeze_calibrations(runs: list[Path], thresholds: dict[str, float]) -> dict:
             "thresholds": thresholds}
 
 
-def verify_freeze(path: Path, *, workload: str, layout: str, fixture_hash: str,
+def verify_freeze(path: Path, *, main_revision: str, workload: str, layout: str, fixture_hash: str,
                   scenario_hash: str, loader_hash: str, connections_per_worker: int,
                   harness_revision: str, harness_files: dict[str, str]) -> dict:
+    require_revision(main_revision)
     freeze = json.loads(path.read_text())
-    expected = {"schemaVersion": 1, "mainRevision": "f1cdd78d6a21bf0ae23da627c0710c65115236aa",
+    expected = {"schemaVersion": 1, "mainRevision": main_revision,
                 "workload": workload, "layout": layout, "fixtureManifestSHA256": fixture_hash,
                 "scenarioSHA256": scenario_hash, "commonLoaderSHA256": loader_hash,
                 "loaderWorkers": 1, "connectionsPerWorker": connections_per_worker,

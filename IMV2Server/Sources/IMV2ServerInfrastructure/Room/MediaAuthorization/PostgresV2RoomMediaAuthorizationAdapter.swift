@@ -3,6 +3,7 @@ import IMV2ServerContracts
 import FluentKit
 import Foundation
 import IMV2ActorContracts
+import IMV2ActorRuntime
 import IMV2Core
 import SQLKit
 
@@ -12,9 +13,12 @@ import SQLKit
 struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
     private let database: any Database
     private let token: V2RoomActivationToken
+    private let lifetime: V2RoomActivationLifetime
     private let scope: V2RoomActivationWriteScope
 
-    init(database: any Database, token: V2RoomActivationToken) throws {
+    init(database: any Database, token: V2RoomActivationToken, lifetime: V2RoomActivationLifetime) throws {
+        guard lifetime.token == token else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
+        self.lifetime = lifetime
         self.database = database
         self.token = token
         self.scope = try .init(tokens: [token])
@@ -22,7 +26,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
 
     func execute(_ query: V2RoomMediaAuthorizationQuery) async throws -> V2RoomMediaAuthorizationResult {
         guard query.roomID == token.roomID else {
-            throw V2RoomActivationLeaseError.activationChanged
+            throw V2RoomActorStateError.activationChanged
         }
         switch query {
         case .groupAvatar(let request):
@@ -38,7 +42,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                   let actor = request.actorUserID.uuidValue else {
                 throw V2MediaStoreError.downloadNotAuthorized
             }
-            return try await v2WithRoomScopedTransaction(database: database) { transaction in
+            return try await ownedTransaction { transaction, validUntil in
                 guard let sql = transaction as? any SQLDatabase else {
                     throw V2RoomWriteStoreError.corruptPersistenceState
                 }
@@ -76,20 +80,38 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
         }
     }
 
+    private func ownedTransaction<Value: Sendable>(
+        _ body: @escaping @Sendable (any Database, ContinuousClock.Instant) async throws -> Value
+    ) async throws -> Value {
+        try await lifetime.withPin(deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { validUntil in
+            try await V2RoomSQLDeadline.withDeadline(validUntil) {
+                try await v2WithRoomScopedTransaction(database: database) { transaction in
+                    try await body(transaction, validUntil)
+                }
+            }
+        }
+    }
+
+    private func proofExpiry(observedAt: Date, validUntil: ContinuousClock.Instant) throws -> Date {
+        let remaining = ContinuousClock.now.duration(to: validUntil).components
+        let seconds = Double(remaining.seconds) + Double(remaining.attoseconds) / 1e18
+        guard seconds > 0, seconds <= 30 else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+        return observedAt.addingTimeInterval(seconds)
+    }
+
     private func groupAvatar(_ request: V2ActorGroupAvatarVisibilityWire) async throws -> V2RoomMediaAuthorizationResult {
         guard let room = request.roomID.uuidValue, let actor = request.actorUserID.uuidValue else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
-        return try await v2WithRoomScopedTransaction(database: database) { transaction in
+        return try await ownedTransaction { transaction, validUntil in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
             try await scope.require([room], sql: sql)
             guard let row = try await sql.raw("""
                 SELECT r.membership_revision, a.media_id, COALESCE(a.revision,0) AS avatar_revision,
-                       c.generation, clock_timestamp() AS observed_at, lease.expires_at AS activation_expires_at,
+                       c.generation, clock_timestamp() AS observed_at,
                        (g.owner_user_id=\(bind:actor) AND member.role='owner' AND r.frozen_at IS NULL) AS can_manage
                 FROM im_v2.rooms r JOIN im_v2.group_rooms g USING(room_id)
-                JOIN im_v2.room_activation_leases lease USING(room_id)
                 JOIN im_v2.room_memberships member ON member.room_id=r.room_id AND member.user_id=\(bind:actor)
                 LEFT JOIN im_v2.resource_group_avatars a ON a.room_id=r.room_id
                 LEFT JOIN im_v2.resource_catalog c ON c.media_id=a.media_id
@@ -105,9 +127,10 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                       AND v.size IN (128,256) AND v.state='ready')=2))
                 """).first(decoding: V2GroupAvatarRoomFactsRow.self) else { return .notVisible }
             guard row.membershipRevision >= 0, row.avatarRevision >= 0,
-                  let expiry = row.activationExpiresAt, expiry > row.observedAt else {
-                throw V2RoomActivationLeaseError.leaseExpired
+                  row.observedAt.timeIntervalSince1970.isFinite else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
             }
+            let expiry = try proofExpiry(observedAt: row.observedAt, validUntil: validUntil)
             return .groupAvatarVisible(.init(request: request, activation: token,
                 membershipRevision: row.membershipRevision,
                 state: try .init(roomID: request.roomID, mediaID: row.mediaID.map { .init(uuid: $0) },
@@ -134,7 +157,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
         let encoded = try JSONEncoder().encode(input)
         guard encoded.count <= 64 * 1_024 else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         let payload = String(decoding: encoded, as: UTF8.self)
-        return try await v2WithRoomScopedTransaction(database: database) { transaction in
+        return try await ownedTransaction { transaction, validUntil in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await v2SetRoomActivationSQLTimeouts(.default, sql: sql)
             try await scope.require([room], sql: sql)
@@ -145,7 +168,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                 )
                 SELECT x.ordinal, x."targetOrdinal" AS target_ordinal, x.target,
                        room.membership_revision, room.group_permission_revision, statement_timestamp() AS observed_at,
-                       lease.expires_at AS activation_expires_at,
+
                        visibility.allowed AS actor_visible,
                        (visibility.allowed AND CASE WHEN x.kind = 'groupJoinReview' THEN EXISTS (
                            SELECT 1 FROM im_v2.group_join_requests application
@@ -153,7 +176,7 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                              AND application.state='pending'
                        ) ELSE member.user_id IS NOT NULL END) AS target_visible,
                        nickname.nickname, nickname.revision AS nickname_revision
-                FROM im_v2.rooms room JOIN im_v2.room_activation_leases lease USING (room_id)
+                FROM im_v2.rooms room
                 CROSS JOIN requested x
                 LEFT JOIN im_v2.room_memberships actor ON actor.room_id = room.room_id AND actor.user_id = x.actor
                   AND actor.joined_revision <= room.membership_revision
@@ -184,9 +207,6 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                       row.target == UUID(uuidString: expected.target), row.membershipRevision >= 0, row.permissionRevision >= 0,
                       row.observedAt.timeIntervalSince1970.isFinite,
                       !row.targetVisible || row.actorVisible else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                guard let expiry = row.activationExpiresAt, expiry > row.observedAt else {
-                    throw V2RoomActivationLeaseError.leaseExpired
-                }
             }
             let grouped = Dictionary(grouping: rows, by: \.ordinal)
             let results = try requests.enumerated().map { ordinal, request -> V2RoomMediaAuthorizationResult in
@@ -194,10 +214,9 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
                       values.count == request.targetUserIDs.count,
                       values.allSatisfy({ $0.actorVisible == facts.actorVisible
                           && $0.observedAt == facts.observedAt && $0.membershipRevision == facts.membershipRevision
-                          && $0.permissionRevision == facts.permissionRevision
-                          && $0.activationExpiresAt == facts.activationExpiresAt }),
-                      let expiry = facts.activationExpiresAt else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                          && $0.permissionRevision == facts.permissionRevision }) else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 guard facts.actorVisible else { return .notVisible }
+                let expiry = try proofExpiry(observedAt: facts.observedAt, validUntil: validUntil)
                 let members = try values.compactMap { row -> V2ActorGroupMemberPresentationWire? in
                     guard let revision = row.nicknameRevision else {
                         guard row.nickname == nil else { throw V2RoomWriteStoreError.corruptPersistenceState }
@@ -228,18 +247,17 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
         guard let room = request.roomID.uuidValue, let actor = request.actorUserID.uuidValue,
               request.usage.home(actorUserID: request.actorUserID) == .room(request.roomID)
         else { return .notVisible }
-        return try await v2WithRoomScopedTransaction(database: database) { transaction in
+        return try await ownedTransaction { transaction, validUntil in
             guard let sql = transaction as? any SQLDatabase else { throw V2RoomWriteStoreError.corruptPersistenceState }
             try await scope.require([room], sql: sql)
             guard let row = try await sql.raw("""
                 SELECT room.room_kind, room.frozen_at, room.membership_revision, room.group_permission_revision,
-                       membership.role, lease.expires_at AS activation_expires_at, clock_timestamp() AS observed_at,
+                       membership.role,  clock_timestamp() AS observed_at,
                        EXISTS (SELECT 1 FROM im_v2.group_rooms g WHERE g.room_id=room.room_id
                            AND g.owner_user_id=\(bind: actor)) AS structural_owner,
                        EXISTS (SELECT 1 FROM im_v2.room_member_mutes mute WHERE mute.room_id = room.room_id
                            AND mute.user_id = \(bind: actor) AND mute.mute_until > clock_timestamp()) AS muted
                 FROM im_v2.rooms room JOIN im_v2.room_memberships membership ON membership.room_id = room.room_id
-                JOIN im_v2.room_activation_leases lease ON lease.room_id = room.room_id
                 WHERE room.room_id = \(bind: room) AND membership.user_id = \(bind: actor)
                   AND membership.joined_revision <= room.membership_revision
                   AND (membership.left_revision IS NULL OR membership.left_revision > room.membership_revision)
@@ -258,9 +276,10 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
             } catch V2RoomWriteStoreError.actorNotEligible, V2RoomWriteStoreError.actorMuted, V2RoomWriteStoreError.roomFrozen {
                 return .notVisible
             }
-            guard let expiry = row.activationExpiresAt, expiry > row.observedAt else {
-                throw V2RoomActivationLeaseError.leaseExpired
+            guard row.observedAt.timeIntervalSince1970.isFinite else {
+                throw V2RoomWriteStoreError.corruptPersistenceState
             }
+            let expiry = try proofExpiry(observedAt: row.observedAt, validUntil: validUntil)
             return .resourceUploadAllowed(.init(request: request, activation: token,
                 membershipRevision: row.membershipRevision, permissionRevision: row.permissionRevision,
                 role: row.role, observedAt: row.observedAt, activationExpiresAt: expiry))
@@ -271,17 +290,17 @@ struct PostgresV2RoomMediaAuthorizationAdapter: Sendable {
 extension PostgresV2RoomMediaAuthorizationAdapter: V2RoomMediaAuthorizationStoring {}
 
 public extension V2RoomMediaAuthorizationDomainExecutor {
-    init(database: any Database, token: V2RoomActivationToken) throws {
-        self.init(token: token, store: try PostgresV2RoomMediaAuthorizationAdapter(database: database, token: token))
+    init(database: any Database, token: V2RoomActivationToken, lifetime: V2RoomActivationLifetime) throws {
+        self.init(token: token, store: try PostgresV2RoomMediaAuthorizationAdapter(database: database, token: token, lifetime: lifetime))
     }
 }
 
 private struct V2GroupAvatarRoomFactsRow: Decodable {
     let membershipRevision: Int64; let mediaID: UUID?; let avatarRevision: Int64; let generation: Int64?
-    let observedAt: Date; let activationExpiresAt: Date?; let canManage: Bool
+    let observedAt: Date;  let canManage: Bool
     enum CodingKeys: String, CodingKey {
         case membershipRevision = "membership_revision", mediaID = "media_id", avatarRevision = "avatar_revision", generation
-        case observedAt = "observed_at", activationExpiresAt = "activation_expires_at", canManage = "can_manage"
+        case observedAt = "observed_at", canManage = "can_manage"
     }
 }
 
@@ -292,22 +311,22 @@ private struct V2ProfileRoomInput: Encodable {
 private struct V2ProfileRoomLookupRow: Codable {
     let ordinal: Int; let targetOrdinal: Int; let target: UUID
     let actorVisible: Bool; let targetVisible: Bool
-    let membershipRevision: Int64; let permissionRevision: Int64; let observedAt: Date; let activationExpiresAt: Date?
+    let membershipRevision: Int64; let permissionRevision: Int64; let observedAt: Date
     let nickname: String?; let nicknameRevision: Int64?
     enum CodingKeys: String, CodingKey {
         case ordinal, target, targetOrdinal = "target_ordinal", actorVisible = "actor_visible", targetVisible = "target_visible"
-        case membershipRevision = "membership_revision", permissionRevision = "group_permission_revision", observedAt = "observed_at", activationExpiresAt = "activation_expires_at"
+        case membershipRevision = "membership_revision", permissionRevision = "group_permission_revision", observedAt = "observed_at"
         case nickname, nicknameRevision = "nickname_revision"
     }
 }
 
 private struct V2ResourceUploadRoomAdmissionRow: Decodable {
     let roomKind: String; let frozenAt: Date?; let membershipRevision: Int64; let permissionRevision: Int64
-    let role: String; let activationExpiresAt: Date?; let observedAt: Date; let muted: Bool
+    let role: String;  let observedAt: Date; let muted: Bool
     let structuralOwner: Bool
     enum CodingKeys: String, CodingKey {
         case roomKind = "room_kind", frozenAt = "frozen_at", membershipRevision = "membership_revision"
-        case permissionRevision = "group_permission_revision", activationExpiresAt = "activation_expires_at"
+        case permissionRevision = "group_permission_revision"
         case observedAt = "observed_at", role, muted
         case structuralOwner = "structural_owner"
     }

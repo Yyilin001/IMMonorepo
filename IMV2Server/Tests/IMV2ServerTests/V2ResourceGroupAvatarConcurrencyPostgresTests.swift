@@ -56,30 +56,31 @@ extension V2ResourceGroupAvatarPostgresTests {
     @Test("a room owner epoch committed during lock wait rejects the old activation and preserves recovery on its successor",
           arguments: [false, true])
     func dataOwnerEpochTransition(hadReceipt: Bool) async throws {
-        try await withFixture { f in
-            let media = try await f.media(), command = try f.command(media: media), gate = AvatarMediaLockGate()
-            let oldReceipt: V2GroupAvatarChange?
-            if hadReceipt {
-                guard case .applied(let receipt) = try await f.apply(command) else { throw AvatarConcurrencyFailure.unexpectedOutcome }
-                oldReceipt = receipt
-            } else { oldReceipt = nil }
-            let moving = Task {
-                try await avatarHeldTransaction(f.database, gate: gate) { transaction in
-                    let sql = try #require(transaction as? any SQLDatabase)
-                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind:f.room.uuidValue!)").run()
+        try await withAvatarDatabase { seed in
+            let prior = try await seed.withActivation { f in
+                let media = try await f.media(), command = try f.command(media: media), gate = AvatarMediaLockGate()
+                let oldReceipt: V2GroupAvatarChange?
+                if hadReceipt {
+                    guard case .applied(let receipt) = try await f.apply(command) else { throw AvatarConcurrencyFailure.unexpectedOutcome }
+                    oldReceipt = receipt
+                } else { oldReceipt = nil }
+                let moving = Task {
+                    try await avatarHeldTransaction(f.database, gate: gate) { transaction in
+                        let sql = try #require(transaction as? any SQLDatabase)
+                        try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind:f.room.uuidValue!)").run()
+                    }
                 }
+                let pid = try await gate.waitUntilHeld()
+                let stale = Task { try await f.apply(command) }
+                do {
+                    try await requireAvatarLockWait(blocker: pid, sql: f.sql)
+                    await gate.release(); try await moving.value
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await stale.value }
+                    return (f, command, oldReceipt, media)
+                } catch { await gate.release(); _ = await moving.result; _ = await stale.result; throw error }
             }
-            let pid = try await gate.waitUntilHeld()
-            let stale = Task { try await f.apply(command) }
-            do {
-                try await requireAvatarLockWait(blocker: pid, sql: f.sql)
-                await gate.release(); try await moving.value
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await stale.value }
-                let owner = try V2RoomDataOwner(shardID: f.token.owner.shardID, epoch: 1)
-                guard case .acquired(let successor) = try await PostgresV2RoomActivationStore(database: f.database)
-                    .acquire(roomID: f.room, owner: owner, host: .init(hostID: .init("avatar-successor"), incarnationID: UUID()), duration: .init(60_000)) else {
-                    throw AvatarConcurrencyFailure.unexpectedOutcome
-                }
+            let f = prior.0, command = prior.1, oldReceipt = prior.2, media = prior.3
+            let closed = try await seed.withActivation(epoch: 1) { successor in
                 let store = try PostgresV2GroupCapabilitiesStore(database: f.database, activationScope: .init(tokens: [successor.token]))
                 let recovery = try await store.recoverAvatar(actorUserID: f.owner, request: .init(command: command, action: .query))
                 if let oldReceipt { #expect(recovery == .committed(oldReceipt)) }
@@ -97,18 +98,16 @@ extension V2ResourceGroupAvatarPostgresTests {
                 // activation handoff; replay cannot create a second terminal fact.
                 let closed = try f.command(media: nil, revision: 1)
                 #expect(try await store.recoverAvatar(actorUserID: f.owner, request: .init(command: closed, action: .closeIfAbsent)) == .closed)
-                #expect(try await PostgresV2RoomActivationStore(database: f.database).release(token: successor.token))
-                guard case .acquired(let next) = try await PostgresV2RoomActivationStore(database: f.database)
-                    .acquire(roomID: f.room, owner: owner, host: .init(hostID: .init("avatar-next"), incarnationID: UUID()), duration: .init(60_000)) else {
-                    throw AvatarConcurrencyFailure.unexpectedOutcome
-                }
+                return closed
+            }
+            try await seed.withActivation(epoch: 1) { next in
                 let recovered = try PostgresV2GroupCapabilitiesStore(database: f.database, activationScope: .init(tokens: [next.token]))
                 #expect(try await recovered.recoverAvatar(actorUserID: f.owner, request: .init(command: closed, action: .query)) == .closed)
                 await #expect(throws: V2GroupCapabilitiesStoreError.operationClosed) {
                     _ = try await recovered.setAvatar(actorUserID: f.owner, command: closed, capacityProfile: f.profile,
                         eventID: .init(uuid: UUID()), now: Date())
                 }
-            } catch { await gate.release(); _ = await moving.result; _ = await stale.result; throw error }
+            }
         }
     }
 
@@ -116,7 +115,7 @@ extension V2ResourceGroupAvatarPostgresTests {
     func bindingWinsMediaLock(commits: Bool) async throws {
         try await withFixture { f in
             let media = try await f.media(), command = try f.command(media: media), gate = AvatarMediaLockGate()
-            let other = try await AvatarFixture.make(database: f.database), eventID = UUID()
+            let other = try await AvatarFixture.seed(database: f.database), eventID = UUID()
             // The real room transaction owns BEGIN/COMMIT. Block its late event
             // insert on a unique event ID held by another connection; wrapping
             // it in an outer transaction would not establish a commit barrier.

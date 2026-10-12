@@ -163,8 +163,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let heldBudget = await fixture.budget.snapshot()
             #expect(heldBudget.commandCount == 1)
             #expect(heldBudget.byteCount > 0)
-            let heldLease = try await fixture.leases.locate(roomID: fixture.room, owner: fixture.owner)
-            #expect(heldLease?.token == token)
+            #expect(first.proof == nil)
             let stillDraining = try await fixture.node.stop(deadline: .now + .milliseconds(40))
             #expect(!stillDraining.completed)
             #expect(stillDraining.remainingRooms == 1)
@@ -177,8 +176,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let releasedBudget = await fixture.budget.snapshot()
             #expect(releasedBudget.commandCount == 0)
             #expect(releasedBudget.byteCount == 0)
-            let releasedLease = try await fixture.leases.locate(roomID: fixture.room, owner: fixture.owner)
-            #expect(releasedLease?.token == nil)
+            #expect(finished.proof?.host == fixture.identity)
             #expect(await fixture.client.dispatchedCallCount() == 0)
         }
     }
@@ -290,7 +288,7 @@ struct V2RoomLocalCapabilityIntegrationTests {
             let gate = ExecutionGate(closed: true)
             let transport = PausedHintTransport(client: fixture.client, gate: gate)
             let owners = StaticOwner(owner: fixture.owner)
-            let directory = V2RoomDirectory(owners: owners, leases: StaticLease(token: token),
+            let directory = V2RoomDirectory(owners: owners, placement: PlacementFixedHostFixture(host: token.host),
                 hosts: fixture.client, transport: transport,
                 configuration: try .init(maximumActiveRooms: 2, maximumConcurrentRestores: 1,
                     maximumActivationWaitersPerRoom: 2, maximumPendingActivations: 2,
@@ -366,7 +364,6 @@ struct V2RoomLocalCapabilityIntegrationTests {
         let node: V2RoomClusterNode
         let client: V2RoomClusterClient
         let budget: V2RoomCommandBudget
-        let leases: LocalLeaseStore
         let descriptor: V2RoomClusterHostDescriptor
         let executions: ExecutionGate
         let identity: V2ActorHostIdentity
@@ -435,12 +432,10 @@ struct V2RoomLocalCapabilityIntegrationTests {
                 events: [try .init(sourceEventID: .init(uuid: UUID()), roomSequence: 1,
                                    projectionKind: "test", payload: Data(repeating: 7, count: 32_768))],
                 nextRoomSequence: 1, hasMore: false, logTrimmedThroughRoomSequence: 0)))
-            let leaseStore = LocalLeaseStore()
-            leases = leaseStore
             let commandBudget = V2RoomCommandBudget(configuration: runtime)
             budget = commandBudget
             let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: hostIdentity,
-                leaseStore: leaseStore, configuration: runtime,
+                placement: PlacementFixedHostFixture(host: hostIdentity), configuration: runtime,
                 budget: commandBudget, classify: { _ in .barrier },
                 factory: .init { _ in
                     .init(restore: { _ in }, execute: { turn in
@@ -527,46 +522,6 @@ struct V2RoomLocalCapabilityIntegrationTests {
         func open() { closed = false; pending?.resume(); pending = nil }
     }
 
-    private actor LocalLeaseStore: V2RoomActivationLeaseStore {
-        private var leases: [RoomID: V2RoomActivationLease] = [:]
-
-        func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
-            guard let lease = leases[roomID], lease.token.owner == owner else { return nil }
-            return lease
-        }
-
-        func acquire(roomID: RoomID, owner: V2RoomDataOwner, host: V2ActorHostIdentity,
-                     duration: V2ActorMilliseconds) async throws -> V2RoomActivationAcquisition {
-            if let lease = leases[roomID] { return .occupied(lease) }
-            let token = V2RoomActivationToken(roomID: roomID, owner: owner,
-                activationEpoch: try .init(1), host: host)
-            let value = try makeLease(token, duration: duration)
-            leases[roomID] = value
-            return .acquired(value)
-        }
-
-        func renew(token: V2RoomActivationToken,
-                   duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
-            guard leases[token.roomID]?.token == token else { throw V2RoomActivationLeaseError.activationChanged }
-            let value = try makeLease(token, duration: duration)
-            leases[token.roomID] = value
-            return value
-        }
-
-        func release(token: V2RoomActivationToken) async throws -> Bool {
-            guard leases[token.roomID]?.token == token else { return false }
-            leases.removeValue(forKey: token.roomID)
-            return true
-        }
-
-        private func makeLease(_ token: V2RoomActivationToken,
-                               duration: V2ActorMilliseconds) throws -> V2RoomActivationLease {
-            let observed = Date(timeIntervalSince1970: 1_000)
-            return try .init(token: token, databaseObservedAt: observed,
-                expiresAt: observed.addingTimeInterval(Double(duration.rawValue) / 1_000))
-        }
-    }
-
     private actor StaticOwner: V2RoomDataOwnerResolving {
         let owner: V2RoomDataOwner
         var calls = 0
@@ -575,25 +530,6 @@ struct V2RoomLocalCapabilityIntegrationTests {
             calls += 1
             return owner
         }
-    }
-
-    private actor StaticLease: V2RoomActivationLeaseStore {
-        let token: V2RoomActivationToken
-        init(token: V2RoomActivationToken) { self.token = token }
-        func locate(roomID: RoomID, owner: V2RoomDataOwner) async throws -> V2RoomActivationLease? {
-            guard roomID == token.roomID, owner == token.owner else { return nil }
-            return try .init(token: token, databaseObservedAt: Date(timeIntervalSince1970: 1_000),
-                expiresAt: Date(timeIntervalSince1970: 1_030))
-        }
-        func acquire(roomID: RoomID, owner: V2RoomDataOwner, host: V2ActorHostIdentity,
-                     duration: V2ActorMilliseconds) async throws -> V2RoomActivationAcquisition {
-            throw V2RoomActivationLeaseError.activationChanged
-        }
-        func renew(token: V2RoomActivationToken,
-                   duration: V2ActorMilliseconds) async throws -> V2RoomActivationLease {
-            throw V2RoomActivationLeaseError.activationChanged
-        }
-        func release(token: V2RoomActivationToken) async throws -> Bool { false }
     }
 
     private actor PausedHintTransport: V2RoomClientTransport {

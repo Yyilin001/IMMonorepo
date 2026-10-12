@@ -257,7 +257,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                 case .overloaded: stage = .acquisitionCallOverloaded
                 case .unavailable: stage = .acquisitionCallUnavailable
                 case .invalidRequest: stage = .acquisitionCallInvalidRequest
-                case .staleActivation, .notReady, .retired, .leaseLost: stage = .acquisitionCallStale
+                case .staleActivation, .notReady, .retired, .authorityLost: stage = .acquisitionCallStale
                 default: stage = .acquisitionOtherFailure
                 }
             }
@@ -312,8 +312,8 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             gatewayDescriptor: ports.gateway)
         var result: V2RoomSubscriptionResult
         do { result = try await ports.subscribe(command, route.activation, callDeadline) }
-        catch V2RoomActivationLeaseError.activationChanged { result = .failure(.stale) }
-        catch V2RoomActivationLeaseError.ownerChanged { result = .failure(.stale) }
+        catch V2RoomActorStateError.activationChanged { result = .failure(.stale) }
+        catch V2RoomActorStateError.ownerChanged { result = .failure(.stale) }
         catch {
             if Self.provesInvalidActivation(error) { result = .failure(.stale) }
             else { noteRouteFailure(error, roomID: key.roomID, activation: route.activation); throw error }
@@ -408,10 +408,10 @@ public actor V2GatewayRoomSubscriptionCoordinator {
     }
     private static func provesInvalidActivation(_ error: any Error) -> Bool {
         switch error {
-        case V2RoomActivationLeaseError.activationChanged, V2RoomActivationLeaseError.ownerChanged: return true
+        case V2RoomActorStateError.activationChanged, V2RoomActorStateError.ownerChanged: return true
         case V2RoomCallFailure.notAccepted(.staleActivation), V2RoomCallFailure.notAccepted(.retired),
-             V2RoomCallFailure.notAccepted(.leaseLost), V2RoomCallFailure.rolledBack(.staleActivation),
-             V2RoomCallFailure.rolledBack(.retired), V2RoomCallFailure.rolledBack(.leaseLost): return true
+             V2RoomCallFailure.notAccepted(.authorityLost), V2RoomCallFailure.rolledBack(.staleActivation),
+             V2RoomCallFailure.rolledBack(.retired), V2RoomCallFailure.rolledBack(.authorityLost): return true
         default: return false
         }
     }
@@ -781,7 +781,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                 case .invalidRequest: stage = .renewalCallInvalidRequest
                 case .cancelled: stage = .renewalCallCancelled
                 case .forbidden: stage = .renewalCallForbidden
-                case .staleActivation, .notReady, .retired, .leaseLost: stage = .renewalCallStale
+                case .staleActivation, .notReady, .retired, .authorityLost: stage = .renewalCallStale
                 default: stage = .renewalOtherFailure
                 }
             }

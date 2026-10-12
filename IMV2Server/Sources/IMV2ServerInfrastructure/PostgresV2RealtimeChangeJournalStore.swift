@@ -371,7 +371,7 @@ public struct PostgresV2RealtimeChangeJournalStore: V2RealtimeJournalProjectionS
         return try await transaction { db in
             let sql = try sqlDatabase(db); try await fence(sql, lease: lease)
             guard let record = try await consumerRecord(sql, partitionID: lease.partitionID, key: consumer) else {
-                throw V2RealtimeJournalError.leaseLost
+                throw V2RealtimeJournalError.authorityLost
             }
             let replay = try await read(sql, partitionID: lease.partitionID, after: record.controlCursor, limit: limit)
             let offered = min(record.offeredThrough,replay.publishedThrough)
@@ -673,7 +673,7 @@ public struct PostgresV2RealtimeChangeJournalStore: V2RealtimeJournalProjectionS
               AND service_id=\(bind: lease.identity.serviceID)
               AND process_incarnation=\(bind: lease.identity.incarnationID) AND expires_at>clock_timestamp()
             """).all()
-        guard rows.count == 1 else { throw V2RealtimeJournalError.leaseLost }
+        guard rows.count == 1 else { throw V2RealtimeJournalError.authorityLost }
     }
 
     private func read(_ sql: any SQLDatabase, partitionID: Int, after: Int64, limit: Int) async throws -> V2RealtimeJournalBatch {

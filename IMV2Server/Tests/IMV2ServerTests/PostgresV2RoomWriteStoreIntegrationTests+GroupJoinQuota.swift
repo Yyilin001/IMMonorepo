@@ -349,7 +349,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let original = try await current.proof(submission), requestID = try current.requestID(original)
             let cancel = try await current.cancel(room: room, actor: applicant, request: requestID)
             try await ownerSQL.raw("UPDATE im_v2.rooms SET owner_epoch = 1 WHERE room_id = \(bind: room.uuidValue!)").run()
-            await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await current.execute(cancel) }
+            await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await current.execute(cancel) }
             #expect(try await count("im_v2.group_join_requests WHERE state = 'pending'", on: ownerSQL) == 1)
             let moved = try QuotaInvitationFixture(control: control, owner: { _ in (owner, "room-b", 1) }, profile: profile, now: now)
             let proof = try await moved.proof(cancel)

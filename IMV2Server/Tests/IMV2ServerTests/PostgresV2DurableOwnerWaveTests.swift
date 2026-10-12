@@ -8,20 +8,24 @@ import SQLKit
 import Testing
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
-    @Test("configured durable fence rejects expiry observed after the lock wait", arguments: [false, true])
-    func durableConfiguredFenceRejectsExpiryAfterLockWait(expiresDuringWait: Bool) async throws {
+    @Test("durable data-owner validation observes committed owner changes after a room lock wait", arguments: [false, true])
+    func durableOwnerChangeAfterLockWait(changesDuringWait: Bool) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             try await withRoomActivation(database: database, roomID: roomID, shardID: "room-a") { token in
                 let gate = DurableWaveTupleQueueGate()
                 let deadline = ContinuousClock.now + .seconds(5)
-                let expiryRow = try #require(try await sql.raw("SELECT clock_timestamp()+make_interval(secs => \(bind: expiresDuringWait ? 0.3 : -1.0)) AS expiry").first())
-                let expiry = try expiryRow.decode(column: "expiry", as: Date.self)
+                if !changesDuringWait {
+                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: token.roomID.uuidValue!)").run()
+                }
                 let holder = Task {
                     do {
                         try await V2RoomSQLDeadline.withDeadline(deadline) {
                             try await v2WithRoomScopedTransaction(database: database) { transaction in
                                 let connection = try #require(transaction as? any SQLDatabase)
-                                try await connection.raw("UPDATE im_v2.room_activation_leases SET expires_at=\(bind: expiry) WHERE room_id=\(bind: token.roomID.uuidValue!)").run()
+                                _ = try await connection.raw("SELECT room_id FROM im_v2.rooms WHERE room_id=\(bind: token.roomID.uuidValue!) FOR NO KEY UPDATE").all()
+                                if changesDuringWait {
+                                    try await connection.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: token.roomID.uuidValue!)").run()
+                                }
                                 await gate.holdUpdatedRow()
                             }
                         }
@@ -29,14 +33,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 }
                 await gate.waitUntilHolderReady()
                 let waiter = Task {
-                    try await v2WithRoomActivationTransactionWithContext(database: database, deadline: deadline) { transaction, fence in
+                    try await v2WithRoomActivationTransaction(database: database, deadline: deadline) { transaction in
                         let connection = try #require(transaction as? any SQLDatabase)
-                        let entered = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value, clock_timestamp()<\(bind: expiry) AS valid_before_wait").first())
+                        let entered = try #require(try await connection.raw("SELECT pg_backend_pid()::bigint AS value").first())
                         let pid = try entered.decode(column: "value", as: Int64.self)
-                        if expiresDuringWait { #expect(try entered.decode(column: "valid_before_wait", as: Bool.self)) }
                         await gate.registerTail(pid)
-                        try await fence.requireDurableOwnersAndActivations(tokens: [token], operations: [
-                            .init(roomID: token.roomID.uuidValue!, senderID: senderUUID, clientMessageID: UUID())])
+                        try await v2RequireRoomActivation(token: token, sql: connection)
                     }
                 }
                 do {
@@ -48,19 +50,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         }
                         await Task.yield()
                     }
-                    if observed, expiresDuringWait {
-                        var expired = false
-                        while ContinuousClock.now < deadline {
-                            let clock = try #require(try await sql.raw("SELECT clock_timestamp()>=\(bind: expiry) AS expired").first())
-                            if try clock.decode(column: "expired", as: Bool.self) { expired = true; break }
-                            try await Task.sleep(for: .milliseconds(5))
-                        }
-                        #expect(expired)
-                    }
                     await gate.release()
                     try await holder.value
                     #expect(observed)
-                    await #expect(throws: V2RoomActivationLeaseError.leaseExpired) { try await waiter.value }
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) { try await waiter.value }
                 } catch {
                     await gate.release()
                     _ = try? await holder.value

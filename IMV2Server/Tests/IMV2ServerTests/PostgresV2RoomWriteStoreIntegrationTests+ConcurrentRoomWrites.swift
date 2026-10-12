@@ -443,7 +443,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     #expect(await signing.drained)
                 } catch { task.cancel(); _ = try? await task.value; throw error }
             } else if scenario == "owner" {
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { try await download() }
+                await #expect(throws: V2RoomActorStateError.ownerChanged) { try await download() }
                 #expect(await signing.calls == 0)
                 #expect(try await count("im_v2.media_download_grants", on: ownerSQL) == 0)
             } else {
@@ -1605,129 +1605,126 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 database: resources.database(.psql),
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 2, window: 86_400),
                 contentReviewMode: .disabled)
-            var selectedWriter = V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql),
-                controlDatabase: resources.database(.psql), store: writer,
-                shardID: "reciprocal-shard", epoch: 0, policyOwners: owners)
-            if actorScoped {
-                let owner = try V2RoomDataOwner(shardID: "reciprocal-shard", epoch: 0)
-                let host = V2ActorHostIdentity(
-                    hostID: try .init("reciprocal-fast-test"), incarnationID: UUID()
+            @Sendable func exercise(token: V2RoomActivationToken?) async throws {
+                let selectedWriter = V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql),
+                    controlDatabase: resources.database(.psql), store: writer,
+                    shardID: "reciprocal-shard", epoch: 0, activationToken: token, policyOwners: owners)
+                let messages = V2SendMessageService(
+                    store: selectedWriter,
+                    capacityProfile: profile,
+                    limits: try .init(maxUTF8Bytes: 64),
+                    now: { now }
                 )
-                let activations = PostgresV2RoomActivationStore(database: resources.database(.psql))
-                guard case .acquired(let lease) = try await activations.acquire(
-                    roomID: room.roomID, owner: owner, host: host, duration: .init(30_000)
-                ) else { throw V2RoomActivationLeaseError.activationChanged }
-                selectedWriter.activationToken = lease.token
-            }
-            let messages = V2SendMessageService(
-                store: selectedWriter,
-                capacityProfile: profile,
-                limits: try .init(maxUTF8Bytes: 64),
-                now: { now }
-            )
-            guard case .accepted = try await messages.send(.init(
-                roomID: room.roomID,
-                actorUserID: first,
-                clientMessageID: try .init("00000000-0000-0000-0002-000000000011"),
-                text: "一方首次发送"
-            )) else {
-                Issue.record("expected first-send acceptance")
-                return
-            }
-
-            guard case .accepted = try await messages.send(.init(
-                roomID: room.roomID,
-                actorUserID: first,
-                clientMessageID: try .init("00000000-0000-0000-0002-000000000012"),
-                text: "一方额度内快速发送"
-            )) else {
-                Issue.record("expected quota-bearing fast append")
-                return
-            }
-            let quota = try #require(try await sql.raw("""
-                SELECT message_count::bigint AS value
-                FROM im_v2.stranger_message_windows
-                WHERE sender_user_id = \(bind: firstUUID)
-                  AND recipient_user_id = \(bind: secondUUID)
-                """).first(decoding: CountRow.self))
-            #expect(quota.value == 2)
-
-            do {
-                _ = try await messages.send(.init(
-                    roomID: room.roomID,
-                    actorUserID: first,
-                    clientMessageID: try .init("00000000-0000-0000-0002-000000000013"),
-                    text: "超出陌生人额度"
-                ))
-                Issue.record("expected exact stranger quota denial")
-                return
-            } catch V2RoomWriteStoreError.strangerMessageLimitReached {
-                // The gateway maps this domain error to RATE_LIMITED. Keeping
-                // it as an error at the service boundary is the existing API.
-            }
-
-            // A reply changes the business rule: this pair is no longer a
-            // one-sided stranger conversation, so later messages correctly
-            // stop consuming the exhausted stranger window.
-            guard case .accepted = try await messages.send(.init(
-                roomID: room.roomID,
-                actorUserID: second,
-                clientMessageID: try .init("00000000-0000-0000-0002-000000000014"),
-                text: "另一方首次发送"
-            )) else {
-                Issue.record("expected reciprocal first-send acceptance")
-                return
-            }
-
-            guard case .accepted = try await messages.send(.init(
-                roomID: room.roomID,
-                actorUserID: first,
-                clientMessageID: try .init("00000000-0000-0000-0002-000000000015"),
-                text: "回复后重新装载缓存"
-            )) else {
-                Issue.record("expected post-reply cache reload")
-                return
-            }
-
-            for (actor, clientID, text) in [
-                (first, "00000000-0000-0000-0002-000000000016", "一方稳定发送"),
-                (second, "00000000-0000-0000-0002-000000000017", "另一方稳定发送"),
-            ] {
                 guard case .accepted = try await messages.send(.init(
                     roomID: room.roomID,
-                    actorUserID: actor,
-                    clientMessageID: try .init(clientID),
-                    text: text
+                    actorUserID: first,
+                    clientMessageID: try .init("00000000-0000-0000-0002-000000000011"),
+                    text: "一方首次发送"
                 )) else {
-                    Issue.record("expected steady-state acceptance")
+                    Issue.record("expected first-send acceptance")
                     return
                 }
-            }
 
+                guard case .accepted = try await messages.send(.init(
+                    roomID: room.roomID,
+                    actorUserID: first,
+                    clientMessageID: try .init("00000000-0000-0000-0002-000000000012"),
+                    text: "一方额度内快速发送"
+                )) else {
+                    Issue.record("expected quota-bearing fast append")
+                    return
+                }
+                let quota = try #require(try await sql.raw("""
+                    SELECT message_count::bigint AS value
+                    FROM im_v2.stranger_message_windows
+                    WHERE sender_user_id = \(bind: firstUUID)
+                      AND recipient_user_id = \(bind: secondUUID)
+                    """).first(decoding: CountRow.self))
+                #expect(quota.value == 2)
+
+                do {
+                    _ = try await messages.send(.init(
+                        roomID: room.roomID,
+                        actorUserID: first,
+                        clientMessageID: try .init("00000000-0000-0000-0002-000000000013"),
+                        text: "超出陌生人额度"
+                    ))
+                    Issue.record("expected exact stranger quota denial")
+                    return
+                } catch V2RoomWriteStoreError.strangerMessageLimitReached {
+                    // The gateway maps this domain error to RATE_LIMITED. Keeping
+                    // it as an error at the service boundary is the existing API.
+                }
+
+                // A reply changes the business rule: this pair is no longer a
+                // one-sided stranger conversation, so later messages correctly
+                // stop consuming the exhausted stranger window.
+                guard case .accepted = try await messages.send(.init(
+                    roomID: room.roomID,
+                    actorUserID: second,
+                    clientMessageID: try .init("00000000-0000-0000-0002-000000000014"),
+                    text: "另一方首次发送"
+                )) else {
+                    Issue.record("expected reciprocal first-send acceptance")
+                    return
+                }
+
+                guard case .accepted = try await messages.send(.init(
+                    roomID: room.roomID,
+                    actorUserID: first,
+                    clientMessageID: try .init("00000000-0000-0000-0002-000000000015"),
+                    text: "回复后重新装载缓存"
+                )) else {
+                    Issue.record("expected post-reply cache reload")
+                    return
+                }
+
+                for (actor, clientID, text) in [
+                    (first, "00000000-0000-0000-0002-000000000016", "一方稳定发送"),
+                    (second, "00000000-0000-0000-0002-000000000017", "另一方稳定发送"),
+                ] {
+                    guard case .accepted = try await messages.send(.init(
+                        roomID: room.roomID,
+                        actorUserID: actor,
+                        clientMessageID: try .init(clientID),
+                        text: text
+                    )) else {
+                        Issue.record("expected steady-state acceptance")
+                        return
+                    }
+                }
+
+                if actorScoped {
+                    let roomUUID = try #require(room.roomID.uuidValue)
+                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomUUID)").run()
+                    let stale = V2AuthenticatedSendMessage(roomID: room.roomID, actorUserID: first, clientMessageID: .init(uuid: UUID()), text: "stale warm append")
+                    await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await messages.send(stale) }
+                    // Restore epoch only in this disposable fixture, then verify
+                    // the failed message can be retried.
+                    try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=0 WHERE room_id=\(bind: roomUUID)").run()
+                    guard case .accepted = try await messages.send(stale) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    let replay = try await messages.send(stale)
+                    guard case .idempotent = replay else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                    guard case .accepted = try await messages.send(.init(roomID: room.roomID, actorUserID: first, clientMessageID: .init(uuid: UUID()), text: "warm after replay")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                }
+
+                let social = PostgresV2SocialRelationshipStore(database: resources.database(.psql),
+                    projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
+                _ = try await social.executeSocialFixture(actorUserID: second, targetUserID: first,
+                    operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: now)
+                await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
+                    try await messages.send(.init(roomID: room.roomID, actorUserID: first,
+                        clientMessageID: .init("00000000-0000-0000-0002-000000000018"), text: "封禁后拒绝发送"))
+                }
+
+                try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
+            }
             if actorScoped {
-                let roomUUID = try #require(room.roomID.uuidValue)
-                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: roomUUID)").run()
-                let stale = V2AuthenticatedSendMessage(roomID: room.roomID, actorUserID: first, clientMessageID: .init(uuid: UUID()), text: "stale warm append")
-                await #expect(throws: V2RoomActivationLeaseError.ownerChanged) { _ = try await messages.send(stale) }
-                // Restore epoch only in this disposable fixture, then verify
-                // the failed message can be retried.
-                try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=0 WHERE room_id=\(bind: roomUUID)").run()
-                guard case .accepted = try await messages.send(stale) else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                let replay = try await messages.send(stale)
-                guard case .idempotent = replay else { throw V2RoomWriteStoreError.corruptPersistenceState }
-                guard case .accepted = try await messages.send(.init(roomID: room.roomID, actorUserID: first, clientMessageID: .init(uuid: UUID()), text: "warm after replay")) else { throw V2RoomWriteStoreError.corruptPersistenceState }
+                try await withRoomActivation(database: resources.database(.psql), roomID: room.roomID,
+                    shardID: "reciprocal-shard") { token in try await exercise(token: token) }
+            } else {
+                try await exercise(token: nil)
             }
-
-            let social = PostgresV2SocialRelationshipStore(database: resources.database(.psql),
-                projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
-            _ = try await social.executeSocialFixture(actorUserID: second, targetUserID: first,
-                operation: .userBlock(.init(uuid: UUID())), action: .userBlock(.block), now: now)
-            await #expect(throws: V2SendOperationResponseError.directPolicyDenied) {
-                try await messages.send(.init(roomID: room.roomID, actorUserID: first,
-                    clientMessageID: .init("00000000-0000-0000-0002-000000000018"), text: "封禁后拒绝发送"))
-            }
-
-            try await assertAllAcceptedMessagesHaveCompletions(sql: sql)
             }
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
             try await resources.shutdown()
@@ -1884,8 +1881,8 @@ struct ConcurrentMediaResourceFixture: Sendable {
 private func roomMediaAuthorizationPort(database: any Database) -> V2ActorRoomMediaAuthorizationPort {
     .init(query: { query, deadline in
         guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        return try await withRoomActivation(database: database, roomID: query.roomID, shardID: "room-b") { token in
-            try await V2RoomMediaAuthorizationDomainExecutor(database: database, token: token).execute(query)
+        return try await withRoomActivationLifetime(database: database, roomID: query.roomID, shardID: "room-b") { token, lifetime in
+            try await V2RoomMediaAuthorizationDomainExecutor(database: database, token: token, lifetime: lifetime).execute(query)
         }
     })
 }

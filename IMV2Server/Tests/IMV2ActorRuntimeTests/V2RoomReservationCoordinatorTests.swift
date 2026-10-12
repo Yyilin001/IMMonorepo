@@ -99,7 +99,7 @@ struct V2RoomReservationCoordinatorTests {
         let second = try #require(fixture.lanes[fixture.rooms[1]])
         #expect(!(await first.snapshot().hasReservation))
         #expect(await second.snapshot().hasReservation)
-        await second.loseLease()
+        await second.loseExecutionAuthority()
         #expect(await second.completeRetirement())
         #expect(fixture.budget.snapshot().commandCount == 0)
     }

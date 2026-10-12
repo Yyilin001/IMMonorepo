@@ -3,41 +3,75 @@
 import FluentKit
 import Foundation
 import IMV2ActorContracts
+import IMV2ActorRuntime
 import IMV2Core
 import Synchronization
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 
-/// Grants a fresh activation for one room turn, runs `body` under its token,
-/// then releases the lease. An activation still held by another in-flight
-/// test turn is waited out (up to about 20s under contention) rather than
-/// treated as a failure; production room actors serialize turns the same way.
+/// Runs a database business operation in the shared native Host's room lane.
+/// The final caller awaits physical Host drain and control-plane retirement.
 func withRoomActivation<Value: Sendable>(
     database: any Database,
     roomID: RoomID,
     shardID: String = "room-a",
     epoch: Int64 = 0,
-    _ body: (V2RoomActivationToken) async throws -> Value
+    _ body: @escaping @Sendable (V2RoomActivationToken) async throws -> Value
 ) async throws -> Value {
-    let leases = PostgresV2RoomActivationStore(database: database)
-    let host = V2ActorHostIdentity(hostID: try .init("activation-test"), incarnationID: UUID())
     let owner = try V2RoomDataOwner(shardID: shardID, epoch: epoch)
-    for _ in 0..<2_000 {
-        guard case .acquired(let lease) = try await leases.acquire(roomID: roomID, owner: owner,
-            host: host, duration: try .init(10_000)) else {
-            try await Task.sleep(for: .milliseconds(10))
-            continue
-        }
-        do {
-            let value = try await body(lease.token)
-            _ = try await leases.release(token: lease.token)
-            return value
-        } catch {
-            _ = try? await leases.release(token: lease.token)
-            throw error
+    return try await V2DatabaseRoomActorTestRuntime.shared.execute(roomID: roomID, owner: owner, body)
+}
+
+/// Holds actual native room lanes in canonical order while a bounded owner
+/// batch executes. Canonical ordering prevents opposite room pairs from
+/// acquiring their lanes in reverse order.
+func withRoomActivations<Value: Sendable>(
+    database: any Database,
+    roomIDs: [RoomID],
+    shardID: String = "room-a",
+    epoch: Int64 = 0,
+    _ body: @escaping @Sendable ([V2RoomActivationToken]) async throws -> Value
+) async throws -> Value {
+    guard !roomIDs.isEmpty, roomIDs.count <= 128, Set(roomIDs).count == roomIDs.count else {
+        throw V2RoomCallFailure.notAccepted(.invalidRequest)
+    }
+    let owner = try V2RoomDataOwner(shardID: shardID, epoch: epoch)
+    return try await withRoomActivations(database: database,
+        owners: Dictionary(uniqueKeysWithValues: roomIDs.map { ($0, owner) }), body)
+}
+
+/// A data-owner migration can change one member of a pair independently.
+/// The native lanes remain canonically ordered across all selected rooms.
+func withRoomActivations<Value: Sendable>(
+    database: any Database,
+    owners: [RoomID: V2RoomDataOwner],
+    _ body: @escaping @Sendable ([V2RoomActivationToken]) async throws -> Value
+) async throws -> Value {
+    guard !owners.isEmpty, owners.count <= 128 else {
+        throw V2RoomCallFailure.notAccepted(.invalidRequest)
+    }
+    let rooms = owners.keys.sorted { $0.rawValue < $1.rawValue }
+    @Sendable func enter(_ index: Int, _ tokens: [V2RoomActivationToken]) async throws -> Value {
+        if index == rooms.count { return try await body(tokens) }
+        let room = rooms[index], owner = owners[room]!
+        return try await withRoomActivation(database: database, roomID: room,
+                                           shardID: owner.shardID, epoch: owner.epoch) { token in
+            try await enter(index + 1, tokens + [token])
         }
     }
-    throw V2RoomActivationLeaseError.activationChanged
+    return try await enter(0, [])
+}
+
+/// Media authorization retains a native pin through actual SQL settlement.
+func withRoomActivationLifetime<Value: Sendable>(
+    database: any Database,
+    roomID: RoomID,
+    shardID: String = "room-a",
+    epoch: Int64 = 0,
+    _ body: @escaping @Sendable (V2RoomActivationToken, V2RoomActivationLifetime) async throws -> Value
+) async throws -> Value {
+    let owner = try V2RoomDataOwner(shardID: shardID, epoch: epoch)
+    return try await V2DatabaseRoomActorTestRuntime.shared.executeWithLifetime(roomID: roomID, owner: owner, body)
 }
 
 /// Runs the activation-fenced room bookkeeping turn that production room
@@ -94,7 +128,7 @@ func invitationRoomPort(
     let identities = PostgresV2GroupInvitationIdentityReader(database: control)
     @Sendable func run(
         _ roomID: RoomID,
-        _ body: @Sendable (V2RoomInvitationDomainExecutor) async throws -> V2RoomInvitationResult
+        _ body: @escaping @Sendable (V2RoomInvitationDomainExecutor) async throws -> V2RoomInvitationResult
     ) async throws -> V2RoomInvitationResult {
         let location = try owner(roomID)
         return try await withRoomActivation(database: location.database, roomID: roomID,
@@ -131,7 +165,7 @@ func invitationOperationPort(
 ) -> V2GroupInvitationOperationRoomPort {
     let identities = PostgresV2GroupInvitationIdentityReader(database: control)
     @Sendable func run<Value: Sendable>(roomID: RoomID, inviteID: GroupInviteID?, deadline: ContinuousClock.Instant,
-        _ body: @Sendable (PostgresV2GroupInvitationOperationStore) async throws -> Value) async throws -> Value {
+        _ body: @escaping @Sendable (PostgresV2GroupInvitationOperationStore) async throws -> Value) async throws -> Value {
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
         let location = try owner(roomID)

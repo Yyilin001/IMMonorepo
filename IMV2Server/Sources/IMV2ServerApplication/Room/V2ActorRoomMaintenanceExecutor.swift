@@ -17,7 +17,7 @@ public struct V2ActorRoomMaintenanceExecutor: Sendable {
 
     public func execute(_ command: V2RoomMaintenanceCommand,
                         token: V2RoomActivationToken) async throws -> V2RoomMaintenanceResult {
-        guard command.roomID == token.roomID else { throw V2RoomActivationLeaseError.activationChanged }
+        guard command.roomID == token.roomID else { throw V2RoomActorStateError.activationChanged }
         return try await persistence.execute(command, token: token, now: now())
     }
 }

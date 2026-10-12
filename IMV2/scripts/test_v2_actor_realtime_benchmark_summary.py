@@ -48,13 +48,13 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
         args = SimpleNamespace(kind='candidate', baseline_checkout=None, baseline_binary=None,
             baseline_account_binary=None, candidate_binary=Path('gateway'),
             candidate_account_binary=Path('account'), loader_binary=Path('loader'))
-        self.assertEqual(benchmark.required_benchmark_binaries(args), [Path('gateway'), Path('account'), Path('loader')])
+        self.assertEqual(benchmark.required_benchmark_binaries(args), [Path('gateway'), Path('account'), Path('loader'), Path('IMV2PlacementControlApp')])
         for kind in ('baseline', 'both'):
             args.kind = kind
             with self.subTest(kind=kind), self.assertRaises(ValueError):
                 benchmark.required_benchmark_binaries(args)
         args.baseline_checkout, args.baseline_binary, args.baseline_account_binary = Path('frozen'), Path('old-gateway'), Path('old-account')
-        self.assertEqual(len(benchmark.required_benchmark_binaries(args)), 5)
+        self.assertEqual(len(benchmark.required_benchmark_binaries(args)), 6)
 
     def test_two_message_loops_preserve_node_pool_budgets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -120,7 +120,7 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                 (fixture / 'credentials.jsonl').write_text('{}\n' * benchmark.PARTS)
                 output = root / 'output'
                 output.mkdir()
-                args = SimpleNamespace(output_dir=output, fixture=fixture, actor_port=28337)
+                args = SimpleNamespace(output_dir=output, fixture=fixture, actor_port=28337, placement_port=None)
                 if mode is not None:
                     args.candidate_authorization_mode = mode
                 actors, parts = benchmark.prepare(args, dict(shardID='rooms-primary',
@@ -142,6 +142,9 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                     self.assertEqual(sorted(partition for owner in current['owners']
                         for partition in owner['partitions']), list(range(16)))
                     for service in candidate['services']:
+                        if 'placementVote' in service['permissions'] or 'placementExclude' in service['permissions']:
+                            self.assertFalse(any(permission.startswith('policy') for permission in service['permissions']))
+                            continue
                         self.assertIn('policyMutation', service['permissions'])
                         if service['hostIDs']:
                             self.assertIn('policyRegistration', service['permissions'])
@@ -153,13 +156,13 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
 class NotificationLossProofTests(unittest.TestCase):
     def test_fault_is_owned_small_candidate_and_cannot_mix_injections(self):
         valid = dict(room_notification_loss_canary=True, kind='candidate', allow_small_canary=True,
-                     shared_postgres=False, allow_scaled_diagnostic=False, room_host_restart_canary=None,
-                     realtime_host_restart_canary=None, actor_partition_canary=None,
+                     shared_postgres=False, allow_scaled_diagnostic=False,
+                     actor_partition_canary=None,
                      planned_reconnect_inflight_canary=False, app_outbox_canary=False,
                      app_multi_device_canary=False, preclose_recovery_witness=False)
         benchmark.room_notification_loss_constraints(SimpleNamespace(**valid), dict(users=120))
         for field, value in [('kind', 'both'), ('allow_small_canary', False), ('shared_postgres', True),
-                             ('room_host_restart_canary', 0), ('planned_reconnect_inflight_canary', True)]:
+                             ('planned_reconnect_inflight_canary', True)]:
             with self.subTest(field=field), self.assertRaises(ValueError):
                 benchmark.room_notification_loss_constraints(SimpleNamespace(**dict(valid, **{field: value})), dict(users=120))
         with self.assertRaises(ValueError):
@@ -221,47 +224,14 @@ class AdmissionStatementCategoryTests(unittest.TestCase):
                       benchmark.postgres_statement_category_probe_sql())
         sampler = benchmark.postgres_hotspot_sample_sql()
         self.assertIn(case, sampler)
+        self.assertNotIn('room_activation_leases', sampler)
+        self.assertNotIn('room_activation_fence', sampler)
+        self.assertIn("WHEN 'rooms' THEN 'room_state_lock'", sampler)
         # CASE sees the SQL on the server; emitted JSON carries only category.
         self.assertNotIn("'query',", sampler)
         self.assertNotIn("'statement_text',", sampler)
 
 
-class ProductionRestartCanaryGuardTests(unittest.TestCase):
-    def test_restart_mode_is_small_candidate_only_and_separate_from_other_faults(self):
-        from types import SimpleNamespace
-        from copy import copy
-        args = SimpleNamespace(realtime_host_restart_canary=2, kind='candidate',
-            allow_small_canary=True, allow_scaled_diagnostic=False, planned_reconnect_inflight_canary=False)
-        phases = [dict(name='natural-ttl-recovery', durationSeconds=60, messagesPerSecond=0,
-                       roomLogReadsPerSecond=0, syncPullsPerSecond=0, reconnectPercentPerMinute=0)]
-        benchmark.restart_canary_constraints(args, dict(users=120), phases)
-        for field, value in (('kind', 'both'), ('allow_small_canary', False),
-                             ('planned_reconnect_inflight_canary', True), ('allow_scaled_diagnostic', True),
-                             ('realtime_host_restart_canary', 6)):
-            invalid = copy(args); setattr(invalid, field, value)
-            with self.subTest(field=field), self.assertRaises(ValueError):
-                benchmark.restart_canary_constraints(invalid, dict(users=120), phases)
-        with self.assertRaises(ValueError):
-            benchmark.restart_canary_constraints(args, dict(users=501), phases)
-        with self.assertRaises(ValueError):
-            benchmark.restart_canary_constraints(args, dict(users=120), [dict(phases[0], reconnectPercentPerMinute=1)])
-
-    def test_only_the_exact_planned_process_with_confirmed_sigkill_is_exempt(self):
-        from types import SimpleNamespace
-        import signal
-        class Process:
-            def __init__(self, code): self.code = code
-            def poll(self): return self.code
-        args = SimpleNamespace(realtime_host_restart_canary=2)
-        canary = benchmark.RealtimeHostRestartCanary(args, 'owned-test', Path('/unused'), {1})
-        old, unrelated = Process(-signal.SIGKILL), Process(-signal.SIGKILL)
-        self.assertFalse(canary.permitted_exit(old))
-        canary.old_process = old
-        self.assertTrue(canary.permitted_exit(old))
-        self.assertFalse(canary.permitted_exit(unrelated))
-        for value in (None, 0, 1, -signal.SIGTERM):
-            old.code = value
-            self.assertFalse(canary.permitted_exit(old))
 
 
 if __name__ == '__main__':

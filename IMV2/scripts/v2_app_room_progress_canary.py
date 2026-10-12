@@ -112,8 +112,7 @@ def proof_matches(nonce, fact, proof):
 
 def preflight(args, manifest):
     app_preflight(args, manifest, ack_cut=False)
-    if (getattr(args, 'room_host_restart_canary', None) is not None
-            or getattr(args, 'room_notification_loss_canary', False)
+    if (getattr(args, 'room_notification_loss_canary', False)
             or getattr(args, 'preclose_recovery_witness', False)):
         raise ValueError('app_room_progress_requires_no_other_fault')
     if args.gateway_port != 18443:

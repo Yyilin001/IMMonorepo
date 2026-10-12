@@ -5,6 +5,7 @@ import FluentPostgresDriver
 import Foundation
 import HTTPTypes
 import IMV2ActorContracts
+import IMV2ActorRuntime
 import IMV2Core
 import IMV2ServerHTTP
 import PostgresNIO
@@ -32,7 +33,7 @@ struct V2ResourceGroupAvatarPostgresTests {
                 }
             }
             if scenario.hasSuffix("before") { try await change() }
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token)
+            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token, lifetime: f.lifetime)
             let route = try V2RoomShardRoute(shardID: f.token.owner.shardID, epoch: f.token.owner.epoch)
             let router = V2ResourceHomeRouter(controlDatabase: f.database, rooms: AvatarTestRouter(value: route),
                 ownerDatabases: [route.shardID: f.database], authorization: .init(query: { query, _ in
@@ -204,8 +205,8 @@ struct V2ResourceGroupAvatarPostgresTests {
                 try await fixture.sql.raw("DELETE FROM im_v2.resource_group_avatar_operations WHERE operation_id=\(bind:command.operationID.uuidValue!)").run()
             }
             #expect(try await fixture.apply(command) == .idempotent(first))
-            #expect(try await PostgresV2RoomActivationStore(database: fixture.database).release(token: fixture.token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) { _ = try await fixture.apply(command) }
+            try await fixture.sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: fixture.room.uuidValue!)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) { _ = try await fixture.apply(command) }
         }
     }
 
@@ -269,7 +270,7 @@ struct V2ResourceGroupAvatarPostgresTests {
     @Test("room-authoritative proof rechecks membership, resource generation, replacement and activation")
     func visibility() async throws {
         try await withFixture { f in
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token)
+            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token, lifetime: f.lifetime)
             let port = V2ActorRoomMediaAuthorizationPort(query: { query, _ in try await executor.execute(query) })
             let deadline = ContinuousClock().now.advanced(by: .seconds(30))
             let request = V2ActorGroupAvatarVisibilityWire(roomID: f.room, actorUserID: f.member)
@@ -288,22 +289,17 @@ struct V2ResourceGroupAvatarPostgresTests {
             try await f.sql.raw("UPDATE im_v2.resource_catalog SET generation=1 WHERE media_id=\(bind:media.uuidValue!)").run()
             try await f.sql.raw("UPDATE im_v2.room_memberships SET left_revision=0 WHERE room_id=\(bind:f.room.uuidValue!) AND user_id=\(bind:f.member.uuidValue!)").run()
             #expect(try await !port.recheckGroupAvatar(bound, deadline: deadline))
-            #expect(try await PostgresV2RoomActivationStore(database: f.database).release(token: f.token))
-            await #expect(throws: V2RoomActivationLeaseError.activationChanged) {
+            try await f.sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: f.room.uuidValue!)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
                 _ = try await port.captureGroupAvatar(request, deadline: deadline)
             }
         }
     }
 
-    func withFixture(_ body: (AvatarFixture) async throws -> Void) async throws {
-        let resources = makeV2DatabaseTestResources()
-        do {
-            resources.databases.use(try .postgres(url: #require(ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"]),
-                maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
-            let fixture = try await AvatarFixture.make(database: resources.database(.psql))
-            try await body(fixture)
-            try await resources.shutdown()
-        } catch { try? await resources.shutdown(); throw error }
+    func withFixture(_ body: @escaping @Sendable (AvatarFixture) async throws -> Void) async throws {
+        try await withAvatarDatabase { seed in
+            try await seed.withActivation(body)
+        }
     }
 
     @Test("HTTP reads authenticate the device, return no-store logical state and reject departed members",
@@ -326,7 +322,7 @@ struct V2ResourceGroupAvatarPostgresTests {
                 if separateControl {
                     #expect(try await f.sql.raw("SELECT count(*) AS value FROM im_v2.public_user_profiles WHERE user_id=\(bind:f.member.uuidValue!)").first(decoding: AvatarCountRow.self)?.value == 0)
                 }
-                let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token)
+                let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token, lifetime: f.lifetime)
                 let route = try V2RoomShardRoute(shardID: f.token.owner.shardID, epoch: f.token.owner.epoch)
                 let service = V2ResourceGroupAvatarPresentationService(controlDatabase: control,
                     rooms: AvatarTestRouter(value: route), ownerDatabases: [route.shardID: f.database],
@@ -367,7 +363,7 @@ struct V2ResourceGroupAvatarPostgresTests {
             let handle = "ga" + f.member.rawValue.replacingOccurrences(of: "-", with: "").prefix(24).lowercased()
             try await f.sql.raw("INSERT INTO im_v2.public_user_profiles(user_id,public_handle,display_name,created_at,updated_at) VALUES(\(bind:f.member.uuidValue!),\(bind:handle),'Viewer',clock_timestamp(),clock_timestamp())").run()
             try await f.sql.raw("INSERT INTO im_v2.auth_devices(user_id,device_id,created_at,last_active_at) VALUES(\(bind:f.member.uuidValue!),\(bind:device.uuidValue!),clock_timestamp(),clock_timestamp())").run()
-            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token)
+            let executor = try V2RoomMediaAuthorizationDomainExecutor(database: f.database, token: f.token, lifetime: f.lifetime)
             let route = try V2RoomShardRoute(shardID: f.token.owner.shardID, epoch: f.token.owner.epoch)
             let router = AvatarTestRouter(value: route)
             let delivery = AvatarTestDelivery {
@@ -529,9 +525,9 @@ struct V2ResourceGroupAvatarPostgresTests {
 struct AvatarFixture: Sendable {
     let database: any Database; let sql: any SQLDatabase
     let room: RoomID; let owner: UserID; let member: UserID; let now: Date
-    let token: V2RoomActivationToken; let profile: V2CapacityProfile
+    let token: V2RoomActivationToken; let lifetime: V2RoomActivationLifetime; let profile: V2CapacityProfile
 
-    static func make(database: any Database) async throws -> Self {
+    static func seed(database: any Database) async throws -> AvatarSeededRoom {
         let sql = try #require(database as? any SQLDatabase)
         let room = RoomID(uuid: UUID()), owner = UserID(uuid: UUID()), member = UserID(uuid: UUID())
         let now = Date(), shard = "avatar-" + UUID().uuidString, lease = UUID()
@@ -543,10 +539,8 @@ struct AvatarFixture: Sendable {
         for (user, role) in [(owner, "owner"), (member, "member")] {
             try await sql.raw("INSERT INTO im_v2.room_memberships(room_id,user_id,role,joined_revision) VALUES(\(bind:room.uuidValue!),\(bind:user.uuidValue!),\(bind:role),0)").run()
         }
-        guard case .acquired(let grant) = try await PostgresV2RoomActivationStore(database: database).acquire(roomID: room,
-            owner: .init(shardID: shard, epoch: 0), host: .init(hostID: .init("avatar-test"), incarnationID: UUID()), duration: .init(60_000))
-        else { throw V2RoomActivationLeaseError.activationChanged }
-        return try .init(database: database, sql: sql, room: room, owner: owner, member: member, now: now, token: grant.token,
+        return try .init(database: database, sql: sql, room: room, owner: owner, member: member, now: now,
+            dataOwner: .init(shardID: shard, epoch: 0),
             profile: .init(id: "standard", limits: .init(maxEligibleMembers: 100, maxCommandsPerWindow: 100, retryAfterSeconds: 1)))
     }
 
@@ -647,4 +641,36 @@ private actor AvatarCommandGate {
     }
     func waitUntilArrived() async { if !arrived { await withCheckedContinuation { arrival = $0 } } }
     func release() { released = true; releaseWaiter?.resume(); releaseWaiter = nil }
+}
+
+/// Database fixture initialization does not create an Actor or grant authority.
+struct AvatarSeededRoom: Sendable {
+    let database: any Database
+    let sql: any SQLDatabase
+    let room: RoomID
+    let owner: UserID
+    let member: UserID
+    let now: Date
+    let dataOwner: V2RoomDataOwner
+    let profile: V2CapacityProfile
+
+    func withActivation<Value: Sendable>(epoch: Int64 = 0,
+        _ body: @escaping @Sendable (AvatarFixture) async throws -> Value) async throws -> Value {
+        try await withRoomActivationLifetime(database: database, roomID: room,
+                                             shardID: dataOwner.shardID, epoch: epoch) { token, lifetime in
+            try await body(.init(database: database, sql: sql, room: room, owner: owner, member: member,
+                                 now: now, token: token, lifetime: lifetime, profile: profile))
+        }
+    }
+}
+
+func withAvatarDatabase(_ body: @escaping @Sendable (AvatarSeededRoom) async throws -> Void) async throws {
+    let resources = makeV2DatabaseTestResources()
+    do {
+        resources.databases.use(try .postgres(url: #require(ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"]),
+            maxConnectionsPerEventLoop: 4), as: .psql, isDefault: true)
+        let seed = try await AvatarFixture.seed(database: resources.database(.psql))
+        try await body(seed)
+        try await resources.shutdown()
+    } catch { try? await resources.shutdown(); throw error }
 }

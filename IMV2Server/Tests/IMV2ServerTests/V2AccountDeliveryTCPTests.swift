@@ -2,6 +2,7 @@ import Foundation
 import Synchronization
 import IMV2Core
 import IMV2ActorContracts
+import IMV2ActorRuntime
 import IMV2ServerContracts
 import IMV2ServerApplication
 import IMV2ServerInfrastructure
@@ -23,51 +24,46 @@ struct V2AccountDeliveryTCPTests {
             try await sql.raw("CREATE TABLE \(unsafeRaw: schema).realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id,owner_epoch,membership_revision) VALUES(\(bind: room.uuidValue!),'tcp-rooms','standard',1,1)").run()
             try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room.uuidValue!),\(bind: user.uuidValue!),1)").run()
-            let leases = PostgresV2RoomActivationStore(database: database, schema: schema)
             let dataOwner = try V2RoomDataOwner(shardID: "tcp-rooms", epoch: 1)
-            guard case .acquired(let lease) = try await leases.acquire(roomID: room, owner: dataOwner,
-                host: .init(hostID: try .init("tcp-postgres-owner"), incarnationID: UUID()), duration: try .init(60_000)) else {
-                throw V2RoomSubscriptionOwnerError.stale
-            }
-            let source = try PostgresV2RoomSubscriptionSource(database: database, activation: lease.token, schema: schema)
-            let recovery = try PostgresV2RoomRecoveryStore(database: database, schema: schema)
-            let topology = try PostgresV2RoomRecoveryTopology(database: database, schema: schema,
-                stores: [recovery], orderedStoreIdentities: [schema])
-            let directory = V2UserRoomDirectoryService(topologySource: topology,
-                cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
-            let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 71, count: 32))
-            let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room, owner: dataOwner,
-                activation: lease.token, deadline: .now + .seconds(5), trackedUserIDs: [user])
-            do {
-                try await exercise(store: PostgresV2DeviceRoomProgressStore(database: database, schema: schema),
-                    user: user, rooms: [room], actorRouting: true, automaticAccountCoverage: true, automaticOwner: (owner, lease.token),
-                    directoryPage: { user, cursor in
-                        try await directory.list(actorUserID: user, cursor: cursor, pageSize: 100)
-                    },
-                    commitOnline: { _ in
-                        try await database.transaction { db in
-                            let transaction = try #require(db as? any SQLDatabase)
-                            try await transaction.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence=1 WHERE room_id=\(bind: room.uuidValue!)").run()
-                            try await transaction.raw("INSERT INTO \(unsafeRaw: schema).room_events(event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at) VALUES(\(bind: UUID()),\(bind: room.uuidValue!),1,'message.accepted',jsonb_build_object('event_type','message.accepted','room_id',\(bind: room.rawValue),'room_sequence',1),1,clock_timestamp())").run()
-                        }
-                        let page = try await source.read(roomID: room, owner: dataOwner, afterRoomSequence: 0,
-                            trackedUserIDs: [user], limit: 64)
-                        let record = try #require(page.records.first)
-                        try #require(record.hasOnlineBody)
-                        return record.event
-                    }, authenticator: try V2PostgresGatewayAuthenticator(database: database, tokenKey: key, schema: schema),
-                    credentials: { device in
-                        let token = UUID().uuidString, issued = Date(), expires = issued.addingTimeInterval(3_600)
-                        try await sql.raw("INSERT INTO \(unsafeRaw: schema).auth_devices(user_id,device_id,created_at,last_active_at,session_expires_at) VALUES(\(bind: user.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: issued),\(bind: expires))").run()
-                        try await sql.raw("INSERT INTO \(unsafeRaw: schema).device_access_tokens(token_hmac,user_id,device_id,issued_at,expires_at) VALUES(\(bind: key.digest(token)),\(bind: user.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: expires))").run()
-                        return token
-                    })
-                try await owner.close()
-                _ = try await leases.release(token: lease.token)
-            } catch {
-                try? await owner.close()
-                _ = try? await leases.release(token: lease.token)
-                throw error
+            try await withRoomActivationLifetime(database: database, roomID: room, shardID: "tcp-rooms", epoch: 1) { token, lifetime in
+                let source = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime, schema: schema)
+                let recovery = try PostgresV2RoomRecoveryStore(database: database, schema: schema)
+                let topology = try PostgresV2RoomRecoveryTopology(database: database, schema: schema,
+                    stores: [recovery], orderedStoreIdentities: [schema])
+                let directory = V2UserRoomDirectoryService(topologySource: topology,
+                    cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
+                let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 71, count: 32))
+                let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room, owner: dataOwner,
+                    activation: token, deadline: .now + .seconds(5), trackedUserIDs: [user])
+                do {
+                    try await exercise(store: PostgresV2DeviceRoomProgressStore(database: database, schema: schema),
+                        user: user, rooms: [room], actorRouting: true, automaticAccountCoverage: true, automaticOwner: (owner, token, lifetime),
+                        directoryPage: { user, cursor in
+                            try await directory.list(actorUserID: user, cursor: cursor, pageSize: 100)
+                        },
+                        commitOnline: { _ in
+                            try await database.transaction { db in
+                                let transaction = try #require(db as? any SQLDatabase)
+                                try await transaction.raw("UPDATE \(unsafeRaw: schema).rooms SET room_sequence=1 WHERE room_id=\(bind: room.uuidValue!)").run()
+                                try await transaction.raw("INSERT INTO \(unsafeRaw: schema).room_events(event_id,room_id,room_sequence,event_type,payload,committed_membership_revision,created_at) VALUES(\(bind: UUID()),\(bind: room.uuidValue!),1,'message.accepted',jsonb_build_object('event_type','message.accepted','room_id',\(bind: room.rawValue),'room_sequence',1),1,clock_timestamp())").run()
+                            }
+                            let page = try await source.read(roomID: room, owner: dataOwner, afterRoomSequence: 0,
+                                trackedUserIDs: [user], limit: 64)
+                            let record = try #require(page.records.first)
+                            try #require(record.hasOnlineBody)
+                            return record.event
+                        }, authenticator: try V2PostgresGatewayAuthenticator(database: database, tokenKey: key, schema: schema),
+                        credentials: { device in
+                            let token = UUID().uuidString, issued = Date(), expires = issued.addingTimeInterval(3_600)
+                            try await sql.raw("INSERT INTO \(unsafeRaw: schema).auth_devices(user_id,device_id,created_at,last_active_at,session_expires_at) VALUES(\(bind: user.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: issued),\(bind: expires))").run()
+                            try await sql.raw("INSERT INTO \(unsafeRaw: schema).device_access_tokens(token_hmac,user_id,device_id,issued_at,expires_at) VALUES(\(bind: key.digest(token)),\(bind: user.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: expires))").run()
+                            return token
+                        })
+                    try await owner.close()
+                } catch {
+                    try? await owner.close()
+                    throw error
+                }
             }
         }
     }
@@ -148,7 +144,7 @@ struct V2AccountDeliveryTCPTests {
                               member: V2RoomSubscriptionMember)? = nil,
                   separateGateways: Bool = false, actorRouting: Bool = false, automaticAccountCoverage: Bool = false,
                   injectOldActivation: Bool = false, retiredActivation: V2RoomActivationToken? = nil,
-                  automaticOwner: (owner: V2RoomSubscriptionOwner, activation: V2RoomActivationToken)? = nil,
+                  automaticOwner: (owner: V2RoomSubscriptionOwner, activation: V2RoomActivationToken, lifetime: V2RoomActivationLifetime)? = nil,
                   automaticHost: V2RoomSubscriptionHost? = nil,
                   directoryPage: (@Sendable (UserID, String?) async throws -> V2UserRoomDirectoryPage)? = nil,
                   messageCommands: V2GatewayMessageCommands? = nil,
@@ -206,7 +202,7 @@ struct V2AccountDeliveryTCPTests {
                 }, maximumCalls: 1)
                 pump = try #require(await automaticHost.currentPump())
                 let automaticOwner = try #require(automaticOwner)
-                try await automaticHost.register(automaticOwner.owner, token: automaticOwner.activation)
+                try await automaticHost.register(automaticOwner.owner, token: automaticOwner.activation, lifetime: automaticOwner.lifetime)
             } else {
                 pump = V2RoomSubscriptionDeliveryPump(send: sendDelivery,
                     requestBaseline: { _, _ in Issue.record("unexpected baseline reset") })

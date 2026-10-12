@@ -6,7 +6,6 @@ public enum V2ActorContractError: Error, Equatable, Sendable {
     case invalidEpoch
     case invalidShardID
     case invalidDuration
-    case invalidLeaseTimestamp
     case invalidConfiguration(String)
 }
 
@@ -61,7 +60,7 @@ public typealias V2ActorHostID = V2Identifier<V2ActorHostIDTag>
 
 /// 稳定的宿主标签，加上每次进程启动生成的新身份。
 ///
-/// 复用地址或标签不会让重启后的进程重新获得旧租约。
+/// 复用地址或标签不会让重启后的进程继承旧 Actor 实例的执行权限。
 public struct V2ActorHostIdentity: Hashable, Codable, Sendable {
     public let hostID: V2ActorHostID
     public let incarnationID: UUID
@@ -72,9 +71,10 @@ public struct V2ActorHostIdentity: Hashable, Codable, Sendable {
     }
 }
 
-/// 续期、释放或为写入设置围栏时，比较整个值。
+/// 标识一个房间的精确物理实例。Host 按整个值校验调用和生命周期。
 ///
-/// 构造此值不会授予权限。房间数据库必须在持有事务围栏直至提交期间校验它。
+/// 构造此值不会授予执行权限；分区归属由控制日志确定，原生 Host
+/// 管理激活与排空。业务数据库只校验 owner 表示的数据分片及归属纪元。
 public struct V2RoomActivationToken: Hashable, Codable, Sendable {
     public let roomID: RoomID
     public let owner: V2RoomDataOwner
@@ -96,43 +96,13 @@ public struct V2RoomActivationToken: Hashable, Codable, Sendable {
     /// 只比较同一逻辑房间的代次。
     ///
     /// 纪元相同但宿主身份不同，不表示“更新”；
-    /// 这代表互相冲突的观测，解析器须依据数据库裁定。
+    /// 这代表互相冲突的观测，解析器须依据已提交的 Actor 分区归属裁定。
     public func isNewer(than other: Self) -> Bool {
         guard roomID == other.roomID else { return false }
         if owner.epoch != other.owner.epoch { return owner.epoch > other.owner.epoch }
         guard owner.shardID == other.owner.shardID else { return false }
         return activationEpoch > other.activationEpoch
     }
-}
-
-/// 这是数据库观测，不是依据客户端时钟的授权检查。
-public struct V2RoomActivationLease: Equatable, Codable, Sendable {
-    public let token: V2RoomActivationToken
-    public let databaseObservedAt: Date
-    public let expiresAt: Date
-
-    public init(token: V2RoomActivationToken, databaseObservedAt: Date, expiresAt: Date) throws {
-        guard databaseObservedAt.timeIntervalSince1970.isFinite,
-              expiresAt.timeIntervalSince1970.isFinite,
-              expiresAt > databaseObservedAt,
-              expiresAt.timeIntervalSince(databaseObservedAt)
-                <= Double(V2ActorMilliseconds.maximum) / 1_000
-        else { throw V2ActorContractError.invalidLeaseTimestamp }
-        self.token = token
-        self.databaseObservedAt = databaseObservedAt
-        self.expiresAt = expiresAt
-    }
-
-    public init(from decoder: any Decoder) throws {
-        let values = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(
-            token: values.decode(V2RoomActivationToken.self, forKey: .token),
-            databaseObservedAt: values.decode(Date.self, forKey: .databaseObservedAt),
-            expiresAt: values.decode(Date.self, forKey: .expiresAt)
-        )
-    }
-
-    private enum CodingKeys: String, CodingKey { case token, databaseObservedAt, expiresAt }
 }
 
 /// 严格为正且有界的时长，可用于线路协议与配置。

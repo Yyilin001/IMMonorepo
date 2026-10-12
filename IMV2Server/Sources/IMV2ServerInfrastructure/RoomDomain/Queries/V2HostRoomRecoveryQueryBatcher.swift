@@ -601,7 +601,7 @@ public actor V2HostRoomRecoveryQueryBatcher {
     /// Complete currently closed wire failure vocabulary. Encoding the actual
     /// envelope avoids an assumed byte bound for arbitrary Error values.
     private static func maximumEncodedWireFailure() throws -> V2RoomCallFailure {
-        let reasons: [V2RoomFailureReason] = [.staleActivation, .notReady, .retired, .leaseLost,
+        let reasons: [V2RoomFailureReason] = [.staleActivation, .notReady, .retired, .authorityLost,
             .unavailable, .overloaded, .deadlineExceeded, .cancelled, .notFound,
             .forbidden, .invalidRequest, .unsupportedVersion, .idempotencyConflict]
         let failures: [V2RoomCallFailure] = [.outcomeUnknown] + reasons.flatMap {

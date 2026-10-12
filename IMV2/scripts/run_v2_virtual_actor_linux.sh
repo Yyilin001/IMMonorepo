@@ -36,7 +36,7 @@ case "$action" in
   build)
     shift
     if (( $# == 0 )); then
-      set -- IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2LocalGatewayProbe IMV2GatewayLoadGenerator
+      set -- IMV2AccountServerApp IMV2OperatorServerApp IMV2ServerApp IMV2PlacementControlApp IMV2RoomHostSupervisorApp IMV2LocalGatewayProbe IMV2GatewayLoadGenerator
     fi
     for product in "$@"; do
       [[ "$product" =~ ^[A-Za-z][A-Za-z0-9]*$ ]] || usage

@@ -2592,23 +2592,6 @@ ALTER TABLE ONLY im_v2.room_timeline_activities
 ALTER TABLE ONLY im_v2.rooms
     ADD CONSTRAINT rooms_pkey PRIMARY KEY (room_id);
 
--- Actual owner-store authority for a room's virtual actor. Never delete a
--- released row: its positive epoch is the durable fencing counter.
-CREATE TABLE im_v2.room_activation_leases (
-    room_id uuid PRIMARY KEY REFERENCES im_v2.rooms(room_id) ON DELETE RESTRICT,
-    activation_epoch bigint NOT NULL CHECK (activation_epoch > 0),
-    owner_shard_id text NOT NULL CHECK (length(btrim(owner_shard_id)) > 0),
-    owner_epoch bigint NOT NULL CHECK (owner_epoch >= 0),
-    host_id text,
-    host_incarnation_id uuid,
-    expires_at timestamp with time zone,
-    CONSTRAINT room_activation_leases_holder_check CHECK (
-        (host_id IS NULL AND host_incarnation_id IS NULL AND expires_at IS NULL)
-        OR (host_id IS NOT NULL AND length(btrim(host_id)) > 0
-            AND host_incarnation_id IS NOT NULL AND expires_at IS NOT NULL AND isfinite(expires_at))
-    )
-);
-
 ALTER TABLE ONLY im_v2.schema_contract
     ADD CONSTRAINT schema_contract_pkey PRIMARY KEY (schema_id);
 

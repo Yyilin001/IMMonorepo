@@ -1,5 +1,7 @@
 # Room Virtual Actor 最终合同、写者与故障证据审查
 
+> 本文保留旧 SQL 房间租约方案的历史审查及当时的缺口，不能作为当前原生 Actor 的完成审计。文中旧 G6 启动器已经删除；当前运行入口、已验证内容与未完成项见[房间分布式 Actor 合同](../room-virtual-actor-contract.md)。原网络分区和崩溃故障矩阵仍须以原生实现重新验证。
+
 审查代码基线 `fd979e68`，并核对集成分支 `8231a079` 新增的 `a13d246d` 双房间 COMMIT ACK 丢失证据。此文是只读审查，不把测试源码的存在等同于执行通过，也不把计划文档的旧状态等同于当前代码缺口。验收条件以[并行方案 G1–G5](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/00-foundation/virtual-actor-parallel-plan.md)及[任务卡的 21 项故障矩阵](https://github.com/Yyilin001/IMMonorepo/blob/21fb3cc8/IMV2/docs/00-foundation/virtual-actor-task-cards.md)为准。等级：**fake** 指进程内替身；**PG** 指真实 PostgreSQL 与生产 store/批处理器；**进程** 指多个实际 OS 进程；**Linux 栈** 指 Linux Release 应用或多 Host 容器。下表未特别说明的测试名称表示源码中的测试，执行结果只从所引证据文件取得。
 
 ## 2026-09-24 集成后的差距处置

@@ -16,14 +16,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(), profile = try forwardImportTestProfile(), gate = PolicyRemotePreparationGate()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '10 minutes'").run()
-            var rooms: [RoomID] = []
+            var seededRooms: [RoomID] = []
             for recipient in [memberTwoUUID, memberThreeUUID] {
                 let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
                     roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { now }).openedIdentity(actorUserID: senderID,
                         operationID: .init(uuid: UUID()), targetUserID: .init(uuid: recipient),
                         firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-                rooms.append(room.roomID)
+                seededRooms.append(room.roomID)
             }
+            let rooms = seededRooms
             let admission = V2DatabaseWorkAdmissionController(policy: .init(maximumForegroundWriteInFlight: 1,
                 maximumInteractiveReadInFlight: 1, maximumSyncInFlight: 1,
                 maximumForegroundWriteQueued: 1, maximumInteractiveReadQueued: 1,
@@ -128,15 +129,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             let now = Date(), profile = try forwardImportTestProfile()
             try await sql.raw("UPDATE im_v2.shard_admission_pools SET valid_until=clock_timestamp()+interval '10 minutes'").run()
-            var rooms: [RoomID] = []
+            var seededRooms: [RoomID] = []
             for recipient in [memberTwoUUID, memberThreeUUID] {
                 let room = try await V2DirectRoomOperationTestFixture(database: database, capacityProfile: profile,
                     roomShardID: "room-a", roomID: .init(uuid: UUID()), now: { now }).openedIdentity(actorUserID: senderID,
                         operationID: .init(uuid: UUID()), targetUserID: .init(uuid: recipient),
                         firstSubmissionDeadlineMilliseconds: V2DirectRoomOperationTestFixture.deadline(now))
-                rooms.append(room.roomID)
+                seededRooms.append(room.roomID)
             }
 
+            let rooms = seededRooms
             let owners = PostgresV2PolicyOwnerDirectory(journal: .init(database: database),
                 dispatcher: .init(database: database, projectionDelivery: SuccessfulProjectionDelivery()))
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
@@ -146,7 +148,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                     .usingControlDatabase(database).usingPolicyAuthorizations(policies))
             let operation = ClientMessageID(uuid: UUID()), expiry = UInt64(now.timeIntervalSince1970 * 1000) + 60_000
-            func command(_ room: RoomID, _ operation: ClientMessageID, _ text: String) throws -> V2MessageSendOperationCommand {
+            @Sendable func command(_ room: RoomID, _ operation: ClientMessageID, _ text: String) throws -> V2MessageSendOperationCommand {
                 try .init(command: .init(roomID: room, senderUserID: senderID, clientMessageID: operation,
                     text: text, limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: expiry)
             }
@@ -235,11 +237,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(throws: V2ActorContractError.invalidConfiguration("physical owner policy authorization aliases")) {
                 try V2RoomServerActivationFactory(owners: ["room-b": resources, "room-alias": baseResources], safetyActorUserID: senderID)
             }
-            let leases = try V2RoomServerLeaseStore(databases: ["room-b": owner])
+            let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+            try await withNativePlacementTestControl(host: identity, shardID: "room-b") { nativeControl in
+            let placement = try await nativeControl.register(identity, shard: "room-b")
             let factory = try V2RoomServerActivationFactory(owners: ["room-b": resources], safetyActorUserID: senderID).runtimeFactory()
             let configuration = try V2RoomRuntimeConfiguration()
-            let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()),
-                leaseStore: leases, configuration: configuration, budget: .init(configuration: configuration),
+            let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
+                placement: placement, configuration: configuration, budget: .init(configuration: configuration),
                 classify: { $0.turnSchedulingClass }, factory: factory)
             await host.start()
             do {
@@ -339,11 +343,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 guard case .messaging(.sendOperation(.receipt(let denial))) = denied,
                       denial.outcome == .rejected(group ? .permissionDenied : .directPolicyDenied) else { throw V2RoomWriteStoreError.corruptPersistenceState }
                 #expect(try await host.invoke(token: token, request: first, deadline: .now + .seconds(10)) == accepted)
-                let combined = resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().sqlContinuations[.durableFenceCombined]
-                #expect(combined?.settledToResumedCount ?? 0 == 0)
-                #expect(combined?.resumedToDispatchCount ?? 0 == 0)
-                #expect(combined?.settledNotResumed ?? 0 == 0)
-                #expect(combined?.resumedNotDispatched ?? 0 == 0)
                 #expect(try await controlSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_intents')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                 #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.direct_authorization_receipts')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                 #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: roomID.uuidValue!)").first(decoding: PolicyFactoryCount.self)?.value == (group ? 4 : 2))
@@ -351,17 +350,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(coldDrained.syncInFlight == 0 && coldDrained.syncQueued == 0)
                 let sample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
                 #expect(sample.count > 0 && sample.inFlight == 0 && sample.totalMilliseconds > 0)
-                #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policySnapshotRegistration]?.count ?? 0 == 0)
-                #expect(await host.stop(deadline: .now + .seconds(10)).completed)
+                let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                try await placement.retireAfterDrain(proof, shards: ["room-b"])
                 #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM pg_catalog.pg_class WHERE oid=to_regclass('im_v2.room_policy_authorization_leases')").first(decoding: PolicyFactoryCount.self)?.value == 0)
                 await resources.shutdownDurableSendOperations()
-                await leases.shutdownLifecycle(); await leases.shutdownRenewals()
                 await policyOwners.shutdown()
             } catch {
-                _ = await host.stop(deadline: .now + .seconds(10))
+                let proof = try #require(await host.stop(deadline: .now + .seconds(30)).proof)
+                try await placement.retireAfterDrain(proof, shards: ["room-b"])
                 await resources.shutdownDurableSendOperations()
-                await leases.shutdownLifecycle(); await leases.shutdownRenewals()
                 await policyOwners.shutdown(); throw error
+            }
             }
         }
     }

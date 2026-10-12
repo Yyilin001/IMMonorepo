@@ -112,7 +112,7 @@ class AppRoomProgressBenchmarkTests(unittest.TestCase):
             self.assertEqual(failure.exception.code,2)
 
     def test_preflight_rejects_other_faults_preserving_base_gate(self):
-        for field,value in [('room_host_restart_canary',0),('room_notification_loss_canary',True),('preclose_recovery_witness',True)]:
+        for field,value in [('room_notification_loss_canary',True),('preclose_recovery_witness',True)]:
             args = SimpleNamespace(gateway_port=18443,**{field:value})
             with patch('v2_app_room_progress_canary.app_preflight') as base:
                 with self.assertRaises(ValueError): preflight(args,{'users':120})

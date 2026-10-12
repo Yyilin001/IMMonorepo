@@ -12,7 +12,7 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
     ]
     if let host = snapshot.host {
         values += [
-            ("active_rooms", host.activeRooms, "Locally ready rooms with a safe lease."),
+            ("active_rooms", host.activeRooms, "Locally ready rooms with native execution authority."),
             ("pending_rooms", host.pendingRooms, "Rooms awaiting activation completion."),
             ("restoring_rooms", host.restoringRooms, "Concurrent room restoration operations."),
             ("retiring_rooms", host.retiringRooms, "Rooms draining or awaiting uncertain-result cleanup."),
@@ -32,6 +32,11 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
     var lines = values.flatMap { suffix, value, help in
         let name = "im_v2_room_actor_" + suffix
         return ["# HELP \(name) \(help)", "# TYPE \(name) gauge", "\(name) \(value)"]
+    }
+    if let host = snapshot.host {
+        lines += ["# HELP im_v2_room_actor_completed_idle_retirements_total Rooms fully drained and closed after idle passivation since process startup.",
+                  "# TYPE im_v2_room_actor_completed_idle_retirements_total counter",
+                  "im_v2_room_actor_completed_idle_retirements_total \(host.completedIdleRetirements)"]
     }
     let directory = snapshot.directoryCalls
     let transport = snapshot.transportCalls
@@ -71,7 +76,6 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
                   "# TYPE \(name) counter", "\(name) \(value)"]
     }
     for (suffix, value) in [("recovering_rooms", directory.recoveringRooms),
-                            ("waiting_for_lease_rooms", directory.waitingForLeaseRooms),
                             ("active_host_recoveries", transport.activeHostRecoveries)] {
         let name = "im_v2_room_actor_" + suffix
         lines += ["# HELP \(name) Current bounded recovery work.",

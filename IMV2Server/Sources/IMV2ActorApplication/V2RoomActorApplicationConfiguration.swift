@@ -16,6 +16,8 @@ public enum V2RoomActorApplicationConfigurationError: Error, Equatable, Sendable
 /// 进程本地身份和明确的部署信任映射。
 /// 发现结果不得扩展已配置的服务、Host 或数据库分片集合。
 public struct V2RoomActorApplicationConfiguration: Sendable {
+    package var startupGate: V2RoomHostStartupGate? = nil
+    public let placementControl: V2PlacementControlConfiguration
     public let name: String
     public let address: String
     public let port: Int
@@ -47,6 +49,30 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         try self.init(document: JSONDecoder().decode(Document.self, from: bytes),
                       hostsRooms: hostsRooms, configuredShardIDs: configuredShardIDs,
                       batchWaitMilliseconds: batchWaitMilliseconds)
+        let gateDirectory = environment.value(for: "IMV2_ROOM_ACTOR_STARTUP_GATE_DIRECTORY")
+        let gateToken = environment.value(for: "IMV2_ROOM_ACTOR_STARTUP_GATE_TOKEN")
+        let gateSupervisor = environment.value(for: "IMV2_ROOM_ACTOR_STARTUP_SUPERVISOR_ID")
+        if gateDirectory != nil || gateToken != nil || gateSupervisor != nil {
+            guard let directory = gateDirectory, directory.hasPrefix("/"), !directory.contains("\0"),
+                  let tokenText = gateToken, let token = UUID(uuidString: tokenText),
+                  let supervisorText = gateSupervisor, let host = hostIdentity else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
+            let supervisor = try V2ActorServiceID(supervisorText)
+            guard try trust.configuredService(supervisor).permissions ==
+                Set([.placementRead, .placementWrite, .placementExclude]) else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
+            startupGate = try .init(directory: URL(fileURLWithPath: directory, isDirectory: true),
+                host: host, serviceID: signer.serviceID, supervisorID: supervisor, launchToken: token)
+        }
+    }
+
+    /// Managed launches publish their actual incarnation before any SQL pool,
+    /// registration, discovery or business listener starts. Manual native
+    /// deployments have no gate and cannot use managed exclusion by inference.
+    public func awaitSupervisedStartup(deadline: ContinuousClock.Instant = .now + .seconds(120)) async throws {
+        try await startupGate?.wait(deadline: deadline)
     }
 
     init(document: Document, hostsRooms: Bool?, configuredShardIDs: Set<String>,
@@ -109,7 +135,8 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         guard keys[signingID] == privateKey.publicKey.rawRepresentation else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
-        let identity = document.hostID.map { V2ActorHostIdentity(hostID: .init(uuid: $0), incarnationID: UUID()) }
+        let processIncarnation = UUID()
+        let identity = document.hostID.map { V2ActorHostIdentity(hostID: .init(uuid: $0), incarnationID: processIncarnation) }
         if let identity, pinnedHosts[identity.hostID] != signingID {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
@@ -172,6 +199,9 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         self.threadPoolSize = document.threadPoolSize; self.hostIdentity = identity
         self.signer = try .init(serviceID: signingID, privateKey: key)
         self.trust = try .init(services: trusted); self.tls = tls
+        self.placementControl = try .init(document: document.placementControl, name: document.name,
+            address: document.address, roomPort: document.port, tls: tls, signer: self.signer, trust: self.trust,
+            processIncarnation: processIncarnation, shards: configuredShardIDs, roomPeers: peers, serviceAccess: access)
         self.discovery = try .init(peers: peers)
         self.allowedShards = allowed
         guard !document.realtimePeers.isEmpty, document.realtimePeers.count <= 64,
@@ -189,7 +219,13 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
             }
             realtimePeers.append(.init(nodeID: peer.nodeID, serviceID: peer.serviceID, address: peer.address, port: peer.port))
         }
-        guard realtimePeers.contains(where: { $0.serviceID == document.serviceID && $0.address == document.address && $0.port == document.port }) else {
+        // A dedicated exclusion caller starts only its control transport. It
+        // must not acquire realtime publishing/receiving roles just to parse
+        // the shared deployment configuration.
+        let exclusionOnly = try identity == nil && self.placementControl.identity == nil &&
+            document.policyPlacement == nil &&
+            self.trust.configuredService(signingID).permissions == Set([.placementRead, .placementWrite, .placementExclude])
+        guard exclusionOnly || realtimePeers.contains(where: { $0.serviceID == document.serviceID && $0.address == document.address && $0.port == document.port }) else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
         self.realtimePeers = realtimePeers.sorted { $0.nodeID < $1.nodeID }
@@ -228,6 +264,7 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
     }
 
     struct Document: Decodable, Sendable {
+        let placementControl: V2PlacementControlConfiguration.Document
         let name: String
         let address: String
         let port: Int
