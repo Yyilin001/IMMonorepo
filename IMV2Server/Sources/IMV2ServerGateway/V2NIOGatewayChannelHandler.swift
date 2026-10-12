@@ -572,6 +572,8 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
 
         private let eventLoop: any EventLoop
         private let maximumWritesPerTurn: Int
+        // Only accessed by drain on this lane's EventLoop.
+        private var drainBatch: [V2NIOGatewayForegroundWriter] = []
         private let state = Mutex(State())
 
         init(eventLoop: any EventLoop, maximumWritesPerTurn: Int) {
@@ -613,15 +615,16 @@ final class V2NIOForegroundWriteScheduler: @unchecked Sendable {
 
         private func drain() {
             eventLoop.preconditionInEventLoop()
-            var batch: [V2NIOGatewayForegroundWriter] = []
-            batch.reserveCapacity(maximumWritesPerTurn)
+            precondition(drainBatch.isEmpty)
+            drainBatch.reserveCapacity(maximumWritesPerTurn)
             state.withLock { state in
-                while batch.count < maximumWritesPerTurn,
+                while drainBatch.count < maximumWritesPerTurn,
                       let writer = state.writers.popFirst() {
-                    batch.append(writer)
+                    drainBatch.append(writer)
                 }
             }
-            for writer in batch { writer.drainOnEventLoop() }
+            for writer in drainBatch { writer.drainOnEventLoop() }
+            drainBatch.removeAll(keepingCapacity: true)
             let needsAnotherTurn = state.withLock { state in
                 guard state.writers.isEmpty else { return true }
                 state.drainScheduled = false

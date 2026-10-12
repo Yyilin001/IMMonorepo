@@ -44,7 +44,15 @@ struct V2RoomSQLSessionDefaultsTests {
             }
             let before = sqlCount()
             let first = try await v2WithRoomActivationTransaction(database: database,
-                deadline: .now + .seconds(2)) { try await settings($0) }
+                deadline: .now + .seconds(2)) { borrowed in
+                    let observation = (borrowed as? any V2ObservedDatabaseHandle)?.loanObservation
+                    #expect(observation != nil)
+                    let nested = v2ObserveBorrowedDatabase(borrowed, observation: observation)
+                    let repeated = v2ObserveBorrowedDatabase(nested, observation: observation)
+                    #expect(repeated is any PostgresDatabase)
+                    #expect(repeated is any TransactionControlDatabase)
+                    return try await settings(repeated)
+                }
             #expect(first.lock == "2s" && first.statement == "10s" && first.idle == "10s")
             #expect(sqlCount() - before == 3) // BEGIN, body SELECT, COMMIT; no setup SELECT.
 

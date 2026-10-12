@@ -18,8 +18,10 @@ package enum V2RoomSQLDeadline {
         _ deadline: ContinuousClock.Instant,
         _ operation: () async throws -> Value
     ) async rethrows -> Value {
-        let selected = current.map { min($0, deadline) } ?? deadline
-        return try await $current.withValue(selected, operation: operation)
+        // A nested scope cannot extend the inherited deadline. Reuse it when
+        // no tightening is needed, avoiding another TaskLocal/closure scope.
+        if let inherited = current, inherited <= deadline { return try await operation() }
+        return try await $current.withValue(deadline, operation: operation)
     }
 
     /// 批处理器从多个调用方选取工作，须将继承的任务上下文
@@ -28,7 +30,8 @@ package enum V2RoomSQLDeadline {
         _ deadline: ContinuousClock.Instant?,
         _ operation: () async throws -> Value
     ) async rethrows -> Value {
-        try await $current.withValue(deadline, operation: operation)
+        if current == deadline { return try await operation() }
+        return try await $current.withValue(deadline, operation: operation)
     }
 }
 

@@ -33,7 +33,7 @@ extension V2ActorAuthenticatedCall: V2ActorProtobufMessage {
         case .user(let user): value.userID = user.rawValue
         case .service: value.service = true
         }
-        value.requestBody = try V2ActorProtobuf.encode(request)
+        value.requestBody = try request.protobufBytes()
         return try value.serializedData()
     }
     package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
@@ -51,7 +51,7 @@ extension V2ActorAuthenticatedCall: V2ActorProtobufMessage {
             callerIncarnation: uuid(value.callerIncarnation), recipient: hostModel(value.recipient),
             sessionID: uuid(value.sessionID), sequence: value.sequence, attemptID: uuid(value.attemptID),
             traceID: uuid(value.traceID), remainingBudget: .init(budget), principal: principal,
-            request: V2ActorProtobuf.decode(V2ActorRPCRequest.self, from: value.requestBody))
+            request: V2ActorRPCRequest.fromProtobufBytes(value.requestBody.bytes))
     }
 }
 extension V2ActorAuthenticatedReply: V2ActorProtobufMessage {
@@ -59,7 +59,7 @@ extension V2ActorAuthenticatedReply: V2ActorProtobufMessage {
         var value = Im_Actor_V1_AuthenticatedReply()
         value.version = Int64(version); value.host = hostWire(host)
         value.sessionID = uuidBytes(sessionID); value.sequence = sequence; value.attemptID = uuidBytes(attemptID)
-        value.responseBody = try V2ActorProtobuf.encode(response)
+        value.responseBody = try response.protobufBytes()
         return try value.serializedData()
     }
     package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
@@ -68,6 +68,6 @@ extension V2ActorAuthenticatedReply: V2ActorProtobufMessage {
               let version = Int(exactly: value.version) else { throw V2ActorAuthenticationError.invalidRequest }
         return try .init(version: version, host: hostModel(value.host), sessionID: uuid(value.sessionID),
             sequence: value.sequence, attemptID: uuid(value.attemptID),
-            response: V2ActorProtobuf.decode(V2ActorRPCResponse.self, from: value.responseBody))
+            response: V2ActorRPCResponse.fromProtobufBytes(value.responseBody.bytes))
     }
 }

@@ -8,6 +8,7 @@ struct V2ActorSessionMAC: Sendable {
     let sessionID: UUID
     let client: V2ActorServiceID
     let server: V2ActorServiceID
+    private let sessionIDBytes: Data
     private let requestKey: SymmetricKey
     private let replyKey: SymmetricKey
 
@@ -20,6 +21,7 @@ struct V2ActorSessionMAC: Sendable {
         binding.append(Data(client.rawValue.utf8)); binding.append(0); binding.append(Data(server.rawValue.utf8))
         let salt = Data(SHA256.hash(data: binding))
         self.sessionID = sessionID; self.client = client; self.server = server
+        sessionIDBytes = Self.uuidBytes(sessionID)
         requestKey = secret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: salt,
             sharedInfo: Data("request".utf8), outputByteCount: 32)
         replyKey = secret.hkdfDerivedSymmetricKey(using: SHA256.self, salt: salt,
@@ -27,12 +29,12 @@ struct V2ActorSessionMAC: Sendable {
     }
 
     func seal<Body: Encodable & V2ActorMACBody>(_ body: Body, reply: Bool, maximumBytes: Int) throws -> V2ActorSignedPacket {
-        let encoded = try V2ActorProtobuf.encode(body)
-        guard maximumBytes > 0, !encoded.isEmpty, encoded.count <= maximumBytes - 16 else {
+        var bytes = try body.protobufBytes()
+        guard maximumBytes > 0, !bytes.isEmpty, bytes.count <= maximumBytes - 16 else {
             throw V2ActorAuthenticationError.oversized
         }
-        var bytes = Data(); bytes.reserveCapacity(16 + encoded.count)
-        bytes.append(Self.uuidBytes(sessionID)); bytes.append(encoded)
+        // Reuse the owned PB buffer instead of allocating a second packet buffer.
+        bytes.insert(contentsOf: sessionIDBytes, at: bytes.startIndex)
         var mac = HMAC<SHA256>(key: reply ? replyKey : requestKey)
         mac.update(data: Body.macDomain); mac.update(data: bytes)
         return .init(signerID: reply ? server : client, body: bytes, signature: Data(mac.finalize()))
@@ -50,7 +52,7 @@ struct V2ActorSessionMAC: Sendable {
             V2MACAuthenticatedBytes(domain: Body.macDomain, body: packet.body), using: reply ? replyKey : requestKey) else {
             throw V2ActorAuthenticationError.invalidSignature
         }
-        do { return try V2ActorProtobuf.decode(Body.self, from: packet.body.bytes.extracting(16...)) }
+        do { return try Body.fromProtobufBytes(packet.body.bytes.extracting(16...)) }
         catch { throw V2ActorAuthenticationError.invalidRequest }
     }
 
@@ -74,7 +76,19 @@ private struct V2MACAuthenticatedBytes: DataProtocol {
     let body: Data
     var startIndex: Int { 0 }
     var endIndex: Int { domain.count + body.count }
-    var regions: [Data] { [domain, body] }
+    var regions: Regions { .init(domain: domain, body: body) }
+    struct Regions: RandomAccessCollection {
+        let domain: Data
+        let body: Data
+        var startIndex: Int { 0 }
+        var endIndex: Int { 2 }
+        subscript(index: Int) -> Data {
+            precondition(index == 0 || index == 1)
+            return index == 0 ? domain : body
+        }
+        func index(after i: Int) -> Int { i + 1 }
+        func index(before i: Int) -> Int { i - 1 }
+    }
     subscript(index: Int) -> UInt8 {
         precondition(index >= startIndex && index < endIndex)
         return index < domain.count ? domain[domain.startIndex + index] : body[body.startIndex + index - domain.count]
@@ -92,7 +106,7 @@ extension RealtimeCall: V2ActorSessionBoundCall {}
 extension ShardCall: V2ActorSessionBoundCall {}
 
 /// Domains retain the existing wire binding, evaluated once per concrete type.
-protocol V2ActorMACBody { static var macDomain: Data { get } }
+protocol V2ActorMACBody: V2ActorProtobufMessage { static var macDomain: Data { get } }
 extension V2ActorAuthenticatedCall: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.V2ActorAuthenticatedCall".utf8) }
 extension V2ActorAuthenticatedReply: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.V2ActorAuthenticatedReply".utf8) }
 extension RoomSubscriptionBatchCall: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.RoomSubscriptionBatchCall".utf8) }

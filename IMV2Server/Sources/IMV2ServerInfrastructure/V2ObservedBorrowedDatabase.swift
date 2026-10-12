@@ -19,6 +19,12 @@ func v2ObserveBorrowedDatabase(_ database: any Database,
     observation: V2DatabaseLoanObservation?,
     sessionTimeouts: V2RoomActivationSQLTimeouts? = nil) -> any Database {
     let sessionTimeouts = sessionTimeouts ?? (database as? any V2RoomSQLSessionDefaults)?.roomSQLSessionTimeouts
+    // Re-entering the same loan must not build another observation wrapper.
+    if let existing = database as? any V2ObservedDatabaseHandle,
+       existing.loanObservation === observation,
+       (database as? any V2RoomSQLSessionDefaults)?.roomSQLSessionTimeouts == sessionTimeouts {
+        return database
+    }
     guard observation != nil || sessionTimeouts != nil, let sql = database as? any SQLDatabase else { return database }
     let core = V2ObservedSQLBorrow(database: database, sql: sql, observation: observation, roomSQLSessionTimeouts: sessionTimeouts)
     if let postgres = database as? any PostgresDatabase,
@@ -42,8 +48,8 @@ private struct V2ObservedSQLBorrow: Database, SQLDatabase, V2ObservedDatabaseHan
     var queryLogLevel: Logger.Level? { sql.queryLogLevel }
     var version: (any SQLDatabaseReportedVersion)? { sql.version }
 
-    func observe<T>(phase: V2DatabaseLoanSQLPhase? = nil,
-        _ operation: () -> EventLoopFuture<T>) -> EventLoopFuture<T> {
+    func observe(phase: V2DatabaseLoanSQLPhase? = nil,
+        _ operation: () -> EventLoopFuture<Void>) -> EventLoopFuture<Void> {
         guard let observation else { return operation() }
         let token = observation.startSQL(phase: phase)
         let actual = operation()
