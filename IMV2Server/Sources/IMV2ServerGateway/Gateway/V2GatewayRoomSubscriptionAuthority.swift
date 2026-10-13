@@ -75,7 +75,7 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
         catalog.withLock { value in
             guard !value.closed, let current = value.sessions[session.host],
                   current.session == session, current.serviceID == serviceID,
-                  current.isReady(at: now()) else { return [] }
+                  current.isReady() else { return [] }
             let obsolete = value.sessions.keys.filter {
                 $0.hostID == session.host.hostID && $0 != session.host
             }
@@ -95,17 +95,13 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
                 if let old {
                     guard old.serviceID == serviceID else { return .stale }
                     if old.session == pulse.session {
-                        return old.heartbeat(sequence: pulse.sequence, at: now()) ? .accepted : .resetRequired
+                        return old.isReady() ? .accepted : .resetRequired
                     }
                     guard pulse.session.generation > old.session.generation else { return .stale }
                     old.retire()
                 } else if value.sessions.count >= 128 { return .stale }
-                value.sessions[pulse.session.host] = .init(session: pulse.session, serviceID: serviceID,
-                    openedAt: now(), sequence: pulse.sequence)
+                value.sessions[pulse.session.host] = .init(session: pulse.session, serviceID: serviceID)
                 return .accepted
-            case .heartbeat:
-                guard let old, old.session == pulse.session, old.serviceID == serviceID else { return .stale }
-                return old.heartbeat(sequence: pulse.sequence, at: now()) ? .accepted : .resetRequired
             case .retire:
                 guard let old, old.session == pulse.session, old.serviceID == serviceID else { return .stale }
                 old.retire(); return .accepted
@@ -115,7 +111,7 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
     public func install(fence: V2RoomSubscriptionFence, serviceID: String, session: V2RoomDeliverySession,
                         afterAuthoritativeReset: Bool = false) async -> Bool {
         guard (try? fence.validate()) != nil, session.host == fence.activation.host,
-              let gate = sessionGate(session, serviceID: serviceID), gate.isReady(at: now()), !serviceID.isEmpty,
+              let gate = sessionGate(session, serviceID: serviceID), gate.isReady(), !serviceID.isEmpty,
               serviceID.utf8.count <= 128 else { return false }
         let selected = catalog.withLock { value -> V2RoomSubscriptionActor? in
             guard !value.closed,
@@ -442,7 +438,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                   !value.closed, let connection = value.connections[connectionID],
                   connection.userID == userID else { throw V2RoomRecoveryReadError.invalidRequest }
             return try reports.map { roomID, applied in
-                guard let room = value.rooms[roomID], room.authorization.ready, room.session.isReady(at: now()) else {
+                guard let room = value.rooms[roomID], room.authorization.ready, room.session.isReady() else {
                     throw V2RoomRecoveryReadError.topologyChanged
                 }
                 guard room.authorization.members[userID] != nil else {
@@ -464,7 +460,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     /// Baseline/Ready and H capture the same exact room/user/device gate as bodies.
     func capturePermits(roomID: RoomID) -> [Permit] {
         withState { value in
-            guard !value.closed, let room = value.rooms[roomID], room.authorization.ready, room.session.isReady(at: now()) else { return [] }
+            guard !value.closed, let room = value.rooms[roomID], room.authorization.ready, room.session.isReady() else { return [] }
             return room.authorization.members.flatMap { userID, member in
                 (value.connectionsByRoomUser[V2RoomSubscriptionConnections.RoomUser(roomID: roomID, userID: userID)] ?? []).compactMap { connectionID -> Permit? in
                     guard let connection = value.connections[connectionID], let interest = connection.interest else { return nil }
@@ -480,7 +476,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     func captureOnlinePermits(roomID: RoomID) -> [Permit] {
         withState { value in
             guard !value.closed, let room = value.rooms[roomID], room.authorization.ready,
-                  room.session.isReady(at: now()) else { return [] }
+                  room.session.isReady() else { return [] }
             return room.authorization.members.flatMap { userID, member in
                 (value.connectionsByUser[userID] ?? []).compactMap { connectionID in
                     guard let connection = value.connections[connectionID] else { return nil }
@@ -504,7 +500,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             guard room.authorization.ready else {
                 V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressAuthorityNotReady); return nil
             }
-            guard room.session.isReady(at: now()) else {
+            guard room.session.isReady() else {
                 V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressSessionUnavailable); return nil
             }
             guard let member = room.authorization.members[connection.userID] else {
@@ -525,7 +521,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                         reserve: @Sendable () -> Bool = { true }) -> Bool {
         withState { value in
             do { try fence.validate() } catch { return false }
-            guard !value.closed, session.isReady(at: now()),
+            guard !value.closed, session.isReady(),
                   !serviceID.isEmpty, serviceID.utf8.count <= 128,
                   value.rooms[fence.roomID].map({ !$0.retired }) == true || value.activeRoomCount < maximumRooms else { return false }
             // This flag comes only from a locally validated reset RPC, never
@@ -534,7 +530,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             guard value.rooms[fence.roomID] != nil || !value.unknownRoomsRequireReset || afterAuthoritativeReset else { return false }
             if let old = value.rooms[fence.roomID] {
                 if old.fence == fence {
-                    guard !old.retired, old.serviceID == serviceID, old.session.isReady(at: now()) else { return false }
+                    guard !old.retired, old.serviceID == serviceID, old.session.isReady() else { return false }
                     guard reserve() else { return false }
                     return old.session === session
                 }
@@ -573,7 +569,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
 
     func authorizedMemberRevision(roomID: RoomID, userID: UserID) -> UInt64? {
         withState { value in
-            guard !value.closed, let room = value.rooms[roomID], room.authorization.ready, room.session.isReady(at: now()) else { return nil }
+            guard !value.closed, let room = value.rooms[roomID], room.authorization.ready, room.session.isReady() else { return nil }
             return room.authorization.members[userID]?.revision
         }
     }
@@ -581,7 +577,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     func authorizationCheckpoint(fence: V2RoomSubscriptionFence, serviceID: String) -> UInt64? {
         withState { value in
             guard !value.closed, let room = value.rooms[fence.roomID], room.fence == fence,
-                  room.serviceID == serviceID, room.authorization.ready, room.session.isReady(at: now()) else { return nil }
+                  room.serviceID == serviceID, room.authorization.ready, room.session.isReady() else { return nil }
             return room.authorization.sequence
         }
     }
@@ -602,7 +598,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         withState { value in
             guard let room = value.rooms[fence.roomID] else { return value.unknownRoomsRequireReset }
             guard room.fence == fence else { return false }
-            return room.retired || !room.session.isReady(at: now()) || (!room.authorization.ready && room.deliverySequence > 0)
+            return room.retired || !room.session.isReady() || (!room.authorization.ready && room.deliverySequence > 0)
         }
     }
 
@@ -618,7 +614,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             // Closing an exact, authenticated fence grants no authority. Its
             // actual receipt must remain possible after local expiry/retirement;
             // otherwise the Owner cannot finish this cut or issue a fresh fence.
-            guard terminal || (!room.retired && room.session.isReady(at: now())) else {
+            guard terminal || (!room.retired && room.session.isReady()) else {
                 room.authorization.ready = false; room.authorization.members.removeAll()
                 return .stale
             }

@@ -327,6 +327,13 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         await metrics()
     }
 
+    public func roomAuthorityInvalidations() async -> AsyncStream<Void> {
+        switch node {
+        case .host(let host): return await host.roomAuthorityInvalidations()
+        case .caller: return AsyncStream { $0.finish() }
+        }
+    }
+
     public func readiness() async -> Bool {
         switch node {
         case .host(let host): await host.readiness()

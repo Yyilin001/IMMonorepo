@@ -1,3 +1,4 @@
+import DistributedCluster
 import Foundation
 import IMV2ActorContracts
 import SwiftProtobuf
@@ -189,6 +190,7 @@ extension RoomDeliverySessionCall: V2ActorProtobufMessage {
         wire.header = callHeader(service: serviceID, version: version, incarnation: callerIncarnation,
             recipient: recipient, session: sessionID, sequence: sequence, attempt: attemptID)
         wire.sourceShardID = sourceShardID
+        wire.sourceNode = try V2ActorProtobuf.encode(sourceNode)
         wire.pulse.session = .init(pulse.session); wire.pulse.kind = pulse.kind.rawValue; wire.pulse.sequence = pulse.sequence
         return try wire.serializedData()
     }
@@ -200,7 +202,7 @@ extension RoomDeliverySessionCall: V2ActorProtobufMessage {
         let h = wire.header; try validate(h)
         return try .init(serviceID: .init(h.serviceID), version: Int(h.version), callerIncarnation: V2HotPB.uuid(h.callerIncarnation),
             recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID),
-            sourceShardID: wire.sourceShardID, pulse: .init(session: wire.pulse.session.model(), kind: kind, sequence: wire.pulse.sequence))
+            sourceNode: V2ActorProtobuf.decode(Cluster.Node.self, from: wire.sourceNode), sourceShardID: wire.sourceShardID, pulse: .init(session: wire.pulse.session.model(), kind: kind, sequence: wire.pulse.sequence))
     }
 }
 extension RoomDeliverySessionReply: V2ActorProtobufMessage {

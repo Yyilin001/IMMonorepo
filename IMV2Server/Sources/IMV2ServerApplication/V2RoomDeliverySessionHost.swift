@@ -3,8 +3,8 @@ import IMV2Core
 import IMV2ActorContracts
 import Synchronization
 
-/// One factory-owned registry across every physical database resource. Sessions
-/// and their bounded heartbeat worker scale with peers, never with rooms.
+/// Lifecycle-bound Host/Gateway generations. Idle sessions have no heartbeat or
+/// periodic scan. Only pending authorization owns a cancellable deadline task.
 public actor V2RoomDeliverySessionHost {
     public typealias SendPulse = @Sendable (V2RoomDeliverySessionPulse, String, V2GatewayRealtimeDescriptor) async throws -> V2RoomDeliverySessionResult
     private struct Key: Hashable, Sendable { let host: V2ActorHostIdentity; let gateway: V2GatewayRealtimeIdentity }
@@ -13,36 +13,54 @@ public actor V2RoomDeliverySessionHost {
         let descriptor: V2GatewayRealtimeDescriptor
         let shard: String
         var rooms: Set<V2RoomActivationToken>
-        var sequence: UInt64 = 1
         var ready = false
+        var invalidated = false
         let control: V2RoomDeliveryControlProgress
     }
+    private struct Deadline {
+        let session: V2RoomDeliverySession
+        let at: ContinuousClock.Instant
+        let task: Task<Void, Never>
+    }
     private nonisolated let controls = Mutex<[Key: V2RoomDeliveryControlProgress]>([:])
+    private nonisolated let wakes = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     private var entries: [Key: Entry] = [:]
+    private var deadlines: [Key: Deadline] = [:]
+    private var timerTasks: [UUID: Task<Void, Never>] = [:]
     private var nextGeneration: UInt64 = 0
     private var openings: [Key: Task<V2RoomDeliverySession, any Error>] = [:]
     private var send: SendPulse?
     private var hostReady: (@Sendable () async -> Bool)?
-    private var worker: Task<Void, Never>?
+    private var controlWorker: Task<Void, Never>?
+    private var lifecycleWorker: Task<Void, Never>?
     private var closed = false
     private let now: @Sendable () -> ContinuousClock.Instant
-    public init(now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) { self.now = now }
-    /// Synchronous bounded enqueue/ACK bookkeeping; no Task is created and
-    /// ordinary message delivery never enters this registry.
+    private let controlAckTimeout: Duration
+    public init(now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }, controlAckTimeout: Duration = .seconds(10)) {
+        precondition(controlAckTimeout > .zero)
+        self.now = now; self.controlAckTimeout = controlAckTimeout
+    }
     public nonisolated func observeAuthorization(_ progress: V2RoomSubscriptionRelay.AuthorizationProgress,
                                                  gateway: V2GatewayRealtimeIdentity) {
         let key = Key(host: progress.fence.activation.host, gateway: gateway)
-        let control = controls.withLock { $0[key] }
-        control?.observe(progress)
+        guard let control = controls.withLock({ $0[key] }) else { return }
+        control.observe(progress)
+        wakes.continuation.yield(())
     }
-    public func configure(send: @escaping SendPulse, hostReady: @escaping @Sendable () async -> Bool) {
+    public func configure(send: @escaping SendPulse, hostReady: @escaping @Sendable () async -> Bool,
+                          invalidations: AsyncStream<Void> = AsyncStream { $0.finish() }) {
         precondition(self.send == nil && !closed)
         self.send = send; self.hostReady = hostReady
-        worker = Task { [weak self] in
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(2)) } catch { return }
-                guard let self else { return }
-                await self.pulse()
+        controlWorker = Task { [weak self, stream = wakes.stream] in
+            for await _ in stream {
+                guard !Task.isCancelled, let self else { return }
+                await self.reconcileDeadlines()
+            }
+        }
+        lifecycleWorker = Task { [weak self] in
+            for await _ in invalidations {
+                guard !Task.isCancelled, let self else { return }
+                await self.lifecycleChanged()
             }
         }
     }
@@ -51,14 +69,12 @@ public actor V2RoomDeliverySessionHost {
         guard !closed else { throw V2RoomCallFailure.notAccepted(.retired) }
         let key = Key(host: activation.host, gateway: gateway.identity)
         if let entry = entries[key] {
-            entries[key]?.rooms.insert(activation)
-            entry.control.retain(activation)
+            entries[key]?.rooms.insert(activation); entry.control.retain(activation)
             if entry.ready { return entry.session }
             return try await open(key: key, descriptor: gateway, shard: activation.owner.shardID).value
         }
         guard entries.count < 128 else { throw V2RoomCallFailure.notAccepted(.overloaded) }
-        let task = open(key: key, descriptor: gateway, shard: activation.owner.shardID, rooms: [activation])
-        return try await task.value
+        return try await open(key: key, descriptor: gateway, shard: activation.owner.shardID, rooms: [activation]).value
     }
     private func open(key: Key, descriptor: V2GatewayRealtimeDescriptor, shard: String,
                       rooms: Set<V2RoomActivationToken> = []) -> Task<V2RoomDeliverySession, any Error> {
@@ -78,11 +94,8 @@ public actor V2RoomDeliverySessionHost {
                 guard try await send(.init(session: session, kind: .open, sequence: 1), shard, descriptor) == .accepted else {
                     throw V2RoomCallFailure.notAccepted(.unavailable)
                 }
-                guard !closed, entries[key]?.session == session else { throw V2RoomCallFailure.notAccepted(.retired) }
-                // Opening a successor closes all old Gateway projections. Only
-                // a fresh room baseline may establish control responsibility.
-                control.opened()
-                entries[key]?.ready = true; openings.removeValue(forKey: key)
+                guard !closed, entries[key]?.session == session, entries[key]?.invalidated == false else { throw V2RoomCallFailure.notAccepted(.retired) }
+                control.opened(); entries[key]?.ready = true; openings.removeValue(forKey: key)
                 return session
             } catch {
                 if entries[key]?.session == session { entries[key]?.ready = false; openings.removeValue(forKey: key) }
@@ -95,100 +108,98 @@ public actor V2RoomDeliverySessionHost {
     public func release(activation: V2RoomActivationToken, gateway: V2GatewayRealtimeIdentity) async {
         let key = Key(host: activation.host, gateway: gateway)
         guard var entry = entries[key] else { return }
-        entry.rooms.remove(activation); entries[key] = entry
-        entry.control.release(activation)
+        entry.rooms.remove(activation); entries[key] = entry; entry.control.release(activation)
+        wakes.continuation.yield(())
         guard entry.rooms.isEmpty else { return }
         if let opening = openings[key] { _ = await opening.result }
         guard let current = entries[key], current.rooms.isEmpty else { return }
-        entries.removeValue(forKey: key)
-        controls.withLock { $0.removeValue(forKey: key) }
-        if let send { _ = try? await send(.init(session: current.session, kind: .retire, sequence: current.sequence + 1), current.shard, current.descriptor) }
+        entries.removeValue(forKey: key); controls.withLock { $0.removeValue(forKey: key) }
+        let deadline = deadlines.removeValue(forKey: key); deadline?.task.cancel(); await deadline?.task.value
+        if let send { _ = try? await send(.init(session: current.session, kind: .retire, sequence: 2), current.shard, current.descriptor) }
     }
-    /// Failure of the authorization lane retires its entire session. A heartbeat
-    /// cannot keep stale grants alive; opening a successor only schedules reset.
+    /// Native peer loss closes local reuse immediately; there is no reconnect
+    /// poll. The next trusted acquisition opens a successor and fresh baseline.
+    public func peerUnavailable(host: V2ActorHostIdentity, gateway: V2GatewayRealtimeIdentity) {
+        let key = Key(host: host, gateway: gateway)
+        entries[key]?.ready = false; entries[key]?.invalidated = true
+        deadlines.removeValue(forKey: key)?.task.cancel()
+    }
     public func controlFailed(host: V2ActorHostIdentity, gateway: V2GatewayRealtimeIdentity) async {
         let key = Key(host: host, gateway: gateway)
         guard let entry = entries[key], entry.ready else { return }
-        entries[key]?.ready = false
-        if let send { _ = try? await send(.init(session: entry.session, kind: .retire, sequence: entry.sequence + 1), entry.shard, entry.descriptor) }
+        peerUnavailable(host: host, gateway: gateway)
+        if let send { _ = try? await send(.init(session: entry.session, kind: .retire, sequence: 2), entry.shard, entry.descriptor) }
     }
-    private func pulse() async {
-        guard !closed, let send, let hostReady else { return }
-        let healthy = await hostReady()
+    private func reconcileDeadlines() {
         guard !closed else { return }
-        // Keep established peers ahead of reconnect work. Reopening a slow
-        // peer must not consume the healthy peers' heartbeat interval.
-        var work: [(Key, Entry, Bool)] = []
-        for (key, var entry) in entries where entry.ready && !entry.rooms.isEmpty {
-            let progress = entry.control.health()
-            if healthy, progress == .stalled { continue }
-            guard entry.sequence < UInt64.max else { entries[key]?.ready = false; continue }
-            entry.sequence += 1; entries[key] = entry
-            work.append((key, entry, healthy && progress == .ready))
-        }
-        await withTaskGroup(of: (Key, V2RoomDeliverySession, Bool).self) { group in
-            var pending = work.makeIterator()
-            func admit(_ item: (Key, Entry, Bool)) {
-                let (key, entry, keepAlive) = item
-                group.addTask {
-                    let result = try? await send(.init(session: entry.session, kind: keepAlive ? .heartbeat : .retire,
-                        sequence: entry.sequence), entry.shard, entry.descriptor)
-                    return (key, entry.session, keepAlive && result == .accepted)
-                }
+        for (key, entry) in entries where entry.ready {
+            guard let at = entry.control.deadline(timeout: controlAckTimeout) else {
+                deadlines.removeValue(forKey: key)?.task.cancel(); continue
             }
-            for _ in 0..<8 { if let item = pending.next() { admit(item) } }
-            for await (key, session, accepted) in group {
-                if entries[key]?.session == session, !accepted { entries[key]?.ready = false }
-                if !closed, !Task.isCancelled, let item = pending.next() { admit(item) }
+            if let old = deadlines[key], old.session == entry.session, old.at == at { continue }
+            deadlines.removeValue(forKey: key)?.task.cancel()
+            let delay = max(.zero, now().duration(to: at))
+            let id = UUID()
+            let task = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: delay)
+                    await self?.deadlineReached(key: key, session: entry.session, at: at)
+                } catch { }
+                await self?.timerFinished(id)
             }
-        }
-        guard !closed, healthy, !Task.isCancelled else { return }
-        let stale = entries.filter { !$0.value.ready && !$0.value.rooms.isEmpty }
-        // The transport reserves eight pulse slots. Admit openings lazily so
-        // a reconnect wave cannot overload those slots by spawning every peer.
-        await withTaskGroup(of: Void.self) { group in
-            var pending = stale.makeIterator()
-            func admit(_ item: (key: Key, value: Entry)) {
-                let opening = open(key: item.key, descriptor: item.value.descriptor, shard: item.value.shard)
-                group.addTask { _ = await opening.result }
-            }
-            for _ in 0..<8 { if let item = pending.next() { admit(item) } }
-            for await _ in group {
-                if !closed, !Task.isCancelled, let item = pending.next() { admit(item) }
-            }
+            timerTasks[id] = task
+            deadlines[key] = .init(session: entry.session, at: at, task: task)
         }
     }
-
+    private func deadlineReached(key: Key, session: V2RoomDeliverySession, at: ContinuousClock.Instant) async {
+        guard !closed, let entry = entries[key], entry.ready, entry.session == session,
+              deadlines[key]?.at == at else { return }
+        deadlines.removeValue(forKey: key)
+        // An ACK can arrive before this task gets its Actor turn. Recheck the
+        // actual oldest pending control; duplicates never extend its deadline.
+        if let actual = entry.control.deadline(timeout: controlAckTimeout), actual <= now() {
+            await controlFailed(host: key.host, gateway: key.gateway)
+        } else { reconcileDeadlines() }
+    }
+    private func timerFinished(_ id: UUID) { timerTasks.removeValue(forKey: id) }
+    private func lifecycleChanged() async {
+        guard !closed else { return }
+        await invalidateAll()
+    }
+    private func invalidateAll() async {
+        let current = Array(entries.values)
+        for entry in current { peerUnavailable(host: entry.session.host, gateway: entry.session.gateway) }
+        guard let send else { return }
+        await withTaskGroup(of: Void.self) { group in
+            var pending = current.makeIterator()
+            func admit(_ entry: Entry) {
+                group.addTask { _ = try? await send(.init(session: entry.session, kind: .retire, sequence: 2), entry.shard, entry.descriptor) }
+            }
+            for _ in 0..<8 { if let entry = pending.next() { admit(entry) } }
+            for await _ in group { if let entry = pending.next() { admit(entry) } }
+        }
+    }
     public func close() async {
         guard !closed else { return }
-        closed = true; worker?.cancel()
-        let pending = Array(openings.values)
-        for task in pending { task.cancel() }
+        closed = true
+        await invalidateAll()
+        wakes.continuation.finish(); controlWorker?.cancel(); lifecycleWorker?.cancel()
+        let timers = Array(timerTasks.values); deadlines.removeAll()
+        for timer in timers { timer.cancel() }
+        let pending = Array(openings.values); for task in pending { task.cancel() }
         for task in pending { _ = await task.result }
-        await worker?.value
-        if let send {
-            await withTaskGroup(of: Void.self) { group in
-                var pending = Array(entries.values).makeIterator()
-                func admit(_ entry: Entry) {
-                    group.addTask {
-                        _ = try? await send(.init(session: entry.session, kind: .retire,
-                            sequence: entry.sequence + 1), entry.shard, entry.descriptor)
-                    }
-                }
-                for _ in 0..<8 { if let entry = pending.next() { admit(entry) } }
-                for await _ in group { if let entry = pending.next() { admit(entry) } }
-            }
-        }
-        entries.removeAll(); openings.removeAll()
-        controls.withLock { $0.removeAll() }
+        await controlWorker?.value; await lifecycleWorker?.value
+        for timer in timers { await timer.value }
+        timerTasks.removeAll()
+        entries.removeAll(); openings.removeAll(); controls.withLock { $0.removeAll() }
     }
+    package func activeControlDeadlines() -> Int { deadlines.count }
 }
 
 /// The oldest pending control determines peer health. Queue entries are
 /// appended only for a new pending room; ACK removes by token. Lazy removal
 /// is amortized and periodically compacted to keep storage bounded.
 private final class V2RoomDeliveryControlProgress: Sendable {
-    enum Health { case ready, stalled, expired }
     private struct Pending: Sendable {
         let id: UInt64
         let startedAt: ContinuousClock.Instant
@@ -249,17 +260,15 @@ private final class V2RoomDeliveryControlProgress: Sendable {
             value.compact()
         }
     }
-    func health() -> Health {
+    func deadline(timeout: Duration) -> ContinuousClock.Instant? {
         state.withLock { value in
-            if value.invalidated { return .expired }
+            if value.invalidated { return now() }
             while value.index < value.queue.count {
                 let item = value.queue[value.index]
                 guard let pending = value.pending[item.0], pending.id == item.1 else { value.index += 1; continue }
-                let age = pending.startedAt.duration(to: now())
-                if age >= .seconds(10) { return .expired }
-                return age >= .seconds(2) ? .stalled : .ready
+                return pending.startedAt + timeout
             }
-            return .ready
+            return nil
         }
     }
 }

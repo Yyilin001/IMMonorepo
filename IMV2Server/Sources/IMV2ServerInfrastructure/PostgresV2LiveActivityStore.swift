@@ -17,6 +17,7 @@ public enum V2LiveActivityConfigurationError: Error, Equatable, Sendable {
 /// 使同一用户/设备的竞争不会形成锁序环。
 public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     private let database: any Database
+    private let admissionDatabase: any Database
     private let renewalDatabase: any Database
     private let onlineLease: TimeInterval
 
@@ -32,9 +33,11 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         }
         let observed = (database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.presence) ?? database
         self.database = observed
+        self.admissionDatabase = (observed as? V2EventLoopBalancedDatabase)?.usingObservationSource(.presenceAdmission) ?? observed
         // Same physical entries and loan gate; only established lease renewal
         // may consume reserved renewal capacity. Admission and reads stay ordinary.
-        self.renewalDatabase = (observed as? V2EventLoopBalancedDatabase)?.usingLoanClass(.renewal) ?? observed
+        self.renewalDatabase = (observed as? V2EventLoopBalancedDatabase)?
+            .usingLoanClass(.renewal).usingObservationSource(.presenceRenewal) ?? observed
         self.onlineLease = onlineLease
     }
 
@@ -268,7 +271,7 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
         now: Date
     ) async throws -> V2LivePresenceLeaseRefresh {
         _ = try validatedLeaseExpiry(now: now)
-        return try await database.transaction { transaction in
+        return try await admissionDatabase.transaction { transaction in
             guard let sql = transaction as? any SQLDatabase else {
                 throw V2LiveActivityStoreError.corruptPersistenceState
             }
@@ -277,45 +280,53 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
             // 同一用户的所有竞争者都先取得同一把锁；
             // 设备锁再串行化更窄的限制，避免用户锁与设备锁形成顺序循环。
             try await lockConnectionIdentity(user: user, device: device, sql: sql)
-            let now = try await liveActivityDatabaseClock(sql)
-            let expiry = try validatedLeaseExpiry(now: now)
-
-            // `auth_devices.device_id` 全局唯一，租约又有复合所有者外键，
-            // 因此此设备只能属于 `user`。查询条件只限定用户，
-            // 使 PostgreSQL 可使用既有的 `(user_id, expires_at)` 索引。
-            try await sql.raw("""
-                DELETE FROM im_v2.user_live_presence_leases
-                WHERE expires_at <= \(bind: now)
-                  AND user_id = \(bind: user)
-                """).run()
-            guard let counts = try await sql.raw("""
-                SELECT COUNT(*) FILTER (WHERE device_id = \(bind: device))::integer AS device_count,
-                       COUNT(*) FILTER (WHERE user_id = \(bind: user))::integer AS user_count
-                FROM im_v2.user_live_presence_leases
-                WHERE user_id = \(bind: user)
-                  AND expires_at > \(bind: now)
-                  AND connection_id <> \(bind: connectionID)
-                """).first(decoding: LiveActivityConnectionCountRow.self)
+            // A separate statement after acquiring the identity locks observes
+            // competing commits. The data statement shares one fresh database clock.
+            let leaseMicroseconds = Int64((onlineLease * 1_000_000).rounded(.up))
+            guard let row = try await sql.raw("""
+                WITH observed AS MATERIALIZED (
+                    SELECT clock_timestamp() AS now
+                ), expired AS (
+                    DELETE FROM im_v2.user_live_presence_leases
+                    WHERE user_id = \(bind: user)
+                      AND expires_at <= (SELECT now FROM observed)
+                      AND connection_id <> \(bind: connectionID)
+                ), counts AS MATERIALIZED (
+                    SELECT COUNT(*) FILTER (WHERE device_id = \(bind: device))::integer AS device_count,
+                           COUNT(*)::integer AS user_count
+                    FROM im_v2.user_live_presence_leases
+                    WHERE user_id = \(bind: user)
+                      AND expires_at > (SELECT now FROM observed)
+                      AND connection_id <> \(bind: connectionID)
+                ), admitted AS (
+                    INSERT INTO im_v2.user_live_presence_leases
+                        (user_id, device_id, connection_id, expires_at, updated_at, publication_suppressed)
+                    SELECT \(bind: user), \(bind: device), \(bind: connectionID),
+                           observed.now + \(bind: leaseMicroseconds)::bigint * interval '1 microsecond',
+                           observed.now, \(bind: publicationSuppressed)
+                    FROM observed, counts
+                    WHERE counts.device_count < \(bind: policy.maximumConnectionsPerDevice)
+                      AND counts.user_count < \(bind: policy.maximumConnectionsPerUser)
+                    ON CONFLICT (connection_id) DO UPDATE
+                    SET publication_suppressed = EXCLUDED.publication_suppressed,
+                        expires_at = GREATEST(im_v2.user_live_presence_leases.expires_at, EXCLUDED.expires_at),
+                        updated_at = GREATEST(im_v2.user_live_presence_leases.updated_at, EXCLUDED.updated_at)
+                    WHERE im_v2.user_live_presence_leases.user_id = EXCLUDED.user_id
+                      AND im_v2.user_live_presence_leases.device_id = EXCLUDED.device_id
+                    RETURNING expires_at
+                )
+                SELECT observed.now, admitted.expires_at,
+                       counts.device_count < \(bind: policy.maximumConnectionsPerDevice)
+                         AND counts.user_count < \(bind: policy.maximumConnectionsPerUser) AS within_limit,
+                       COALESCE(preference.allows_online_presence, TRUE) AS allows_online_presence
+                FROM observed CROSS JOIN counts
+                LEFT JOIN admitted ON TRUE
+                LEFT JOIN im_v2.user_live_activity_preferences preference ON preference.user_id = \(bind: user)
+                """).first(decoding: LiveActivityAdmissionRow.self), v2PostgresTimestampCanEncode(row.now)
             else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            guard counts.deviceCount < policy.maximumConnectionsPerDevice,
-                  counts.userCount < policy.maximumConnectionsPerUser
-            else { return .init(outcome: .rejected, allowsOnlinePresence: false) }
-            guard let admitted = try await sql.raw("""
-                INSERT INTO im_v2.user_live_presence_leases
-                    (user_id, device_id, connection_id, expires_at, updated_at, publication_suppressed)
-                VALUES
-                    (\(bind: user), \(bind: device), \(bind: connectionID), \(bind: expiry), \(bind: now), \(bind: publicationSuppressed))
-                ON CONFLICT (connection_id) DO UPDATE
-                SET publication_suppressed = EXCLUDED.publication_suppressed,
-                    expires_at = GREATEST(im_v2.user_live_presence_leases.expires_at, EXCLUDED.expires_at),
-                    updated_at = GREATEST(im_v2.user_live_presence_leases.updated_at, EXCLUDED.updated_at)
-                WHERE im_v2.user_live_presence_leases.user_id = EXCLUDED.user_id
-                  AND im_v2.user_live_presence_leases.device_id = EXCLUDED.device_id
-                RETURNING expires_at
-                """).first(decoding: LiveActivityExpiryRow.self), let acceptedExpiry = admitted.expiresAt
-            else { throw V2LiveActivityStoreError.corruptPersistenceState }
-            let preference = try await sql.raw("SELECT allows_online_presence FROM im_v2.user_live_activity_preferences WHERE user_id=\(bind:user)").first(decoding: LiveActivityOnlinePreferenceRow.self)?.allowsOnlinePresence ?? true
-            return try liveActivityConfirmedRefresh(expiry: acceptedExpiry, databaseNow: now, allows: preference)
+            guard row.withinLimit else { return .init(outcome: .rejected, allowsOnlinePresence: false) }
+            guard let expiry = row.expiresAt else { throw V2LiveActivityStoreError.corruptPersistenceState }
+            return try liveActivityConfirmedRefresh(expiry: expiry, databaseNow: row.now, allows: row.allowsOnlinePresence)
         }
     }
 
@@ -470,15 +481,16 @@ public struct PostgresV2LiveActivityStore: V2LiveActivityStore {
     }
 
     private func lockConnectionIdentity(user: UUID, device: UUID, sql: any SQLDatabase) async throws {
+        // Materialization and the FROM dependency acquire user before device.
         try await sql.raw("""
-            SELECT pg_advisory_xact_lock(
-                hashtextextended(\(bind: "v2-live-user:" + user.uuidString.lowercased()), 0)
+            WITH user_lock AS MATERIALIZED (
+                SELECT pg_advisory_xact_lock(
+                    hashtextextended(\(bind: "v2-live-user:" + user.uuidString.lowercased()), 0)
+                )
             )
-            """).run()
-        try await sql.raw("""
             SELECT pg_advisory_xact_lock(
                 hashtextextended(\(bind: "v2-live-device:" + device.uuidString.lowercased()), 0)
-            )
+            ) FROM user_lock
             """).run()
     }
 
@@ -509,12 +521,14 @@ private struct LiveActivityExpiryRow: Decodable { let expiresAt: Date?; enum Cod
 private struct LiveActivityMembershipRevisionRow: Decodable { let membershipRevision: Int64; enum CodingKeys: String, CodingKey { case membershipRevision = "membership_revision" } }
 private struct LiveActivityExistsRow: Decodable { let exists: Int }
 private struct LiveActivityBooleanRow: Decodable { let exists: Bool }
-private struct LiveActivityConnectionCountRow: Decodable {
-    let deviceCount: Int
-    let userCount: Int
+private struct LiveActivityAdmissionRow: Decodable {
+    let now: Date
+    let expiresAt: Date?
+    let withinLimit: Bool
+    let allowsOnlinePresence: Bool
     enum CodingKeys: String, CodingKey {
-        case deviceCount = "device_count"
-        case userCount = "user_count"
+        case now, expiresAt = "expires_at", withinLimit = "within_limit"
+        case allowsOnlinePresence = "allows_online_presence"
     }
 }
 private struct LiveActivityConnectionIDRow: Decodable {

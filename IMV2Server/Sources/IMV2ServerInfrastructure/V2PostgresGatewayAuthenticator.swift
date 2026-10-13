@@ -33,7 +33,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         now: @escaping @Sendable () -> Date = Date.init,
         activityWriteGate: V2DeviceActivityWriteGate = .init()
     ) {
-        self.database = database
+        self.database = (database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.authentication) ?? database
         self.schema = "im_v2"
         self.tokenKey = tokenKey
         self.now = now
@@ -44,7 +44,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         guard schema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil else {
             throw V2GatewayAuthenticationError.corruptPersistenceState
         }
-        self.database = database
+        self.database = (database as? V2EventLoopBalancedDatabase)?.usingObservationSource(.authentication) ?? database
         self.tokenKey = tokenKey
         self.schema = schema
         self.now = Date.init
@@ -75,7 +75,8 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         }
         guard let row = try await database.raw("""
             SELECT token.user_id, LEAST(token.expires_at, device.session_expires_at) AS expires_at,
-                   coalesce(control.latest_change_version,0) AS credential_control_version
+                   coalesce(control.latest_change_version,0) AS credential_control_version,
+                   device.last_active_at
             FROM \(unsafeRaw: schema).device_access_tokens AS token
             JOIN \(unsafeRaw: schema).auth_devices AS device
               ON device.user_id = token.user_id AND device.device_id = token.device_id
@@ -108,6 +109,7 @@ public struct V2PostgresGatewayAuthenticator: V2GatewayAuthenticator {
         // 此时间戳是展示元数据，不是认证状态。本地门控可省去重复的
         // 无效果 UPDATE 往返；PostgreSQL 条件仍是跨副本正确性边界。
         if let activityCutoff = v2PostgresPastTimestamp(now: observedAt, interval: 60),
+           row.lastActiveAt.map({ $0 < activityCutoff }) ?? true,
            await activityWriteGate.shouldWrite(deviceID: deviceID, at: observedAt) {
             try? await database.raw("""
                 UPDATE \(unsafeRaw: schema).auth_devices
@@ -177,6 +179,7 @@ private struct V2AuthenticatedSessionRow: Decodable {
     /// 令牌到期时间与设备会话到期时间中的较早值。
     let expiresAt: Date
     let credentialControlVersion: Int64
+    let lastActiveAt: Date?
     /// 把 Swift 属性映射到认证 SQL 查询列名。
-    enum CodingKeys: String, CodingKey { case userID = "user_id", expiresAt = "expires_at", credentialControlVersion = "credential_control_version" }
+    enum CodingKeys: String, CodingKey { case userID = "user_id", expiresAt = "expires_at", credentialControlVersion = "credential_control_version", lastActiveAt = "last_active_at" }
 }

@@ -159,14 +159,23 @@ public struct V2RoomServerActivationFactory: Sendable {
     private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
 
-    public func configureRoomSubscriptionDelivery(sendBatch: @escaping V2RoomSubscriptionDeliveryPump.SendBatch, sendPulse: @escaping V2RoomDeliverySessionHost.SendPulse, hostReady: @escaping @Sendable () async -> Bool, maximumCalls: Int) async throws {
+    public func configureRoomSubscriptionDelivery(sendBatch: @escaping V2RoomSubscriptionDeliveryPump.SendBatch, sendPulse: @escaping V2RoomDeliverySessionHost.SendPulse, hostReady: @escaping @Sendable () async -> Bool, invalidations: AsyncStream<Void>, maximumCalls: Int) async throws {
         guard maximumCalls > 0 else { throw V2ActorContractError.invalidConfiguration("subscription calls") }
-        await deliverySessions.configure(send: sendPulse, hostReady: hostReady)
+        await deliverySessions.configure(send: sendPulse, hostReady: hostReady, invalidations: invalidations)
         let sessions = deliverySessions
         var seen: Set<UUID> = []
         for resource in owners.values where seen.insert(resource.durableOwner.id).inserted {
             try await resource.subscriptionHost.configure(sendBatch: { batch, shard, gateway in
-                do { return try await sendBatch(batch, shard, gateway) }
+                do {
+                    let result = try await sendBatch(batch, shard, gateway)
+                    if batch.deliveries.contains(where: { $0.payload.isAuthorizationControl }),
+                       result.receipts.contains(where: { receipt in
+                           if case .appliedThrough = receipt.result { return false }; return true
+                       }), let host = batch.deliveries.first?.fence.activation.host {
+                        await sessions.controlFailed(host: host, gateway: gateway.identity)
+                    }
+                    return result
+                }
                 catch {
                     if batch.deliveries.contains(where: { $0.payload.isAuthorizationControl }) {
                         if let host = batch.deliveries.first?.fence.activation.host { await sessions.controlFailed(host: host, gateway: gateway.identity) }
@@ -175,6 +184,10 @@ public struct V2RoomServerActivationFactory: Sendable {
                 }
             }, maximumCalls: maximumCalls)
         }
+    }
+
+    public func roomDeliveryPeerUnavailable(host: V2ActorHostIdentity, gateway: V2GatewayRealtimeIdentity) async {
+        await deliverySessions.peerUnavailable(host: host, gateway: gateway)
     }
 
     public func shutdownRoomSubscriptionDelivery() async {

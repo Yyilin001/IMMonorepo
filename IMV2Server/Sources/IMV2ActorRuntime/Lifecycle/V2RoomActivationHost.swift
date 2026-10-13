@@ -32,6 +32,8 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     private let clock = ContinuousClock()
     private var started = false
     private var draining = false
+    private nonisolated let authorityChanges = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    public nonisolated var authorityInvalidations: AsyncStream<Void> { authorityChanges.stream }
     private var accepting = false
     private var entries: [RoomID: Entry] = [:]
     private var placementAdmissions: [String: @Sendable (RoomID) -> Bool] = [:]
@@ -89,6 +91,9 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         qualificationWatchdog?.cancel(); qualificationWatchdog = nil
         qualificationWatchdogID = nil
         let proof = liveQualification()
+        if proof == nil || entries.values.contains(where: { $0.qualificationGeneration != proof?.generation }) {
+            authorityChanges.continuation.yield(())
+        }
         for entry in Array(entries.values) where proof?.generation != entry.qualificationGeneration {
             beginRetirement(entry, uncertain: true)
         }
@@ -442,6 +447,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         // including when startup has not yet reached start(). Otherwise a late
         // startup callback could reopen admission after ownership was retired.
         draining = true
+        authorityChanges.continuation.yield(())
         guard accepting else { return }
         accepting = false
         hostAdmission.close()

@@ -7,6 +7,42 @@ import Testing
 @testable import IMV2ServerInfrastructure
 
 extension PostgresV2RoomWriteStoreIntegrationTests {
+    @Test("merged presence admission enforces concurrent user limits, expired replacement and privacy")
+    func mergedPresenceAdmissionPreservesLimits() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            let now = Date(), device = UUID()
+            try await sql.raw("INSERT INTO im_v2.auth_devices (user_id,device_id,created_at,last_active_at) VALUES (\(bind:senderUUID),\(bind:device),\(bind:now),\(bind:now))").run()
+            try await sql.raw("INSERT INTO im_v2.user_live_activity_preferences (user_id,allows_online_presence,allows_typing_indicators,updated_at) VALUES (\(bind:senderUUID),FALSE,TRUE,\(bind:now))").run()
+            let identity = V2AuthenticatedConnection(userID: senderID, deviceID: .init(uuid: device), capabilityProfile: "base")
+            let store = try PostgresV2LiveActivityStore(database: database)
+            let policy = V2AuthenticatedConnectionAdmissionPolicy(maximumConnectionsPerDevice: 2, maximumConnectionsPerUser: 2)
+            let accepted = try await withThrowingTaskGroup(of: Bool.self, returning: Int.self) { group in
+                for _ in 0..<32 {
+                    group.addTask {
+                        let refresh = try await store.admitConnectionRefresh(identity: identity, connectionID: UUID(),
+                            publicationSuppressed: false, policy: policy, now: now)
+                        guard case .accepted = refresh.outcome else { return false }
+                        #expect(!refresh.allowsOnlinePresence)
+                        return true
+                    }
+                }
+                var count = 0
+                for try await admitted in group where admitted { count += 1 }
+                return count
+            }
+            #expect(accepted == 2)
+            try await sql.raw("UPDATE im_v2.user_live_presence_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE user_id=\(bind:senderUUID)").run()
+            let replacement = UUID()
+            for _ in 0..<2 {
+                let refresh = try await store.admitConnectionRefresh(identity: identity, connectionID: replacement,
+                    publicationSuppressed: true, policy: policy, now: now)
+                guard case .accepted = refresh.outcome else { Issue.record("replacement must be accepted"); return }
+                #expect(!refresh.allowsOnlinePresence)
+            }
+            struct Count: Decodable { let value: Int }
+            #expect(try await sql.raw("SELECT COUNT(*)::integer AS value FROM im_v2.user_live_presence_leases WHERE user_id=\(bind:senderUUID)").first(decoding: Count.self)?.value == 1)
+        }
+    }
     @Test("Presence renewal samples database time after actual connection locks and never revives expired rows")
     func liveLeaseUsesLockedDatabaseClockAndConfirmedRemaining() async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in

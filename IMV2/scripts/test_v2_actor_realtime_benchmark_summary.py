@@ -243,6 +243,38 @@ class MeasuredPhaseTests(unittest.TestCase):
         self.assertFalse(benchmark.summarize(*args, measurement_phase='rate-1000')['qualityPassed'])
 
 
+class OnlineOnlySummaryTests(unittest.TestCase):
+    def reports(self):
+        return [dict(authenticated=10, peakActive=10, failed=0, workloadFailed=0,
+            messagesSent=0, messagesAcknowledged=0, heartbeatMissed=0, onlineOnly=True,
+            directRoomAttempted=0, roomEventPullsSent=0, syncPullsSent=0, plannedReconnects=0,
+            scenarioDrain=dict(drained=True), scenarioPhases=[dict(name='online-idle',
+                messagesAcknowledged=0, observedDurationSeconds=180, durationSeconds=180, completed=True,
+                startedAtUnixMilliseconds=1000, endedAtUnixMilliseconds=181000,
+                heartbeatLatency=dict(count=60))]) for _ in range(benchmark.PARTS)]
+
+    def test_online_quality_requires_actual_heartbeats_without_message_work(self):
+        reports = self.reports()
+        result = benchmark.summarize(reports, [0]*benchmark.PARTS, 120,
+            measurement_phase='online-idle', online_only=True)
+        self.assertTrue(result['qualityPassed'])
+        self.assertTrue(result['onlineOnlyVerified'])
+        self.assertEqual(result['heartbeatAcknowledged'], 720)
+        self.assertFalse(benchmark.summarize(reports, [0]*benchmark.PARTS, 120,
+            measurement_phase='online-idle')['qualityPassed'])
+        reports[0]['directRoomAttempted'] = 1
+        self.assertFalse(benchmark.summarize(reports, [0]*benchmark.PARTS, 120,
+            measurement_phase='online-idle', online_only=True)['qualityPassed'])
+
+    def test_online_quality_rejects_missed_heartbeats_and_missing_phase(self):
+        reports = self.reports(); reports[0]['heartbeatMissed'] = 1
+        self.assertFalse(benchmark.summarize(reports, [0]*benchmark.PARTS, 120,
+            measurement_phase='online-idle', online_only=True)['qualityPassed'])
+        reports[0]['heartbeatMissed'] = 0; reports[0]['scenarioPhases'] = []
+        self.assertFalse(benchmark.summarize(reports, [0]*benchmark.PARTS, 120,
+            measurement_phase='online-idle', online_only=True)['qualityPassed'])
+
+
 class AdmissionStatementCategoryTests(unittest.TestCase):
     def test_actual_sql_markers_classify_before_and_after_query_truncation(self):
         source = (Path(__file__).resolve().parents[2] / 'IMV2Server/Sources/IMV2ServerInfrastructure/RoomWrite/V2RoomWriteDurableOwnerBatchAdmission.swift').read_text()

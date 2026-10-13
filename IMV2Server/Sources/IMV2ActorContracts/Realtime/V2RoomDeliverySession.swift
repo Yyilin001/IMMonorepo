@@ -20,7 +20,7 @@ public struct V2RoomDeliverySession: Codable, Hashable, Sendable {
 }
 
 public struct V2RoomDeliverySessionPulse: Codable, Equatable, Sendable {
-    public enum Kind: String, Codable, Sendable { case open, heartbeat, retire }
+    public enum Kind: String, Codable, Sendable { case open, retire }
     public let session: V2RoomDeliverySession
     public let kind: Kind
     public let sequence: UInt64

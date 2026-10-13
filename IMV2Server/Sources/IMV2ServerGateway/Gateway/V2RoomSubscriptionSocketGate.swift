@@ -62,7 +62,7 @@ final class V2RoomSubscriptionSocketGate: Sendable {
         let value = state.value
         guard !value.closed, value.lifecycle == permit.lifecycle,
               let room = value.rooms[permit.fence.roomID], room.fence == permit.fence,
-              room.session?.isReady(at: now) == true,
+              room.session?.isReady() == true,
               room.authorizationID == permit.authorizationID,
               room.memberRevision == permit.memberRevision else { return false }
         if permit.requiresRoomInterest {

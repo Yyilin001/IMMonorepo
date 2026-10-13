@@ -121,6 +121,8 @@ def sample_host_resources(previous=None):
         ('virtualMemory', ['vm_stat']),
         ('swapUsage', ['sysctl', '-n', 'vm.swapusage']),
         ('memoryPressureLevel', ['sysctl', '-n', 'kern.memorystatus_vm_pressure_level']),
+        ('networkBuffers', ['netstat', '-m']),
+        ('fileHandles', ['sysctl', 'kern.num_files', 'kern.maxfiles', 'kern.maxfilesperproc']),
     ):
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=2)
@@ -463,7 +465,7 @@ def room_notification_loss_constraints(args, manifest):
         raise ValueError('notification loss requires an owned candidate-only small fixture and no other fault')
 
 
-def summarize(reports, codes, requested, reconnect_canary=False, measurement_phase='rate-5000'):
+def summarize(reports, codes, requested, reconnect_canary=False, measurement_phase='rate-5000', online_only=False):
     fields = ('authenticated','peakActive','failed','workloadFailed','messagesSent','messagesAcknowledged',
               'scenarioMessageQueueOverflowed','scenarioMessageQueueAbandoned','queuedScenarioMessagesAtEnd',
               'roomEventAvailabilityHintsReceived','roomEventRecordsReceived','roomEventLivePayloadsApplied',
@@ -524,6 +526,18 @@ def summarize(reports, codes, requested, reconnect_canary=False, measurement_pha
                 for key in ('OUTCOME_UNKNOWN', 'OUTCOME_UNKNOWN_CONNECTION_CLOSED'))
         for r in reports))
     result['qualityPassed'] = result['coverageProofPassed'] and result['reconnectCanaryVerified'] and result['messageTransportVerified'] and result['capacityCompleted'] and result['steadyStateCompleted'] and result['steadyStateCommonWindowPassed'] and result['drained'] and result['failed']==0 and result['workloadFailed']==0 and result['scenarioMessageQueueOverflowed']==0 and result['scenarioMessageQueueAbandoned']==0 and result['queuedScenarioMessagesAtEnd']==0 and result['messagesAcknowledged']>0 and (result['roomEventRecordsReceived']+result['roomEventLivePayloadsApplied'])>0
+    if online_only:
+        result['workloadKind'] = 'authenticated_tcp_online_only'
+        result['onlineOnlyVerified'] = len(reports) == PARTS and all(
+            r.get('onlineOnly') is True and r.get('directRoomAttempted', -1) == 0
+            and r.get('messagesSent', -1) == 0 and r.get('syncPullsSent', -1) == 0
+            and r.get('roomEventPullsSent', -1) == 0 and r.get('plannedReconnects', -1) == 0
+            for r in reports)
+        result['heartbeatAcknowledged'] = sum(p.get('heartbeatLatency', {}).get('count', 0) for p in phases)
+        result['qualityPassed'] = (result['onlineOnlyVerified'] and result['capacityCompleted']
+            and result['steadyStateCompleted'] and result['steadyStateCommonWindowPassed']
+            and result['drained'] and result['failed'] == 0 and result['workloadFailed'] == 0
+            and result['heartbeatMissed'] == 0 and result['heartbeatAcknowledged'] > 0)
     return result
 
 
@@ -2008,7 +2022,19 @@ def run_revision(args, kind, actors, counts, manifest):
                 except OSError:
                     pass
             if ready==len(ports):
-                if not partition_canary: break
+                if not partition_canary and not args.online_only: break
+                if args.online_only:
+                    eligible = 0
+                    for index in range(NODES):
+                        try:
+                            with urllib.request.urlopen(f'http://127.0.0.1:{args.metrics_port+index}/metrics', timeout=1) as response:
+                                body = response.read().decode()
+                            if re.search(r'^im_v2_actor_realtime_service_qualified 1$', body, re.M): eligible += 1
+                        except (OSError, ValueError): pass
+                    if eligible == NODES: break
+                    if time.monotonic() > deadline: raise TimeoutError('online service qualification readiness')
+                    time.sleep(1)
+                    continue
                 # Prefill must exercise qualified Actor services, rather than
                 # consuming client guard budgets while only TCP listeners exist.
                 try: qualification_metrics = partition_canary.metrics()
@@ -2073,9 +2099,18 @@ def run_revision(args, kind, actors, counts, manifest):
                      '--scenario',str(prefill_scenario if prefill else args.scenario),'--scenario-rate-scale',str(1/PARTS),
                      '--scenario-ready-path',str(directory/f'prefill-part-{i}-ready.json' if prefill else directory/f'part-{i}-ready.json'),
                      '--scenario-start-barrier-path',str(prefill_barrier if prefill else barrier_path)]
+            if args.online_only:
+                for option, value in {'--sync-reads': '0', '--room-log-reads': '0',
+                                      '--room-log-initial-cursor': 'zero',
+                                      '--room-log-read-trigger': 'message_ack',
+                                      '--max-failure-percent': '0'}.items():
+                    command[command.index(option) + 1] = value
+                command += ['--online-only', '1']
             if not partition_canary:
                 at = command.index('--hold-seconds')
                 command[at:at] = ['--local-port-base', str(25000+(i//NODES)*10000)]
+            if args.loader_excluded_local_ports:
+                command += ['--exclude-local-ports', args.loader_excluded_local_ports]
             if args.planned_reconnect_inflight_canary:
                 command += ['--planned-reconnect-inflight-canary', '1']
             if args.room_notification_loss_canary:
@@ -2179,7 +2214,7 @@ def run_revision(args, kind, actors, counts, manifest):
         if any(report.get('benchmarkWireVersion') != expected_wire or
                report.get('algorithmSourceSHA256') != expected_algorithm for report in reports):
             raise RuntimeError('Loader report wire adapter/common algorithm identity mismatch; no capacity comparison')
-        result=summarize(reports,[p.returncode for p in loaders],manifest['users'], args.planned_reconnect_inflight_canary, args.measurement_phase)
+        result=summarize(reports,[p.returncode for p in loaders],manifest['users'], args.planned_reconnect_inflight_canary, args.measurement_phase, online_only=args.online_only)
         if args.planned_reconnect_inflight_canary:
             failure_stage = 'planned_reconnect_fact_drain'
             # Reports are complete; stop all real writers before the one fact
@@ -2205,8 +2240,12 @@ def run_revision(args, kind, actors, counts, manifest):
             result['plannedReconnectFactProof'] = facts
             result['qualityPassed'] = result['qualityPassed'] and facts.get('passed') is True
         failure_stage = 'delivery_proof'
-        result['foregroundDelivery']=verify_foreground_cursors(args,database,directory)
-        result['qualityPassed']=result['qualityPassed'] and result['foregroundDelivery']['passed']
+        if args.online_only:
+            result['foregroundDelivery'] = dict(checkedForegroundViewers=0, passed=True,
+                status='not_applicable_no_room_subscriptions')
+        else:
+            result['foregroundDelivery']=verify_foreground_cursors(args,database,directory)
+            result['qualityPassed']=result['qualityPassed'] and result['foregroundDelivery']['passed']
         if args.room_notification_loss_canary:
             proof = room_notification_loss_proof(reports, result['foregroundDelivery'])
             result['roomNotificationLossCanary'] = proof
@@ -2333,7 +2372,7 @@ def run_revision(args, kind, actors, counts, manifest):
                         try: reports.append(json.loads(path.read_text()))
                         except Exception: diagnostics['reportReadCode'] = 'report_decode_failed'
                 try:
-                    failed_result = summarize(reports, [p.poll() for p in loaders], manifest['users'], args.planned_reconnect_inflight_canary, args.measurement_phase)
+                    failed_result = summarize(reports, [p.poll() for p in loaders], manifest['users'], args.planned_reconnect_inflight_canary, args.measurement_phase, online_only=args.online_only)
                 except Exception:
                     diagnostics['aggregateCode'] = 'aggregate_failed'
                     failed_result = dict(reportCount=len(reports), exitCodes=[p.poll() for p in loaders])
@@ -2343,7 +2382,9 @@ def run_revision(args, kind, actors, counts, manifest):
                     if not wait_for_database_client_drain(args, database):
                         diagnostics['databaseDrainCode'] = 'database_clients_not_drained'
                         raise RuntimeError('database_clients_not_drained')
-                    if not (directory/'foreground-delivery-proof.json').exists():
+                    if args.online_only:
+                        failed_result['foregroundDelivery'] = dict(checkedForegroundViewers=0, passed=True, status='not_applicable_no_room_subscriptions')
+                    elif not (directory/'foreground-delivery-proof.json').exists():
                         failed_result['foregroundDelivery'] = verify_foreground_cursors(args, database, directory)
                     else:
                         failed_result['foregroundDelivery'] = json.loads((directory/'foreground-delivery-proof.json').read_text())
@@ -2395,6 +2436,8 @@ def main():
                         help='candidate requires memory policy owners')
     parser.add_argument('--scenario',type=Path,default=ROOT/'IMV2/load-scenarios/high-active-50000-uuid-ab-5000.json')
     parser.add_argument('--preclose-recovery-witness',action='store_true',help='candidate scaled diagnostic: bounded pre-close checkpoints and one read-only DB witness; never changes quality')
+    parser.add_argument('--loader-excluded-local-ports', default='', help='comma-separated occupied source ports to skip within fixed loader ranges')
+    parser.add_argument('--online-only', action='store_true', help='candidate diagnostic: authentication and heartbeats only; no rooms, sends, pulls or reconnects')
     parser.add_argument('--measurement-phase',help='exact measured scenario phase; inferred when there is one message phase')
     parser.add_argument('--pg-user',default=os.environ.get('USER',''))
     parser.add_argument('--pg-host',default='localhost');parser.add_argument('--pg-port',type=int,default=18532)
@@ -2445,7 +2488,18 @@ def main():
         if getattr(args,name) is not None: setattr(args,name,getattr(args,name).resolve())
     candidate_message_write_socket(args)
     scenario_phases = [] if app_canary_enabled(args) else json.loads(args.scenario.read_text())['phases']
-    measured = [phase['name'] for phase in scenario_phases if phase.get('messagesPerSecond',0)>0]
+    if args.online_only:
+        if (args.kind != 'candidate' or not args.allow_scaled_diagnostic or app_canary_enabled(args)
+                or args.actor_partition_canary is not None or args.preclose_recovery_witness
+                or args.planned_reconnect_inflight_canary or args.room_notification_loss_canary):
+            parser.error('online-only requires candidate scaled diagnostic without fault injection')
+        rates = ('messagesPerSecond', 'roomLogReadsPerSecond', 'syncPullsPerSecond',
+                 'readReceiptsPerSecond', 'roomSyncStateBatchesPerSecond', 'roomLatestVisibleBatchesPerSecond',
+                 'reconnectPercentPerMinute')
+        if not scenario_phases or any(p.get(k, 0) != 0 for p in scenario_phases for k in rates):
+            parser.error('online-only scenario must disable sends, pulls, reads, receipts and reconnects')
+    measured = [phase['name'] for phase in scenario_phases
+                if args.online_only or phase.get('messagesPerSecond',0)>0]
     if args.measurement_phase is None and not app_canary_enabled(args):
         if len(measured)!=1:parser.error('multiple message phases require --measurement-phase')
         args.measurement_phase = measured[0]

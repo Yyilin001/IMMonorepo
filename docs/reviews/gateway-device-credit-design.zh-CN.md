@@ -1,6 +1,6 @@
 # Gateway 设备字节额度与恢复通道设计
 
-> 归档说明（2026-10-13）：以下保留设备字节额度设计及 r8 时点的历史审计，不能作为当前房间续期实现说明。当前已取消逐房间授权续期及 Host 周期 head probe；权限由提交后的内存 cut 和有序控制事件主动推进，存活由 Host–Gateway 共享控制会话检测。会话心跳不读取逐房间数据库，也不提供 H 或成员权限；断线恢复重新建立可信基线。H/G/C 与设备字节额度的职责边界仍适用，历史问题是否已修复应以当前代码和回归结果为准。
+> 归档说明（2026-10-13）：以下保留设备字节额度设计及 r8 时点的历史审计，不能作为当前房间续期实现说明。当前已取消逐房间授权续期及 Host 周期 head probe；权限由提交后的内存 cut 和有序控制事件主动推进，Host–Gateway 共享控制会话随原生节点可达性及宿主资格事件失效，已移除独立业务心跳。权限控制只在有未确认事件时维护 ACK 超时任务，不读取逐房间数据库，也不提供 H 或成员权限；断线恢复建立新会话并重新获取可信基线。H/G/C 与设备字节额度的职责边界仍适用，历史问题是否已修复应以当前代码和回归结果为准。
 
 本文是当前实现的只读审计和下一阶段实现建议。没有修改生产代码、冻结 Loader 或数据库，也没有构建、启动服务或重新执行测试。第一阶段 H/G/C 心跳闭环已接入；本阶段尚未实现设备正文 credit。
 
@@ -24,7 +24,7 @@
 | 设备队列 | `V2NIOGatewayForegroundWriter` 默认普通队列 256 KiB/32 帧；单次 drain 默认 64 KiB/32 帧；按 EventLoop lane 批调度，非 writable 时等待 channel 通知 | 已有本地队列预算与调度，没有 C 驱动的正文 flight 额度 |
 | 实际写入权限 | NIO drain 在 `channel.write` 前调用 `Authority.enqueueIfCurrent`；scoped writer 在 `writeAndFlush` 前同样执行同步 gate | exact room/user/connection lifecycle、interest nonce、授权代、期限检查与 enqueue 不跨 await |
 | H 保留 | HeadWorker 有界保留每 room 最大 H；ByteStream 单 detail-room 保留最新 H、offer 身份、实际提交身份 | 新的可信同 H offer 能再次实际提交；失效 permit 暂停等待新 offer，不忙重试 |
-| H 补齐 | Owner/Relay 有序投递、可信基线；设备心跳读取 Gateway 已接纳的 H | 无逐设备 SQL；共享会话心跳不查询或推进房间 H |
+| H 补齐 | Owner/Relay 有序投递、可信基线；设备心跳读取 Gateway 已接纳的 H | 无逐设备 SQL；原生节点存活检测不查询或推进房间 H |
 | 设备 C | Session 复用 Heartbeat；Authority 按 connection O(1) 读取合法 interest；ByteStream 接纳同 scope 单调 C 且 C≤H，即使无报告也返回本地状态 | 已有进度交换，尚未用它结算正文 bytes 或控制慢端状态 |
 | 客户端持久边界 | `GRDBV2LocalSyncStore.roomProgressAppliedSequence` 只读取已提交房间 cursor；排除 snapshot activation、明确撤权、`history_incomplete` | 正文接收、服务端 G、latest-visible 摘要均不能替代 C |
 

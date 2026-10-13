@@ -148,12 +148,14 @@ private struct LoadConfiguration: Sendable {
     let reportPath: String
     let connections: Int
     let localPortBase: Int?
+    let excludedLocalPorts: Set<Int>
     let rampPerSecond: Int
     let rampBatchSize: Int
     let workloadRampPerSecond: Int
     let holdSeconds: Int
     let eventLoops: Int
     let messagesPerSecond: Int
+    let onlineOnly: Bool
     let maximumInFlightMessagesPerConnection: Int
     let messageBytes: Int
     let targetsPerConnection: Int
@@ -231,6 +233,12 @@ private struct LoadConfiguration: Sendable {
         } else {
             localPortBase = nil
         }
+        let excluded = (values["--exclude-local-ports"] ?? "").split(separator: ",")
+        excludedLocalPorts = try Set(excluded.map { try Self.integer(String($0), range: 1...65_535) })
+        if let localPortBase {
+            let unavailable = excludedLocalPorts.filter { $0 >= localPortBase && $0 < localPortBase + LocalSourcePortAllocator.span }.count
+            guard connections <= LocalSourcePortAllocator.span - unavailable else { throw LoadError.invalidArguments }
+        } else if !excludedLocalPorts.isEmpty { throw LoadError.invalidArguments }
         rampPerSecond = try Self.integer(values["--ramp-per-second"] ?? "50", range: 1...1_000)
         rampBatchSize = try Self.integer(
             values["--ramp-batch-size"] ?? String(min(rampPerSecond, 100)),
@@ -252,6 +260,7 @@ private struct LoadConfiguration: Sendable {
         // 1,000-msg/s run.  The guarded launcher continues to enforce local
         // CPU/RSS limits and the run itself fails on connection/error-rate
         // thresholds, so permit a materially higher controlled target here.
+        onlineOnly = try Self.integer(values["--online-only"] ?? "0", range: 0...1) == 1
         messagesPerSecond = try Self.integer(values["--messages-per-second"] ?? "0", range: 0...10_000)
         maximumInFlightMessagesPerConnection = try Self.integer(
             values["--max-inflight-messages-per-connection"] ?? "1",
@@ -366,6 +375,13 @@ private struct LoadConfiguration: Sendable {
             scenario!.phases.allSatisfy { $0.reconnectPercentPerMinute == 0 }) else {
             throw LoadError.invalidArguments
         }
+        guard !onlineOnly || (messagesPerSecond == 0 && !syncReads && !roomLogReads
+            && !recoveryBurst && !plannedReconnectInflightCanary && !roomNotificationLossCanary
+            && scenario != nil && scenario!.phases.allSatisfy {
+                $0.messagesPerSecond == 0 && $0.roomLogReadsPerSecond == 0 && $0.syncPullsPerSecond == 0
+                && $0.effectiveReadReceiptsPerSecond == 0 && $0.effectiveRoomSyncStateBatchesPerSecond == 0
+                && $0.effectiveRoomLatestVisibleBatchesPerSecond == 0 && $0.reconnectPercentPerMinute == 0
+            }) else { throw LoadError.invalidArguments }
         guard (messagesPerSecond == 0 && scenario == nil)
                   || targetOffset + targetsPerConnection - 1 < connections else {
             throw LoadError.invalidArguments
@@ -1151,14 +1167,17 @@ private final class LocalSourcePortAllocator: @unchecked Sendable {
     private let lock = NIOLock()
     private var nextPort: Int
     private let endPort: Int
+    private let excluded: Set<Int>
 
-    init(base: Int) {
+    init(base: Int, excluding: Set<Int> = []) {
         nextPort = base
         endPort = base + Self.span
+        excluded = excluding
     }
 
     func allocate() throws -> Int {
         try lock.withLock {
+            while nextPort < endPort, excluded.contains(nextPort) { nextPort += 1 }
             guard nextPort < endPort else { throw LoadError.localSourcePortRangeExhausted }
             defer { nextPort += 1 }
             return nextPort
@@ -1181,7 +1200,7 @@ private struct LoadRun: Sendable {
     init(configuration: LoadConfiguration, credentials: [LoadCredential]) throws {
         self.configuration = configuration
         self.credentials = credentials
-        self.localSourcePorts = configuration.localPortBase.map { LocalSourcePortAllocator(base: $0) }
+        self.localSourcePorts = configuration.localPortBase.map { LocalSourcePortAllocator(base: $0, excluding: configuration.excludedLocalPorts) }
         self.accountHTTP = try V2ToolOperationHTTP(baseURL: configuration.accountBaseURL, caPath: configuration.caPath,
             http1ConnectionsPerHostSoftLimit: Self.accountHTTPConnectionsPerHostSoftLimit)
     }
@@ -1272,11 +1291,11 @@ private struct LoadRun: Sendable {
                 checkpointWorker = RealtimeCheckpointWorker(slots: slots, requested: configuration.connections,
                     requestPath: request, responsePath: response)
             }
-            if configuration.messagesPerSecond > 0 || configuration.scenario != nil {
+            if !configuration.onlineOnly && (configuration.messagesPerSecond > 0 || configuration.scenario != nil) {
                 try await startWorkloads(channels: slots.compactMap(\.channel))
             }
             if let scenario = configuration.scenario {
-                try await waitForRoomWarmup(scenario: scenario, statistics: statistics)
+                if !configuration.onlineOnly { try await waitForRoomWarmup(scenario: scenario, statistics: statistics) }
                 if configuration.recoveryBurst {
                     recoveryBurstReport = try await runRecoveryBurst(slots: slots, group: group,
                         sslContext: sslContext, statistics: statistics)
@@ -1375,6 +1394,10 @@ private struct LoadRun: Sendable {
         // Signal shutdown instead of cancelling futures, before closing any channel.
         await checkpointWorker?.stopAndDrain()
         scenarioPhases = scenarioPhaseReports.snapshot()
+        if configuration.onlineOnly {
+            do { try await stopHeartbeats(channels: slots.compactMap(\.channel)) }
+            catch { if terminalError == nil { terminalError = error } }
+        }
         let finalConnectionSnapshots = await snapshotConnectionCursors(channels: slots.compactMap(\.channel))
         let roomCursorSnapshots = finalConnectionSnapshots.flatMap(\.rooms).sorted {
             ($0.connectionIndex, $0.roomID) < ($1.connectionIndex, $1.roomID)
@@ -2070,6 +2093,21 @@ private struct LoadRun: Sendable {
         }
     }
 
+    private func stopHeartbeats(channels: [Channel]) async throws {
+        guard let first = channels.first else { return }
+        let futures = channels.map { channel in
+            let promise = channel.eventLoop.makePromise(of: Void.self)
+            channel.eventLoop.execute {
+                if channel.isActive { channel.pipeline.fireUserInboundEventTriggered(StopHeartbeatEvent(completion: promise)) }
+                else { promise.succeed(()) }
+            }
+            return promise.futureResult
+        }
+        // Drain every actual pending heartbeat before starting planned disconnects.
+        let results = try await EventLoopFuture.whenAllComplete(futures, on: first.eventLoop).get()
+        for result in results { _ = try result.get() }
+    }
+
     private func close(channels: [Channel]) async {
         var offset = 0
         while offset < channels.count {
@@ -2083,6 +2121,7 @@ private struct LoadRun: Sendable {
 }
 
 private struct StartWorkloadEvent: Sendable {}
+private struct StopHeartbeatEvent: Sendable { let completion: EventLoopPromise<Void> }
 private struct ScenarioSendEvent: Sendable {
     let scheduledAt: NIODeadline
     init(scheduledAt: NIODeadline = .now()) { self.scheduledAt = scheduledAt }
@@ -2499,7 +2538,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "42f89f907009dc572617c583aa4309d211a83f0278dde6009da2a548e409fc72"
+    static let algorithmSourceSHA256 = "0970cf49d46c532e082d2bddb34c646ae2cc1305b139931f9cdbda38a0044f6f"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     static let maximumMessageWireAttempts = 5
@@ -2646,6 +2685,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var recoveryInFlightRequestID: UInt64?
     private var recoveryDeadlineTask: Scheduled<Void>?
     private var heartbeatTask: RepeatedTask?
+    private var heartbeatStopping = false
+    private var heartbeatDrain: EventLoopPromise<Void>?
+    private var heartbeatDrainTimeout: Scheduled<Void>?
     private var messageTask: RepeatedTask?
     private var authenticationCompleted = false
     private var registered = false
@@ -2768,6 +2810,11 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     func channelInactive(context: ChannelHandlerContext) {
+        if heartbeatDrain != nil {
+            statistics.recordHeartbeatMissed()
+            checkpointHeartbeatMissed += 1
+            finishHeartbeatDrain(.failure(LoadError.connectionClosed))
+        }
         for id in directRoomTaskIDs { directRoomTasks.cancel(id: id) }
         directRoomTaskIDs.removeAll()
         for (operationID, operation) in messageOperations {
@@ -3030,6 +3077,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 try receiveRoomProgressStates(acknowledgement.roomSubscriptionStates, context: context)
                 checkpointHeartbeatAcknowledged += 1
                 statistics.recordHeartbeatAcknowledged(milliseconds: (NIODeadline.now() - sent).millisecondsDouble)
+                finishHeartbeatDrain(.success(()))
 
             case .message(let operationID):
                 guard let operation = messageOperations[operationID], operation.wireRequestID == frame.requestID,
@@ -3193,6 +3241,21 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
         switch event {
+        case let stop as StopHeartbeatEvent:
+            heartbeatStopping = true
+            heartbeatTask?.cancel(); heartbeatTask = nil
+            guard let id = heartbeatRequestID, case .heartbeat(let sent)? = pendingRequests[id] else {
+                stop.completion.succeed(()); return
+            }
+            heartbeatDrain = stop.completion
+            let handler = NIOLoopBound(self, eventLoop: context.eventLoop)
+            heartbeatDrainTimeout = context.eventLoop.scheduleTask(deadline: sent + .seconds(Int64(heartbeatSeconds))) {
+                let handler = handler.value
+                guard handler.heartbeatDrain != nil else { return }
+                handler.statistics.recordHeartbeatMissed()
+                handler.checkpointHeartbeatMissed += 1
+                handler.finishHeartbeatDrain(.failure(LoadError.connectionClosed))
+            }
         case is StartWorkloadEvent:
             guard case .authenticated = stage, !workloadStarted, !handoffPrepared, context.channel.isActive else { return }
             workloadStarted = true
@@ -3399,6 +3462,13 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             passed: authenticationCompleted && requestedAccountCoverage && scopes.allSatisfy(\.passed))
     }
 
+    private func finishHeartbeatDrain(_ result: Result<Void, Error>) {
+        guard let promise = heartbeatDrain else { return }
+        heartbeatDrain = nil
+        heartbeatDrainTimeout?.cancel(); heartbeatDrainTimeout = nil
+        promise.completeWith(result)
+    }
+
     private func scheduleHeartbeat(context: ChannelHandlerContext) {
         let spread = max(1, heartbeatSeconds - 5)
         let initialSeconds = 5 + connectionIndex % spread
@@ -3410,7 +3480,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         ) { _ in
             let handler = handler.value
             let context = boundContext.value
-            guard case .authenticated = handler.stage, context.channel.isActive else { return }
+            guard !handler.heartbeatStopping, case .authenticated = handler.stage, context.channel.isActive else { return }
             do { try handler.sendHeartbeat(context: context) }
             catch { handler.failAuthentication(error, context: context) }
         }
@@ -4296,6 +4366,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             heartbeatRequestID = nil
             checkpointHeartbeatMissed += 1
             statistics.recordHeartbeatMissed()
+            finishHeartbeatDrain(.failure(LoadError.unexpectedResponse))
         case .message(let operationID):
             guard let operation = messageOperations[operationID], operation.wireRequestID == requestID else { throw LoadError.unexpectedResponse }
             operation.timer?.cancel(); operation.timer = nil; operation.wireRequestID = nil
@@ -4484,6 +4555,7 @@ private struct LoadReport: Encodable {
     let roomProgressStatesIgnored: Int
     let roomProgressRecoverySignals: Int
     let roomNotificationsDiscarded: Int
+    let onlineOnly: Bool
     let directRoomAttempted: Int
     let directRoomOpened: Int
     let roomLogTailReady: Int
@@ -4624,6 +4696,7 @@ private struct LoadReport: Encodable {
         roomProgressRecoverySignals = state.roomProgressRecoverySignals
         roomNotificationsDiscarded = state.roomNotificationsDiscarded
         directRoomAttempted = state.directRoomAttempted
+        onlineOnly = configuration.onlineOnly
         directRoomOpened = state.directRoomOpened
         roomLogTailReady = state.roomLogTailReady
         workloadFailed = state.workloadFailed
@@ -4754,6 +4827,9 @@ private struct ScenarioPhaseReport: Encodable {
     let syncRecordsReceived: Int
     let workloadFailed: Int
     let heartbeatLatency: Percentiles
+    let heartbeatSent: Int
+    let heartbeatAcknowledged: Int
+    let heartbeatMissed: Int
     let messageLatency: Percentiles
     /// 包含计划调度、客户端队列、网络及重试，直到最终 ACK。
     let messageEndToEndLatency: Percentiles
@@ -4825,6 +4901,9 @@ private struct ScenarioPhaseReport: Encodable {
         heartbeatLatency = ended.heartbeatLatency
             .subtracting(started.heartbeatLatency)
             .percentiles
+        heartbeatSent = ended.heartbeatSent - started.heartbeatSent
+        heartbeatAcknowledged = ended.heartbeatAcknowledged - started.heartbeatAcknowledged
+        heartbeatMissed = ended.heartbeatMissed - started.heartbeatMissed
         messageLatency = ended.messageLatency
             .subtracting(started.messageLatency)
             .percentiles

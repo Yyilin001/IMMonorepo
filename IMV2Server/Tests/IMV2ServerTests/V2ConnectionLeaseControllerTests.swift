@@ -7,6 +7,29 @@ import Testing
 
 @Suite("Connection lease controller ownership")
 struct V2ConnectionLeaseControllerTests {
+    @Test("due renewal wakes without scanning idle connections and revoked deadlines never renew")
+    func automaticRenewalAndRevocation() async throws {
+        let store = ControllerLeaseStore(leaseSeconds: 0.15)
+        let controller = makeController(store)
+        let id = UUID(), retired = UUID(), idle = UUID(), identity = makeIdentity()
+        let policy = V2AuthenticatedConnectionAdmissionPolicy(maximumConnectionsPerDevice: 4, maximumConnectionsPerUser: 8)
+        for connection in [id, retired, idle] {
+            _ = try await controller.admit(connectionID: connection, identity: identity, lifecycle: 1,
+                publicationSuppressed: false, policy: policy)
+        }
+        #expect(await controller.heartbeat(connectionID: id, lifecycle: 1))
+        #expect(await controller.heartbeat(connectionID: retired, lifecycle: 1))
+        await controller.revoke(connectionID: retired, lifecycle: 1)
+        let before = await controller.snapshot(connectionID: id).deadline
+        let limit = ContinuousClock.now + .seconds(2)
+        while await controller.snapshot(connectionID: id).deadline == before, ContinuousClock.now < limit {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await controller.snapshot(connectionID: id).deadline != before)
+        #expect(await store.renewalCount == 1)
+        #expect(await controller.snapshot(connectionID: retired).deadline == nil)
+        await controller.finish()
+    }
     @Test("heartbeats do not grant unconfirmed database authority")
     func heartbeatDoesNotExtendAuthority() async throws {
         let store = ControllerLeaseStore()

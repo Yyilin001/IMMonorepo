@@ -135,11 +135,14 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             serviceOwnerAccess: actor.realtimeServiceOwnerAccess,
             limits: .init(maximumConcurrentCalls: maximumCallbackCalls))
         do {
+            await handle.configureRoomDeliveryPeerFailure { host, gateway in
+                await actorFactory?.roomDeliveryPeerUnavailable(host: host, gateway: gateway)
+            }
             try await actorFactory?.configureRoomSubscriptionDelivery(sendBatch: { batch, shard, target in
                 try await handle.sendRoomSubscriptionBatch(batch, sourceShardID: shard, to: target)
             }, sendPulse: { pulse, shard, target in
                 try await handle.sendDeliverySession(pulse, sourceShardID: shard, to: target)
-            }, hostReady: { await actors.readiness() }, maximumCalls: maximumCallbackCalls)
+            }, hostReady: { await actors.readiness() }, invalidations: await actors.roomAuthorityInvalidations(), maximumCalls: maximumCallbackCalls)
             let roomIngress = try await registry.configureRoomSubscriptionIngress(
                 authority: V2GatewayRoomSubscriptionAuthority(maximumRooms: configuration.onlineDeliveryMaximumRooms,
                     maximumConnections: configuration.maximumConnections),

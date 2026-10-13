@@ -9,6 +9,29 @@ import Testing
 
 @Suite("Physical database loan ownership")
 struct V2PhysicalDatabaseLoanGateTests {
+    @Test("idle renewal capacity serves ordinary work and queued renewal takes the next returned slot")
+    func elasticRenewalCapacity() async throws {
+        let resources = makeV2DatabaseTestResources()
+        let gate = V2PhysicalDatabaseLoanGate(eventLoop: resources.eventLoopGroup.next(), policy: try .init(
+            maximumConnections: 4, reservedRenewalConnections: 2,
+            maximumQueued: 4, maximumWait: .seconds(5), lendsIdleRenewalConnections: true))
+        var held: [V2PhysicalDatabaseLoanLease] = []
+        for _ in 0..<4 { held.append(try await gate.acquire(loanClass: .ordinary).get()) }
+        let ordinary = gate.request(loanClass: .ordinary)
+        let renewal = gate.request(loanClass: .renewal)
+        #expect(gate.snapshot().classes[.ordinary]?.inFlight == 4)
+        held.removeLast().release()
+        let renewed = try await renewal.future.get()
+        #expect(gate.snapshot().classes[.ordinary]?.queued == 1)
+        #expect(gate.snapshot().classes[.renewal]?.inFlight == 1)
+        renewed.release()
+        let next = try await ordinary.future.get()
+        #expect(gate.snapshot().classes[.ordinary]?.inFlight == 4)
+        next.release()
+        for lease in held { lease.release() }
+        await gate.shutdown()
+        try await resources.shutdown()
+    }
     @Test("queued Sendable room borrowing follows a peer capacity return while the original pool remains held",
           arguments: V2PhysicalDatabaseLoanClass.allCases, [false, true])
     func queuedRoomBorrowFollowsPeer(loanClass: V2PhysicalDatabaseLoanClass, releaseBoth: Bool) async throws {

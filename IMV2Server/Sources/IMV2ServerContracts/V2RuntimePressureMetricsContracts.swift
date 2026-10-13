@@ -93,6 +93,9 @@ public enum V2DatabaseLoanObservationMetricSource: String, CaseIterable, Sendabl
     case controlReservation = "control_reservation"
     case policySnapshot = "policy_snapshot"
     case lifecycle, renewal, presence
+    case authentication
+    case presenceAdmission = "presence_admission"
+    case presenceRenewal = "presence_renewal"
     case roomWake = "room_wake"
     case routeLookup = "route_lookup"
     case realtimePartitionControl = "realtime_partition_control"

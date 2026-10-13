@@ -40,6 +40,7 @@ public actor V2ConnectionLeaseController {
         var waiters: Int
     }
     private var projectionRefreshes: [UUID: ProjectionRefresh] = [:]
+    private var renewalDeadlines = V2ConnectionRenewalDeadlines()
     private var wake: Task<Void, Never>?
     private var wakeDeadline: ContinuousClock.Instant?
     private var activeWakes: [UUID: Task<Void, Never>] = [:]
@@ -97,13 +98,14 @@ public actor V2ConnectionLeaseController {
         if admissions[connectionID] == lifecycle { admissions.removeValue(forKey: connectionID) }
         guard let lease = leases[connectionID], lease.lifecycle == lifecycle else { return }
         leases.removeValue(forKey: connectionID)
+        updateWake(connectionID)
     }
 
     public func heartbeat(connectionID: UUID, lifecycle: UInt64) async -> Bool {
         guard !closed, var lease = leases[connectionID], lease.lifecycle == lifecycle else { return false }
         lease.heartbeat = .now
         leases[connectionID] = lease
-        if let wake = nextWake(connectionID, lease) { schedule(wake) }
+        updateWake(connectionID)
         return true
     }
 
@@ -146,7 +148,7 @@ public actor V2ConnectionLeaseController {
             if projectionRefreshes[connectionID]?.ticket == ticket {
                 projectionRefreshes.removeValue(forKey: connectionID)
             }
-            if let current = leases[connectionID], let next = nextWake(connectionID, current) { schedule(next) }
+            updateWake(connectionID)
             end(connectionID)
         }
         let started = ContinuousClock.now, date = Date()
@@ -244,6 +246,7 @@ public actor V2ConnectionLeaseController {
         wake?.cancel(); wake = nil; wakeDeadline = nil
         admissions.removeAll()
         leases.removeAll()
+        renewalDeadlines.removeAll()
         await batcher.finish()
         while true {
             while let task = activeWakes.values.first { await task.value }
@@ -279,6 +282,7 @@ public actor V2ConnectionLeaseController {
         guard !closed, renewing[id] == nil, leases[id]?.lifecycle == lease.lifecycle else { return }
         let ticket = UUID(), started = ContinuousClock.now, date = Date()
         renewing[id] = ticket
+        updateWake(id)
         begin(id)
         let accepted = await batcher.enqueue(identity: lease.identity, connectionID: id, now: date) { result in
             await self.completed(id, ticket: ticket, submitted: lease, started: started, date: date, result: result)
@@ -323,7 +327,7 @@ public actor V2ConnectionLeaseController {
             current.renewAt = Self.renewalDate(current.deadline)
             current.retryAt = nil
             leases[id] = current
-            if let wake = nextWake(id, current) { schedule(wake) }
+            updateWake(id)
             return true
         case .failure:
             retry(id, lifecycle: submitted.lifecycle)
@@ -335,7 +339,21 @@ public actor V2ConnectionLeaseController {
         guard !closed, var current = leases[id], current.lifecycle == lifecycle else { return }
         current.retryAt = .now + .seconds(1)
         leases[id] = current
-        if let wake = nextWake(id, current) { schedule(wake) }
+        updateWake(id)
+    }
+
+    private func updateWake(_ id: UUID) {
+        renewalDeadlines.set(id, deadline: leases[id].flatMap { nextWake(id, $0) })
+        scheduleNextWake()
+    }
+
+    private func scheduleNextWake() {
+        guard let first = renewalDeadlines.first else {
+            wake?.cancel(); wake = nil; wakeDeadline = nil
+            return
+        }
+        // Coalesce nearby deadlines, rather than launching a timer per connection.
+        schedule(max(first.deadline, .now + .milliseconds(10)))
     }
 
     private func schedule(_ deadline: ContinuousClock.Instant) {
@@ -359,14 +377,17 @@ public actor V2ConnectionLeaseController {
     private func processWake(_ deadline: ContinuousClock.Instant) async {
         guard !closed, wakeDeadline == deadline else { return }
         wake = nil; wakeDeadline = nil
-        let due = leases.filter { nextWake($0.key, $0.value).map { $0 <= .now } ?? false }
-        for (id, old) in due {
-            guard !closed, let current = leases[id], current.lifecycle == old.lifecycle else { continue }
+        let observedAt = ContinuousClock.now
+        var due: [V2ConnectionRenewalDeadlines.Entry] = []
+        while let entry = renewalDeadlines.popDue(at: observedAt) { due.append(entry) }
+        for entry in due {
+            let id = entry.connectionID
+            // Another operation may renew or revoke this connection while enqueue suspends.
+            guard !closed, let current = leases[id],
+                  let next = nextWake(id, current), next <= observedAt else { continue }
             await enqueue(id, lease: current)
         }
-        for (id, lease) in leases {
-            if let next = nextWake(id, lease) { schedule(next) }
-        }
+        scheduleNextWake()
     }
 
     private func begin(_ id: UUID) { operations[id, default: 0] += 1 }

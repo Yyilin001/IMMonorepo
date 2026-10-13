@@ -1,3 +1,4 @@
+import DistributedCluster
 import Foundation
 import IMV2Core
 import IMV2ActorContracts
@@ -12,10 +13,10 @@ struct V2HotRPCProtobufTests {
         let host = V2ActorHostIdentity(hostID: try .init("host"), incarnationID: UUID())
         let gateway = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "gateway", incarnationID: UUID())
         let session = V2RoomDeliverySession(host: host, gateway: gateway, generation: 9)
-        for kind in [V2RoomDeliverySessionPulse.Kind.open, .heartbeat, .retire] {
+        for kind in [V2RoomDeliverySessionPulse.Kind.open, .retire] {
             let call = RoomDeliverySessionCall(serviceID: try .init("publisher"), version: 1,
                 callerIncarnation: UUID(), recipient: gateway, sessionID: UUID(), sequence: 13, attemptID: UUID(),
-                sourceShardID: "rooms", pulse: .init(session: session, kind: kind, sequence: 7))
+                sourceNode: .init(systemName: "publisher", host: "127.0.0.1", port: 9001, nid: .init(42)), sourceShardID: "rooms", pulse: .init(session: session, kind: kind, sequence: 7))
             let bytes = try V2ActorProtobuf.encode(call)
             let wire = try Im_Actor_V1_HotDeliverySessionCall(serializedBytes: bytes)
             #expect(wire.pulse.kind == kind.rawValue && wire.pulse.sequence == 7)
@@ -25,6 +26,10 @@ struct V2HotRPCProtobufTests {
                 let reply = RoomDeliverySessionReply(recipient: gateway, sessionID: call.sessionID,
                     sequence: call.sequence, attemptID: call.attemptID, result: result)
                 #expect(try V2ActorProtobuf.decode(RoomDeliverySessionReply.self, from: V2ActorProtobuf.encode(reply)) == reply)
+            }
+            var missingNode = wire; missingNode.sourceNode = Data()
+            #expect(throws: (any Error).self) {
+                try V2ActorProtobuf.decode(RoomDeliverySessionCall.self, from: missingNode.serializedData())
             }
             var invalid = wire; invalid.pulse.session.generation = 0
             #expect(throws: (any Error).self) {

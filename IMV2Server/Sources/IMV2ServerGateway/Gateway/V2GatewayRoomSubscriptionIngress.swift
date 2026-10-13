@@ -67,7 +67,7 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
     public func applyDeliverySession(_ pulse: V2RoomDeliverySessionPulse,
         authenticatedServiceID: String) async -> V2RoomDeliverySessionResult {
         let result = authority.applyDeliverySession(pulse, serviceID: authenticatedServiceID)
-        if pulse.kind != .heartbeat || result == .resetRequired {
+        if result != .stale {
             let notify = sessionChanged.withLock { $0 }
             await notify?(pulse.session.host)
         }

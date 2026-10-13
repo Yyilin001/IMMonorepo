@@ -86,7 +86,9 @@ struct GatewayDatabaseTopology {
         try configuration.requirePersistentMessageWritePool()
         let applicationName = actorConfiguration.hostIdentity.map(V2ActorPostgresSessionIdentity.applicationName)
         let workloads = resources
-        let resources = workloads.control
+        // Routing, policy and room identity are foreground control dependencies.
+        // Their independent pools must not inherit the background EventLoop either.
+        let resources = workloads.resources(for: .foreground)
         let allControlEventLoops = Array(resources.eventLoopGroup.makeIterator())
         let controlEventLoops = Array(allControlEventLoops.prefix(configuration.databaseNonMessagePoolEventLoopThreads))
         let expectedControlLoops = configuration.databaseWorkloadPoolIsolationEnabled
@@ -126,7 +128,8 @@ struct GatewayDatabaseTopology {
                     reservedRenewalConnections: role == .foreground ? min(2, max(0, capacity - 1)) :
                         (role == .maintenance ? min(1, max(0, capacity - 1)) : 0),
                     maximumQueued: configuration.foregroundWriteDatabaseWorkMaximumQueued,
-                    maximumWait: .milliseconds(configuration.databasePolicy.poolTimeoutMilliseconds))
+                    maximumWait: .milliseconds(configuration.databasePolicy.poolTimeoutMilliseconds),
+                    lendsIdleRenewalConnections: role == .foreground)
                 roleResources.databases.use(
                     try postgresDatabaseConfiguration(
                         url: url,

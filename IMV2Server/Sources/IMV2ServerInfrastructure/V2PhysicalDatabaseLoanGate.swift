@@ -20,12 +20,15 @@ public enum V2PhysicalDatabaseLoanFailure: Error, Equatable, Sendable, V2SafeOpe
 public struct V2PhysicalDatabaseLoanPolicy: Sendable {
     public let maximumConnections: Int
     public let reservedRenewalConnections: Int
+    /// Idle renewal slots may serve ordinary work; queued renewals get the next return.
+    public let lendsIdleRenewalConnections: Bool
     /// Cold lifecycle work shares ordinary capacity and has its own smaller ceiling.
     public let maximumActivationConnections: Int
     public let maximumQueued: Int
     public let maximumWait: Duration
     public init(maximumConnections: Int, reservedRenewalConnections: Int, maximumQueued: Int,
-                maximumWait: Duration, maximumActivationConnections: Int? = nil) throws {
+                maximumWait: Duration, maximumActivationConnections: Int? = nil,
+                lendsIdleRenewalConnections: Bool = false) throws {
         guard maximumConnections > 0, reservedRenewalConnections >= 0,
               reservedRenewalConnections < maximumConnections, maximumQueued >= 0,
               maximumWait > .zero else { throw V2PhysicalDatabaseLoanFailure.invalidPolicy }
@@ -37,6 +40,7 @@ public struct V2PhysicalDatabaseLoanPolicy: Sendable {
         self.maximumActivationConnections = activationLimit
         self.maximumConnections = maximumConnections
         self.reservedRenewalConnections = reservedRenewalConnections
+        self.lendsIdleRenewalConnections = lendsIdleRenewalConnections
         self.maximumQueued = maximumQueued
         self.maximumWait = maximumWait
     }
@@ -314,7 +318,10 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
         let ordinary = value.metrics.classes[.ordinary, default: .init()].inFlight
         let activation = value.metrics.classes[.activation, default: .init()].inFlight
         let sync = value.metrics.classes[.sync, default: .init()].inFlight
-        guard ordinary + activation + sync < policy.maximumConnections - policy.reservedRenewalConnections else {
+        let renewalWaiting = value.metrics.classes[.renewal, default: .init()].queued > 0
+        let ordinaryLimit = policy.lendsIdleRenewalConnections && !renewalWaiting
+            ? policy.maximumConnections : policy.maximumConnections - policy.reservedRenewalConnections
+        guard ordinary + activation + sync < ordinaryLimit else {
             return false
         }
         return loanClass != .activation || activation < policy.maximumActivationConnections
@@ -392,7 +399,8 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
                 }
                 let family = value.nextSync ? (sync ?? general) : (general ?? sync)
                 let index: Int?
-                if let renewal, let family { index = min(renewal, family) }
+                if policy.lendsIdleRenewalConnections, let renewal { index = renewal }
+                else if let renewal, let family { index = min(renewal, family) }
                 else { index = renewal ?? family }
                 guard let index else { break }
                 let waiter = value.queue.remove(at: index)

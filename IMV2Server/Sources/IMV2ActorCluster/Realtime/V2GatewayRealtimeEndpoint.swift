@@ -5,6 +5,30 @@ import DistributedCluster
 import Foundation
 import IMV2ActorContracts
 
+/// Project the library's actor-confined membership into Sendable lifecycle data.
+/// Cluster.Event itself must never be sent across our Actor boundaries.
+struct V2RealtimePeerLifecycleChange: Sendable {
+    let available: [Cluster.Node: Bool]
+    let invalidatesOpening: Bool
+
+    init(event: Cluster.Event, membership: inout Cluster.Membership) {
+        try? membership.apply(event: event)
+        var available = Dictionary(uniqueKeysWithValues: membership.members(atLeast: .joining).map {
+            ($0.node, $0.status < .down && $0.reachability == .reachable)
+        })
+        switch event {
+        case .membershipChange(let change) where change.status >= .down:
+            // Removed members can already be absent from the snapshot.
+            available[change.node] = false
+        case .reachabilityChange(let change) where change.reachability == .unreachable:
+            available[change.member.node] = false
+        default: break
+        }
+        self.available = available
+        self.invalidatesOpening = available.values.contains(false)
+    }
+}
+
 struct RealtimeHello: Codable, Sendable {
     let serviceID: V2ActorServiceID
     let version: Int
@@ -103,6 +127,7 @@ struct RoomDeliverySessionCall: Codable, Equatable, Sendable {
     let sessionID: UUID
     let sequence: UInt64
     let attemptID: UUID
+    let sourceNode: Cluster.Node
     let sourceShardID: String
     let pulse: V2RoomDeliverySessionPulse
 }
@@ -153,6 +178,16 @@ actor V2GatewayRealtimeInbound {
     private var accepting = true
     private var roomSubscriptionHandler: (any V2RoomSubscriptionHandler)?
     private var projectionHandler: (any V2RealtimeJournalProjectionHandler)?
+    private var clusterSystem: ClusterSystem?
+    private var lifecycleWorker: Task<Void, Never>?
+    private var peerAvailability: [Cluster.Node: Bool] = [:]
+    private var lifecycleRevision: UInt64 = 0
+    private struct DeliveryPeer {
+        let session: V2RoomDeliverySession
+        let serviceID: String
+        let node: Cluster.Node
+    }
+    private var deliveryPeers: [V2ActorHostIdentity: DeliveryPeer] = [:]
     // Actor-confined reference state avoids copying the replay window on every RPC.
     private final class Session {
         let service: V2ActorServiceID
@@ -194,7 +229,39 @@ actor V2GatewayRealtimeInbound {
             digest = Data(SHA256.hash(data: bytes))
         }
     }
-    func stop() { accepting = false; sessions.removeAll() }
+    func startDeliveryLifecycle(system: ClusterSystem, sender: V2RealtimeClusterSender) {
+        guard lifecycleWorker == nil, accepting else { return }
+        clusterSystem = system
+        lifecycleWorker = Task { [weak self] in
+            var membership = Cluster.Membership.empty
+            for await event in system.cluster.events {
+                guard !Task.isCancelled, let self else { return }
+                let change = V2RealtimePeerLifecycleChange(event: event, membership: &membership)
+                await self.clusterChanged(change)
+                await sender.clusterChanged(change)
+            }
+        }
+    }
+    func clusterChanged(_ change: V2RealtimePeerLifecycleChange) async {
+        peerAvailability = change.available
+        if change.invalidatesOpening { lifecycleRevision &+= 1 }
+        let localUnavailable = clusterSystem.map { change.available[$0.cluster.node] == false } ?? false
+        let failed = deliveryPeers.values.filter { localUnavailable || change.available[$0.node] == false }
+        for peer in failed {
+            deliveryPeers.removeValue(forKey: peer.session.host)
+            _ = await roomSubscriptionHandler?.applyDeliverySession(.init(session: peer.session, kind: .retire, sequence: 2),
+                authenticatedServiceID: peer.serviceID)
+        }
+    }
+    func stop() async {
+        accepting = false; lifecycleWorker?.cancel()
+        for peer in deliveryPeers.values {
+            _ = await roomSubscriptionHandler?.applyDeliverySession(.init(session: peer.session, kind: .retire, sequence: 2),
+                authenticatedServiceID: peer.serviceID)
+        }
+        deliveryPeers.removeAll(); sessions.removeAll()
+        await lifecycleWorker?.value; lifecycleWorker = nil
+    }
     func openSession(_ packet: V2ActorSignedPacket) throws -> V2ActorSignedPacket {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let (hello, peer) = try trust.verify(packet, as: RealtimeHello.self, maximumBytes: 16_384)
@@ -286,8 +353,37 @@ actor V2GatewayRealtimeInbound {
         try call.pulse.session.validate()
         guard call.pulse.sequence > 0 else { throw V2ActorAuthenticationError.invalidConfiguration }
         try session.accept(sequence: call.sequence, attemptID: call.attemptID)
-        let result = await roomSubscriptionHandler?.applyDeliverySession(call.pulse,
-            authenticatedServiceID: peer.serviceID.rawValue) ?? .stale
+        guard let system = clusterSystem, let handler = roomSubscriptionHandler else {
+            throw V2ActorAuthenticationError.invalidConfiguration
+        }
+        let revision = lifecycleRevision
+        if call.pulse.kind == .open {
+            // Membership is a failure signal, never room authorization. Wait
+            // only on establishment, not on ordinary message/control calls.
+            system.cluster.join(host: call.sourceNode.endpoint.host, port: call.sourceNode.endpoint.port)
+            let member = try await system.cluster.waitFor(call.sourceNode, atLeast: .joining, within: .seconds(2))
+            guard accepting, member.status < .down, member.reachability == .reachable,
+                  peerAvailability[call.sourceNode] != false, peerAvailability[system.cluster.node] != false,
+                  revision == lifecycleRevision else { throw V2ActorAuthenticationError.overloaded }
+            if let old = deliveryPeers[call.pulse.session.host],
+               old.node != call.sourceNode { throw V2ActorAuthenticationError.wrongRecipient }
+            guard deliveryPeers[call.pulse.session.host] != nil || deliveryPeers.count < 128 else {
+                throw V2ActorAuthenticationError.overloaded
+            }
+        }
+        var result = await handler.applyDeliverySession(call.pulse, authenticatedServiceID: peer.serviceID.rawValue)
+        if call.pulse.kind == .open, revision != lifecycleRevision || !accepting {
+            _ = await handler.applyDeliverySession(.init(session: call.pulse.session, kind: .retire, sequence: 2),
+                authenticatedServiceID: peer.serviceID.rawValue)
+            result = .resetRequired
+        }
+        if call.pulse.kind == .open, result == .accepted {
+            deliveryPeers[call.pulse.session.host] = .init(session: call.pulse.session,
+                serviceID: peer.serviceID.rawValue, node: call.sourceNode)
+        }
+        if call.pulse.kind == .retire, deliveryPeers[call.pulse.session.host]?.session == call.pulse.session {
+            deliveryPeers.removeValue(forKey: call.pulse.session.host)
+        }
         return try sessionReply(RoomDeliverySessionReply(recipient: identity, sessionID: call.sessionID,
             sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: 16_384)
     }
@@ -360,6 +456,21 @@ public actor V2RealtimeClusterSender {
     private let incarnation = UUID()
     private var stopped = false
     private var active = 0
+    private var roomDeliveryPeers: [V2RoomDeliverySession: Cluster.Node] = [:]
+    private var peerFailure: (@Sendable (V2ActorHostIdentity, V2GatewayRealtimeIdentity) async -> Void)?
+    private var peerAvailability: [Cluster.Node: Bool] = [:]
+    public func configureRoomDeliveryPeerFailure(_ notify: @escaping @Sendable (V2ActorHostIdentity, V2GatewayRealtimeIdentity) async -> Void) {
+        precondition(peerFailure == nil && !stopped); peerFailure = notify
+    }
+    func clusterChanged(_ change: V2RealtimePeerLifecycleChange) async {
+        peerAvailability = change.available
+        let localUnavailable = change.available[system.cluster.node] == false
+        let failed = roomDeliveryPeers.filter { localUnavailable || change.available[$0.value] == false }
+        for (session, _) in failed {
+            roomDeliveryPeers.removeValue(forKey: session)
+            await peerFailure?(session.host, session.gateway)
+        }
+    }
     private var sessionCalls = 0
     private var sessionPeers: Set<V2GatewayRealtimeIdentity> = []
     private var authorizationCalls = 0
@@ -543,7 +654,7 @@ public actor V2RealtimeClusterSender {
         session.sequence += 1; sessions[target] = session
         let call = RoomDeliverySessionCall(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation,
             recipient: target.identity, sessionID: session.id, sequence: session.sequence, attemptID: UUID(),
-            sourceShardID: sourceShardID, pulse: pulse)
+            sourceNode: system.cluster.node, sourceShardID: sourceShardID, pulse: pulse)
         let packet = try session.mac.seal(call, reply: false, maximumBytes: 16_384)
         do {
         let endpoint = session.endpoint
@@ -553,6 +664,15 @@ public actor V2RealtimeClusterSender {
         let reply = try session.mac.open(response, as: RoomDeliverySessionReply.self, reply: true, maximumBytes: 16_384)
         guard reply.recipient == target.identity, reply.sessionID == call.sessionID,
               reply.sequence == call.sequence, reply.attemptID == call.attemptID else { throw V2ActorAuthenticationError.wrongRecipient }
+        if reply.result == .accepted, pulse.kind == .open {
+            guard !stopped, peerAvailability[endpoint.id.node] != false,
+                  peerAvailability[system.cluster.node] != false else {
+                throw V2ActorAuthenticationError.overloaded
+            }
+            roomDeliveryPeers = roomDeliveryPeers.filter { $0.key.host != pulse.session.host || $0.key.gateway != pulse.session.gateway }
+            guard roomDeliveryPeers.count < 128 else { throw V2ActorAuthenticationError.overloaded }
+            roomDeliveryPeers[pulse.session] = endpoint.id.node
+        } else if pulse.kind == .retire { roomDeliveryPeers.removeValue(forKey: pulse.session) }
         return reply.result
         } catch {
             if let auth = error as? V2ActorAuthenticationError,
@@ -599,6 +719,7 @@ public actor V2RealtimeClusterSender {
         let task = Task<Session, Error> {
             let id = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: target.endpointReference)
             guard id.node.endpoint.host == target.address, id.node.endpoint.port == target.port else { throw V2ActorAuthenticationError.wrongRecipient }
+            system.cluster.join(host: target.address, port: target.port)
             let endpoint = try V2GatewayRealtimeEndpoint.resolve(id: id, using: system)
             let agreement = Curve25519.KeyAgreement.PrivateKey()
             let hello = RealtimeHello(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation, recipient: target.identity, handshakeID: UUID(),
@@ -633,6 +754,8 @@ public actor V2RealtimeClusterSender {
     }
     public func stop(deadline: ContinuousClock.Instant) async -> Bool {
         stopped = true
+        let peers = Array(roomDeliveryPeers.keys); roomDeliveryPeers.removeAll()
+        for peer in peers { await peerFailure?(peer.host, peer.gateway) }
         while (active > 0 || authorizationCalls > 0 || sessionCalls > 0) && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) } catch { break }
         }
@@ -648,9 +771,10 @@ public final class V2RealtimeTransportHandle: Sendable {
     public let sender: V2RealtimeClusterSender
     private let endpoint: V2GatewayRealtimeEndpoint
     private let inbound: V2GatewayRealtimeInbound
-    init(descriptor: V2GatewayRealtimeDescriptor, sender: V2RealtimeClusterSender,
+    private let system: ClusterSystem
+    init(system: ClusterSystem, descriptor: V2GatewayRealtimeDescriptor, sender: V2RealtimeClusterSender,
          endpoint: V2GatewayRealtimeEndpoint, inbound: V2GatewayRealtimeInbound) {
-        self.descriptor = descriptor; self.sender = sender; self.endpoint = endpoint; self.inbound = inbound
+        self.system = system; self.descriptor = descriptor; self.sender = sender; self.endpoint = endpoint; self.inbound = inbound
     }
     public func send(_ batch: V2RealtimeBatch, to target: V2GatewayRealtimeDescriptor) async throws -> V2RealtimeAcceptance {
         try await sender.send(batch, to: target)
@@ -661,6 +785,11 @@ public final class V2RealtimeTransportHandle: Sendable {
     }
     public func configureRoomSubscription(_ handler: any V2RoomSubscriptionHandler) async throws {
         try await inbound.configureRoomSubscription(handler)
+        await inbound.startDeliveryLifecycle(system: system, sender: sender)
+    }
+    public func configureRoomDeliveryPeerFailure(_ notify: @escaping @Sendable (V2ActorHostIdentity, V2GatewayRealtimeIdentity) async -> Void) async {
+        await sender.configureRoomDeliveryPeerFailure(notify)
+        await inbound.startDeliveryLifecycle(system: system, sender: sender)
     }
     public func sendRoomSubscriptionBatch(_ batch: V2RoomSubscriptionDeliveryBatch, sourceShardID: String,
                                           to target: V2GatewayRealtimeDescriptor) async throws -> V2RoomSubscriptionBatchResult {
@@ -696,7 +825,7 @@ func buildRealtimeTransport(system: ClusterSystem, identity: V2GatewayRealtimeId
     let descriptor = V2GatewayRealtimeDescriptor(identity: identity, endpointReference: try V2ActorProtobuf.encode(endpoint.id), address: address, port: port)
     try descriptor.validate()
     inbound.bindEndpointReference(descriptor.endpointReference)
-    return V2RealtimeTransportHandle(descriptor: descriptor,
+    return V2RealtimeTransportHandle(system: system, descriptor: descriptor,
                                     sender: V2RealtimeClusterSender(system: system, signer: signer, trust: trust, limits: limits),
                                     endpoint: endpoint, inbound: inbound)
 }

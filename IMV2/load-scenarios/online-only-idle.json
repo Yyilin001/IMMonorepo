@@ -1,0 +1,31 @@
+{
+  "name": "authenticated-online-only",
+  "seed": 20260829,
+  "roomWarmupTimeoutSeconds": 900,
+  "completionDrainSeconds": 10,
+  "postDrainHoldSeconds": 10,
+  "requiresSteadyStateDrain": true,
+  "maximumSteadyStateQueuedMessages": 0,
+  "sendDispatch": "bounded_client_queue",
+  "maximumQueuedMessagesPerConnection": 1,
+  "schedulerTicksPerSecond": 10,
+  "personas": [
+    {
+      "name": "online",
+      "share": 1,
+      "sendWeight": 1,
+      "roomLogReadWeight": 1,
+      "syncPullWeight": 1
+    }
+  ],
+  "phases": [
+    {
+      "name": "online-idle",
+      "durationSeconds": 180,
+      "messagesPerSecond": 0,
+      "roomLogReadsPerSecond": 0,
+      "syncPullsPerSecond": 0,
+      "reconnectPercentPerMinute": 0
+    }
+  ]
+}

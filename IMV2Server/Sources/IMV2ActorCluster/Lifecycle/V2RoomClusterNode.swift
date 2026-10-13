@@ -231,6 +231,8 @@ public actor V2RoomClusterNode {
         return handle
     }
 
+    public func roomAuthorityInvalidations() -> AsyncStream<Void> { host.authorityInvalidations }
+
     public func readiness() async -> Bool {
         guard system != nil, inbound != nil, endpoint != nil, discoveryBeacon != nil else { return false }
         return await host.snapshot().accepting

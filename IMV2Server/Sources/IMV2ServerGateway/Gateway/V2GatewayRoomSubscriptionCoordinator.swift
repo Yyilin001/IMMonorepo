@@ -190,7 +190,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             relations[key]?.receipt = receipt
             if receipt.activationFailure == nil { await retainShared(receipt) }
             if let error = receipt.activationFailure { throw error }
-            guard ingress.authority.sessionGate(receipt.grant.deliverySession, serviceID: receipt.route.authenticatedServiceID)?.isReady(at: now()) == true else { throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant }
+            guard ingress.authority.sessionGate(receipt.grant.deliverySession, serviceID: receipt.route.authenticatedServiceID)?.isReady() == true else { throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant }
             return receipt.grant
         } catch {
             recordAcquisitionFailure(error)
@@ -506,7 +506,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
     public func sessionChanged(host: V2ActorHostIdentity) async {
         guard !closed else { return }
         for (room, receipt) in sharedReceipts where receipt.route.activation.host == host {
-            if ingress.authority.sessionGate(receipt.grant.deliverySession, serviceID: receipt.route.authenticatedServiceID)?.isReady(at: now()) != true {
+            if ingress.authority.sessionGate(receipt.grant.deliverySession, serviceID: receipt.route.authenticatedServiceID)?.isReady() != true {
                 setDeadline(room, at: now())
             }
         }

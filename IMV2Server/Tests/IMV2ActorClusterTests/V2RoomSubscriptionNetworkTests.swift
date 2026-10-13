@@ -228,6 +228,91 @@ struct V2RoomSubscriptionNetworkTests {
         if let failure { throw failure }
     }
 
+    @Test("native peer loss retires idle authorization; recovery requires a successor and new baseline")
+    func nativePeerLifecycleRetiresIdleSession() async throws {
+        let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
+        let keys = try Keys(), user = UserID(uuid: UUID())
+        let callerSystem = await makeSystem(name: "session-owner", port: callerPort)
+        let peerSystem = await makeSystem(name: "session-gateway", port: peerPort)
+        let caller = try buildRealtimeTransport(system: callerSystem,
+            identity: .init(nodeID: "publisher", serviceID: "publisher", incarnationID: UUID()),
+            address: "127.0.0.1", port: callerPort, signer: keys.publisher, trust: keys.trust,
+            ingress: RejectingIngress(), serviceOwnerAccess: [keys.publisher.serviceID: ["rooms"]], limits: .init())
+        let peer = try makePeer(system: peerSystem, port: peerPort, keys: keys)
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, offerEvent: { _, _ in }, offerHead: { _, _ in })
+        let sessions = V2RoomDeliverySessionHost()
+        var failure: (any Error)?
+        do {
+            try await peer.configureRoomSubscription(ingress)
+            await caller.configureRoomDeliveryPeerFailure { host, gateway in
+                await sessions.peerUnavailable(host: host, gateway: gateway)
+            }
+            await sessions.configure(send: { pulse, shard, target in
+                try await caller.sendDeliverySession(pulse, sourceShardID: shard, to: target)
+            }, hostReady: { true })
+            let token = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: try .init(shardID: "rooms", epoch: 0),
+                activationEpoch: try .init(1), host: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()))
+            let old = try await sessions.retain(activation: token, gateway: peer.descriptor)
+            let oldGate = try #require(authority.sessionGate(old, serviceID: "publisher"))
+            let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+            try #require(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "publisher", session: old))
+            let connection = UUID(), lifecycle = UUID()
+            try #require(await authority.registerFixtureConnection(connection, userID: user, lifecycle: lifecycle))
+            let member = V2RoomSubscriptionMember(userID: user, memberRevision: 0)
+            #expect(try await caller.sendRoomSubscription(.init(fence: fence, deliverySequence: 1, authorizationSequence: 1,
+                payload: .baseline(members: [member])), sourceShardID: "rooms", to: peer.descriptor) == .appliedThrough(1))
+            let oldPermit = try #require(await authority.captureOnlinePermits(roomID: token.roomID).first)
+            #expect(await authority.enqueueFixtureIfCurrent(oldPermit) {})
+
+            // Drive the actual native event stream deterministically. This is
+            // an unreachable notification, not a fabricated permission change.
+            let sourceNode = callerSystem.cluster.node, gatewayNode = peerSystem.cluster.node
+            _ = try await callerSystem.cluster.waitFor(gatewayNode, atLeast: .joining, within: .seconds(2))
+            await peerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: sourceNode, status: .up).asUnreachable)))
+            await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asUnreachable)))
+            let limit = ContinuousClock.now + .seconds(3)
+            while oldGate.isReady() {
+                try #require(ContinuousClock.now < limit); try await Task.sleep(for: .milliseconds(1))
+            }
+            #expect(!(await authority.enqueueFixtureIfCurrent(oldPermit) {}))
+            #expect(authority.applyDeliverySession(.init(session: old, kind: .open, sequence: 3), serviceID: "publisher") == .resetRequired)
+
+            await peerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: sourceNode, status: .up).asReachable)))
+            await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asReachable)))
+            var fresh: V2RoomDeliverySession?
+            while fresh == nil {
+                if let result = try? await sessions.retain(activation: token, gateway: peer.descriptor), result.generation > old.generation {
+                    fresh = result
+                }
+                try #require(ContinuousClock.now < limit)
+                if fresh == nil { try await Task.sleep(for: .milliseconds(5)) }
+            }
+            let successor = try #require(fresh)
+            #expect(!oldGate.isReady())
+            #expect(await authority.requiresBaseline(fence: fence))
+            #expect(!(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "publisher", session: successor)))
+            let newFence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 2, baselineSequence: 0)
+            try #require(await ingress.install(fence: newFence, sourceShardID: "rooms", serviceID: "publisher",
+                session: successor, afterAuthoritativeReset: true))
+            #expect(try await caller.sendRoomSubscription(.init(fence: newFence, deliverySequence: 1, authorizationSequence: 1,
+                payload: .baseline(members: [member])), sourceShardID: "rooms", to: peer.descriptor) == .appliedThrough(1))
+            let freshGate = try #require(authority.sessionGate(successor, serviceID: "publisher"))
+            // Exercise real cluster downing as well as reachability updates.
+            peerSystem.cluster.down(member: .init(node: sourceNode, status: .up))
+            while freshGate.isReady() {
+                try #require(ContinuousClock.now < limit); try await Task.sleep(for: .milliseconds(1))
+            }
+            #expect(!(await authority.enqueueFixtureIfCurrent(oldPermit) {}))
+        } catch { failure = error }
+        await sessions.close()
+        #expect(await peer.stop(deadline: .now + .seconds(2)))
+        #expect(await caller.stop(deadline: .now + .seconds(2)))
+        await authority.shutdown()
+        try await peerSystem.shutdown().wait(); try await callerSystem.shutdown().wait()
+        if let failure { throw failure }
+    }
+
     @Test("retired history resets a real Owner and installs its baseline over signed TCP")
     func retiredHistoryRealOwnerReset() async throws {
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)

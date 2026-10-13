@@ -21,8 +21,8 @@ def main():
     parser.add_argument('--foreground-paired', action='store_true',
                         help='adjacent even/odd users share their first foreground target; requires an even population')
     args = parser.parse_args()
-    if not 3 <= args.users <= 50000:
-        parser.error('users must be 3..50000')
+    if not 3 <= args.users <= 100000:
+        parser.error('users must be 3..100000')
     if args.foreground_paired and args.users % 2:
         parser.error('foreground-paired requires an even user count')
     os.umask(0o077)

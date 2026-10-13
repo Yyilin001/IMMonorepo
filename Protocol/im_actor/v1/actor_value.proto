@@ -276,5 +276,5 @@ message HotShardCall { HotRealtimeHeader header = 1; oneof operation { HotPublis
 message HotShardReply { HotRealtimeHeader header = 1; oneof result { string publish = 2; bytes cold_control = 100; } }
 
 message HotDeliverySessionPulse { HotDeliverySession session = 1; string kind = 2; uint64 sequence = 3; }
-message HotDeliverySessionCall { HotRealtimeHeader header = 1; string source_shard_id = 2; HotDeliverySessionPulse pulse = 3; }
+message HotDeliverySessionCall { HotRealtimeHeader header = 1; string source_shard_id = 2; HotDeliverySessionPulse pulse = 3; bytes source_node = 4; }
 message HotDeliverySessionReply { HotRealtimeHeader header = 1; string result = 2; }
