@@ -19,6 +19,7 @@ struct PostgresV2RoomAdministrationAdapter: Sendable {
     private let presentation: PostgresV2ProfilePresentationStore
     private let makeEventID: @Sendable () throws -> EventID
     private let now: @Sendable () -> Date
+    private let permissionCommit: V2RoomPermissionCommit?
 
     init(
         database: any Database,
@@ -27,7 +28,8 @@ struct PostgresV2RoomAdministrationAdapter: Sendable {
         token: V2RoomActivationToken,
         capacityProfile: V2CapacityProfile,
         makeEventID: @escaping @Sendable () throws -> EventID = { try EventID(UUID().uuidString) },
-        now: @escaping @Sendable () -> Date = Date.init
+        now: @escaping @Sendable () -> Date = Date.init,
+        permissionCommit: V2RoomPermissionCommit? = nil
     ) throws {
         let scope = try V2RoomActivationWriteScope(tokens: [token])
         self.personalPreferences = .init(database:database,activationScope:scope)
@@ -37,17 +39,18 @@ struct PostgresV2RoomAdministrationAdapter: Sendable {
         self.token = token
         self.capacityProfile = capacityProfile
         self.capabilities = .init(database: database, activationScope: scope)
-        self.moderation = .init(database: database, activationScope: scope)
+        self.moderation = PostgresV2ModerationStore(database: database, activationScope: scope).usingPermissionCommit(permissionCommit)
         self.presentation = .init(database: database, activationScope: scope,
             nicknameCapacityProfile: capacityProfile, makeEventID: makeEventID, now: now)
         self.makeEventID = makeEventID
         self.now = now
+        self.permissionCommit = permissionCommit
     }
 
     private func invitationStore(_ intent: V2GroupInvitationOperationIntent) throws -> PostgresV2GroupInvitationOperationStore {
         let invite: GroupInviteID?
         switch intent.action { case .submit(let id,_,_), .revoke(let id,_): invite = id; default: invite = nil }
-        return try .init(database:database,activationToken:token,identities:invitationIdentities,issuer:invitationSecretIssuer,policy:.standard,capacity:capacityProfile,inviteID:invite)
+        return try PostgresV2GroupInvitationOperationStore(database:database,activationToken:token,identities:invitationIdentities,issuer:invitationSecretIssuer,policy:.standard,capacity:capacityProfile,inviteID:invite).usingPermissionCommit(permissionCommit)
     }
 
     private func requireRoom(_ roomID: RoomID) throws {
@@ -67,7 +70,7 @@ struct PostgresV2RoomAdministrationAdapter: Sendable {
         case .groupCapabilityAdmit(let intent):
             return .groupCapabilityAdmission(try await PostgresV2GroupCapabilityOperationStore(database:database,clock:now).admit(intent,token:token))
         case .groupCapabilitySubmit(let command):
-            return .groupCapabilityRecovery(try await PostgresV2GroupCapabilityOperationStore(database:database,clock:now).submit(command,token:token,capacityProfile:capacityProfile,eventID:makeEventID()))
+            return .groupCapabilityRecovery(try await PostgresV2GroupCapabilityOperationStore(database:database,clock:now).usingPermissionCommit(permissionCommit).submit(command,token:token,capacityProfile:capacityProfile,eventID:makeEventID()))
         case .groupCapabilityRecover(let request):
             return .groupCapabilityRecovery(try await PostgresV2GroupCapabilityOperationStore(database:database,clock:now).recover(request,token:token))
         case .membershipAdmission, .membershipSubmit, .membershipRecovery:
@@ -81,7 +84,7 @@ struct PostgresV2RoomAdministrationAdapter: Sendable {
         case .memberAdministrationAdmission(let intent):
             return .memberAdministrationAdmission(try await PostgresV2MemberAdministrationStore(database:database,clock:now).admit(intent,token:token))
         case .memberAdministrationSubmit(let command):
-            return .memberAdministrationRecovery(try await PostgresV2MemberAdministrationStore(database:database,clock:now).submit(command,token:token,capacityProfile:capacityProfile,eventID:makeEventID()))
+            return .memberAdministrationRecovery(try await PostgresV2MemberAdministrationStore(database:database,clock:now).usingPermissionCommit(permissionCommit).submit(command,token:token,capacityProfile:capacityProfile,eventID:makeEventID()))
         case .memberAdministrationRecovery(let request):
             return .memberAdministrationRecovery(try await PostgresV2MemberAdministrationStore(database:database,clock:now).recover(request,token:token))
         case .conversationState(let request):
@@ -167,7 +170,7 @@ extension PostgresV2RoomAdministrationAdapter: V2RoomMembershipOperationPersisti
 
     func submitMembership(_ command: V2MembershipOperationCommand,
                           snapshot: V2MembershipIdentitySnapshot) async throws -> V2MembershipRecoveryResult {
-        try await PostgresV2MembershipOperationStore(database: database, clock: now)
+        try await PostgresV2MembershipOperationStore(database: database, clock: now).usingPermissionCommit(permissionCommit)
             .submit(command, token: token, capacityProfile: capacityProfile,
                     eventID: makeEventID(), identitySnapshot: snapshot)
     }
@@ -187,10 +190,25 @@ public extension V2RoomAdministrationDomainExecutor {
          membershipIdentities: any V2MembershipIdentitySnapshotValidating,
          makeEventID: @escaping @Sendable () throws -> EventID = { try EventID(UUID().uuidString) },
          now: @escaping @Sendable () -> Date = Date.init) throws {
+        try self.init(database: database, invitationSecretIssuer: invitationSecretIssuer,
+            invitationIdentities: invitationIdentities, token: token, capacityProfile: capacityProfile,
+            membershipIdentities: membershipIdentities, permissionCommit: nil, makeEventID: makeEventID, now: now)
+    }
+}
+
+package extension V2RoomAdministrationDomainExecutor {
+    init(database: any Database,
+         invitationSecretIssuer: V2GroupInviteSecretIssuer,
+         invitationIdentities: any V2GroupInvitationIdentityReading,
+         token: V2RoomActivationToken, capacityProfile: V2CapacityProfile,
+         membershipIdentities: any V2MembershipIdentitySnapshotValidating,
+         permissionCommit: V2RoomPermissionCommit?,
+         makeEventID: @escaping @Sendable () throws -> EventID = { try EventID(UUID().uuidString) },
+         now: @escaping @Sendable () -> Date = Date.init) throws {
         let adapter = try PostgresV2RoomAdministrationAdapter(
             database: database, invitationSecretIssuer: invitationSecretIssuer,
             invitationIdentities: invitationIdentities, token: token,
-            capacityProfile: capacityProfile, makeEventID: makeEventID, now: now)
+            capacityProfile: capacityProfile, makeEventID: makeEventID, now: now, permissionCommit: permissionCommit)
         self.init(token: token, store: adapter, membership: adapter,
                   membershipIdentities: membershipIdentities)
     }

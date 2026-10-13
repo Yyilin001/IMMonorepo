@@ -12,20 +12,6 @@ public struct V2GatewayRoomSubscriptionPorts: Sendable {
             self.activation = activation; self.authenticatedServiceID = authenticatedServiceID
         }
     }
-    public struct RenewalRequest: Sendable {
-        public let activation: V2RoomActivationToken
-        public let command: V2RoomSubscriptionRenewCommand
-        public init(activation: V2RoomActivationToken, command: V2RoomSubscriptionRenewCommand) {
-            self.activation = activation; self.command = command
-        }
-    }
-    public struct RenewalOutcome: Sendable {
-        public enum Result: Sendable { case result(V2RoomSubscriptionResult), failure(V2RoomCallFailure) }
-        public let activation: V2RoomActivationToken
-        public let result: Result
-        public init(activation: V2RoomActivationToken, result: Result) { self.activation = activation; self.result = result }
-    }
-    public let renewBatch: @Sendable (V2ActorHostIdentity, [RenewalRequest], ContinuousClock.Instant) async throws -> [RenewalOutcome]
     public let gateway: V2GatewayRealtimeDescriptor
     public let resolve: @Sendable (RoomID, ContinuousClock.Instant) async throws -> Route
     public let subscribe: @Sendable (V2RoomSubscriptionSubscribeCommand, V2RoomActivationToken, ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult
@@ -36,11 +22,10 @@ public struct V2GatewayRoomSubscriptionPorts: Sendable {
         resolve: @escaping @Sendable (RoomID, ContinuousClock.Instant) async throws -> Route,
         subscribe: @escaping @Sendable (V2RoomSubscriptionSubscribeCommand, V2RoomActivationToken, ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult,
         reset: @escaping @Sendable (V2RoomSubscriptionResetCommand, V2RoomActivationToken, ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult,
-        renewBatch: @escaping @Sendable (V2ActorHostIdentity, [RenewalRequest], ContinuousClock.Instant) async throws -> [RenewalOutcome],
         activate: @escaping @Sendable (V2RoomSubscriptionActivateCommand, V2RoomActivationToken, ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult,
         unsubscribe: @escaping @Sendable (V2RoomSubscriptionUnsubscribeCommand, V2RoomActivationToken, ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult) {
         self.gateway = gateway; self.resolve = resolve; self.subscribe = subscribe
-        self.reset = reset; self.renewBatch = renewBatch; self.activate = activate; self.unsubscribe = unsubscribe
+        self.reset = reset; self.activate = activate; self.unsubscribe = unsubscribe
     }
 }
 
@@ -58,7 +43,6 @@ public actor V2GatewayRoomSubscriptionCoordinator {
     private struct Receipt: Sendable {
         let grant: V2RoomSubscriptionGrant
         let route: V2GatewayRoomSubscriptionPorts.Route
-        let deadline: ContinuousClock.Instant
         let activationFailure: (any Error)?
     }
     private struct Relation: Sendable {
@@ -81,10 +65,9 @@ public actor V2GatewayRoomSubscriptionCoordinator {
     private var references: [UUID: Key] = [:]
     private var keysByRoom: [RoomID: Set<Key>] = [:]
     private var sharedReceipts: [RoomID: Receipt] = [:]
-    private var dueRooms = V2RoomRenewalDeadlines()
-    private var renewalFlights: [UUID: Task<Void, Never>] = [:]
-    private var renewingRooms: Set<RoomID> = []
-    private var renewalCallsByPeer: [V2ActorHostIdentity: Int] = [:]
+    private var dueRooms = V2RoomRepairDeadlines()
+    private var repairFlights: [UUID: Task<Void, Never>] = [:]
+    private var repairingRooms: Set<RoomID> = []
     private var deniedRepresentatives: Set<Key> = []
     private var roomRepresentatives: [RoomID: Key] = [:]
     private var callWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
@@ -101,7 +84,6 @@ public actor V2GatewayRoomSubscriptionCoordinator {
     private var maintenanceStarted = false
     private var wakeGeneration: UInt64 = 0
     private var scheduledWake: ContinuousClock.Instant?
-    private var peerWaiters: [V2ActorHostIdentity: Set<RoomID>] = [:]
 
     public init(ports: V2GatewayRoomSubscriptionPorts, ingress: V2GatewayRoomSubscriptionIngress,
         maximumRelations: Int = 4096, maximumReferences: Int = 16_384, maximumConcurrentCalls: Int = 16,
@@ -136,17 +118,11 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             do { try await Task.sleep(until: target, clock: .continuous) } catch { return }
             guard !closed, generation == wakeGeneration else { return }
             scheduledWake = nil
-            _ = await admitRenewals()
+            _ = await admitRepairs()
             scheduleMaintenance()
         }
     }
-    private func releasePeerWaiters(_ peer: V2ActorHostIdentity) {
-        let instant = now()
-        for room in peerWaiters.removeValue(forKey: peer) ?? [] where sharedReceipts[room] != nil {
-            dueRooms.set(room, at: instant)
-        }
-        scheduleMaintenance()
-    }
+
     public func acquire(roomID: RoomID, userID: UserID, reference: UUID) async throws -> V2RoomSubscriptionGrant {
         let key = Key(roomID: roomID, userID: userID)
         guard !closed else { throw V2GatewayRoomSubscriptionCoordinationError.closed }
@@ -173,7 +149,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             relations[key]?.references.insert(reference)
             references[reference] = key
             if let previous = relations[key]?.receipt {
-                let checkpoint = await ingress.authority.renewalCheckpoint(fence: previous.grant.fence,
+                let checkpoint = await ingress.authority.authorizationCheckpoint(fence: previous.grant.fence,
                     serviceID: previous.route.authenticatedServiceID)
                 let revision = await ingress.authority.authorizedMemberRevision(roomID: roomID, userID: userID)
                 guard !closed, relations[key]?.id == observedRelationID,
@@ -207,11 +183,6 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                     && cached.grant.fence.generation > acquired.grant.fence.generation)) {
                 receipt = cached
             } else { receipt = acquired }
-            if let shared = sharedReceipts[roomID], shared.grant.fence == receipt.grant.fence,
-               shared.deadline > receipt.deadline {
-                receipt = Receipt(grant: receipt.grant, route: shared.route,
-                    deadline: shared.deadline, activationFailure: receipt.activationFailure)
-            }
             guard !closed, relations[key]?.id == relation.id, references[reference] == key,
                   relations[key]?.references.contains(reference) == true else {
                 throw V2GatewayRoomSubscriptionCoordinationError.superseded
@@ -219,7 +190,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             relations[key]?.receipt = receipt
             if receipt.activationFailure == nil { await retainShared(receipt) }
             if let error = receipt.activationFailure { throw error }
-            guard receipt.deadline > now() else { throw V2GatewayRoomSubscriptionCoordinationError.deadlineExpired }
+            guard ingress.authority.sessionGate(receipt.grant.deliverySession, serviceID: receipt.route.authenticatedServiceID)?.isReady(at: now()) == true else { throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant }
             return receipt.grant
         } catch {
             recordAcquisitionFailure(error)
@@ -273,7 +244,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
     }
     /// The admitted relation bounds this wait and owns its actual acquisition.
     /// FIFO foreground waiters share a bounded slice of the total call budget.
-    /// They cannot consume the slots reserved for lease maintenance.
+    /// They cannot consume the slots reserved for failure recovery.
     private func prepareWhenAdmitted(_ key: Key, relationID: UUID) async throws -> Receipt {
         if calls >= maximumConcurrentCalls {
             V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.acquisitionQueued)
@@ -292,8 +263,8 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             throw V2GatewayRoomSubscriptionCoordinationError.refused(.unavailable)
         }
         if let recovery = routeRecovery[key.roomID], recovery.retryAt <= now() {
-            // A failed call proves no rollback. Directory confirms the physical
-            // lease before a replacement route can issue a fresh subscription.
+            // A failed call proves no rollback. Directory confirms the current
+            // activation before a replacement route can issue a fresh subscription.
             routes.removeValue(forKey: key.roomID)
         }
         var route: V2GatewayRoomSubscriptionPorts.Route
@@ -307,7 +278,6 @@ public actor V2GatewayRoomSubscriptionCoordinator {
               route.authenticatedServiceID.utf8.count <= 128 else {
             throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant
         }
-        var queryStart = now()
         let command = V2RoomSubscriptionSubscribeCommand(roomID: key.roomID, actorUserID: key.userID,
             gatewayDescriptor: ports.gateway)
         var result: V2RoomSubscriptionResult
@@ -333,7 +303,6 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                 throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant
             }
             routes[key.roomID] = route
-            queryStart = now()
             do { result = try await ports.subscribe(command, route.activation, callDeadline) }
             catch { noteRouteFailure(error, roomID: key.roomID, activation: route.activation); throw error }
         }
@@ -347,7 +316,6 @@ public actor V2GatewayRoomSubscriptionCoordinator {
         do {
         if await ingress.authority.requiresBaseline(fence: grant.fence) {
             guard hasReferences(key, relationID: relationID) else { throw V2GatewayRoomSubscriptionCoordinationError.superseded }
-            queryStart = now()
             let reset = try await ports.reset(.init(roomID: key.roomID, actorUserID: key.userID,
                 gatewayDescriptor: ports.gateway, expectedFence: grant.fence), route.activation, callDeadline)
             switch reset {
@@ -366,28 +334,24 @@ public actor V2GatewayRoomSubscriptionCoordinator {
         } catch {
             noteRouteFailure(error, roomID: key.roomID, activation: route.activation)
             return Receipt(grant: grant, route: route,
-                deadline: queryStart + .milliseconds(max(0, grant.remainingLeaseMilliseconds)),
                 activationFailure: error)
         }
         try grant.fence.validate()
         guard grant.fence.activation == route.activation, grant.memberRevision <= UInt64(Int64.max),
               grant.userBaselineSequence >= grant.fence.baselineSequence,
               grant.userBaselineSequence <= UInt64(Int64.max),
-              (1...300_000).contains(grant.remainingLeaseMilliseconds) else {
+              grant.deliverySession.host == route.activation.host && grant.deliverySession.gateway == ports.gateway.identity else {
             throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant
         }
-        // The budget starts BEFORE the signed RPC. Remote elapsed time cannot
-        // turn into extra lease lifetime on this Gateway's monotonic clock.
-        let deadline = queryStart + .milliseconds(grant.remainingLeaseMilliseconds)
+        try grant.deliverySession.validate()
         var activationFailure: (any Error)?
         do {
-            guard deadline > now() else { throw V2GatewayRoomSubscriptionCoordinationError.deadlineExpired }
             guard hasReferences(key, relationID: relationID) else {
-                return Receipt(grant: grant, route: route, deadline: deadline,
+                return Receipt(grant: grant, route: route,
                     activationFailure: V2GatewayRoomSubscriptionCoordinationError.superseded)
             }
             guard await ingress.install(fence: grant.fence, sourceShardID: route.activation.owner.shardID,
-                serviceID: route.authenticatedServiceID, deadline: deadline,
+                serviceID: route.authenticatedServiceID, session: grant.deliverySession,
                 afterAuthoritativeReset: resetValidated) else {
                 throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant
             }
@@ -404,7 +368,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             activationFailure = error
         }
         if activationFailure == nil { routeRecovery.removeValue(forKey: key.roomID) }
-        return Receipt(grant: grant, route: route, deadline: deadline, activationFailure: activationFailure)
+        return Receipt(grant: grant, route: route, activationFailure: activationFailure)
     }
     private static func provesInvalidActivation(_ error: any Error) -> Bool {
         switch error {
@@ -448,7 +412,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                 relations.removeValue(forKey: key); keysByRoom[key.roomID]?.remove(key); deniedRepresentatives.remove(key)
             }
             if keysByRoom[key.roomID]?.isEmpty == true {
-                // Last local interest ends socket authority as well as renewal.
+                // Last local interest ends socket authority.
                 // Exact-fence retirement cannot invalidate a newer installation; keep
                 // the fence history to reject delayed controls and old writes.
                 if let fence = sharedReceipts[key.roomID]?.grant.fence ?? acquiredFence {
@@ -487,23 +451,16 @@ public actor V2GatewayRoomSubscriptionCoordinator {
         setDeadline(roomID, at: now())
     }
 
-    private func renewalDue(before deadline: ContinuousClock.Instant) -> ContinuousClock.Instant {
-        // Start before the entire RPC budget plus one maintenance tick. A
-        // successful proof cannot extend an authority that expired in flight.
-        let instant = now()
-        let lead = min(requestTimeout + .milliseconds(100), (deadline - instant) / 2)
-        return max(instant + .milliseconds(100), deadline - lead)
-    }
+
     private func retainShared(_ receipt: Receipt) async {
         let room = receipt.grant.fence.roomID
         if let old = sharedReceipts[room], old.grant.fence.activation.isNewer(than: receipt.grant.fence.activation)
             || (old.grant.fence.activation == receipt.grant.fence.activation && old.grant.fence.generation > receipt.grant.fence.generation) { return }
-        if let old = sharedReceipts[room], old.grant.fence == receipt.grant.fence, old.deadline >= receipt.deadline { return }
         sharedReceipts[room] = receipt
         let needsBaseline = await ingress.authority.requiresBaseline(fence: receipt.grant.fence)
         guard !closed, sharedReceipts[room]?.grant.fence == receipt.grant.fence,
-              sharedReceipts[room]?.deadline == receipt.deadline else { return }
-        setDeadline(room, at: needsBaseline ? now() : renewalDue(before: receipt.deadline))
+              sharedReceipts[room]?.grant.deliverySession == receipt.grant.deliverySession else { return }
+        if needsBaseline { setDeadline(room, at: now()) }
     }
     private func representative(_ room: RoomID) async -> Key? {
         func eligible(_ key: Key) -> Bool {
@@ -512,7 +469,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
         if let cached = roomRepresentatives[room], eligible(cached) {
             let live: Bool
             if let receipt = sharedReceipts[room] {
-                live = await ingress.authority.renewalCheckpoint(fence: receipt.grant.fence,
+                live = await ingress.authority.authorizationCheckpoint(fence: receipt.grant.fence,
                     serviceID: receipt.route.authenticatedServiceID) != nil
             } else { live = false }
             guard !closed else { return nil }
@@ -545,104 +502,37 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             if callWaiters.isEmpty { firstCallWaiter = 0; nextCallWaiter = 0 }
         }
     }
-    private struct PendingRenewal: Sendable {
-        let key: Key
-        let relationID: UUID
-        let receipt: Receipt
-        let authorizationSequence: UInt64
-    }
-    /// Indexed bounded deadline admission. One room renews once per Gateway;
-    /// up to 64 independent rooms on the same peer share one signed RPC.
-    public func renewLeases() async {
-        for task in await admitRenewals() { await task.value }
-    }
-    private var admittingRenewals = false
-    private func admitRenewals() async -> [Task<Void, Never>] {
-        guard !closed, !admittingRenewals else { return [] }
-        admittingRenewals = true
-        defer { admittingRenewals = false }
-        var peers: [(peer: V2ActorHostIdentity, values: [PendingRenewal])] = []
-        var openBatches: [V2ActorHostIdentity: Int] = [:]
-        var selectedCallsByPeer: [V2ActorHostIdentity: Int] = [:]
-        var rebuilds: [(Key, UUID)] = []
-        let available = max(0, maximumConcurrentCalls - calls)
-        guard available > 0 else { return [] }
-        var selected = 0
-        var examined = 0
-        let admissionCut = now()
-        // Deferred rooms consume work too. A moving clock can otherwise make
-        // the same busy-peer room due again inside this synchronous actor turn.
-        while !closed, examined < available * 64, selected < available * 64,
-              let room = dueRooms.popDue(at: admissionCut) {
-            examined += 1
-            guard !renewingRooms.contains(room), let key = await representative(room),
-                  let relation = relations[key], let receipt = sharedReceipts[room] else { continue }
-            if let pending = routeRecovery[room], pending.retryAt > now() {
-                setDeadline(room, at: pending.retryAt); continue
+    /// Only failures and explicit control invalidations enqueue recovery.
+    public func sessionChanged(host: V2ActorHostIdentity) async {
+        guard !closed else { return }
+        for (room, receipt) in sharedReceipts where receipt.route.activation.host == host {
+            if ingress.authority.sessionGate(receipt.grant.deliverySession, serviceID: receipt.route.authenticatedServiceID)?.isReady(at: now()) != true {
+                setDeadline(room, at: now())
             }
-            let checkpoint = await ingress.authority.renewalCheckpoint(fence: receipt.grant.fence,
-                serviceID: receipt.route.authenticatedServiceID)
-            guard !closed, relations[key]?.id == relation.id,
-                  sharedReceipts[room]?.grant.fence == receipt.grant.fence else { continue }
-            guard let checkpoint, routes[room] != nil,
-                routeRecovery[room] == nil else {
-                if rebuilds.count + peers.count >= available { setDeadline(room, at: admissionCut); break }
-                rebuilds.append((key, relation.id)); renewingRooms.insert(room)
-                selected += 1; continue
-            }
-            let peer = receipt.route.activation.host
-            let renewal = PendingRenewal(key: key, relationID: relation.id,
-                receipt: receipt, authorizationSequence: checkpoint)
-            if let index = openBatches[peer], peers[index].values.count < 64 {
-                peers[index].values.append(renewal)
-            } else {
-                guard renewalCallsByPeer[peer, default: 0] + selectedCallsByPeer[peer, default: 0] < 2 else {
-                    peerWaiters[peer, default: []].insert(room); continue
-                }
-                guard rebuilds.count + peers.count < available else {
-                    setDeadline(room, at: admissionCut); break
-                }
-                // A full peer batch consumes one call, not the whole pass.
-                // Another bounded batch may use another available call slot.
-                openBatches[peer] = peers.count
-                peers.append((peer, [renewal]))
-                selectedCallsByPeer[peer, default: 0] += 1
-            }
-            renewingRooms.insert(room); selected += 1
         }
-        guard !closed else {
-            for (key, _) in rebuilds { renewingRooms.remove(key.roomID) }
-            for (_, values) in peers { for value in values { renewingRooms.remove(value.key.roomID) } }
-            return []
-        }
+    }
+    private var admittingRepairs = false
+    private func admitRepairs() async -> [Task<Void, Never>] {
+        guard !closed, !admittingRepairs else { return [] }
+        admittingRepairs = true; defer { admittingRepairs = false }
         var admitted: [Task<Void, Never>] = []
-        for (key, relationID) in rebuilds {
-            guard calls < maximumConcurrentCalls else {
-                renewingRooms.remove(key.roomID); setDeadline(key.roomID, at: admissionCut); continue
-            }
-            calls += 1
+        let cut = now()
+        while !closed, calls < maximumConcurrentCalls, let room = dueRooms.popDue(at: cut) {
+            guard !repairingRooms.contains(room), let key = await representative(room), let relation = relations[key] else { continue }
+            if let pending = routeRecovery[room], pending.retryAt > cut { setDeadline(room, at: pending.retryAt); continue }
+            guard calls < maximumConcurrentCalls else { setDeadline(room, at: cut); break }
+            calls += 1; repairingRooms.insert(room)
             let flightID = UUID()
-            let task = Task { await self.rebuildRoom(key, relationID: relationID, flightID: flightID) }
-            renewalFlights[flightID] = task; admitted.append(task)
-        }
-        for (peer, values) in peers {
-            guard calls < maximumConcurrentCalls else {
-                for value in values { renewingRooms.remove(value.key.roomID); setDeadline(value.key.roomID, at: admissionCut) }
-                continue
-            }
-            calls += 1
-            renewalCallsByPeer[peer, default: 0] += 1
-            let flightID = UUID()
-            let task = Task { await self.renewRooms(peer: peer, values: values, flightID: flightID) }
-            renewalFlights[flightID] = task; admitted.append(task)
+            let task = Task { await self.rebuildRoom(key, relationID: relation.id, flightID: flightID) }
+            repairFlights[flightID] = task; admitted.append(task)
         }
         return admitted
     }
     private func rebuildRoom(_ key: Key, relationID: UUID, flightID: UUID) async {
         defer {
             releaseCallSlot()
-            renewingRooms.remove(key.roomID)
-            renewalFlights.removeValue(forKey: flightID)
+            repairingRooms.remove(key.roomID)
+            repairFlights.removeValue(forKey: flightID)
             scheduleMaintenance()
         }
         guard hasReferences(key, relationID: relationID) else { return }
@@ -670,7 +560,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                     deniedRepresentatives.insert(member)
                     continue
                 }
-                // Partial registration must not become an ordinary renewal.
+                // Retry the complete registration after a partial failure.
                 scheduleRouteConfirmation(key.roomID)
                 if await representative(key.roomID) != nil {
                     setDeadline(key.roomID, at: routeRecovery[key.roomID]?.retryAt ?? now() + .seconds(1))
@@ -679,122 +569,12 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             }
         }
     }
-    private func renewRooms(peer: V2ActorHostIdentity, values: [PendingRenewal], flightID: UUID) async {
-        defer {
-            releaseCallSlot(); renewalFlights.removeValue(forKey: flightID)
-            let remaining = renewalCallsByPeer[peer, default: 1] - 1
-            if remaining == 0 { renewalCallsByPeer.removeValue(forKey: peer) }
-            else { renewalCallsByPeer[peer] = remaining }
-            for value in values { renewingRooms.remove(value.key.roomID) }
-            releasePeerWaiters(peer)
-        }
-        let queryStart = now()
-        let requests = values.map { value in
-            V2GatewayRoomSubscriptionPorts.RenewalRequest(activation: value.receipt.route.activation,
-                command: .init(roomID: value.key.roomID, actorUserID: value.key.userID,
-                    gatewayDescriptor: ports.gateway, expectedFence: value.receipt.grant.fence,
-                    appliedControlSequence: value.authorizationSequence))
-        }
-        do {
-            let outcomes = try await ports.renewBatch(peer, requests, queryStart + requestTimeout)
-            guard outcomes.count == values.count, Set(outcomes.map(\.activation)).count == values.count else {
-                throw V2GatewayRoomSubscriptionCoordinationError.invalidGrant
-            }
-            let byToken = Dictionary(uniqueKeysWithValues: outcomes.map { ($0.activation, $0.result) })
-            for value in values {
-                guard !closed, await representative(value.key.roomID) != nil,
-                      sharedReceipts[value.key.roomID]?.grant.fence == value.receipt.grant.fence,
-                      let outcome = byToken[value.receipt.route.activation] else { continue }
-                switch outcome {
-                case .result(.renewed(let renewal)):
-                    let deadline = queryStart + .milliseconds(renewal.remainingLeaseMilliseconds)
-                    if renewal.fence != value.receipt.grant.fence {
-                        _ = await ingress.authority.pause(fence: value.receipt.grant.fence)
-                    }
-                    guard renewal.fence == value.receipt.grant.fence,
-                          renewal.appliedControlSequence == value.authorizationSequence,
-                          (1...300_000).contains(renewal.remainingLeaseMilliseconds) else {
-                        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.renewalProofMalformed)
-                        await renewalFailed(value, error: V2GatewayRoomSubscriptionCoordinationError.invalidGrant); continue
-                    }
-                    guard deadline > now() else {
-                        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.renewalProofExpired)
-                        await renewalFailed(value, error: V2GatewayRoomSubscriptionCoordinationError.invalidGrant); continue
-                    }
-                    guard await ingress.renew(fence: renewal.fence, sourceShardID: value.receipt.route.activation.owner.shardID,
-                            serviceID: value.receipt.route.authenticatedServiceID,
-                            appliedControlSequence: value.authorizationSequence,
-                            deadline: deadline) else {
-                        await renewalFailed(value, error: V2GatewayRoomSubscriptionCoordinationError.invalidGrant); continue
-                    }
-                    await ingress.refreshProgress(fence: renewal.fence,
-                        sourceShardID: value.receipt.route.activation.owner.shardID,
-                        serviceID: value.receipt.route.authenticatedServiceID,
-                        highWatermark: renewal.committedRoomSequence)
-                    let renewed = Receipt(grant: value.receipt.grant, route: value.receipt.route,
-                        deadline: deadline, activationFailure: nil)
-                    sharedReceipts[value.key.roomID] = renewed
-                    V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.renewalAccepted)
-                    setDeadline(value.key.roomID, at: renewalDue(before: deadline))
-                case .failure(let error): await renewalFailed(value, error: error)
-                case .result(.failure(let reason)):
-                    if reason == .stale { routes.removeValue(forKey: value.key.roomID) }
-                    await renewalFailed(value, error: V2GatewayRoomSubscriptionCoordinationError.refused(reason))
-                default: await renewalFailed(value, error: V2GatewayRoomSubscriptionCoordinationError.invalidGrant)
-                }
-            }
-        } catch { for value in values { await renewalFailed(value, error: error) } }
-    }
-    private func renewalFailed(_ value: PendingRenewal, error: any Error) async {
-        guard !closed, sharedReceipts[value.key.roomID]?.grant.fence == value.receipt.grant.fence,
-              await representative(value.key.roomID) != nil else { return }
-        if case V2GatewayRoomSubscriptionCoordinationError.refused(.unauthorized) = error {
-            deniedRepresentatives.insert(value.key)
-        }
-        noteRouteFailure(error, roomID: value.key.roomID, activation: value.receipt.route.activation)
-        recordRenewalFailure(error)
-        onCleanupFailure(value.key.roomID, value.key.userID, error)
-        // No grant is extended on failure. A missing/expired/paused proof takes
-        // the full two-phase repair on its next bounded deadline admission.
-        setDeadline(value.key.roomID, at: routeRecovery[value.key.roomID]?.retryAt ?? now() + .seconds(1))
-    }
-    private func recordRenewalFailure(_ error: any Error) {
-        let stage: V2RoomSubscriptionHeadDeliveryMetrics.Stage
-        switch error {
-        case V2GatewayRoomSubscriptionCoordinationError.invalidGrant: stage = .renewalInvalidGrant
-        case V2GatewayRoomSubscriptionCoordinationError.refused(let reason):
-            switch reason {
-            case .unavailable: stage = .renewalRemoteUnavailable
-            case .overloaded: stage = .renewalRemoteOverloaded
-            case .stale: stage = .renewalRemoteStale
-            case .unauthorized: stage = .renewalRemoteUnauthorized
-            case .invalidRequest: stage = .renewalRemoteInvalidRequest
-            }
-        case let failure as V2RoomCallFailure:
-            switch failure {
-            case .outcomeUnknown: stage = .renewalCallOutcomeUnknown
-            case .notAccepted(let reason), .rolledBack(let reason):
-                switch reason {
-                case .deadlineExceeded: stage = .renewalCallDeadlineExceeded
-                case .overloaded: stage = .renewalCallOverloaded
-                case .unavailable: stage = .renewalCallUnavailable
-                case .invalidRequest: stage = .renewalCallInvalidRequest
-                case .cancelled: stage = .renewalCallCancelled
-                case .forbidden: stage = .renewalCallForbidden
-                case .staleActivation, .notReady, .retired, .authorityLost: stage = .renewalCallStale
-                default: stage = .renewalOtherFailure
-                }
-            }
-        default: stage = .renewalOtherFailure
-        }
-        V2RoomSubscriptionHeadDeliveryMetrics.shared.record(stage)
-    }
     public func shutdown() async {
         if closed {
             if !shutdownFinished { await withCheckedContinuation { shutdownJoiners.append($0) } }
             return
         }
-        closed = true; maintenance?.cancel(); dueRooms.removeAll(); peerWaiters.removeAll()
+        closed = true; maintenance?.cancel(); dueRooms.removeAll()
         for receipt in sharedReceipts.values { _ = await ingress.authority.pause(fence: receipt.grant.fence) }
         references.removeAll()
         let retained = relations
@@ -803,7 +583,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             _ = startRetirement(key, relation: relation)
         }
         let retirements = relations.values.compactMap(\.retirement)
-        let flights = Array(renewalFlights.values)
+        let flights = Array(repairFlights.values)
         for flight in flights { await flight.value }
         for retirement in retirements { await retirement.value }
         await maintenance?.value
@@ -816,7 +596,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
 }
 
 /// Exactly one deadline node per active room; no stale tombstones or full sweep.
-private struct V2RoomRenewalDeadlines {
+private struct V2RoomRepairDeadlines {
     private struct Node { let room: RoomID; var at: ContinuousClock.Instant }
     private var nodes: [Node] = []
     private var positions: [RoomID: Int] = [:]

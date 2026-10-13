@@ -18,12 +18,6 @@ extension V2GatewayRealtimeDescriptor: V2ActorBudgetedPayload {
             Cost.textBytes(address), Cost.dataBytes(endpointReference))
     }
 }
-extension V2RoomSubscriptionRenewCommand: V2ActorBudgetedPayload {
-    package var actorRetainedBytes: Int {
-        Cost.sum(128, Cost.textBytes(roomID.rawValue), Cost.textBytes(actorUserID.rawValue),
-            gatewayDescriptor.actorRetainedBytes, expectedFence.actorRetainedBytes)
-    }
-}
 extension V2ActorRoomLogPullWire: V2ActorBudgetedPayload {
     package var actorRetainedBytes: Int { Cost.sum(128, Cost.textBytes(roomID.rawValue), Cost.textBytes(actorUserID.rawValue)) }
 }
@@ -31,7 +25,6 @@ extension V2RoomRequest: V2ActorBudgetedPayload {
     package var actorRetainedBytes: Int {
         switch self {
         case .messaging(.sendOperation(let command)): Cost.sum(64, command.estimatedRetainedBytes)
-        case .roomSubscription(.renew(let command)): Cost.sum(64, command.actorRetainedBytes)
         case .roomLog(.pull(let command)): Cost.sum(64, command.actorRetainedBytes)
         default: Cost.reflectedBytes(of: self)
         }

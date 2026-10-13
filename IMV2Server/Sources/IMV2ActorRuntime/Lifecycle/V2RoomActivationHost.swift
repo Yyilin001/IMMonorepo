@@ -264,10 +264,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
            let concrete = request as? V2RoomRequest, case .roomLog(.pull) = concrete {
             return try await invokePureRead(token: token, request: request, deadline: deadline)
         }
-        if factory.pureSubscriptionRenew != nil,
-           let concrete = request as? V2RoomRequest, case .roomSubscription(.renew) = concrete {
-            return try await invokePureRenew(token: token, request: request, deadline: deadline)
-        }
+
         return try await executionHandle(token: token).invoke(decodedInvocation: V2RoomInvocation(request), deadline: deadline)
     }
 
@@ -282,22 +279,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
             request: request, deadline: deadline, execute: execute)
     }
 
-    private func invokePureRenew(token: V2RoomActivationToken,
-                                 request: Request, deadline: ContinuousClock.Instant) async throws -> Response {
-        guard let concrete = request as? V2RoomRequest, concrete.roomID == token.roomID,
-              case .roomSubscription(.renew) = concrete,
-              let execute = factory.pureSubscriptionRenew else {
-            throw V2RoomCallFailure.notAccepted(.invalidRequest)
-        }
-        let entry = try readyEntry(token)
-        guard let validUntil = entry.executionAuthority?.deadline() else {
-            throw V2RoomCallFailure.notAccepted(.authorityLost)
-        }
-        return try await invokePinnedRead(entry: entry, token: token,
-            request: request, deadline: deadline, execute: { token, request, deadline in
-                await execute(token, request, deadline, validUntil)
-            })
-    }
+
 
     private func invokePinnedRead(
         entry: Entry, token: V2RoomActivationToken,

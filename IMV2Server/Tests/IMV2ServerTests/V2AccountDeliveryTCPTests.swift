@@ -219,15 +219,15 @@ struct V2AccountDeliveryTCPTests {
                             token: token, deadline: deadline)
                         installedFences.withLock { $0["\(gatewayIndex):\(command.roomID.rawValue)"] = grant.fence }
                         return .granted(.init(fence: grant.fence, memberRevision: grant.memberRevision,
-                            userBaselineSequence: grant.baselineSequence, remainingLeaseMilliseconds: grant.remainingLeaseMilliseconds))
+                            userBaselineSequence: grant.baselineSequence, deliverySession: testDeliverySession(fence: grant.fence, gateway: gateway.identity, authority: ingress.authority)))
                     }
                     let key = "\(gatewayIndex):\(command.roomID.rawValue)"
                     let generation = installedFences.withLock { ($0[key]?.generation ?? 0) + 1 }
                     let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: generation, baselineSequence: 0)
                     installedFences.withLock { $0["\(gatewayIndex):\(command.roomID.rawValue)"] = fence }
                     return .granted(.init(fence: fence, memberRevision: 1,
-                        userBaselineSequence: 0, remainingLeaseMilliseconds: 30_000))
-                }, reset: { _, _, _ in .failure(.unavailable) }, renewBatch: { _, _, _ in [] },
+                        userBaselineSequence: 0, deliverySession: testDeliverySession(fence: fence, gateway: gateway.identity, authority: ingress.authority)))
+                }, reset: { _, _, _ in .failure(.unavailable) },
                 activate: { command, token, deadline in
                     if let automaticOwner {
                         try #require(try await automaticOwner.owner.activate(to: pump, descriptor: gateway, userID: user,
@@ -380,7 +380,7 @@ struct V2AccountDeliveryTCPTests {
                 for (index, ingress) in ingresses.enumerated() {
                     var fence = automaticAccountCoverage ? (installedFences.withLock { $0["\(index):\(room.rawValue)"] } ?? automaticFences[room]!) : V2RoomSubscriptionFence(activation: activation, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
                     if !automaticAccountCoverage {
-                        #expect(await ingress.install(fence: fence, sourceShardID: shard, serviceID: "owner", deadline: .now + .seconds(30)))
+                        #expect(await ingress.installTestSession(fence: fence, sourceShardID: shard, serviceID: "owner"))
                         let member = committed?.member ?? V2RoomSubscriptionMember(userID: user, memberRevision: 1)
                         let baseline = V2RoomSubscriptionDelivery(fence: fence, deliverySequence: 1,
                             authorizationSequence: 1, payload: .baseline(members: [member]))
@@ -399,8 +399,8 @@ struct V2AccountDeliveryTCPTests {
                                 owner: oldFence.activation.owner, activationEpoch: try .init(2),
                                 host: .init(hostID: oldFence.activation.host.hostID, incarnationID: UUID())),
                                 subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-                            try #require(await ingress.install(fence: replacement, sourceShardID: shard,
-                                serviceID: "owner", deadline: .now + .seconds(30)))
+                            try #require(await ingress.installTestSession(fence: replacement, sourceShardID: shard,
+                                serviceID: "owner"))
                             let baseline = V2RoomSubscriptionDelivery(fence: replacement, deliverySequence: 1,
                                 authorizationSequence: 1, payload: .baseline(members: [member]))
                             #expect(try await remote.send(baseline, gateway: index) == .appliedThrough(1))

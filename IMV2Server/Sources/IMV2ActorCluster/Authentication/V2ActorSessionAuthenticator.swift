@@ -224,8 +224,17 @@ public actor V2ActorSessionAuthenticator {
             guard pair.actorUserID.uuidValue != nil, pair.operationID.uuidValue != nil,
                   pair.source.roomID.uuidValue != nil, pair.source.messageID.uuidValue != nil,
                   pair.targetRoomID.uuidValue != nil else { throw V2ActorAuthenticationError.invalidRequest }
-        case .mutatePolicy, .updatePolicySnapshot:
+        case .mutatePolicy:
             guard call.principal == .service, peer.permissions.contains(.policyMutation) else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        case .updatePolicySnapshot(let request):
+            guard call.principal == .service, peer.permissions.contains(.policyMutation),
+                  peer.hostedIDs.contains(request.session.source.hostID),
+                  request.session.recipient == call.recipient else { throw V2ActorAuthenticationError.forbidden }
+        case .releasePolicyInterests(let request):
+            guard call.principal == .service, peer.permissions.contains(.policyRegistration),
+                  peer.hostedIDs.contains(request.subscriber.hostID), request.source == call.recipient else {
                 throw V2ActorAuthenticationError.forbidden
             }
         case .policySnapshots(let request):
@@ -234,25 +243,6 @@ public actor V2ActorSessionAuthenticator {
         case .activate, .lookup:
             guard call.principal == .service, !peer.permissions.subtracting([.policyRegistration, .policyMutation]).isEmpty else {
                 throw V2ActorAuthenticationError.forbidden
-            }
-        case .subscriptionRenewBatch(let items):
-            guard call.principal == .service, peer.permissions.contains(.userRoomCalls),
-                  peer.permissions.contains(.realtimeReceive), !items.isEmpty, items.count <= 64,
-                  Set(items.map { $0.token.roomID }).count == items.count else {
-                throw V2ActorAuthenticationError.forbidden
-            }
-            for item in items {
-                let command = item.command
-                guard item.token.host == host, item.token.roomID == command.roomID,
-                      command.expectedFence.activation == item.token else { throw V2ActorAuthenticationError.wrongRecipient }
-                guard command.gatewayDescriptor.identity.serviceID == peer.serviceID.rawValue,
-                      command.gatewayDescriptor.identity.incarnationID == call.callerIncarnation,
-                      peer.gatewayNodeIDs.contains(command.gatewayDescriptor.identity.nodeID)
-                        || peer.serviceID.rawValue == command.gatewayDescriptor.identity.nodeID else {
-                    throw V2ActorAuthenticationError.forbidden
-                }
-                do { try V2RoomSubscriptionCommand.renew(command).validate() }
-                catch { throw V2ActorAuthenticationError.invalidRequest }
             }
         case .recoveryBatch(let items):
             guard call.principal == .service, peer.permissions.contains(.userRoomCalls),
@@ -281,9 +271,7 @@ public actor V2ActorSessionAuthenticator {
                 if case .activate(let value) = command, value.fence.activation != token {
                     throw V2ActorAuthenticationError.wrongRecipient
                 }
-                if case .renew(let value) = command, value.expectedFence.activation != token {
-                    throw V2ActorAuthenticationError.wrongRecipient
-                }
+
                 if case .reset(let value) = command, value.expectedFence.activation != token {
                     throw V2ActorAuthenticationError.wrongRecipient
                 }

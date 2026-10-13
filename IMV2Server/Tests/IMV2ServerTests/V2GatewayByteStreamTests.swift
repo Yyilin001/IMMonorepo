@@ -1068,8 +1068,7 @@ struct V2GatewayByteStreamTests {
             owner: try .init(shardID: "rooms", epoch: 0), activationEpoch: try .init(1),
             host: .init(hostID: try .init("byte-stream-owner"), incarnationID: UUID())),
             subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        try #require(await owner.install(fence: fence, sourceShardID: "rooms", serviceID: "owner",
-            deadline: .now + .seconds(20)))
+        try #require(await owner.installTestSession(fence: fence, sourceShardID: "rooms", serviceID: "owner"))
         let member = V2RoomSubscriptionMember(userID: try .init("user-a"), memberRevision: 0)
         #expect(await owner.applyRoomSubscription(.init(fence: fence, deliverySequence: 1,
             authorizationSequence: 1, payload: .baseline(members: [member])),
@@ -1305,7 +1304,7 @@ struct V2GatewayByteStreamTests {
             owner: try .init(shardID: "rooms", epoch: 0), activationEpoch: try .init(1),
             host: .init(hostID: try .init("byte-stream-owner"), incarnationID: UUID())),
             subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        try #require(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
+        try #require(await ingress.installTestSession(fence: fence, sourceShardID: "rooms", serviceID: "owner"))
         #expect(await ingress.applyRoomSubscription(.init(fence: fence, deliverySequence: 1, authorizationSequence: 1,
             payload: .baseline(members: [.init(userID: try UserID("user-a"), memberRevision: memberRevision)])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))

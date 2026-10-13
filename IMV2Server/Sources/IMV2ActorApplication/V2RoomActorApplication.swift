@@ -167,7 +167,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
                 client = try await hostNode.makeClient(signer: configuration.signer,
                     trust: configuration.trust, limits: configuration.authentication)
                 _ = try await hostNode.startDiscovery(client: client, configuration: configuration.discovery)
-                try await policyServices?.clientBinding?.bind(client)
+                try await policyServices?.clientBinding?.bind(client, qualified: { await hostNode.readiness() })
                 directory = V2RoomDirectory(owners: V2RoomServerOwnerResolver(router: ownerRouter),
                     placement: placement, hosts: client, transport: client, configuration: configuration.runtime)
                 reservations = V2RoomReservationCoordinator(operations: await directory.reservationOperations(),
@@ -279,10 +279,7 @@ public actor V2RoomActorApplication: V2RoomRuntimeMetricsReading {
         try await client.resetRoomSubscription(command, token: token, deadline: deadline)
     }
 
-    public func renewRoomSubscriptions(on host: V2ActorHostIdentity, items: [V2RoomSubscriptionRenewBatchItem],
-        deadline: ContinuousClock.Instant) async throws -> [V2RoomSubscriptionRenewBatchOutcome] {
-        try await client.renewRoomSubscriptions(on: host, items: items, deadline: deadline)
-    }
+
 
     public func unsubscribeRoom(_ command: V2RoomSubscriptionUnsubscribeCommand, token: V2RoomActivationToken,
                                 deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult {

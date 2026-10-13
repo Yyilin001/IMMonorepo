@@ -12,6 +12,10 @@ import SQLKit
 /// 因此较旧的本地时间线不会把未知的审核事件当成一次有效的消息接受。
 public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
     private let database: any Database
+    private var permissionCommit: V2RoomPermissionCommit?
+    package func usingPermissionCommit(_ commit: V2RoomPermissionCommit?) -> Self {
+        var copy = self; copy.permissionCommit = commit; return copy
+    }
     private let activationScope: V2RoomActivationWriteScope?
     private var existingMemberAdministrationTransaction=false
     private var existingMessageModerationTransaction=false
@@ -68,10 +72,8 @@ public struct PostgresV2ModerationStore: V2TrustedSafetyModerationStore {
     }
 
     private func controlRoom(command: V2ModerationCommand, capacityProfile: V2CapacityProfile, eventID: EventID, now: Date) async throws -> V2ModerationOutcome {
-        return try await v2WithPostgresTransactionRetry(
-            database: database, maximumRetryCount: 0,
-            classifyCommitFailure: activationScope != nil, useRoomDeadline: activationScope != nil
-        ) { transaction in
+        return try await v2WithRoomPermissionCommit(database: database, permissionCommit: permissionCommit,
+            useRoomDeadline: activationScope != nil) { transaction in
             guard let sql = transaction as? any SQLDatabase else { throw V2ModerationStoreError.corruptPersistenceState }
             let roomID = try v2PersistenceUUID(command.roomID, invalid: V2ModerationStoreError.corruptPersistenceState)
             let actorID = try v2PersistenceUUID(command.actorUserID, invalid: V2ModerationStoreError.corruptPersistenceState)

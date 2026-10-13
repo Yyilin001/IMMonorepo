@@ -79,8 +79,11 @@ package struct PostgresV2RemotePolicyOwners: Sendable {
                 group.addTask {
                     let startedAt = ContinuousClock.now
                     defer { trace?.record("policy_snapshot_rpc", from: startedAt) }
-                    let request = try V2PolicySnapshotRequestWire(endpoint: route.endpoint, scopes: scopes, subscriber: subscriber)
-                    return try await client.policySnapshots(request, on: route.host, deadline: deadline).map { try .init(wire: $0) }
+                    let revision = try await stateCache?.prepareRemoteScopes(scopes.map(\.policyScope), source: route.host, endpoint: route.endpoint) ?? 1
+                    let request = try V2PolicySnapshotRequestWire(endpoint: route.endpoint, scopes: scopes, subscriber: subscriber, interestRevision: revision)
+                    let batch = try await client.policySnapshots(request, on: route.host, deadline: deadline)
+                    try await stateCache?.installRemoteBatch(batch, source: route.host)
+                    return try batch.snapshots.map { try .init(wire: $0) }
                 }
             }
             var states: [V2PolicyFactsSnapshot] = []

@@ -14,11 +14,15 @@ public protocol V2PolicyMutationServing: Sendable {
 }
 
 public protocol V2PolicyOwnershipServing: Sendable {
-    func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire]
+    func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> V2PolicySnapshotBatchWire
     func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, deadline: ContinuousClock.Instant) async throws
+    func releasePolicyInterests(_ request: V2PolicyInterestReleaseWire, deadline: ContinuousClock.Instant) async throws
 }
 extension V2PolicyOwnershipServing {
-    public func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire] {
+    public func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> V2PolicySnapshotBatchWire {
+        throw V2RoomCallFailure.notAccepted(.unavailable)
+    }
+    public func releasePolicyInterests(_ request: V2PolicyInterestReleaseWire, deadline: ContinuousClock.Instant) async throws {
         throw V2RoomCallFailure.notAccepted(.unavailable)
     }
     public func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, deadline: ContinuousClock.Instant) async throws {
@@ -134,7 +138,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         self.forwardPairs = forwardPairs
         self.placementDrain = placementDrain
         self.maximumInboundRequests = maximumInboundRequests
-        self.batchAdmission = .init(maximumRenewalBatches: min(maximumInboundRequests, serviceShardAccess.count * 2))
+        self.batchAdmission = .init()
         self.localGeneration = localGeneration
         self.actorSystem = actorSystem
     }
@@ -272,8 +276,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
             guard isHostOnly(request) else { throw V2ActorAuthenticationError.wrongRecipient }
         }
         let shards: Set<String>
-        if case .subscriptionRenewBatch(let items) = request { shards = Set(items.map { $0.token.owner.shardID }) }
-        else if case .recoveryBatch(let items) = request { shards = Set(items.map { $0.token.owner.shardID }) }
+        if case .recoveryBatch(let items) = request { shards = Set(items.map { $0.token.owner.shardID }) }
         else { shards = [requestShard(request)] }
         guard shards.isSubset(of: allowedShards),
               shards.isSubset(of: serviceShardAccess[verified.call.serviceID] ?? []) else {
@@ -281,7 +284,6 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         }
         let batchKind: V2RoomBatchAdmission.Kind?
         switch request {
-        case .subscriptionRenewBatch: batchKind = .renewal
         case .recoveryBatch: batchKind = .recovery
         default: batchKind = nil
         }
@@ -387,11 +389,18 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
             return .policyMutationCommitted(receipt)
         case .policySnapshots(let request):
             guard let policyOwnership else { throw V2RoomCallFailure.notAccepted(.unavailable) }
-            let states = try await policyOwnership.policySnapshots(request, deadline: deadline)
-            guard states.count == request.scopes.count, Set(states.map { $0.scope.key }) == Set(request.scopes.map(\.key)) else {
+            let batch = try await policyOwnership.policySnapshots(request, deadline: deadline)
+            guard batch.session.source == identity, batch.session.recipient == request.subscriber.host,
+                  batch.interestRevision == request.interestRevision,
+                  batch.snapshots.count == request.scopes.count,
+                  Set(batch.snapshots.map { $0.scope.key }) == Set(request.scopes.map(\.key)) else {
                 throw V2RoomCallFailure.outcomeUnknown
             }
-            return .policySnapshots(states)
+            return .policySnapshots(batch)
+        case .releasePolicyInterests(let request):
+            guard let policyOwnership else { throw V2RoomCallFailure.notAccepted(.unavailable) }
+            try await policyOwnership.releasePolicyInterests(request, deadline: deadline)
+            return .acknowledged
         case .updatePolicySnapshot(let request):
             guard let policyOwnership else { throw V2RoomCallFailure.notAccepted(.unavailable) }
             try await policyOwnership.updatePolicySnapshot(request, deadline: deadline)
@@ -414,26 +423,6 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
             let result = try await host.invoke(token: token, request: request, deadline: deadline)
             V2SendPathTrace.current?.mark("receiver_host_return")
             return .result(result)
-        case .subscriptionRenewBatch(let items):
-            // Bounded fanout uses Host lifecycle pins for pure renewal when
-            // configured. Other factories retain their ordinary room lanes.
-            let results = await withTaskGroup(of: (Int, V2RoomSubscriptionRenewBatchOutcome).self) { group in
-                for (index, item) in items.enumerated() {
-                    group.addTask { [host] in
-                        do {
-                            let reply = try await host.invoke(token: item.token, request: .roomSubscription(.renew(item.command)), deadline: deadline)
-                            guard case .roomSubscription(let result) = reply else { throw V2RoomCallFailure.outcomeUnknown }
-                            return (index, .init(token: item.token, outcome: .result(result)))
-                        } catch let failure as V2RoomCallFailure {
-                            return (index, .init(token: item.token, outcome: .failure(failure)))
-                        } catch { return (index, .init(token: item.token, outcome: .failure(.outcomeUnknown))) }
-                    }
-                }
-                var ordered: [(Int, V2RoomSubscriptionRenewBatchOutcome)] = []
-                for await result in group { ordered.append(result) }
-                return ordered.sorted { $0.0 < $1.0 }.map { $0.1 }
-            }
-            return .subscriptionRenewBatch(results)
         case .recoveryBatch(let items):
             let local = items.map { V2RoomRecoveryBatchCallItem(token: $0.token, query: $0.query, deadline: deadline) }
             return .recoveryBatch(await host.invokeRecoveryBatch(items: local, deadline: deadline))
@@ -450,12 +439,12 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
     }
 
     private func isBoundedBatch(_ request: V2ActorRPCRequest) -> Bool {
-        switch request { case .recoveryBatch, .subscriptionRenewBatch: true; default: false }
+        switch request { case .recoveryBatch: true; default: false }
     }
 
     private func requestToken(_ request: V2ActorRPCRequest) -> V2RoomActivationToken? {
         switch request {
-        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot: nil
+        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .recoveryBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests: nil
         case .lookup(let token), .invoke(let token, _), .reserve(let token, _): token
         case .forwardPair(let token, _): token
         case .markDispatched(let grant), .abortReservation(let grant), .finishReservation(let grant, _): grant.token
@@ -468,10 +457,11 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         case .drainPlacement(let request): request.shardID
         case .policySnapshots(let request): request.endpoint
         case .updatePolicySnapshot(let request): request.endpoint
+        case .releasePolicyInterests(let request): request.endpoint
         case .forwardPair(let token, _): token.owner.shardID
         case .mutatePolicy(let mutation): mutation.endpoint
         case .activate(_, let owner): owner.shardID
-        case .recoveryBatch, .subscriptionRenewBatch: "" // Handled as the complete shard set before dispatch.
+        case .recoveryBatch: "" // Handled as the complete shard set before dispatch.
         case .lookup(let token), .invoke(let token, _), .reserve(let token, _): token.owner.shardID
         case .markDispatched(let grant), .abortReservation(let grant), .finishReservation(let grant, _):
             grant.token.owner.shardID
@@ -480,25 +470,23 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
 
     private func isHostOnly(_ request: V2ActorRPCRequest) -> Bool {
         switch request {
-        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .lookup, .recoveryBatch, .subscriptionRenewBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .forwardPair: true
+        case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .lookup, .recoveryBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests, .forwardPair: true
         default: false
         }
     }
 }
 
 /// Actor-owned admission. SQL recovery cannot consume lease-maintenance slots.
-/// Renewal capacity is bounded by configured authenticated peers and the outer
+/// Recovery capacity is bounded by authenticated peers and the outer
 /// request limit; each peer can hold at most two batches of at most 64 rooms.
 struct V2RoomBatchAdmission {
-    enum Kind: Hashable { case recovery, renewal }
+    enum Kind: Hashable { case recovery }
     private struct Key: Hashable { let kind: Kind; let peer: V2ActorServiceID }
-    private let maximumRenewalBatches: Int
     private var active: [Kind: Int] = [:]
     private var peers: [Key: Int] = [:]
-    init(maximumRenewalBatches: Int) { self.maximumRenewalBatches = maximumRenewalBatches }
     mutating func acquire(_ kind: Kind, peer: V2ActorServiceID) -> Bool {
         let key = Key(kind: kind, peer: peer)
-        let limit = kind == .recovery ? 4 : maximumRenewalBatches
+        let limit = 4
         guard active[kind, default: 0] < limit, peers[key, default: 0] < 2 else { return false }
         active[kind, default: 0] += 1; peers[key, default: 0] += 1
         return true

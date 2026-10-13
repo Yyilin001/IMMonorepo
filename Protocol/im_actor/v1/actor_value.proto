@@ -193,11 +193,12 @@ message HotRetry { HotSendIdentity identity = 1; HotFingerprint fingerprint = 2;
 message HotSendResult { oneof outcome { HotSendReceipt receipt = 1; HotRetry deferred = 2; HotEmpty unresolved = 3; HotEmpty fingerprint_conflict = 4; } }
 message HotSubscriptionCommand {
   string room_id = 1; string user_id = 2; HotGatewayDescriptor gateway = 3;
-  // 1 subscribe, 2 activate, 3 reset, 4 unsubscribe, 5 renew. Unrecognized kinds fail closed.
-  uint32 kind = 4; HotFence fence = 5; uint64 member_revision = 6; uint64 applied_control_sequence = 7;
+  // 1 subscribe, 2 activate, 3 reset, 4 unsubscribe. Unrecognized kinds fail closed.
+  uint32 kind = 4; HotFence fence = 5; uint64 member_revision = 6;
 }
-message HotSubscriptionLease { HotFence fence = 1; uint64 member_revision = 2; uint64 baseline = 3; sint64 remaining_ms = 4; uint64 applied_control_sequence = 5; uint64 committed_sequence = 6; }
-message HotSubscriptionResult { oneof outcome { HotSubscriptionLease granted = 1; HotSubscriptionLease renewed = 2; HotEmpty activated = 3; HotEmpty unsubscribed = 4; string failure = 5; } }
+message HotDeliverySession { HostIdentity host = 1; HotGateway gateway = 2; uint64 generation = 3; }
+message HotSubscriptionGrant { HotFence fence = 1; uint64 member_revision = 2; uint64 baseline = 3; HotDeliverySession session = 4; }
+message HotSubscriptionResult { oneof outcome { HotSubscriptionGrant granted = 1; HotEmpty activated = 2; HotEmpty unsubscribed = 3; string failure = 4; } }
 message HotLogPull { string room_id = 1; string user_id = 2; uint64 after_sequence = 3; sint64 page_size = 4; }
 message HotLogSubscribe { string room_id = 1; string user_id = 2; }
 message HotLogEntry { string event_id = 1; uint64 sequence = 2; string projection_kind = 3; bytes payload = 4; }
@@ -206,13 +207,9 @@ message HotLogSubscription { string room_id = 1; uint64 high_watermark = 2; uint
 message HotRoomRequest { oneof operation { HotSend send = 1; HotSubscriptionCommand subscription = 2; HotLogPull log_pull = 3; HotLogSubscribe log_subscribe = 4; bytes cold_value = 100; } }
 message HotRoomResponse { oneof result { HotSendResult send = 1; HotSubscriptionResult subscription = 2; HotLogPage log_page = 3; HotLogSubscription log_subscription = 4; string log_failure = 5; bytes cold_value = 100; } }
 message HotInvoke { HotActivation token = 1; HotRoomRequest request = 2; }
-message HotRenewItem { HotActivation token = 1; HotSubscriptionCommand command = 2; }
-message HotRenewBatch { repeated HotRenewItem items = 1; }
-message HotRenewOutcome { HotActivation token = 1; oneof outcome { HotSubscriptionResult result = 2; bytes cold_failure = 100; } }
-message HotRenewResults { repeated HotRenewOutcome items = 1; }
 message HotReady { HotActivation token = 1; bytes physical_reference = 2; }
-message HotRPCRequest { oneof operation { HotInvoke invoke = 1; HotActivation lookup = 2; HotRenewBatch renew = 3; bytes cold_value = 100; } }
-message HotRPCResponse { oneof result { HotRoomResponse response = 1; HotReady ready = 2; HotRenewResults renew = 3; bool completed = 4; HotEmpty acknowledged = 5; bytes cold_value = 100; } }
+message HotRPCRequest { oneof operation { HotInvoke invoke = 1; HotActivation lookup = 2; bytes cold_value = 100; } }
+message HotRPCResponse { oneof result { HotRoomResponse response = 1; HotReady ready = 2; bool completed = 4; HotEmpty acknowledged = 5; bytes cold_value = 100; } }
 
 message HotEvent {
   string room_id = 1; uint64 high_watermark = 2; string event_id = 3; uint64 sequence = 4;
@@ -277,3 +274,7 @@ message HotShardToken { sint64 partition_id = 1; HotGateway host = 2; sint64 epo
 message HotPublish { HotShardToken token = 1; HotTopic topic = 2; HotRealtimePayload payload = 3; }
 message HotShardCall { HotRealtimeHeader header = 1; oneof operation { HotPublish publish = 2; bytes cold_control = 100; } }
 message HotShardReply { HotRealtimeHeader header = 1; oneof result { string publish = 2; bytes cold_control = 100; } }
+
+message HotDeliverySessionPulse { HotDeliverySession session = 1; string kind = 2; uint64 sequence = 3; }
+message HotDeliverySessionCall { HotRealtimeHeader header = 1; string source_shard_id = 2; HotDeliverySessionPulse pulse = 3; }
+message HotDeliverySessionReply { HotRealtimeHeader header = 1; string result = 2; }

@@ -32,15 +32,12 @@ public struct V2RoomActivationFactory<Request: Sendable, Response: Sendable>: Se
     /// Renewal observes the existing authorization cut. It pins the activation
     /// and uses its trusted deadline without queueing behind message writes.
     /// Subscribe, reset, activation and revocation still enter the room lane.
-    public let pureSubscriptionRenew: (@Sendable (V2RoomActivationToken, Request, ContinuousClock.Instant, ContinuousClock.Instant) async -> V2RoomTransactionCompletion<Response>)?
 
     public init(recoveryBatch: (@Sendable ([V2RoomRecoveryBatchCallItem]) async -> V2RoomTransactionCompletion<[V2RoomRecoveryBatchCallOutcome]>)? = nil,
                 pureRoomLogPull: (@Sendable (V2RoomActivationToken, Request, ContinuousClock.Instant) async -> V2RoomTransactionCompletion<Response>)? = nil,
-                pureSubscriptionRenew: (@Sendable (V2RoomActivationToken, Request, ContinuousClock.Instant, ContinuousClock.Instant) async -> V2RoomTransactionCompletion<Response>)? = nil,
                 make: @escaping @Sendable (V2RoomActivationToken) -> V2RoomActivationExecutor<Request, Response>) {
         self.make = make
         self.recoveryBatch = recoveryBatch
         self.pureRoomLogPull = pureRoomLogPull
-        self.pureSubscriptionRenew = pureSubscriptionRenew
     }
 }

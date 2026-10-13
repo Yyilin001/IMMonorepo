@@ -95,6 +95,25 @@ struct RoomSubscriptionBatchReply: Codable, Sendable {
     let result: V2RoomSubscriptionBatchResult
 }
 
+struct RoomDeliverySessionCall: Codable, Equatable, Sendable {
+    let serviceID: V2ActorServiceID
+    let version: Int
+    let callerIncarnation: UUID
+    let recipient: V2GatewayRealtimeIdentity
+    let sessionID: UUID
+    let sequence: UInt64
+    let attemptID: UUID
+    let sourceShardID: String
+    let pulse: V2RoomDeliverySessionPulse
+}
+struct RoomDeliverySessionReply: Codable, Equatable, Sendable {
+    let recipient: V2GatewayRealtimeIdentity
+    let sessionID: UUID
+    let sequence: UInt64
+    let attemptID: UUID
+    let result: V2RoomDeliverySessionResult
+}
+
 public distributed actor V2GatewayRealtimeEndpoint {
     public typealias ActorSystem = ClusterSystem
     private let service: V2GatewayRealtimeInbound
@@ -103,6 +122,9 @@ public distributed actor V2GatewayRealtimeEndpoint {
     }
     public distributed func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try await service.openSession(packet)
+    }
+    public distributed func deliverySession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
+        try await service.deliverySession(packet)
     }
     public distributed func projectJournal(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try await service.projectJournal(packet)
@@ -250,6 +272,25 @@ actor V2GatewayRealtimeInbound {
         return try sessionReply(RoomSubscriptionBatchReply(recipient: identity, sessionID: call.sessionID,
             sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: limits.maximumPacketBytes)
     }
+    func deliverySession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
+        guard accepting else { throw V2ActorAuthenticationError.overloaded }
+        let (call, peer) = try verifySessionPacket(packet, as: RoomDeliverySessionCall.self)
+        guard call.serviceID == peer.serviceID, peer.permissions.contains(.realtimePublish),
+              serviceOwnerAccess[peer.serviceID]?.contains(call.sourceShardID) == true,
+              call.pulse.session.gateway == identity else { throw V2ActorAuthenticationError.forbidden }
+        guard call.version == 1, call.recipient == identity else { throw V2ActorAuthenticationError.wrongRecipient }
+        guard let session = sessions[call.sessionID], session.expires > .now,
+              session.service == peer.serviceID, session.incarnation == call.callerIncarnation else {
+            throw V2ActorAuthenticationError.sessionExpired
+        }
+        try call.pulse.session.validate()
+        guard call.pulse.sequence > 0 else { throw V2ActorAuthenticationError.invalidConfiguration }
+        try session.accept(sequence: call.sequence, attemptID: call.attemptID)
+        let result = await roomSubscriptionHandler?.applyDeliverySession(call.pulse,
+            authenticatedServiceID: peer.serviceID.rawValue) ?? .stale
+        return try sessionReply(RoomDeliverySessionReply(recipient: identity, sessionID: call.sessionID,
+            sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: 16_384)
+    }
     func deliverRoomSubscription(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let (call, peer) = try verifySessionPacket(packet, as: RoomSubscriptionCall.self)
@@ -319,6 +360,10 @@ public actor V2RealtimeClusterSender {
     private let incarnation = UUID()
     private var stopped = false
     private var active = 0
+    private var sessionCalls = 0
+    private var sessionPeers: Set<V2GatewayRealtimeIdentity> = []
+    private var authorizationCalls = 0
+    private var authorizationPeers: [V2GatewayRealtimeIdentity: Int] = [:]
     private var peerActive: [V2GatewayRealtimeIdentity: Int] = [:]
     private var sessions: [V2GatewayRealtimeDescriptor: Session] = [:]
     private var openings: [V2GatewayRealtimeDescriptor: Task<Session, Error>] = [:]
@@ -446,8 +491,13 @@ public actor V2RealtimeClusterSender {
         try target.validate()
         let validated = try validateRoomSubscriptionBatch(batch, sourceShardID: sourceShardID, limits: limits)
         try trust.validateRealtimeReceiver(target.identity)
-        try acquireCallback(to: target.identity)
-        defer { releaseCallback(to: target.identity) }
+        let authorization = batch.deliveries.allSatisfy { $0.payload.isAuthorizationControl }
+        if authorization { try acquireAuthorization(to: target.identity) }
+        else { try acquireCallback(to: target.identity) }
+        defer {
+            if authorization { releaseAuthorization(to: target.identity) }
+            else { releaseCallback(to: target.identity) }
+        }
         var session = try await session(for: target)
         try Task.checkCancellation()
         guard !stopped, session.expires > .now else { throw V2ActorAuthenticationError.sessionExpired }
@@ -476,6 +526,42 @@ public actor V2RealtimeClusterSender {
             throw error
         }
     }
+    public func sendDeliverySession(_ pulse: V2RoomDeliverySessionPulse, sourceShardID: String,
+                                    to target: V2GatewayRealtimeDescriptor) async throws -> V2RoomDeliverySessionResult {
+        try Task.checkCancellation(); try target.validate(); try pulse.session.validate()
+        guard pulse.session.gateway == target.identity,
+              pulse.sequence > 0, !sourceShardID.isEmpty else { throw V2ActorAuthenticationError.invalidConfiguration }
+        try trust.validateRealtimeReceiver(target.identity)
+        guard !stopped, sessionCalls < 8, !sessionPeers.contains(target.identity) else { throw V2ActorAuthenticationError.overloaded }
+        sessionCalls += 1; sessionPeers.insert(target.identity)
+        defer { sessionCalls -= 1; sessionPeers.remove(target.identity) }
+        var session = try await session(for: target)
+        try Task.checkCancellation()
+        guard !stopped, session.expires > .now else { throw V2ActorAuthenticationError.sessionExpired }
+        session = sessions[target] ?? session
+        guard session.sequence < UInt64.max else { throw V2ActorAuthenticationError.sessionExpired }
+        session.sequence += 1; sessions[target] = session
+        let call = RoomDeliverySessionCall(serviceID: signer.serviceID, version: 1, callerIncarnation: incarnation,
+            recipient: target.identity, sessionID: session.id, sequence: session.sequence, attemptID: UUID(),
+            sourceShardID: sourceShardID, pulse: pulse)
+        let packet = try session.mac.seal(call, reply: false, maximumBytes: 16_384)
+        do {
+        let endpoint = session.endpoint
+        let response = try await RemoteCall.with(timeout: .seconds(2)) { try await endpoint.deliverySession(packet) }
+        let peer = try trust.configuredService(try V2ActorServiceID(target.identity.serviceID))
+        try validatePeer(peer, target: target)
+        let reply = try session.mac.open(response, as: RoomDeliverySessionReply.self, reply: true, maximumBytes: 16_384)
+        guard reply.recipient == target.identity, reply.sessionID == call.sessionID,
+              reply.sequence == call.sequence, reply.attemptID == call.attemptID else { throw V2ActorAuthenticationError.wrongRecipient }
+        return reply.result
+        } catch {
+            if let auth = error as? V2ActorAuthenticationError,
+               auth == .sessionExpired || auth == .wrongRecipient, sessions[target]?.id == session.id {
+                sessions.removeValue(forKey: target)
+            }
+            throw error
+        }
+    }
     // Every callback type shares these actual invocation counters. Admission
     // precedes handshake suspension; release belongs to the invocation's defer.
     func acquireCallback(to peer: V2GatewayRealtimeIdentity) throws {
@@ -487,6 +573,15 @@ public actor V2RealtimeClusterSender {
         precondition(active > 0 && peerActive[peer, default: 0] > 0)
         active -= 1; peerActive[peer, default: 0] -= 1
         if peerActive[peer] == 0 { peerActive.removeValue(forKey: peer) }
+    }
+    private func acquireAuthorization(to peer: V2GatewayRealtimeIdentity) throws {
+        guard !stopped, authorizationCalls < 8, authorizationPeers[peer, default: 0] < 2 else { throw V2ActorAuthenticationError.overloaded }
+        authorizationCalls += 1; authorizationPeers[peer, default: 0] += 1
+    }
+    private func releaseAuthorization(to peer: V2GatewayRealtimeIdentity) {
+        precondition(authorizationCalls > 0 && authorizationPeers[peer, default: 0] > 0)
+        authorizationCalls -= 1; authorizationPeers[peer, default: 0] -= 1
+        if authorizationPeers[peer] == 0 { authorizationPeers.removeValue(forKey: peer) }
     }
     private func session(for target: V2GatewayRealtimeDescriptor) async throws -> Session {
         if let cached = sessions[target], cached.expires > .now { return cached }
@@ -538,10 +633,10 @@ public actor V2RealtimeClusterSender {
     }
     public func stop(deadline: ContinuousClock.Instant) async -> Bool {
         stopped = true
-        while active > 0 && ContinuousClock.now < deadline {
+        while (active > 0 || authorizationCalls > 0 || sessionCalls > 0) && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) } catch { break }
         }
-        guard active == 0 else { return false }
+        guard active == 0, authorizationCalls == 0, sessionCalls == 0 else { return false }
         sessions.removeAll(); openings.removeAll()
         return true
     }
@@ -559,6 +654,10 @@ public final class V2RealtimeTransportHandle: Sendable {
     }
     public func send(_ batch: V2RealtimeBatch, to target: V2GatewayRealtimeDescriptor) async throws -> V2RealtimeAcceptance {
         try await sender.send(batch, to: target)
+    }
+    public func sendDeliverySession(_ pulse: V2RoomDeliverySessionPulse, sourceShardID: String,
+                                    to target: V2GatewayRealtimeDescriptor) async throws -> V2RoomDeliverySessionResult {
+        try await sender.sendDeliverySession(pulse, sourceShardID: sourceShardID, to: target)
     }
     public func configureRoomSubscription(_ handler: any V2RoomSubscriptionHandler) async throws {
         try await inbound.configureRoomSubscription(handler)

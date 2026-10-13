@@ -119,3 +119,7 @@ extension RealtimeCall: V2ActorMACBody { static let macDomain = Data("IMV2ActorC
 extension RealtimeReply: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.RealtimeReply".utf8) }
 extension ShardCall: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.ShardCall".utf8) }
 extension ShardReply: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.ShardReply".utf8) }
+
+extension RoomDeliverySessionCall: V2ActorSessionBoundCall {}
+extension RoomDeliverySessionCall: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.RoomDeliverySessionCall".utf8) }
+extension RoomDeliverySessionReply: V2ActorMACBody { static let macDomain = Data("IMV2ActorCluster.RoomDeliverySessionReply".utf8) }

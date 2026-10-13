@@ -21,12 +21,11 @@ public struct V2RoomSubscriptionSourceSnapshot: Equatable, Sendable {
     public let highWatermark: UInt64
     public let membershipRevision: UInt64
     public let roomControlVersion: Int64
-    public let remainingLeaseMilliseconds: Int64
     public let members: [V2RoomSubscriptionSourceMember]
-    public init(roomID: RoomID, owner: V2RoomDataOwner, highWatermark: UInt64, membershipRevision: UInt64 = 0, roomControlVersion: Int64 = 0, remainingLeaseMilliseconds: Int64 = 0,
+    public init(roomID: RoomID, owner: V2RoomDataOwner, highWatermark: UInt64, membershipRevision: UInt64 = 0, roomControlVersion: Int64 = 0,
                 members: [V2RoomSubscriptionSourceMember]) {
         self.roomID = roomID; self.owner = owner; self.highWatermark = highWatermark
-        self.roomControlVersion = roomControlVersion; self.membershipRevision = membershipRevision; self.remainingLeaseMilliseconds = remainingLeaseMilliseconds; self.members = members
+        self.roomControlVersion = roomControlVersion; self.membershipRevision = membershipRevision; self.members = members
     }
 }
 
@@ -64,11 +63,10 @@ public struct V2RoomSubscriptionSourcePage: Equatable, Sendable {
     public let afterRoomSequence: UInt64
     public let highWatermark: UInt64
     public let records: [V2RoomSubscriptionSourceRecord]
-    public let remainingLeaseMilliseconds: Int64
     public init(roomID: RoomID, owner: V2RoomDataOwner, afterRoomSequence: UInt64,
-                highWatermark: UInt64, records: [V2RoomSubscriptionSourceRecord], remainingLeaseMilliseconds: Int64 = 0) {
+                highWatermark: UInt64, records: [V2RoomSubscriptionSourceRecord]) {
         self.roomID = roomID; self.owner = owner; self.afterRoomSequence = afterRoomSequence
-        self.highWatermark = highWatermark; self.records = records; self.remainingLeaseMilliseconds = remainingLeaseMilliseconds
+        self.highWatermark = highWatermark; self.records = records
     }
 }
 
@@ -82,16 +80,25 @@ public protocol V2RoomSubscriptionSource: Sendable {
               trackedUserIDs: Set<UserID>, limit: Int) async throws -> V2RoomSubscriptionSourcePage
 }
 
-/// Trusted local Host observation, never caller-supplied authority. Combines
-/// its confirmed activation safety deadline with a fresh ordered control cut.
-/// Renewal performs no credential, membership or activation database lookup.
-public struct V2RoomSubscriptionLeaseProof: Equatable, Sendable {
+
+/// Obtained only after a room mutation commits, under the same execution turn.
+/// This complete cut can advance several durable versions in one transaction.
+public struct V2RoomCommittedPermissionEffect: Sendable {
     public let activation: V2RoomActivationToken
-    public let committedRoomSequence: UInt64
-    public let roomControlVersion: Int64
-    public let remainingLeaseMilliseconds: Int64
-    public init(activation: V2RoomActivationToken, committedRoomSequence: UInt64, roomControlVersion: Int64 = 0, remainingLeaseMilliseconds: Int64) {
-        self.activation = activation; self.committedRoomSequence = committedRoomSequence
-        self.roomControlVersion = roomControlVersion; self.remainingLeaseMilliseconds = remainingLeaseMilliseconds
+    public let snapshot: V2RoomSubscriptionSourceSnapshot
+    public let requiresReceiveReset: Bool
+    public init(activation: V2RoomActivationToken, snapshot: V2RoomSubscriptionSourceSnapshot,
+                requiresReceiveReset: Bool = true) {
+        self.activation = activation; self.snapshot = snapshot; self.requiresReceiveReset = requiresReceiveReset
+    }
+}
+
+/// A room command returns its committed cut together with the business result.
+/// Rejections or commands that make no permission change have no new cut.
+public struct V2RoomPermissionMutationResult<Result: Sendable>: Sendable {
+    public let result: Result
+    public let effect: V2RoomCommittedPermissionEffect?
+    public init(result: Result, effect: V2RoomCommittedPermissionEffect?) {
+        self.result = result; self.effect = effect
     }
 }

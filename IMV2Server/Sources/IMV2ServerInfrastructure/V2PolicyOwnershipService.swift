@@ -13,19 +13,27 @@ package struct V2PolicyOwnershipService: V2PolicyOwnershipServing {
         precondition(!endpoint.isEmpty && endpoint.utf8.count <= 512)
         self.owners = owners; self.endpoint = endpoint; self.cache = cache
     }
-    package func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire] {
+    package func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> V2PolicySnapshotBatchWire {
         guard request.endpoint == endpoint else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
         guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
         return try await V2RoomSQLDeadline.withDeadline(deadline) {
-            let states = try await owners.registrationSnapshots(scopes: request.scopes.map(\.policyScope), subscriber: request.subscriber, requestedAt: .now)
+            let scopes = request.scopes.map(\.policyScope)
+            let session = try await owners.registrationSession(scopes: scopes, subscriber: request.subscriber, interestRevision: request.interestRevision)
+            let states = try await owners.registrationSnapshots(scopes: scopes, requestedAt: .now)
+            try await owners.confirmRegistration(session, scopes: scopes, interestRevision: request.interestRevision)
             guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-            return try states.map { try $0.wire }
+            return try .init(session: session, snapshots: states.map { try $0.wire }, interestRevision: request.interestRevision)
         }
+    }
+    package func releasePolicyInterests(_ request: V2PolicyInterestReleaseWire, deadline: ContinuousClock.Instant) async throws {
+        guard request.endpoint == endpoint else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+        guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+        try await owners.releaseInterests(request)
     }
     package func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, deadline: ContinuousClock.Instant) async throws {
         guard request.endpoint == endpoint, let cache else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
         guard deadline > .now else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-        try await cache.install(.init(wire: request.snapshot), interestedOnly: true)
+        try await cache.applyControl(request)
     }
 
 }

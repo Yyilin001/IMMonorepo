@@ -175,8 +175,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let recipient = UserID(uuid: memberTwoUUID)
             let dirtyHeads = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database)
             let activeLifetime = Mutex<V2RoomActivationLifetime?>(nil)
-            let host = V2RoomSubscriptionHost(checkInterval: loseCommitNotification ? .milliseconds(50) : .seconds(3_600),
-                dirtyChanges: { _, cursor, limit, deadline in
+            let host = V2RoomSubscriptionHost(dirtyChanges: { _, cursor, limit, deadline in
                     guard loseCommitNotification, let lifetime = activeLifetime.withLock({ $0 }) else {
                         return .init(changes: [], nextCursor: nil)
                     }

@@ -595,8 +595,7 @@ private final class Fixture: Sendable {
             owner: try .init(shardID: "rooms", epoch: 0), activationEpoch: try .init(1),
             host: .init(hostID: try .init("author-owner"), incarnationID: UUID())),
             subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        try #require(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "owner",
-            deadline: .now + .seconds(20)))
+        try #require(await ingress.installTestSession(fence: fence, sourceShardID: "rooms", serviceID: "owner"))
         #expect(await ingress.applyRoomSubscription(.init(fence: fence, deliverySequence: 1, authorizationSequence: 1,
             payload: .baseline(members: [.init(userID: user, memberRevision: 0)])),
             authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))

@@ -84,9 +84,9 @@ public enum V2ActorRPCRequest: Codable, Equatable, Sendable {
     case mutatePolicy(V2PolicyMutationWire)
     case policySnapshots(V2PolicySnapshotRequestWire)
     case updatePolicySnapshot(V2PolicySnapshotUpdateWire)
+    case releasePolicyInterests(V2PolicyInterestReleaseWire)
     case forwardPair(token: V2RoomActivationToken, pair: V2ActorForwardPairWire)
     case invoke(token: V2RoomActivationToken, request: V2RoomRequest)
-    case subscriptionRenewBatch([V2RoomSubscriptionRenewBatchItem])
     case recoveryBatch([V2RoomRecoveryBatchWireItem])
     case reserve(token: V2RoomActivationToken, requestID: UUID)
     case markDispatched(V2RoomReservation)
@@ -102,14 +102,13 @@ public enum V2ActorRPCResponse: Codable, Equatable, Sendable {
     case placementDrained(V2ActorPlacementDrainedWire)
     case ready(token: V2RoomActivationToken, physicalReference: Data)
     case result(V2RoomResponse)
-    case subscriptionRenewBatch([V2RoomSubscriptionRenewBatchOutcome])
     case recoveryBatch([V2RoomRecoveryBatchWireOutcome])
     case reserved(V2RoomReservation)
     case completed(Bool)
     case acknowledged
     case policyMutationIdentityConflict(V2PolicyMutationWire)
     case policyMutationCommitted(V2PolicyMutationReceiptWire)
-    case policySnapshots([V2PolicySnapshotWire])
+    case policySnapshots(V2PolicySnapshotBatchWire)
     case forwardPair(V2ActorForwardMessageResultWire)
     case failure(V2RoomCallFailure)
 }
@@ -186,21 +185,4 @@ public enum V2ActorAuthenticationError: Error, Equatable, Codable, Sendable {
     case sessionExpired
     case replay
     case overloaded
-}
-
-public struct V2RoomSubscriptionRenewBatchItem: Codable, Equatable, Sendable {
-    public let token: V2RoomActivationToken
-    public let command: V2RoomSubscriptionRenewCommand
-    public init(token: V2RoomActivationToken, command: V2RoomSubscriptionRenewCommand) {
-        self.token = token; self.command = command
-    }
-}
-public struct V2RoomSubscriptionRenewBatchOutcome: Codable, Equatable, Sendable {
-    public enum Outcome: Codable, Equatable, Sendable {
-        case result(V2RoomSubscriptionResult)
-        case failure(V2RoomCallFailure)
-    }
-    public let token: V2RoomActivationToken
-    public let outcome: Outcome
-    public init(token: V2RoomActivationToken, outcome: Outcome) { self.token = token; self.outcome = outcome }
 }

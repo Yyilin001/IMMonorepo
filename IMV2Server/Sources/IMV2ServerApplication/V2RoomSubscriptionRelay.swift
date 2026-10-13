@@ -35,6 +35,19 @@ public struct V2RoomSubscriptionInput: Equatable, Sendable {
 /// and acknowledges `pending` only after exact-fence Gateway admission. Bodies
 /// may become heads; durable room pull remains the recovery path.
 public actor V2RoomSubscriptionRelay {
+    public struct AuthorizationProgress: Sendable {
+        public let fence: V2RoomSubscriptionFence
+        public let issued: UInt64
+        public let applied: UInt64
+        public let invalidated: Bool
+        public let isUnreferenced: Bool
+        public init(fence: V2RoomSubscriptionFence, issued: UInt64, applied: UInt64,
+                    invalidated: Bool, isUnreferenced: Bool = false) {
+            self.fence = fence; self.issued = issued; self.applied = applied
+            self.invalidated = invalidated; self.isUnreferenced = isUnreferenced
+        }
+    }
+    public typealias ObserveAuthorization = @Sendable (AuthorizationProgress, V2GatewayRealtimeIdentity) -> Void
     public struct Status: Equatable, Sendable {
         public let fence: V2RoomSubscriptionFence
         public let latestHighWatermark: UInt64
@@ -47,12 +60,12 @@ public actor V2RoomSubscriptionRelay {
         let retainedBytes: Int
     }
     private struct Subscription: Sendable {
+        let gateway: V2GatewayRealtimeIdentity
         let fence: V2RoomSubscriptionFence
         var members: [UserID: UInt64]
         var nextAuthorizationSequence: UInt64 = 1
         var nextSequence: UInt64 = 1
-                // ACKs may advance while a renewal RPC is in flight. Only missing
-        // authorization controls invalidate its captured authority checkpoint.
+        // Message ACK progress is independent of the authorization frontier.
         var latestAuthoritySequence: UInt64 { nextAuthorizationSequence - 1 }
         var authorizationOutbox: [V2RoomSubscriptionDelivery] = []
         var messageOutbox: [V2RoomSubscriptionDelivery] = []
@@ -69,6 +82,7 @@ public actor V2RoomSubscriptionRelay {
     private let ownerEpoch: Int64
     private let sourceOwner: V2RoomDataOwner
     private let activation: V2RoomActivationToken
+    private let observeAuthorization: ObserveAuthorization
     private let maximumBufferedInputs: Int
     private let maximumBufferedInputBytes: Int
     private let maximumPendingDeliveries: Int
@@ -91,7 +105,8 @@ public actor V2RoomSubscriptionRelay {
                 maximumBufferedInputs: Int = 128, maximumPendingDeliveries: Int = 256,
                 maximumBufferedInputBytes: Int = 1_048_576,
                 maximumPendingBodyBytes: Int = 1_048_576,
-                maximumGateways: Int = 64, maximumMembers: Int = V2GroupCapacityPolicy.largeMaximumMembers) throws {
+                maximumGateways: Int = 64, maximumMembers: Int = V2GroupCapacityPolicy.largeMaximumMembers,
+                observeAuthorization: @escaping ObserveAuthorization = { _, _ in }) throws {
         guard sourceMembershipRevision <= UInt64(Int64.max), activation.owner.epoch >= 0, baselineSequence <= UInt64(Int64.max), nextInputSequence > 0,
               maximumBufferedInputs > 0, maximumPendingDeliveries > 0, maximumPendingBodyBytes > 0, maximumGateways > 0,
               maximumBufferedInputBytes > 0,
@@ -107,6 +122,7 @@ public actor V2RoomSubscriptionRelay {
         }
         self.roomID = activation.roomID; self.ownerEpoch = activation.owner.epoch; self.roomSequence = baselineSequence
         self.activation = activation
+        self.observeAuthorization = observeAuthorization
         self.sourceOwner = activation.owner; self.sourceMembershipRevision = sourceMembershipRevision
         self.nextInput = nextInputSequence; self.maximumBufferedInputs = maximumBufferedInputs
         self.maximumBufferedInputBytes = maximumBufferedInputBytes
@@ -120,14 +136,15 @@ public actor V2RoomSubscriptionRelay {
     }
 
     public static func restored(from snapshot: V2RoomSubscriptionSourceSnapshot, activation: V2RoomActivationToken,
-                                maximumMembers: Int = V2GroupCapacityPolicy.largeMaximumMembers, maximumGateways: Int = 64) throws -> V2RoomSubscriptionRelay {
+                                maximumMembers: Int = V2GroupCapacityPolicy.largeMaximumMembers, maximumGateways: Int = 64,
+                                observeAuthorization: @escaping ObserveAuthorization = { _, _ in }) throws -> V2RoomSubscriptionRelay {
         guard snapshot.roomID == activation.roomID, snapshot.owner == activation.owner else {
             throw V2RoomSubscriptionRelayError.stale
         }
         return try .init(activation: activation,
                   baselineSequence: snapshot.highWatermark, initialAuthorizations: snapshot.members,
                   sourceMembershipRevision: snapshot.membershipRevision,
-                  maximumGateways: maximumGateways, maximumMembers: maximumMembers)
+                  maximumGateways: maximumGateways, maximumMembers: maximumMembers, observeAuthorization: observeAuthorization)
     }
 
     public func committedSequence() -> UInt64 { roomSequence }
@@ -136,6 +153,7 @@ public actor V2RoomSubscriptionRelay {
     /// restore from a fresh fenced snapshot; transport cannot ACK past this.
     public func invalidate() {
         for gateway in Array(subscriptions.keys) {
+            if let subscription = subscriptions[gateway] { reportAuthorization(subscription, invalidated: true) }
             subscriptions[gateway]?.needsBaseline = true
             subscriptions[gateway]?.authorizationOutbox.removeAll(keepingCapacity: false)
             subscriptions[gateway]?.messageOutbox.removeAll(keepingCapacity: false)
@@ -395,7 +413,9 @@ public actor V2RoomSubscriptionRelay {
     package func reconcileControlCut(_ snapshot: V2RoomSubscriptionSourceSnapshot, requireTerminal: Bool = false) throws -> Bool {
         guard snapshot.roomID == roomID, snapshot.owner == sourceOwner, snapshot.highWatermark >= roomSequence,
               Set(snapshot.members.map(\.userID)) == Set(membership.keys) else { throw V2RoomSubscriptionRelayError.stale }
-        let matches = snapshot.highWatermark == roomSequence && snapshot.membershipRevision == sourceMembershipRevision
+        // Send-only policies can advance the log without changing receivers.
+        // Keep consuming that log in order instead of resetting live grants.
+        let matches = snapshot.membershipRevision == sourceMembershipRevision
             && snapshot.members.allSatisfy { member in
                 membership[member.userID].map { $0.revision == member.memberRevision && $0.authorized == member.authorized } ?? false
             }
@@ -416,6 +436,7 @@ public actor V2RoomSubscriptionRelay {
             subscription.authorizationOutbox.append(.init(fence: subscription.fence, deliverySequence: subscription.nextSequence, authorizationSequence: subscription.nextAuthorizationSequence, payload: .authorizationInvalidated))
             subscription.nextAuthorizationSequence += 1
             subscription.nextSequence += 1; subscription.controlInvalidated = true
+            reportAuthorization(subscription)
             subscriptions[gateway] = subscription
         }
     }
@@ -459,23 +480,13 @@ public actor V2RoomSubscriptionRelay {
                         && subscription.authorizationOutbox.isEmpty && subscription.messageOutbox.isEmpty))
     }
 
-    /// The authenticated Gateway checkpoint must include every issued authority control.
-    /// Body ACK lag does not require a new membership snapshot.
-    package func canRenew(gateway: V2GatewayRealtimeIdentity, fence: V2RoomSubscriptionFence,
-                          appliedControlSequence: UInt64, userID: UserID) -> Bool {
-        guard let subscription = subscriptions[gateway], subscription.fence == fence,
-              !subscription.needsBaseline, !subscription.controlInvalidated, subscription.members[userID] != nil,
-              appliedControlSequence > 0, appliedControlSequence < subscription.nextAuthorizationSequence,
-              appliedControlSequence >= subscription.latestAuthoritySequence else { return false }
-        return true
-    }
-
     package func acknowledge(gateway: V2GatewayRealtimeIdentity, fence: V2RoomSubscriptionFence,
                              through sequence: UInt64, lane: V2RoomSubscriptionLane) throws {
         guard var subscription = subscriptions[gateway], subscription.fence == fence else { throw V2RoomSubscriptionRelayError.stale }
         guard sequence < subscription.nextSequence else { throw V2RoomSubscriptionRelayError.invalidInput }
         if lane == .authorization {
             subscription.authorizationOutbox.removeAll { $0.deliverySequence <= sequence }
+            reportAuthorization(subscription)
         } else {
             subscription.messageOutbox.removeAll { $0.deliverySequence <= sequence }
             subscription.pendingBodyBytes = subscription.messageOutbox.reduce(0) { $0 + bodyBytes($1.payload) }
@@ -486,6 +497,7 @@ public actor V2RoomSubscriptionRelay {
             }
         }
         subscriptions[gateway] = subscription
+        if lane == .message, subscription.members.isEmpty { reportAuthorization(subscription) }
     }
 
     /// A receiver with a newer permission cut rejects old bodies. Retire only
@@ -494,7 +506,7 @@ public actor V2RoomSubscriptionRelay {
                                          through sequence: UInt64) throws {
         try acknowledge(gateway: gateway, fence: fence, through: sequence, lane: .message)
         guard var subscription = subscriptions[gateway], subscription.fence == fence,
-              !subscription.controlInvalidated else { return }
+              !subscription.controlInvalidated, !subscription.members.isEmpty else { return }
         append(.head(highWatermark: subscription.latestHighWatermark), to: &subscription)
         subscriptions[gateway] = subscription
     }
@@ -507,15 +519,23 @@ public actor V2RoomSubscriptionRelay {
     }
 
     private func append(_ payload: V2RoomSubscriptionPayload, to subscription: inout Subscription) {
+        defer { if payload.isAuthorizationControl { reportAuthorization(subscription) } }
         guard !subscription.needsBaseline else { return }
         guard subscription.nextSequence < UInt64.max else {
             subscription.needsBaseline = true
             return
         }
         if payload.isAuthorizationControl {
-            guard subscription.authorizationOutbox.count < maximumPendingDeliveries,
-                  subscription.nextAuthorizationSequence < UInt64.max else {
-                subscription.needsBaseline = true
+            guard !subscription.controlInvalidated else { return }
+            guard subscription.nextAuthorizationSequence < UInt64.max else { subscription.needsBaseline = true; return }
+            if subscription.authorizationOutbox.count >= maximumPendingDeliveries {
+                // Preserve the immutable prefix and one reserved terminal slot.
+                // The Gateway must apply denial before this fence can retire.
+                subscription.authorizationOutbox.append(.init(fence: subscription.fence,
+                    deliverySequence: subscription.nextSequence, authorizationSequence: subscription.nextAuthorizationSequence,
+                    payload: .authorizationInvalidated))
+                subscription.nextSequence += 1; subscription.nextAuthorizationSequence += 1
+                subscription.controlInvalidated = true
                 return
             }
         } else if subscription.messageOutbox.count >= maximumPendingDeliveries {
@@ -556,6 +576,18 @@ public actor V2RoomSubscriptionRelay {
         subscription.nextSequence += 1
     }
 
+    /// Enqueue and application ACK are the only normal update points. This
+    /// bounded synchronous observer runs before a control can wait in the pump;
+    /// ordinary messages perform no session bookkeeping or extra Actor hop.
+    private func reportAuthorization(_ subscription: Subscription, invalidated: Bool = false) {
+        observeAuthorization(.init(fence: subscription.fence,
+            issued: subscription.latestAuthoritySequence,
+            applied: subscription.authorizationOutbox.first.map { $0.authorizationSequence - 1 } ?? subscription.latestAuthoritySequence,
+            invalidated: invalidated, isUnreferenced: subscription.members.isEmpty
+                && subscription.authorizationOutbox.isEmpty && subscription.messageOutbox.isEmpty
+                && subscription.deferredHighWatermark == nil), subscription.gateway)
+    }
+
     private func apply(_ operation: V2RoomSubscriptionInput.Operation) throws {
         switch operation {
         case .membership(let user, let revision, let authorized):
@@ -590,7 +622,7 @@ public actor V2RoomSubscriptionRelay {
                 subscriptions[gateway] = subscription
             } else {
                 guard subscriptions.count < maximumGateways else { throw V2RoomSubscriptionRelayError.overloaded }
-                var subscription = Subscription(fence: .init(activation: activation, subscriptionID: id,
+                var subscription = Subscription(gateway: gateway, fence: .init(activation: activation, subscriptionID: id,
                     generation: generation, baselineSequence: roomSequence), members: [user: revision], latestHighWatermark: roomSequence)
                 append(.baseline(members: [member]), to: &subscription)
                 subscriptions[gateway] = subscription
@@ -599,6 +631,7 @@ public actor V2RoomSubscriptionRelay {
             guard var subscription = subscriptions[gateway] else { return }
             guard subscription.members[user] == revision else { throw V2RoomSubscriptionRelayError.stale }
             subscription.members.removeValue(forKey: user)
+            if subscription.members.isEmpty { subscription.deferredHighWatermark = nil }
             append(.revoke(userID: user, memberRevision: revision), to: &subscription)
             subscriptions[gateway] = subscription
         case .reset(let gateway, let id, let generation):
@@ -609,7 +642,7 @@ public actor V2RoomSubscriptionRelay {
                 guard let permission = membership[user], permission.authorized, permission.revision == revision else { return nil }
                 return .init(userID: user, memberRevision: revision)
             }.sorted { $0.userID.rawValue < $1.userID.rawValue }
-            var subscription = Subscription(fence: .init(activation: activation, subscriptionID: id,
+            var subscription = Subscription(gateway: gateway, fence: .init(activation: activation, subscriptionID: id,
                 generation: generation, baselineSequence: roomSequence),
                 members: Dictionary(uniqueKeysWithValues: members.map { ($0.userID, $0.memberRevision) }),
                 latestHighWatermark: max(previous.latestHighWatermark, roomSequence))

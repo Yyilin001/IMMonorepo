@@ -2,6 +2,14 @@ import Foundation
 import IMV2Core
 import SwiftProtobuf
 
+extension Im_Actor_V1_HotDeliverySession {
+    package init(_ value: V2RoomDeliverySession) { self.init(); host = .init(value.host); gateway = .init(value.gateway); generation = value.generation }
+    package func model() throws -> V2RoomDeliverySession {
+        try V2HotPB.check(self, hasHost && hasGateway)
+        let value = try V2RoomDeliverySession(host: host.model(), gateway: gateway.model(), generation: generation)
+        try value.validate(); return value
+    }
+}
 extension Im_Actor_V1_HotSubscriptionCommand {
     package init(_ value: V2RoomSubscriptionCommand) {
         self.init(); roomID = value.roomID.rawValue; userID = value.actorUserID.rawValue; gateway = .init(value.gatewayDescriptor)
@@ -10,18 +18,16 @@ extension Im_Actor_V1_HotSubscriptionCommand {
         case .activate(let value): kind = 2; fence = .init(value.fence)
         case .reset(let value): kind = 3; fence = .init(value.expectedFence)
         case .unsubscribe(let value): kind = 4; memberRevision = value.memberRevision
-        case .renew(let value): kind = 5; fence = .init(value.expectedFence); appliedControlSequence = value.appliedControlSequence
         }
     }
     package func model() throws -> V2RoomSubscriptionCommand {
         try V2HotPB.check(self, hasGateway)
         let room = try RoomID(roomID), user = try UserID(userID), descriptor = try gateway.model()
         switch kind {
-        case 1: try V2HotPB.check(self, !hasFence && memberRevision == 0 && appliedControlSequence == 0); return .subscribe(.init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor))
-        case 2: try V2HotPB.check(self, hasFence && memberRevision == 0 && appliedControlSequence == 0); return .activate(try .init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor, fence: fence.model()))
-        case 3: try V2HotPB.check(self, hasFence && memberRevision == 0 && appliedControlSequence == 0); return .reset(try .init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor, expectedFence: fence.model()))
-        case 4: try V2HotPB.check(self, !hasFence && appliedControlSequence == 0); return .unsubscribe(.init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor, memberRevision: memberRevision))
-        case 5: try V2HotPB.check(self, hasFence && memberRevision == 0); return .renew(try .init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor, expectedFence: fence.model(), appliedControlSequence: appliedControlSequence))
+        case 1: try V2HotPB.check(self, !hasFence && memberRevision == 0); return .subscribe(.init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor))
+        case 2: try V2HotPB.check(self, hasFence && memberRevision == 0); return .activate(try .init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor, fence: fence.model()))
+        case 3: try V2HotPB.check(self, hasFence && memberRevision == 0); return .reset(try .init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor, expectedFence: fence.model()))
+        case 4: try V2HotPB.check(self, !hasFence); return .unsubscribe(.init(roomID: room, actorUserID: user, gatewayDescriptor: descriptor, memberRevision: memberRevision))
         default: throw V2HotPB.Invalid.value
         }
     }
@@ -31,11 +37,8 @@ extension Im_Actor_V1_HotSubscriptionResult {
         self.init()
         switch value {
         case .granted(let value):
-            var lease = Im_Actor_V1_HotSubscriptionLease(); lease.fence = .init(value.fence); lease.memberRevision = value.memberRevision
-            lease.baseline = value.userBaselineSequence; lease.remainingMs = value.remainingLeaseMilliseconds; granted = lease
-        case .renewed(let value):
-            var lease = Im_Actor_V1_HotSubscriptionLease(); lease.fence = .init(value.fence); lease.appliedControlSequence = value.appliedControlSequence
-            lease.committedSequence = value.committedRoomSequence; lease.remainingMs = value.remainingLeaseMilliseconds; renewed = lease
+            var item = Im_Actor_V1_HotSubscriptionGrant(); item.fence = .init(value.fence); item.memberRevision = value.memberRevision
+            item.baseline = value.userBaselineSequence; item.session = .init(value.deliverySession); granted = item
         case .activated: activated = .init()
         case .unsubscribed: unsubscribed = .init()
         case .failure(let reason): failure = reason.rawValue
@@ -45,11 +48,8 @@ extension Im_Actor_V1_HotSubscriptionResult {
         try V2HotPB.check(self)
         switch outcome {
         case .granted(let value):
-            try V2HotPB.check(value, value.hasFence && value.appliedControlSequence == 0 && value.committedSequence == 0)
-            return .granted(try .init(fence: value.fence.model(), memberRevision: value.memberRevision, userBaselineSequence: value.baseline, remainingLeaseMilliseconds: value.remainingMs))
-        case .renewed(let value):
-            try V2HotPB.check(value, value.hasFence && value.memberRevision == 0 && value.baseline == 0)
-            return .renewed(try .init(fence: value.fence.model(), appliedControlSequence: value.appliedControlSequence, committedRoomSequence: value.committedSequence, remainingLeaseMilliseconds: value.remainingMs))
+            try V2HotPB.check(value, value.hasFence && value.hasSession)
+            return .granted(try .init(fence: value.fence.model(), memberRevision: value.memberRevision, userBaselineSequence: value.baseline, deliverySession: value.session.model()))
         case .activated(let value): try V2HotPB.check(value); return .activated
         case .unsubscribed(let value): try V2HotPB.check(value); return .unsubscribed
         case .failure(let value): guard let reason = V2RoomSubscriptionFailure(rawValue: value) else { throw V2HotPB.Invalid.value }; return .failure(reason)

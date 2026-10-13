@@ -9,6 +9,10 @@ import SQLKit
 /// Short online admission and permanent original outcomes, owned by the room activation.
 public struct PostgresV2MemberAdministrationStore:Sendable {
     private let database:any Database
+    private var permissionCommit: V2RoomPermissionCommit?
+    package func usingPermissionCommit(_ commit: V2RoomPermissionCommit?) -> Self {
+        var copy = self; copy.permissionCommit = commit; return copy
+    }
     private let clock:@Sendable () -> Date
     public init(database:any Database,clock:@escaping @Sendable () -> Date=Date.init) { self.database=database;self.clock=clock }
     public func admit(_ intent:V2MemberAdministrationIntent,token:V2RoomActivationToken) async throws -> V2MemberAdministrationAdmissionResult {
@@ -40,7 +44,7 @@ public struct PostgresV2MemberAdministrationStore:Sendable {
     public func submit(_ command:V2MemberAdministrationCommand,token:V2RoomActivationToken,
                        capacityProfile:V2CapacityProfile,eventID:EventID) async throws -> V2MemberAdministrationRecoveryResult {
         guard command.intent.targetUserID.uuidValue != nil else { throw V2MemberAdministrationValidationError.invalidIntent }
-        return try await v2WithRoomScopedTransaction(database:database) { transaction in
+        return try await v2WithRoomPermissionCommit(database: database, permissionCommit: permissionCommit) { transaction in
             let sql=try await lock(identity:command.identity,token:token,database:transaction)
             if let prior=try await original(identity:command.identity,fingerprint:command.fingerprint,sql:sql) { return prior }
             var now=clock(),nowMS=try milliseconds(now)

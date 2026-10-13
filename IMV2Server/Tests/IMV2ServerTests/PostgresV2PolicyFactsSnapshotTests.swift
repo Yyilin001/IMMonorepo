@@ -97,10 +97,14 @@ struct PostgresV2PolicyFactsSnapshotTests {
             var systems: [ClusterSystem] = []
             for index in 0..<2 { systems.append(await ClusterSystem(names[index], settings: settings(names[index], ports[index]))) }
             let clients = (0..<2).map { V2RoomClusterClient(system: systems[$0], signer: signers[$0], trust: trust, limits: limits, configuration: configuration) }
-            let caches = (0..<2).map { _ in V2NodePolicyStateCache() }
-            let subscriber = try V2PolicySnapshotSubscriberWire(hostID: identities[1].hostID, endpoint: names[1])
-            let publisher = V2PolicySnapshotPublisher(targets: [subscriber], localHostID: identities[0].hostID,
-                cache: caches[0], client: { clients[0] })
+            let caches = (0..<2).map { V2NodePolicyStateCache(identity: identities[$0]) }
+            let subscriber = try V2PolicySnapshotSubscriberWire(host: identities[1], endpoint: names[1])
+            let publisher = V2PolicySnapshotPublisher(targets: [try .init(hostID: subscriber.hostID, endpoint: subscriber.endpoint)],
+                identity: identities[0], cache: caches[0], validateRecipient: { target in
+                    guard target.host == identities[1] else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+                }, send: { request, target in
+                    try await clients[0].updatePolicySnapshot(request, on: target.host, deadline: .now + .seconds(2))
+                })
             let journal = PostgresV2PolicyAuthorizationJournal(database: database)
             let dispatcher = PostgresV2PolicyMutationDispatcher(database: database, projectionDelivery: SuccessfulProjectionDelivery())
             let directories = (0..<2).map { index in
@@ -115,6 +119,7 @@ struct PostgresV2PolicyFactsSnapshotTests {
             var endpoints: [V2RoomHostEndpoint] = []
             var serving: [SnapshotCountingService] = []
             func stop() async {
+                await publisher.shutdown()
                 for client in clients { await client.stop() }
                 for inbound in inbounds { await inbound.stop() }
                 for (index, host) in hosts.enumerated() {
@@ -158,11 +163,16 @@ struct PostgresV2PolicyFactsSnapshotTests {
                 #expect(first.count == 4 && first.allSatisfy { $0.version == 1 })
                 #expect(try await sql.raw("SELECT count(*)::bigint AS value FROM im_v2.policy_authorization_scopes").first(decoding: Count.self)?.value == 0)
                 #expect(await serving[0].reads == 1)
+                try await publisher.start(qualified: { true })
                 let hidden = ["public_user_profiles", "special_accounts", "account_disables", "user_blocks", "user_relationships", "user_stranger_message_preferences", "policy_authorization_scopes"]
                 for table in hidden { try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table) RENAME TO \(unsafeRaw: table + "_snapshot_hidden")").run() }
-                try await Task.sleep(for: .milliseconds(100))
+                // Heartbeats cross the real TCP control path while every
+                // authorization table is unavailable. Idle online authority
+                // must remain usable without a SQL revalidation.
+                try await Task.sleep(for: .milliseconds(2200))
                 for _ in 0..<100 { #expect(try await remote.registrationSnapshots(scopes: scopes) == first) }
                 #expect(await serving[0].reads == 1)
+                #expect(await serving[1].updates >= 1)
                 for table in hidden { try await sql.raw("ALTER TABLE im_v2.\(unsafeRaw: table + "_snapshot_hidden") RENAME TO \(unsafeRaw: table)").run() }
                 let social = V2PostgresSocialRelationshipPersistence(database: database, projectionDelivery: SuccessfulProjectionDelivery())
                 let block = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: .init(uuid: memberTwoUUID),
@@ -184,6 +194,16 @@ struct PostgresV2PolicyFactsSnapshotTests {
                 if case .account(let facts) = disabled.facts { #expect(!facts.isActive) }
                 #expect(await serving[0].reads == 1)
                 #expect(await serving[1].updates >= 3)
+                let snapshotsBeforeRelease = await serving[1].snapshots
+                try await clients[1].releasePolicyInterests(.init(endpoint: names[0], source: identities[0],
+                    subscriber: subscriber, payload: .scopes([.init(scope: scopes[2].policyWire, revision: 1)])),
+                    on: identities[0], deadline: .now + .seconds(2))
+                #expect(await serving[0].releases == 1)
+                try await publisher.publish(blocked)
+                #expect(await serving[1].snapshots == snapshotsBeforeRelease)
+                await caches[1].invalidate(scopes[2])
+                #expect(try await remote.registrationSnapshots(scopes: [scopes[2]]) == [blocked])
+                #expect(await serving[0].reads == 2)
                 #expect(endpoints.count == 2)
                 await stop()
             } catch { await stop(); throw error }
@@ -208,12 +228,19 @@ private actor SnapshotCountingService: V2PolicyOwnershipServing {
     let service: V2PolicyOwnershipService
     private(set) var reads = 0
     private(set) var updates = 0
+    private(set) var snapshots = 0
+    private(set) var releases = 0
     init(service: V2PolicyOwnershipService) { self.service = service }
-    func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire] {
+    func policySnapshots(_ request: V2PolicySnapshotRequestWire, deadline: ContinuousClock.Instant) async throws -> V2PolicySnapshotBatchWire {
         reads += 1; return try await service.policySnapshots(request, deadline: deadline)
     }
     func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, deadline: ContinuousClock.Instant) async throws {
-        updates += 1; try await service.updatePolicySnapshot(request, deadline: deadline)
+        updates += 1
+        if case .snapshot = request.payload { snapshots += 1 }
+        try await service.updatePolicySnapshot(request, deadline: deadline)
+    }
+    func releasePolicyInterests(_ request: V2PolicyInterestReleaseWire, deadline: ContinuousClock.Instant) async throws {
+        releases += 1; try await service.releasePolicyInterests(request, deadline: deadline)
     }
 
 }

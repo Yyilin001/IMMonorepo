@@ -69,9 +69,7 @@ public struct V2RoomDirectoryCallMetricsSnapshot: Equatable, Sendable {
 }
 
 /// Closed, process-local counters; no room, actor or operation identifiers.
-public enum V2RoomRenewalFailureStage: String, CaseIterable, Sendable {
-    case callerTimeout, callerCancelled, transportError, replyVerification, invalidBatchReply, remoteOutcomeUnknown
-}
+
 
 public struct V2RoomTransportCallMetricsSnapshot: Equatable, Sendable {
     public let cachedLocalCalls: UInt64
@@ -87,8 +85,6 @@ public struct V2RoomTransportCallMetricsSnapshot: Equatable, Sendable {
     public let batchCallerCancellations: UInt64
     public let batchRejectedGlobal: UInt64
     public let batchRejectedPeer: UInt64
-    public let renewalActualCalls: Int
-    public let renewalFailures: [V2RoomRenewalFailureStage: UInt64]
 
     public init(cachedLocalCalls: UInt64 = 0,
                 cachedRemoteCalls: UInt64 = 0,
@@ -100,8 +96,7 @@ public struct V2RoomTransportCallMetricsSnapshot: Equatable, Sendable {
                 activeHostRecoveries: Int = 0,
                 recoveryStages: [V2RoomTransportRecoveryStage: V2RoomTransportRecoveryStageSnapshot] = [:],
                 batchCallerTimeouts: UInt64 = 0, batchCallerCancellations: UInt64 = 0,
-                batchRejectedGlobal: UInt64 = 0, batchRejectedPeer: UInt64 = 0,
-                renewalActualCalls: Int = 0, renewalFailures: [V2RoomRenewalFailureStage: UInt64] = [:]) {
+                batchRejectedGlobal: UInt64 = 0, batchRejectedPeer: UInt64 = 0) {
         self.cachedLocalCalls = cachedLocalCalls
         self.cachedRemoteCalls = cachedRemoteCalls
         self.roomLookups = roomLookups
@@ -117,8 +112,6 @@ public struct V2RoomTransportCallMetricsSnapshot: Equatable, Sendable {
         self.batchCallerCancellations = batchCallerCancellations
         self.batchRejectedGlobal = batchRejectedGlobal
         self.batchRejectedPeer = batchRejectedPeer
-        self.renewalActualCalls = renewalActualCalls
-        self.renewalFailures = renewalFailures
     }
 }
 

@@ -708,77 +708,7 @@ struct V2RoomActivationHostTests {
         #expect((await host.stop(deadline: .now + .seconds(2))).completed)
     }
 
-    @Test("pure subscription renewal bypasses a held write turn and pins its exact lifecycle")
-    func pureRenewalOwnsBudgetAndLifecycle() async throws {
-        let owner = try V2RoomDataOwner(shardID: "renew", epoch: 0)
-        let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
-        let configuration = try V2RoomRuntimeConfiguration(maximumQueuedCommandsPerRoom: 3,
-            maximumQueuedCommandsPerHost: 4, maximumCommandsPerTurn: 3)
-        let budget = V2RoomCommandBudget(configuration: configuration), gate = Gate()
-        let lane = ReadInvalidationProbe()
-        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
-        _ = qualification.update(witnesses: ["b": .now + .seconds(10)])
-        let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
-            placement: FakePlacement(host: identity), configuration: configuration, budget: budget,
-            classify: { $0.turnSchedulingClass }, factory: .init(pureSubscriptionRenew: { token, request, _, validUntil in
-                #expect(validUntil > .now)
-                guard case .roomSubscription(.renew(let command)) = request, command.roomID == token.roomID else {
-                    return .rolledBack(.invalidRequest)
-                }
-                await gate.wait()
-                if command.appliedControlSequence == 1 { return .outcomeUnknown }
-                return .committed(.roomSubscription(.failure(.unavailable)))
-            }) { _ in
-                .init(restore: { _ in }, execute: { turn in
-                    await lane.record(); return .committed(turn.items.map { _ in .roomSubscription(.activated) })
-                }, invalidateReservation: { _ in }, close: {})
-            }, qualification: qualification)
-        await host.start()
-        let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
-        guard case .ready(let token) = try await host.activate(roomID: room, owner: owner, deadline: .now + .seconds(2)) else {
-            throw TestFailure.restore
-        }
-        let peer = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "g", serviceID: "g", incarnationID: UUID()),
-            endpointReference: Data([1]), address: "127.0.0.1", port: 9000)
-        let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        func bytes(_ sequence: UInt64) throws -> V2RoomRequest {
-            try V2RoomRequest.roomSubscription(.renew(.init(roomID: room, actorUserID: user,
-                gatewayDescriptor: peer, expectedFence: fence, appliedControlSequence: sequence)))
-        }
-        let end = ContinuousClock.now + .seconds(5)
-        let held = try await host.reserve(token: token, requestID: UUID(), deadline: end)
-        let unknownBytes = try bytes(1), knownBytes = try bytes(2)
-        let unknown = Task { try await host.invoke(token: token, request: unknownBytes, deadline: end) }
-        let cancelled = Task { try await host.invoke(token: token, request: knownBytes, deadline: end) }
-        do {
-            try await gate.waitForEntries(2)
-            #expect(await lane.count == 0)
-            #expect(budget.snapshot().commandCount == 3)
-            cancelled.cancel()
-            await #expect(throws: V2RoomCallFailure.notAccepted(.overloaded)) {
-                _ = try await host.invoke(token: token, request: knownBytes, deadline: end)
-            }
-            await gate.open()
-            await expectFailure(.outcomeUnknown, unknown)
-            await expectFailure(.notAccepted(.cancelled), cancelled)
-            #expect(await host.isReady(token: token))
-            #expect(budget.snapshot().commandCount == 1)
-            #expect(await host.abortReservation(held))
-            let subscribe = V2RoomRequest.roomSubscription(.subscribe(.init(roomID: room, actorUserID: user,
-                                                                           gatewayDescriptor: peer)))
-            _ = try await host.invoke(token: token, request: subscribe, deadline: end)
-            #expect(await lane.count == 1)
-            qualification.revoke()
-            await #expect(throws: V2RoomCallFailure.self) {
-                _ = try await host.invoke(token: token, request: knownBytes, deadline: end)
-            }
-            #expect(budget.snapshot().commandCount == 0)
-        } catch {
-            await gate.open(); _ = await unknown.result; _ = await cancelled.result
-            _ = await host.abortReservation(held); _ = await host.stop(deadline: .now + .seconds(2)); throw error
-        }
-        #expect((await host.stop(deadline: .now + .seconds(2))).completed)
-    }
+
 
     private actor ReadInvalidationProbe {
         var count = 0

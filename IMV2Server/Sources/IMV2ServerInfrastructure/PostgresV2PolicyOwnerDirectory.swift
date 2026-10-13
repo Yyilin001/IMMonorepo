@@ -50,44 +50,59 @@ package actor PostgresV2PolicyOwnerDirectory {
         -> (result: V2PolicyMutationResult, replayed: Bool) {
         try mutation.validate()
         let key = mutation.operationKey, fingerprint = try mutation.fingerprint, json = try mutation.json
-        let result = try await run {
-            try await self.useOwner(scope: mutation.scope) { owner in
-                let execution = try await owner.changeExecution(operationKey: key, fingerprint: fingerprint, commandJSON: json)
-                if let snapshot = execution.state {
-                    try await self.snapshots.install(snapshot)
-                    do { try await self.snapshotPublisher?.publish(snapshot) }
+        return try await run {
+            try await self.snapshotPublisher?.beginChange(mutation.scope)
+            do {
+                let result = try await self.useOwner(scope: mutation.scope) { owner in
+                    let execution = try await owner.changeExecution(operationKey: key, fingerprint: fingerprint, commandJSON: json)
+                    if let snapshot = execution.state {
+                        try await self.snapshots.install(snapshot)
+                        do { try await self.snapshotPublisher?.publish(snapshot) }
+                        catch { throw V2RoomCallFailure.outcomeUnknown }
+                    }
+                    return (try JSONDecoder().decode(V2PolicyMutationResult.self, from: execution.receipt), execution.replayed)
+                }
+                if result.1 {
+                    // Recovery republishes authoritative facts, not a result
+                    // retained only in the interrupted caller's memory.
+                    do { try await self.publishSnapshot(scope: mutation.scope) }
                     catch { throw V2RoomCallFailure.outcomeUnknown }
                 }
-                return (try JSONDecoder().decode(V2PolicyMutationResult.self, from: execution.receipt), execution.replayed)
+                do { try await self.committed?(mutation.scope) }
+                catch { throw V2RoomCallFailure.outcomeUnknown }
+                await self.snapshotPublisher?.finishChange(mutation.scope, succeeded: true)
+                return result
+            } catch {
+                await self.snapshots.invalidate(mutation.scope)
+                await self.snapshotPublisher?.finishChange(mutation.scope, succeeded: false)
+                throw error
             }
         }
-        if result.1 {
-            // An interrupted post-COMMIT push is retried by replaying the
-            // current snapshot; versions make duplicate delivery harmless.
-            do { try await publishSnapshot(scope: mutation.scope) }
-            catch { throw V2RoomCallFailure.outcomeUnknown }
-        }
-        // COMMIT and authoritative memory publication have already settled.
-        // A failed notification cannot be reported as a rolled-back mutation.
-        do { try await committed?(mutation.scope) }
-        catch { throw V2RoomCallFailure.outcomeUnknown }
-        return result
     }
 
     package func registrationSnapshots(scopes: [V2PolicyAuthorizationScope],
-        subscriber: V2PolicySnapshotSubscriberWire? = nil,
         requestedAt: ContinuousClock.Instant? = nil) async throws -> [V2PolicyFactsSnapshot] {
         if let requestedAt { V2SendPathTrace.current?.record("policy_directory_actor_entry_wait", from: requestedAt) }
         guard !closed, !scopes.isEmpty, scopes.count <= 4, scopes.allSatisfy(\.isValid),
               Set(scopes.map(\.key)).count == scopes.count else { throw V2PolicyAuthorizationLifecycleError.invalidRequest }
         guard scopes.allSatisfy({ ownsScope($0.key) }) else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
-        if let subscriber {
-            guard let snapshotPublisher else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
-            try await snapshotPublisher.subscribe(scopes: scopes, target: subscriber)
-        }
         // No bounded mutation root or owner-object quota wraps reads.
         let journal = journal
         return try await snapshots.loadSnapshots(scopes: scopes, requestedAt: .now) { try await journal.readSnapshots(scopes: $0) }
+    }
+    package func registrationSession(scopes: [V2PolicyAuthorizationScope], subscriber: V2PolicySnapshotSubscriberWire, interestRevision: UInt64 = 1) async throws -> V2PolicyControlSessionWire {
+        guard !closed, scopes.allSatisfy({ ownsScope($0.key) }), let snapshotPublisher else {
+            throw V2PolicyAuthorizationLifecycleError.invalidTarget
+        }
+        return try await snapshotPublisher.subscribe(scopes: scopes, target: subscriber, interestRevision: interestRevision)
+    }
+    package func releaseInterests(_ request: V2PolicyInterestReleaseWire) async throws {
+        guard let snapshotPublisher else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+        try await snapshotPublisher.release(request)
+    }
+    package func confirmRegistration(_ session: V2PolicyControlSessionWire, scopes: [V2PolicyAuthorizationScope]? = nil, interestRevision: UInt64? = nil) async throws {
+        guard !closed, let snapshotPublisher else { throw V2PolicyAuthorizationLifecycleError.closed }
+        try await snapshotPublisher.confirmRegistration(session, scopes: scopes, interestRevision: interestRevision)
     }
     package func cachedSnapshots(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot]? {
         guard !closed else { throw V2PolicyAuthorizationLifecycleError.closed }
@@ -165,9 +180,17 @@ package actor PostgresV2PolicyOwnerDirectory {
         try mutation.validate()
         guard mutation.scope.key == pending.scopeKey, mutation.operationKey == pending.operationKey,
               try mutation.fingerprint == pending.fingerprint else { throw V2PolicyAuthorizationLifecycleError.corruptPersistence }
-        try await useOwner(scope: mutation.scope) { owner in
-            try await owner.recover(limit: 1)
-            try await self.publishSnapshot(scope: mutation.scope)
+        try await snapshotPublisher?.beginChange(mutation.scope)
+        do {
+            try await useOwner(scope: mutation.scope) { owner in
+                try await owner.recover(limit: 1)
+                try await self.publishSnapshot(scope: mutation.scope)
+            }
+            await snapshotPublisher?.finishChange(mutation.scope, succeeded: true)
+        } catch {
+            await snapshots.invalidate(mutation.scope)
+            await snapshotPublisher?.finishChange(mutation.scope, succeeded: false)
+            throw error
         }
     }
 

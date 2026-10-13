@@ -34,15 +34,22 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
 
     public func snapshot(roomID: RoomID, owner: V2RoomDataOwner,
                          trackedUserIDs: Set<UserID>) async throws -> V2RoomSubscriptionSourceSnapshot {
-        let (value, remaining) = try await withOwnedCut { sql in
-            try await self.snapshotSQL(roomID: roomID, owner: owner, trackedUserIDs: trackedUserIDs, sql: sql, remaining: 0)
+        return try await withOwnedCut { sql in
+            try await self.snapshotSQL(roomID: roomID, owner: owner, trackedUserIDs: trackedUserIDs, sql: sql)
         }
-        return .init(roomID: value.roomID, owner: value.owner, highWatermark: value.highWatermark,
-            membershipRevision: value.membershipRevision, roomControlVersion: value.roomControlVersion, remainingLeaseMilliseconds: remaining, members: value.members)
+    }
+
+    /// The room's mutation turn already retains the native activation. Read
+    /// its resulting cut on the same SQL transaction before COMMIT, without
+    /// borrowing another connection or starting a restoration transaction.
+    package func permissionCut(in transaction: any Database, trackedUserIDs: Set<UserID>) async throws -> V2RoomSubscriptionSourceSnapshot {
+        guard let sql = transaction as? any SQLDatabase else { throw V2RoomSubscriptionSourceError.corruptPersistence }
+        return try await snapshotSQL(roomID: activation.roomID, owner: activation.owner,
+            trackedUserIDs: trackedUserIDs, sql: sql)
     }
 
     private func snapshotSQL(roomID: RoomID, owner: V2RoomDataOwner, trackedUserIDs: Set<UserID>,
-                             sql: any SQLDatabase, remaining: Int64) async throws -> V2RoomSubscriptionSourceSnapshot {
+                             sql: any SQLDatabase) async throws -> V2RoomSubscriptionSourceSnapshot {
         let (room, users) = try inputs(roomID, owner, trackedUserIDs)
         let states = membershipStates(users: users, room: room, revision: "r.membership_revision")
         guard let row = try await sql.raw("""
@@ -55,22 +62,19 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
         try validateOwner(shard: row.room_shard_id, epoch: row.owner_epoch, sequence: row.room_sequence, owner: owner)
         guard row.membership_revision >= 0, row.room_control_version >= 0 else { throw V2RoomSubscriptionSourceError.corruptPersistence }
         let members = try decodeMembers(row.members_json, requested: trackedUserIDs)
-        return .init(roomID: roomID, owner: owner, highWatermark: UInt64(row.room_sequence), membershipRevision: UInt64(row.membership_revision), roomControlVersion: row.room_control_version, remainingLeaseMilliseconds: remaining, members: members)
+        return .init(roomID: roomID, owner: owner, highWatermark: UInt64(row.room_sequence), membershipRevision: UInt64(row.membership_revision), roomControlVersion: row.room_control_version, members: members)
     }
 
     public func read(roomID: RoomID, owner: V2RoomDataOwner, afterRoomSequence: UInt64,
                      trackedUserIDs: Set<UserID>, limit: Int) async throws -> V2RoomSubscriptionSourcePage {
-        let (value, remaining) = try await withOwnedCut { sql in
+        return try await withOwnedCut { sql in
             try await self.readSQL(roomID: roomID, owner: owner, afterRoomSequence: afterRoomSequence,
-                trackedUserIDs: trackedUserIDs, limit: limit, sql: sql, remaining: 0)
+                trackedUserIDs: trackedUserIDs, limit: limit, sql: sql)
         }
-        return .init(roomID: value.roomID, owner: value.owner, afterRoomSequence: value.afterRoomSequence,
-            highWatermark: value.highWatermark, records: value.records, remainingLeaseMilliseconds: remaining)
     }
 
     private func readSQL(roomID: RoomID, owner: V2RoomDataOwner, afterRoomSequence: UInt64,
-                         trackedUserIDs: Set<UserID>, limit: Int, sql: any SQLDatabase,
-                         remaining: Int64) async throws -> V2RoomSubscriptionSourcePage {
+                         trackedUserIDs: Set<UserID>, limit: Int, sql: any SQLDatabase) async throws -> V2RoomSubscriptionSourcePage {
         guard afterRoomSequence <= UInt64(Int64.max), (1...64).contains(limit) else {
             throw V2RoomSubscriptionSourceError.invalidInput
         }
@@ -127,7 +131,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
             throw V2RoomSubscriptionSourceError.snapshotRequired
         }
         return .init(roomID: roomID, owner: owner, afterRoomSequence: afterRoomSequence,
-                     highWatermark: UInt64(first.high_watermark), records: records, remainingLeaseMilliseconds: remaining)
+                     highWatermark: UInt64(first.high_watermark), records: records)
     }
 
     package func readQuery(room: UUID, users: [UUID], after: Int64, limit: Int) -> SQLQueryString {
@@ -197,10 +201,10 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
 
     package func withOwnedCut<Value: Sendable>(
         _ operation: @escaping @Sendable (any SQLDatabase) async throws -> Value
-    ) async throws -> (Value, Int64) {
+    ) async throws -> Value {
         let deadline = V2RoomSQLDeadline.boundedTransactionDeadline()
         return try await lifetime.withPin(deadline: deadline) { validUntil in
-            let value = try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
+            return try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
                 callerDeadline: validUntil) {
                 try await v2WithRoomActivationTransaction(database: database, deadline: validUntil,
                     readOnlyRepeatableRead: true) { transaction in
@@ -220,10 +224,6 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
                     return try await operation(sql)
                 }
             }
-            let duration = ContinuousClock.now.duration(to: validUntil).components
-            let remaining = duration.seconds * 1000 + duration.attoseconds / 1_000_000_000_000_000
-            guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
-            return (value, remaining)
         }
     }
 

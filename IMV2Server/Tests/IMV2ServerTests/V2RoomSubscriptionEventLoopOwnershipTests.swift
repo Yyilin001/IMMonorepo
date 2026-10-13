@@ -72,7 +72,7 @@ struct V2RoomSubscriptionEventLoopOwnershipTests {
             #expect(await authority.pause(fence: other.fence))
             #expect(completed.withLock { $0 } == false)
             let next = Fixture()
-            #expect(await authority.install(fence: next.fence, serviceID: "owner", deadline: .now + .seconds(60)) == false)
+            #expect(await authority.installTestSession(fence: next.fence, serviceID: "owner") == false)
             unblock.signal()
             #expect(await revoked.value)
             try await next.baseline(authority)
@@ -122,7 +122,7 @@ private struct Fixture: Sendable {
         .init(fence: fence, deliverySequence: sequence, authorizationSequence: sequence, payload: payload)
     }
     func baseline(_ authority: V2GatewayRoomSubscriptionAuthority) async throws {
-        try #require(await authority.install(fence: fence, serviceID: "owner", deadline: .now + .seconds(60)))
+        try #require(await authority.installTestSession(fence: fence, serviceID: "owner"))
         try #require(await authority.apply(delivery(1, .baseline(members: [member])), authenticatedServiceID: "owner") == .applied(permits: []))
     }
 }

@@ -69,27 +69,7 @@ struct V2RoomSubscriptionRelayTests {
               recipientUserIDs: [], groupMembershipRevision: 1)
     }
 
-    @Test func renewalCheckpointSurvivesConcurrentBodyAcknowledgement() async throws {
-        let room = try RoomID("room"), alice = try UserID("alice"), bob = try UserID("bob"), id = UUID()
-        let relay = try V2RoomSubscriptionRelay(activation: roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0),
-            baselineSequence: 0, members: [.init(userID: alice, memberRevision: 1), .init(userID: bob, memberRevision: 1)])
-        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1,
-            operation: .subscribe(gateway: gateway, userID: alice, memberRevision: 1, subscriptionID: id, generation: 1)))
-        let fence = try #require(await relay.status(for: gateway)).fence
-        try await relay.acknowledgeAll(gateway: gateway, fence: fence, through: 1)
-        // Renewal captured 1; the delivery pump applies and ACKs a body before
-        // the renewal reaches the Owner. No membership authority was missed.
-        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 2, operation: .event(try event(room, sequence: 1))))
-        try await relay.acknowledgeAll(gateway: gateway, fence: fence, through: 2)
-        #expect(await relay.canRenew(gateway: gateway, fence: fence, appliedControlSequence: 1, userID: alice))
-        // An acknowledged grant must still reject an older authority checkpoint;
-        // removing it from pending is not permission to renew the old cut.
-        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 3,
-            operation: .subscribe(gateway: gateway, userID: bob, memberRevision: 1, subscriptionID: id, generation: 1)))
-        try await relay.acknowledgeAll(gateway: gateway, fence: fence, through: 3)
-        #expect(!(await relay.canRenew(gateway: gateway, fence: fence, appliedControlSequence: 1, userID: alice)))
-        #expect(await relay.canRenew(gateway: gateway, fence: fence, appliedControlSequence: 2, userID: alice))
-    }
+
 
     @Test func acknowledgedFinalBodyStillGetsBoundedAdvisoryHeadRepair() async throws {
         let room = try RoomID("room"), user = try UserID("user")
@@ -187,8 +167,7 @@ struct V2RoomSubscriptionRelayTests {
         let published = await relay.pending(for: gateway)
         let admittedBody = published[1]
         let authority = V2GatewayRoomSubscriptionAuthority()
-        #expect(await authority.install(fence: admittedBody.fence, serviceID: "owner",
-            deadline: ContinuousClock.now.advanced(by: .seconds(30))))
+        #expect(await authority.installTestSession(fence: admittedBody.fence, serviceID: "owner"))
         #expect(await authority.apply(published[0], authenticatedServiceID: "owner") == .applied(permits: []))
         #expect(await authority.apply(admittedBody, authenticatedServiceID: "owner") == .applied(permits: []))
         try await relay.offer(.init(ownerEpoch: 2, inputSequence: 3, operation: .event(try event(room, sequence: 2))))
@@ -217,6 +196,11 @@ struct V2RoomSubscriptionRelayTests {
                 subscriptionID: UUID(), generation: 1)))
         try await relay.offer(.init(ownerEpoch: 2, inputSequence: 2,
             operation: .membership(userID: user, revision: 2, authorized: false)))
+        #expect(await relay.controlInvalidationPending(gateway: gateway))
+        let terminal = try #require(await relay.pending(for: gateway, lane: .authorization).last)
+        #expect(terminal.payload == .authorizationInvalidated)
+        try await relay.acknowledge(gateway: gateway, fence: terminal.fence,
+            through: terminal.deliverySequence, lane: .authorization)
         #expect(await relay.status(for: gateway)?.needsBaseline == true)
         try await relay.offer(.init(ownerEpoch: 2, inputSequence: 3,
             operation: .reset(gateway: gateway, subscriptionID: UUID(), generation: 2)))
@@ -307,8 +291,7 @@ struct V2RoomSubscriptionRelayTests {
         #expect(deliveries[1].payload == .broadcast(try event(room, sequence: 1)))
         #expect(deliveries[2].payload == .revoke(userID: user, memberRevision: 0))
         let authority = V2GatewayRoomSubscriptionAuthority()
-        #expect(await authority.install(fence: deliveries[0].fence, serviceID: "owner",
-            deadline: ContinuousClock.now.advanced(by: .seconds(30))))
+        #expect(await authority.installTestSession(fence: deliveries[0].fence, serviceID: "owner"))
         for delivery in deliveries {
             #expect(await authority.apply(delivery, authenticatedServiceID: "owner") == .applied(permits: []))
         }

@@ -11,22 +11,13 @@ public final class V2RoomSubscriptionHeadDeliveryMetrics: Sendable {
         case socketClosed, socketNotWritable, socketResponseBusy
         case socketPermitRejected, socketEnqueued, socketWriteFailed
         case progressNoInterest, progressNoRoom, progressAuthorityNotReady
-        case progressAuthorityExpired, progressNoMember, progressSocketNotReady, progressReady
+        case progressSessionUnavailable, progressNoMember, progressSocketNotReady, progressReady
         case acquisitionQueued, acquisitionAdmitted
         case acquisitionDeadlineExpired, acquisitionInvalidGrant, acquisitionSuperseded
         case acquisitionRemoteUnavailable, acquisitionRemoteOverloaded, acquisitionRemoteStale
         case acquisitionRemoteUnauthorized, acquisitionRemoteInvalidRequest
         case acquisitionCallDeadlineExceeded, acquisitionCallOverloaded, acquisitionCallUnavailable
         case acquisitionCallInvalidRequest, acquisitionCallStale, acquisitionCallOutcomeUnknown, acquisitionOtherFailure
-        case renewalAccepted, renewalInvalidGrant
-        case renewalProofMalformed, renewalProofExpired
-        case renewalAuthorityMissing, renewalAuthorityFenceMismatch, renewalAuthorityServiceMismatch
-        case renewalAuthorityNotReady, renewalAuthorityExpired, renewalAuthorityControlMismatch, renewalAuthorityHeadInvalid
-        case renewalRemoteUnavailable, renewalRemoteOverloaded, renewalRemoteStale
-        case renewalRemoteUnauthorized, renewalRemoteInvalidRequest
-        case renewalCallDeadlineExceeded, renewalCallOverloaded, renewalCallUnavailable
-        case renewalCallStale, renewalCallOutcomeUnknown, renewalOtherFailure
-        case renewalCallInvalidRequest, renewalCallCancelled, renewalCallForbidden
     }
     public struct Snapshot: Sendable {
         public let counters: [Stage: UInt64]

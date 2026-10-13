@@ -66,12 +66,10 @@ struct V2HotProtobufTests {
             .subscribe(.init(roomID: room, actorUserID: user, gatewayDescriptor: gateway)),
             .activate(.init(roomID: room, actorUserID: user, gatewayDescriptor: gateway, fence: fence)),
             .reset(.init(roomID: room, actorUserID: user, gatewayDescriptor: gateway, expectedFence: fence)),
-            .unsubscribe(.init(roomID: room, actorUserID: user, gatewayDescriptor: gateway, memberRevision: 9)),
-            .renew(.init(roomID: room, actorUserID: user, gatewayDescriptor: gateway, expectedFence: fence, appliedControlSequence: UInt64.max))]
+            .unsubscribe(.init(roomID: room, actorUserID: user, gatewayDescriptor: gateway, memberRevision: 9))]
         for command in commands { #expect(try roundTrip(V2RoomRequest.roomSubscription(command))) }
         let results: [V2RoomSubscriptionResult] = [.activated, .unsubscribed, .failure(.stale),
-            .granted(.init(fence: fence, memberRevision: 4, userBaselineSequence: 5, remainingLeaseMilliseconds: 100)),
-            .renewed(.init(fence: fence, appliedControlSequence: UInt64.max, committedRoomSequence: 6, remainingLeaseMilliseconds: 101))]
+            .granted(.init(fence: fence, memberRevision: 4, userBaselineSequence: 5, deliverySession: .init(host: fence.activation.host, gateway: gateway.identity, generation: 1)))]
         for result in results { #expect(try roundTrip(V2RoomResponse.roomSubscription(result))) }
     }
     private func event() -> V2RealtimeRoomEvent {

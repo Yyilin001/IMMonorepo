@@ -61,7 +61,7 @@ struct V2GatewayJournalHeadRoutingTests {
                 activationEpoch: try .init(1), host: .init(hostID: try .init("owner-test"),
                     incarnationID: UUID(uuidString: "00000000-0000-0000-0000-00000000ac01")!)),
                 subscriptionID: UUID(), generation: 1, baselineSequence: 10)
-            try #require(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "owner", deadline: .now + .seconds(20)))
+            try #require(await ingress.installTestSession(fence: fence, sourceShardID: "rooms", serviceID: "owner"))
             #expect(await ingress.applyRoomSubscription(.init(fence: fence, deliverySequence: 1, authorizationSequence: 1,
                 payload: .baseline(members: [.init(userID: user, memberRevision: 0)])),
                 authenticatedServiceID: "owner", sourceShardID: "rooms") == .appliedThrough(1))

@@ -1,9 +1,10 @@
 import Foundation
+import Synchronization
 import IMV2Core
 import IMV2ActorContracts
 
 /// Authenticated Actor ingress for room-local subscriptions. Composition installs
-/// source ownership and a local monotonic deadline; packets cannot grant either.
+/// source ownership and a delivery session; packets cannot grant either.
 /// Control results wait for connection EventLoop projections. Callbacks offer
 /// bounded work carrying immutable permits for the final socket-local check.
 public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, Sendable {
@@ -22,24 +23,24 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
 
     @discardableResult
     public func install(fence: V2RoomSubscriptionFence, sourceShardID: String,
-                        serviceID: String, deadline: ContinuousClock.Instant,
+                        serviceID: String, session: V2RoomDeliverySession,
                         afterAuthoritativeReset: Bool = false) async -> Bool {
         guard sourceShardID == fence.activation.owner.shardID,
               !sourceShardID.isEmpty, sourceShardID.utf8.count <= 128 else { return false }
-        return await authority.install(fence: fence, serviceID: serviceID, deadline: deadline,
+        let installed = await authority.install(fence: fence, serviceID: serviceID, session: session,
             afterAuthoritativeReset: afterAuthoritativeReset)
+        if installed {
+            let obsolete = authority.releaseSupersededHostSessions(confirmed: session, serviceID: serviceID)
+            if !obsolete.isEmpty {
+                let notify = sessionChanged.withLock { $0 }
+                for host in obsolete { await notify?(host) }
+            }
+        }
+        return installed
     }
 
     @discardableResult
     public func retire(fence: V2RoomSubscriptionFence) async -> Bool { await authority.retire(fence: fence) }
-
-    @discardableResult
-    public func renew(fence: V2RoomSubscriptionFence, sourceShardID: String, serviceID: String,
-        appliedControlSequence: UInt64, deadline: ContinuousClock.Instant) async -> Bool {
-        guard sourceShardID == fence.activation.owner.shardID else { return false }
-        return await authority.renew(fence: fence, serviceID: serviceID,
-            appliedControlSequence: appliedControlSequence, deadline: deadline)
-    }
 
     @discardableResult
     public func refreshProgress(fence: V2RoomSubscriptionFence, sourceShardID: String, serviceID: String,
@@ -50,6 +51,28 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
         return accepted
     }
 
+    private let sessionChanged = Synchronization.Mutex<(@Sendable (V2ActorHostIdentity) async -> Void)?>(nil)
+    public func configureSessionChanged(_ notify: @escaping @Sendable (V2ActorHostIdentity) async -> Void) {
+        sessionChanged.withLock { precondition($0 == nil); $0 = notify }
+    }
+    private let baselineRequired = Synchronization.Mutex<(@Sendable (RoomID) async -> Void)?>(nil)
+    public func configureBaselineRequired(_ notify: @escaping @Sendable (RoomID) async -> Void) {
+        baselineRequired.withLock { precondition($0 == nil); $0 = notify }
+    }
+    private func requestBaseline(for fence: V2RoomSubscriptionFence) async {
+        guard await authority.requiresBaseline(fence: fence) else { return }
+        let notify = baselineRequired.withLock { $0 }
+        await notify?(fence.roomID)
+    }
+    public func applyDeliverySession(_ pulse: V2RoomDeliverySessionPulse,
+        authenticatedServiceID: String) async -> V2RoomDeliverySessionResult {
+        let result = authority.applyDeliverySession(pulse, serviceID: authenticatedServiceID)
+        if pulse.kind != .heartbeat || result == .resetRequired {
+            let notify = sessionChanged.withLock { $0 }
+            await notify?(pulse.session.host)
+        }
+        return result
+    }
     public func applyRoomSubscription(_ delivery: V2RoomSubscriptionDelivery,
                                       authenticatedServiceID: String, sourceShardID: String) async -> V2RoomSubscriptionDeliveryResult {
         guard sourceShardID == delivery.fence.activation.owner.shardID else { return .stale }
@@ -68,8 +91,12 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
                 offerHead(delivery.fence.roomID, highWatermark)
             }
             return .appliedThrough(delivery.deliverySequence)
-        case .snapshotRequired: return .snapshotRequired
-        case .stale, .invalid: return .stale
+        case .snapshotRequired:
+            await requestBaseline(for: delivery.fence)
+            return .snapshotRequired
+        case .stale, .invalid:
+            await requestBaseline(for: delivery.fence)
+            return .stale
         }
     }
     public func applyRoomSubscriptionBatch(_ batch: V2RoomSubscriptionDeliveryBatch,

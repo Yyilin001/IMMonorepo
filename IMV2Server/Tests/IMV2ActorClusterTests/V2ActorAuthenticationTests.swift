@@ -90,11 +90,14 @@ struct V2ActorAuthenticationTests {
 
     @Test("versioned policy updates require mutation authority", arguments: [false, true])
     func versionedPolicyUpdateAuthority(allowed: Bool) async throws {
-        let fixture = try Fixture(clientPermissions: allowed ? [.policyMutation] : [.policyRegistration])
+        let source = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let fixture = try Fixture(clientHostedIDs: [source.hostID], clientPermissions: allowed ? [.policyMutation] : [.policyRegistration])
         let grant = try await fixture.open()
         let scope = V2PolicyScopeWire(account: UUID())
         let snapshot = try V2PolicySnapshotWire(scope: scope, version: 2, facts: .account(.init(userID: scope.first, isActive: true)))
-        let request = V2ActorRPCRequest.updatePolicySnapshot(try .init(endpoint: "owner", snapshot: snapshot))
+        let request = V2ActorRPCRequest.updatePolicySnapshot(try .init(endpoint: "owner",
+            session: .init(source: source, recipient: fixture.token.host, generation: 1),
+            sequence: 1, payload: .snapshot(snapshot)))
         func call(_ principal: V2ActorCallPrincipal, sequence: UInt64) throws -> V2ActorAuthenticatedCall {
             .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
                 sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
@@ -109,7 +112,7 @@ struct V2ActorAuthenticationTests {
     func versionedPolicySubscriberIdentity() async throws {
         let fixture = try Fixture(clientPermissions: [.policyRegistration]), grant = try await fixture.open()
         let request = V2ActorRPCRequest.policySnapshots(try .init(endpoint: "owner", scopes: [.init(account: UUID())],
-            subscriber: .init(hostID: fixture.token.host.hostID, endpoint: "gateway")))
+            subscriber: .init(host: fixture.token.host, endpoint: "gateway")))
         let call = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
             recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 1, attemptID: UUID(), traceID: UUID(),
             remainingBudget: try .init(5_000), principal: .service, request: request)
@@ -123,7 +126,7 @@ struct V2ActorAuthenticationTests {
         let grant = try await fixture.open()
         let scope = V2PolicyScopeWire(account: UUID())
         let claim = try V2PolicySnapshotRequestWire(endpoint: "owner", scopes: [scope],
-            subscriber: .init(hostID: subscriberID, endpoint: "gateway"))
+            subscriber: .init(host: .init(hostID: subscriberID, incarnationID: UUID()), endpoint: "gateway"))
         func call(_ principal: V2ActorCallPrincipal, sequence: UInt64) throws -> V2ActorAuthenticatedCall {
             .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
                 sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
@@ -188,7 +191,7 @@ struct V2ActorAuthenticationTests {
         #expect(try V2ActorProtobuf.decode(V2PolicyScopeWire.self, from: V2ActorProtobuf.encode(reverse)) == forward)
         #expect(throws: (any Error).self) { try V2PolicyScopeWire(pair: a, a) }
         #expect(throws: (any Error).self) { try V2PolicySnapshotRequestWire(endpoint: "owner", scopes: [forward, reverse],
-            subscriber: .init(hostID: .init(uuid: UUID()), endpoint: "gateway")) }
+            subscriber: .init(host: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()), endpoint: "gateway")) }
         var object = try V2ActorProtobuf.message(V2PolicyScopeWire(account: a))
         var extra = Im_Actor_V1_Field(); extra.name = "second"; extra.value = try V2ActorProtobuf.message(b)
         object.objectValue.fields.append(extra)
@@ -218,44 +221,7 @@ struct V2ActorAuthenticationTests {
         }
     }
 
-    @Test("a valid 64-room renewal can exceed the signed batch byte budget")
-    func renewalBatchCountDoesNotGuaranteeByteBudget() async throws {
-        let fixture = try Fixture(clientPermissions: [.userRoomCalls, .realtimeReceive], gatewayNodeIDs: ["gateway-alias"])
-        let grant = try await fixture.open()
-        let descriptor = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "gateway-alias", serviceID: "gateway",
-            incarnationID: grant.callerIncarnation), endpointReference: Data(repeating: 1, count: 1024),
-            address: "127.0.0.1", port: 12345)
-        let items = try (0..<64).map { _ -> V2RoomSubscriptionRenewBatchItem in
-            let token = V2RoomActivationToken(roomID: RoomID(uuid: UUID()), owner: fixture.token.owner,
-                activationEpoch: fixture.token.activationEpoch, host: fixture.token.host)
-            let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-            let command = V2RoomSubscriptionRenewCommand(roomID: token.roomID, actorUserID: fixture.user,
-                gatewayDescriptor: descriptor, expectedFence: fence, appliedControlSequence: 1)
-            try V2RoomSubscriptionCommand.renew(command).validate()
-            return .init(token: token, command: command)
-        }
-        let call = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
-            recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 1, attemptID: UUID(), traceID: UUID(),
-            remainingBudget: try .init(5_000), principal: .service, request: .subscriptionRenewBatch(items))
-        let bytes = try V2ActorProtobuf.encode(call).count
-        #expect(bytes > 65_536)
-        #expect(throws: V2ActorAuthenticationError.oversized) {
-            _ = try fixture.client.sign(call, maximumBytes: 65_536)
-        }
-        let batches = try V2RoomClusterClient.renewalBatches(items, template: call, maximumBytes: 65_536)
-        #expect(batches.count > 1)
-        #expect(batches.flatMap { $0 } == items)
-        for batch in batches {
-            let packed = V2ActorAuthenticatedCall(serviceID: call.serviceID, callerIncarnation: call.callerIncarnation,
-                recipient: call.recipient, sessionID: call.sessionID, sequence: call.sequence,
-                attemptID: call.attemptID, traceID: call.traceID, remainingBudget: call.remainingBudget,
-                principal: call.principal, request: .subscriptionRenewBatch(batch))
-            _ = try fixture.client.sign(packed, maximumBytes: 65_536)
-        }
-        #expect(throws: V2RoomCallFailure.notAccepted(.invalidRequest)) {
-            _ = try V2RoomClusterClient.renewalBatches(items, template: call, maximumBytes: 1)
-        }
-    }
+
     @Test("user identity and complete typed payload are covered by the signature")
     func signatureAndPrincipal() async throws {
         let fixture = try Fixture()
@@ -275,41 +241,7 @@ struct V2ActorAuthenticationTests {
         }
     }
 
-    @Test("renewal batch binds every exact activation and callback before room dispatch")
-    func renewalBatchAuthority() async throws {
-        let fixture = try Fixture(clientPermissions: [.userRoomCalls, .realtimeReceive], gatewayNodeIDs: ["gateway-alias"])
-        let grant = try await fixture.open()
-        let descriptor = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "gateway-alias", serviceID: "gateway",
-            incarnationID: grant.callerIncarnation), endpointReference: Data([1]), address: "127.0.0.1", port: 12345)
-        let fence = V2RoomSubscriptionFence(activation: fixture.token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        func item(fence: V2RoomSubscriptionFence, descriptor: V2GatewayRealtimeDescriptor) -> V2RoomSubscriptionRenewBatchItem {
-            .init(token: fixture.token, command: .init(roomID: fixture.token.roomID, actorUserID: fixture.user,
-                gatewayDescriptor: descriptor, expectedFence: fence, appliedControlSequence: 1))
-        }
-        func call(_ items: [V2RoomSubscriptionRenewBatchItem], sequence: UInt64 = 1) throws -> V2ActorAuthenticatedCall {
-            .init(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation, recipient: fixture.token.host,
-                sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
-                remainingBudget: try .init(5_000), principal: .service, request: .subscriptionRenewBatch(items))
-        }
-        let valid = item(fence: fence, descriptor: descriptor)
-        _ = try await fixture.auth.accept(fixture.client.sign(call([valid]), maximumBytes: 65_536))
-        await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(call([valid, valid], sequence: 2), maximumBytes: 65_536))
-        }
-        let other = V2RoomActivationToken(roomID: fixture.token.roomID, owner: fixture.token.owner,
-            activationEpoch: try .init(2), host: fixture.token.host)
-        let wrong = V2RoomSubscriptionFence(activation: other, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        await failure(.wrongRecipient) {
-            _ = try await fixture.auth.accept(fixture.client.sign(call([item(fence: wrong, descriptor: descriptor)], sequence: 2), maximumBytes: 65_536))
-        }
-        let impostor = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "gateway-alias", serviceID: "gateway",
-            incarnationID: UUID()), endpointReference: Data([1]), address: "127.0.0.1", port: 12345)
-        await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(call([item(fence: fence, descriptor: impostor)], sequence: 2), maximumBytes: 65_536))
-        }
-        #expect(try V2ActorProtobuf.decode(V2ActorAuthenticatedCall.self,
-            from: V2ActorProtobuf.encode(call([valid], sequence: 2))).request == .subscriptionRenewBatch([valid]))
-    }
+
 
     @Test("room subscription binds user and Gateway callback to authenticated service incarnation")
     func roomSubscriptionAuthority() async throws {
@@ -376,7 +308,7 @@ struct V2ActorAuthenticationTests {
         _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
             request: unsubscribe), maximumBytes: 16_384))
         let response = V2RoomResponse.roomSubscription(.granted(.init(fence: fence, memberRevision: 0,
-            userBaselineSequence: 7, remainingLeaseMilliseconds: 10_000)))
+            userBaselineSequence: 7, deliverySession: .init(host: fixture.token.host, gateway: descriptor().identity, generation: 1))))
         #expect(try V2ActorProtobuf.decode(V2RoomResponse.self, from: V2ActorProtobuf.encode(response)) == response)
         #expect(try V2ActorProtobuf.decode(V2RoomRequest.self, from: V2ActorProtobuf.encode(activation)) == activation)
         let missingReceiverPermission = try Fixture()

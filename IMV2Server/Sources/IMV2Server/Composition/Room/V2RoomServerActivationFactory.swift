@@ -160,34 +160,30 @@ private final class V2RoomDurableOwnerHolder: Sendable {
 /// Cluster 负责认证与传输。后两者都不导入 Server。
 public struct V2RoomServerActivationFactory: Sendable {
     private let owners: [String: V2RoomServerOwnerResources]
+    private let deliverySessions = V2RoomDeliverySessionHost()
     private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
 
-    /// Optional commit-observer bridge for durable writes outside execute().
-    /// Invoke only after the transaction settles; this merely coalesces a room
-    /// read. A future committed-facts feed can replace the read without changing
-    /// the transport or subscription authority boundary.
-    public func notifyCommittedRoomChange(token: V2RoomActivationToken) {
-        owners[token.owner.shardID]?.subscriptionHost.signal(room: token.roomID)
-    }
-
-    public func configureRoomSubscriptionDelivery(sendBatch: @escaping V2RoomSubscriptionDeliveryPump.SendBatch, maximumCalls: Int) async throws {
+    public func configureRoomSubscriptionDelivery(sendBatch: @escaping V2RoomSubscriptionDeliveryPump.SendBatch, sendPulse: @escaping V2RoomDeliverySessionHost.SendPulse, hostReady: @escaping @Sendable () async -> Bool, maximumCalls: Int) async throws {
         guard maximumCalls > 0 else { throw V2ActorContractError.invalidConfiguration("subscription calls") }
+        await deliverySessions.configure(send: sendPulse, hostReady: hostReady)
+        let sessions = deliverySessions
         var seen: Set<UUID> = []
         for resource in owners.values where seen.insert(resource.durableOwner.id).inserted {
-            try await resource.subscriptionHost.configure(sendBatch: sendBatch, maximumCalls: maximumCalls)
+            try await resource.subscriptionHost.configure(sendBatch: { batch, shard, gateway in
+                do { return try await sendBatch(batch, shard, gateway) }
+                catch {
+                    if batch.deliveries.contains(where: { $0.payload.isAuthorizationControl }) {
+                        if let host = batch.deliveries.first?.fence.activation.host { await sessions.controlFailed(host: host, gateway: gateway.identity) }
+                    }
+                    throw error
+                }
+            }, maximumCalls: maximumCalls)
         }
     }
-    public func configureRoomSubscriptionDelivery(send: @escaping V2RoomSubscriptionDeliveryPump.Send) async throws {
-        try await configureRoomSubscriptionDelivery(sendBatch: { batch, shard, gateway in
-            var receipts: [V2RoomSubscriptionBatchReceipt] = []
-            for delivery in batch.deliveries {
-                receipts.append(.init(fence: delivery.fence, result: try await send(delivery, shard, gateway)))
-            }
-            return .init(receipts: receipts)
-        }, maximumCalls: 4)
-    }
+
     public func shutdownRoomSubscriptionDelivery() async {
+        await deliverySessions.close()
         var seen: Set<UUID> = []
         for resource in owners.values where seen.insert(resource.durableOwner.id).inserted {
             await resource.shutdownRoomSubscriptionDelivery()
@@ -299,34 +295,9 @@ public struct V2RoomServerActivationFactory: Sendable {
                     }
                 }
             } catch { return v2RoomDomainCompletion(error) }
-        }, pureSubscriptionRenew: { token, request, deadline, validUntil in
-            guard case .roomSubscription(.renew(let command)) = request,
-                  command.roomID == token.roomID, let resources = owners[token.owner.shardID] else {
-                return .rolledBack(.invalidRequest)
-            }
-            do {
-                try V2RoomSubscriptionCommand.renew(command).validate()
-                let renewal = try await resources.subscriptionHost.renew(command: command, token: token,
-                    activationValidUntil: validUntil, deadline: deadline)
-                return .committed(.roomSubscription(.renewed(renewal)))
-            } catch {
-                if let failure = error as? V2RoomSubscriptionOwnerError {
-                    switch failure {
-                    case .busy: V2RoomSubscriptionOwnerFailureMetrics.shared.record(.busy)
-                    case .catchUpRequired:
-                        V2RoomSubscriptionOwnerFailureMetrics.shared.record(.catchUpRequired)
-                        resources.subscriptionHost.signal(room: token.roomID)
-                        return .committed(.roomSubscription(.failure(.unavailable)))
-                    case .overloaded: V2RoomSubscriptionOwnerFailureMetrics.shared.record(.overloaded)
-                    default: break
-                    }
-                }
-                do { return .committed(.roomSubscription(.failure(try v2RoomSubscriptionFailure(for: error)))) }
-                catch { return v2RoomDomainCompletion(error) }
-            }
         }) { token in
             let instance = V2RoomServerActivation(token: token, resources: owners[token.owner.shardID],
-                safetyActorUserID: safetyActorUserID, now: now)
+                safetyActorUserID: safetyActorUserID, now: now, deliverySessions: deliverySessions)
             let recorder = owners[token.owner.shardID]?.sendOperationMetrics
             return .init(restore: { context in
                 try await V2RoomSQLContinuationObservation.$metrics.withValue(recorder) {
@@ -351,6 +322,8 @@ private actor V2RoomServerActivation {
     private let resources: V2RoomServerOwnerResources?
     private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
+    private let deliverySessions: V2RoomDeliverySessionHost
+    private var sessionGateways: Set<V2GatewayRealtimeIdentity> = []
     private var subscriptionOwner: V2RoomSubscriptionOwner?
     private var restoringSubscription = false
     private var subscriptionRestoreWaiters: [CheckedContinuation<Void, Never>] = []
@@ -359,8 +332,9 @@ private actor V2RoomServerActivation {
     private var closed = false
 
     init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResources?,
-         safetyActorUserID: UserID?, now: @escaping @Sendable () -> Date) {
+         safetyActorUserID: UserID?, now: @escaping @Sendable () -> Date, deliverySessions: V2RoomDeliverySessionHost) {
         self.token = token
+        self.deliverySessions = deliverySessions
         self.resources = resources
         self.safetyActorUserID = safetyActorUserID
         self.now = now
@@ -476,21 +450,37 @@ private actor V2RoomServerActivation {
                 default: break
                 }
                 let item = turn.items[0]
-                let response: V2RoomResponse
-                if let workClass = item.request.hostDatabaseWorkClass {
-                    response = try await v2WithAdmittedRoomDatabaseWork(resources.databaseWorkAdmission,
-                        workClass: workClass, callerDeadline: item.deadline) {
-                        try await dispatch(item.request, handlers: handlers, resources: resources,
-                            batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline,
-                            activationValidUntil: turn.context.activationValidUntil)
+                let executeCommand: @Sendable (V2RoomPermissionCommit?) async throws -> V2RoomResponse = { permissionCommit in
+                    if let workClass = item.request.hostDatabaseWorkClass {
+                        return try await v2WithAdmittedRoomDatabaseWork(resources.databaseWorkAdmission,
+                            workClass: workClass, callerDeadline: item.deadline) {
+                            try await self.dispatch(item.request, handlers: handlers, resources: resources,
+                                batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline,
+                                activationValidUntil: turn.context.activationValidUntil, permissionCommit: permissionCommit)
+                        }
                     }
-                } else {
-                    // 回执和恢复操作在其执行叶子针对实际 SQL 获取许可；
-                    // typed scalar 发送在上方取得一次前台写许可。
-                    response = try await dispatch(item.request, handlers: handlers, resources: resources,
+                    return try await self.dispatch(item.request, handlers: handlers, resources: resources,
                         batchDeadline: turn.context.batchDeadline, callDeadline: item.deadline,
-                            activationValidUntil: turn.context.activationValidUntil)
+                        activationValidUntil: turn.context.activationValidUntil, permissionCommit: permissionCommit)
                 }
+                let response: V2RoomResponse
+                if let receiveReset = item.request.permissionMutationReceiveReset, let subscriptionOwner {
+                    guard let lifetime else { return .outcomeUnknown }
+                    do {
+                        response = try await subscriptionOwner.withPermissionMutation(token: token, deadline: item.deadline) { users, version in
+                            let commit = try V2RoomPermissionCommit(database: resources.database, token: self.token,
+                                lifetime: lifetime, trackedUserIDs: users, baseVersion: version, requiresReceiveReset: receiveReset)
+                            let response = try await executeCommand(commit)
+                            return .init(result: response, effect: commit.effect())
+                        }
+                    } catch {
+                        try? await subscriptionOwner.close()
+                        for gateway in sessionGateways {
+                            await deliverySessions.controlFailed(host: token.host, gateway: gateway)
+                        }
+                        return .outcomeUnknown
+                    }
+                } else { response = try await executeCommand(nil) }
                 if item.request.needsSubscriptionReadSignal { resources.subscriptionHost.signal(room: token.roomID) }
                 return .committed([response])
             }
@@ -507,7 +497,8 @@ private actor V2RoomServerActivation {
     private func dispatch(_ request: V2RoomRequest, handlers: Handlers,
                           resources: V2RoomServerOwnerResources,
                           batchDeadline: ContinuousClock.Instant,
-                          callDeadline: ContinuousClock.Instant, activationValidUntil: ContinuousClock.Instant?) async throws -> V2RoomResponse {
+                          callDeadline: ContinuousClock.Instant, activationValidUntil: ContinuousClock.Instant?,
+                          permissionCommit: V2RoomPermissionCommit? = nil) async throws -> V2RoomResponse {
         switch request {
         case .roomSubscription(let command):
             try command.validate()
@@ -516,23 +507,22 @@ private actor V2RoomServerActivation {
                 guard let activationValidUntil, activationValidUntil > .now else {
                     throw V2RoomCallFailure.notAccepted(.authorityLost)
                 }
-                let grantValidUntil = min(activationValidUntil, .now + V2RoomSubscriptionHost.controlFreshnessLimit)
                 let owner = try await subscriptions(resources: resources, deadline: callDeadline)
                 switch command {
-                case .renew(let value):
-                    let renewal = try await owner.renew(gateway: value.gatewayDescriptor.identity,
-                        userID: value.actorUserID, expectedFence: value.expectedFence,
-                        appliedControlSequence: value.appliedControlSequence, token: token, deadline: callDeadline,
-                        leaseProof: { token, deadline in
-                            try await resources.subscriptionHost.renewalProof(token: token, activationValidUntil: activationValidUntil, deadline: deadline)
-                        })
-                    return .roomSubscription(.renewed(renewal))
                 case .subscribe(let value):
-                    let grant = try await owner.subscribe(gateway: value.gatewayDescriptor.identity, userID: value.actorUserID, token: token, deadline: callDeadline)
-                    return .roomSubscription(.granted(.init(fence: grant.fence, memberRevision: grant.memberRevision, userBaselineSequence: grant.baselineSequence, remainingLeaseMilliseconds: min(grant.remainingLeaseMilliseconds, v2SubscriptionRemainingMilliseconds(until: grantValidUntil)))))
+                    let session = try await deliverySessions.retain(activation: token, gateway: value.gatewayDescriptor)
+                    sessionGateways.insert(value.gatewayDescriptor.identity)
+                    let grant: V2RoomSubscriptionOwner.Grant
+                    do { grant = try await owner.subscribe(gateway: value.gatewayDescriptor.identity, userID: value.actorUserID, token: token, deadline: callDeadline) }
+                    catch { await releaseUnreferencedSession(value.gatewayDescriptor.identity); throw error }
+                    return .roomSubscription(.granted(.init(fence: grant.fence, memberRevision: grant.memberRevision, userBaselineSequence: grant.baselineSequence, deliverySession: session)))
                 case .reset(let value):
-                    let grant = try await owner.resetGrant(gateway: value.gatewayDescriptor.identity, userID: value.actorUserID, expectedFence: value.expectedFence, token: token, deadline: callDeadline)
-                    return .roomSubscription(.granted(.init(fence: grant.fence, memberRevision: grant.memberRevision, userBaselineSequence: grant.baselineSequence, remainingLeaseMilliseconds: min(grant.remainingLeaseMilliseconds, v2SubscriptionRemainingMilliseconds(until: grantValidUntil)))))
+                    let session = try await deliverySessions.retain(activation: token, gateway: value.gatewayDescriptor)
+                    sessionGateways.insert(value.gatewayDescriptor.identity)
+                    let grant: V2RoomSubscriptionOwner.Grant
+                    do { grant = try await owner.resetGrant(gateway: value.gatewayDescriptor.identity, userID: value.actorUserID, expectedFence: value.expectedFence, token: token, deadline: callDeadline) }
+                    catch { await releaseUnreferencedSession(value.gatewayDescriptor.identity); throw error }
+                    return .roomSubscription(.granted(.init(fence: grant.fence, memberRevision: grant.memberRevision, userBaselineSequence: grant.baselineSequence, deliverySession: session)))
                 case .activate(let value):
                     guard let pump = await resources.subscriptionHost.currentPump() else { return .roomSubscription(.failure(.unavailable)) }
                     let bound = try await owner.activate(to: pump, descriptor: value.gatewayDescriptor, userID: value.actorUserID, fence: value.fence, token: token, deadline: callDeadline)
@@ -551,11 +541,7 @@ private actor V2RoomServerActivation {
                     default: break
                     }
                 }
-                if case .renew = command, let ownerError = error as? V2RoomSubscriptionOwnerError,
-                   ownerError == .catchUpRequired {
-                    resources.subscriptionHost.signal(room: token.roomID)
-                    return .roomSubscription(.failure(.unavailable))
-                }
+
                 return .roomSubscription(.failure(try v2RoomSubscriptionFailure(for: error)))
             }
         case .forward(let command):
@@ -575,12 +561,19 @@ private actor V2RoomServerActivation {
             return .messaging(try await handlers.messages.execute(command))
         case .administration(let command):
             do {
+                let administration: any V2RoomAdministrationExecuting
+                if let permissionCommit {
+                    administration = try V2RoomAdministrationDomainExecutor(database: resources.database,
+                        invitationSecretIssuer: resources.invitationSecretIssuer, invitationIdentities: resources.invitationIdentities,
+                        token: token, capacityProfile: resources.capacity, membershipIdentities: resources.identities,
+                        permissionCommit: permissionCommit, now: now)
+                } else { administration = handlers.administration }
                 if case .trustedSafety(let value) = command {
                     guard let safetyActorUserID else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-                    return .administration(try await handlers.administration.executeTrustedSafety(value,
+                    return .administration(try await administration.executeTrustedSafety(value,
                         authority: .init(safetyActorUserID: safetyActorUserID)))
                 }
-                return .administration(try await handlers.administration.executeUser(command))
+                return .administration(try await administration.executeUser(command))
             } catch {
                 if let failure = V2ActorAdministrationFailureWire(domainError: error) {
                     return .administration(.failure(failure))
@@ -634,11 +627,27 @@ private actor V2RoomServerActivation {
         let source = try PostgresV2RoomSubscriptionSource(database: resources.database, activation: token, lifetime: lifetime, databaseWorkAdmission: resources.databaseWorkAdmission)
         let host = resources.subscriptionHost
         let roomID = token.roomID
-        let created = try await V2RoomSubscriptionOwner.restore(source: source, roomID: token.roomID, owner: token.owner, activation: token, deadline: deadline, trackedUserIDs: [], notifyChanged: { host.signal(gateway: .init(roomID: roomID, gateway: $0)) })
+        let sessions = deliverySessions
+        let created = try await V2RoomSubscriptionOwner.restore(source: source, roomID: token.roomID, owner: token.owner,
+            activation: token, deadline: deadline, trackedUserIDs: [],
+            observeAuthorization: { progress, gateway in
+                sessions.observeAuthorization(progress, gateway: gateway)
+                if progress.isUnreferenced { host.signal(gateway: .init(roomID: roomID, gateway: gateway)) }
+            },
+            notifyRetired: { [weak self] gateway in await self?.releaseUnreferencedSession(gateway) },
+            notifyChanged: { host.signal(gateway: .init(roomID: roomID, gateway: $0)) })
         guard !closed else { try await created.close(); throw V2RoomSubscriptionOwnerError.closed }
         try await host.register(created, token: token, lifetime: lifetime)
         subscriptionOwner = created
         return created
+    }
+
+    private func releaseUnreferencedSession(_ gateway: V2GatewayRealtimeIdentity) async {
+        // A reentrant subscribe may have installed a new attachment while an
+        // old pump call was settling. Its live reference must remain retained.
+        if let subscriptionOwner, await subscriptionOwner.hasGateway(gateway) { return }
+        guard sessionGateways.remove(gateway) != nil else { return }
+        await deliverySessions.release(activation: token, gateway: gateway)
     }
 
     func invalidate(_ reservation: V2RoomReservation) async {
@@ -650,6 +659,8 @@ private actor V2RoomServerActivation {
     func close() async {
         guard !closed else { return }
         closed = true
+        for gateway in sessionGateways { await deliverySessions.release(activation: token, gateway: gateway) }
+        sessionGateways.removeAll()
         if restoringSubscription { await withCheckedContinuation { subscriptionRestoreWaiters.append($0) } }
         if let subscriptionOwner { try? await subscriptionOwner.close() }
         await resources?.subscriptionHost.unregister(token: token)
@@ -699,6 +710,28 @@ private actor V2RoomServerActivation {
 }
 
 private extension V2RoomRequest {
+    /// nil means no room-permission mutation. The Bool distinguishes a
+    /// receiver cut from send-only changes such as mute, role policy or freeze.
+    var permissionMutationReceiveReset: Bool? {
+        guard case .administration(let command) = self else { return nil }
+        switch command {
+        case .membershipSubmit: return true
+        case .memberAdministrationSubmit(let value):
+            switch value.intent.action { case .remove: return true; case .mute: return false }
+        case .groupCapabilitySubmit(let value):
+            switch value.intent.action {
+            case .rolePermissions: return false
+            case .memberRole: return true
+            case .pin, .announcement: return nil
+            }
+        case .groupInvitationSubmit(let value):
+            if case .decide(_, let decision, _) = value.command.intent.action, decision == .approve { return true }
+            return nil
+        case .trustedSafety(let value):
+            switch value.action { case .freezeRoom, .unfreezeRoom: return false; default: return nil }
+        default: return nil
+        }
+    }
     var needsSubscriptionReadSignal: Bool {
         switch self {
         case .messaging, .administration, .maintenance, .forward, .specialAccountAudit: return true
@@ -761,13 +794,7 @@ package actor V2RoomSubscriptionHost {
     private var entries: [RoomID: Entry] = [:]
     private var pump: V2RoomSubscriptionDeliveryPump?
     private var worker: Task<Void, Never>?
-    private var checker: Task<Void, Never>?
-    private let checkInterval: Duration
-    package static let controlFreshnessLimit: Duration = .seconds(15)
     private var checkingChanges = false
-    private var controlValidUntil: ContinuousClock.Instant?
-    private var controlCycleStarted: ContinuousClock.Instant?
-    private let controlFreshness: Duration
     private let now: @Sendable () -> ContinuousClock.Instant
     private let dirtyChanges: V2RoomSubscriptionDirtyChanges
     private var dirtyCursor: V2RoomSubscriptionDirtyCursor?
@@ -782,14 +809,12 @@ package actor V2RoomSubscriptionHost {
         factsFeed.withLock { precondition($0 == nil); $0 = feed }
     }
 
-    package init(checkInterval: Duration = .seconds(5), controlFreshness: Duration = V2RoomSubscriptionHost.controlFreshnessLimit,
-                 maximumRooms: Int = 8192, maximumBindings: Int = 8192,
+    package init(maximumRooms: Int = 8192, maximumBindings: Int = 8192,
                  now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
                  dirtyChanges: @escaping V2RoomSubscriptionDirtyChanges, dirtyAcknowledge: V2RoomSubscriptionDirtyHeadAcknowledge? = nil) {
-        precondition(checkInterval > .zero && controlFreshness > .zero && maximumRooms > 0 && maximumBindings > 0)
+        precondition(maximumRooms > 0 && maximumBindings > 0)
         self.maximumRooms = maximumRooms; self.maximumBindings = maximumBindings
-        self.checkInterval = checkInterval
-        self.controlFreshness = controlFreshness; self.now = now
+        self.now = now
         self.dirtyChanges = dirtyChanges; self.dirtyAcknowledge = dirtyAcknowledge
     }
 
@@ -807,16 +832,6 @@ package actor V2RoomSubscriptionHost {
             for await _ in stream {
                 guard !Task.isCancelled, let self else { return }
                 await self.consume()
-            }
-        }
-        // Correctness does not depend on a final commit notification arriving.
-        // One physical-host task consumes durable
-        // pending changes, coalescing with foreground commit notifications.
-        checker = Task { [weak self, interval = checkInterval] in
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: interval) } catch { return }
-                guard !Task.isCancelled, let self else { return }
-                await self.checkChanges()
             }
         }
     }
@@ -853,7 +868,6 @@ package actor V2RoomSubscriptionHost {
         // the existing worker to retry and settle local ownership.
         if !completedDirty.isEmpty { wakes.continuation.yield(()) }
         let deadline = ContinuousClock.now + .seconds(10)
-        if dirtyCursor == nil { controlCycleStarted = now() }
         do {
             for _ in 0..<64 {
                 let page = try await dirtyChanges(entries.values.map(\.token), dirtyCursor, 128, deadline)
@@ -869,54 +883,16 @@ package actor V2RoomSubscriptionHost {
                     if change.highWatermark > consumedThrough { signal(room: current.token.roomID) }
                 }
                 if dirtyCursor == nil {
-                    // Count SQL/queue time against freshness. A stalled or partial
-                    // cycle cannot indefinitely extend old permission grants.
-                    controlValidUntil = controlCycleStarted.map { $0 + controlFreshness }
-                    controlCycleStarted = nil
+                    // Durable repair does not extend online authorization.
                     return
                 }
                 guard .now < deadline else { return }
             }
-        } catch { /* Retain the original freshness boundary and retry the feed. */ }
+        } catch { /* Retain durable repair responsibility for the next retry. */ }
     }
 
-    package func renewalProof(token: V2RoomActivationToken, activationValidUntil: ContinuousClock.Instant,
-                              deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionLeaseProof {
-        guard !closed, deadline > .now, let entry = entries[token.roomID], entry.token == token,
-              let controlValidUntil, controlValidUntil > now(), activationValidUntil > now() else {
-            throw V2RoomSubscriptionOwnerError.catchUpRequired
-        }
-        let checkpoint = await entry.owner.renewalCheckpoint()
-        guard !closed, entries[token.roomID]?.token == token else { throw V2RoomActorStateError.activationChanged }
-        let dirty = dirtyHeads[token.roomID]
-        guard dirty.map({ $0.roomControlVersion == checkpoint.controlVersion }) ?? true else {
-            throw V2RoomSubscriptionOwnerError.catchUpRequired
-        }
-        // A committed message backlog is not an authorization discontinuity.
-        // Share its trusted advisory target without advancing the consumed log
-        // or clearing the feed's retained delivery/repair responsibility.
-        let committedHead = max(checkpoint.sequence, max(dirty?.highWatermark ?? 0,
-            factsFeed.withLock { $0 }?.highWatermark(activation: token) ?? 0))
-        let remaining = v2SubscriptionRemainingMilliseconds(until: min(controlValidUntil, activationValidUntil), now: now())
-        guard remaining > 0 else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
-        return .init(activation: token, committedRoomSequence: committedHead,
-            roomControlVersion: checkpoint.controlVersion, remainingLeaseMilliseconds: remaining)
-    }
-    /// Only an already activated subscription can renew. Missing entries never
-    /// restore from SQL or create a grant on this independent read path.
-    package func renew(command: V2RoomSubscriptionRenewCommand, token: V2RoomActivationToken,
-                       activationValidUntil: ContinuousClock.Instant,
-                       deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionRenewal {
-        guard !closed, let entry = entries[token.roomID], entry.token == token else {
-            throw V2RoomSubscriptionOwnerError.catchUpRequired
-        }
-        return try await entry.owner.renew(gateway: command.gatewayDescriptor.identity,
-            userID: command.actorUserID, expectedFence: command.expectedFence,
-            appliedControlSequence: command.appliedControlSequence, token: token, deadline: deadline,
-            leaseProof: { token, deadline in
-                try await self.renewalProof(token: token, activationValidUntil: activationValidUntil, deadline: deadline)
-            })
-    }
+
+
     private func retainHead(token: V2RoomActivationToken, highWatermark: UInt64) {
         guard entries[token.roomID]?.token == token else { return }
         pending.withLock { value in
@@ -1032,7 +1008,12 @@ package actor V2RoomSubscriptionHost {
                     dirtyHeads.removeValue(forKey: receipt.activation.roomID)
                     completedDirty.removeValue(forKey: receipt.activation.roomID)
                 }
-            } catch { /* Keep exact receipts; the independent change cycle retries. */ }
+            } catch {
+                // Retry retained recovery work without an idle database poll.
+                // The factory owns this worker and joins it during shutdown.
+                try? await Task.sleep(for: .milliseconds(25))
+                if !closed { wakes.continuation.yield(()) }
+            }
         }
     }
     private func withPinnedAcknowledgement(
@@ -1050,8 +1031,6 @@ package actor V2RoomSubscriptionHost {
         guard !closed else { return }; closed = true
         pending.withLock { $0.closed = true; $0.rooms.removeAll(); $0.deliveryRooms.removeAll(); $0.heads.removeAll(); $0.registeredRooms.removeAll() }
         wakes.continuation.finish()
-        checker?.cancel()
-        if let checker { await checker.value }; checker = nil
         worker?.cancel()
         if let worker { await worker.value }; worker = nil
         for entry in entries.values { try? await entry.owner.close() }

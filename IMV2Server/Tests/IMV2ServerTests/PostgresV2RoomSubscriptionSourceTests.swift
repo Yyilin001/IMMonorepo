@@ -219,7 +219,6 @@ struct PostgresV2RoomSubscriptionSourceTests {
             await #expect(throws: V2RoomSubscriptionSourceError.snapshotRequired) {
                 try await source.read(roomID: roomID, owner: owner, afterRoomSequence: 6, trackedUserIDs: tracked, limit: 64)
             }
-            #expect(snapshot.remainingLeaseMilliseconds > 0 && snapshot.remainingLeaseMilliseconds <= 60_000)
             let wrongActivation = V2RoomActivationToken(roomID: roomID, owner: owner,
                 activationEpoch: try .init(activation.activationEpoch.rawValue + 1), host: activation.host)
             #expect(throws: V2RoomSubscriptionSourceError.wrongOwner) {

@@ -137,7 +137,9 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         do {
             try await actorFactory?.configureRoomSubscriptionDelivery(sendBatch: { batch, shard, target in
                 try await handle.sendRoomSubscriptionBatch(batch, sourceShardID: shard, to: target)
-            }, maximumCalls: maximumCallbackCalls)
+            }, sendPulse: { pulse, shard, target in
+                try await handle.sendDeliverySession(pulse, sourceShardID: shard, to: target)
+            }, hostReady: { await actors.readiness() }, maximumCalls: maximumCallbackCalls)
             let roomIngress = try await registry.configureRoomSubscriptionIngress(
                 authority: V2GatewayRoomSubscriptionAuthority(maximumRooms: configuration.onlineDeliveryMaximumRooms,
                     maximumConnections: configuration.maximumConnections),
@@ -151,18 +153,6 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
                     try await actors.subscribeRoom(command, token: token, deadline: deadline)
                 }, reset: { command, token, deadline in
                     try await actors.resetRoomSubscription(command, token: token, deadline: deadline)
-                }, renewBatch: { peer, requests, deadline in
-                    let outcomes = try await actors.renewRoomSubscriptions(on: peer, items: requests.map {
-                        .init(token: $0.activation, command: $0.command)
-                    }, deadline: deadline)
-                    return outcomes.map { value in
-                        let result: V2GatewayRoomSubscriptionPorts.RenewalOutcome.Result
-                        switch value.outcome {
-                        case .result(let reply): result = .result(reply)
-                        case .failure(let failure): result = .failure(failure)
-                        }
-                        return .init(activation: value.token, result: result)
-                    }
                 }, activate: { command, token, deadline in
                     try await actors.activateRoomSubscription(command, token: token, deadline: deadline)
                 }, unsubscribe: { command, token, deadline in

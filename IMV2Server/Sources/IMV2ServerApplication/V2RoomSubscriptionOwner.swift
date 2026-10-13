@@ -7,9 +7,9 @@ public enum V2RoomSubscriptionOwnerError: Error, Equatable, Sendable {
     case busy, closed, unauthorized, catchUpRequired, overloaded, invalidInput, stale, deadlineExceeded
 }
 
-/// Trusted room-owner composition authenticates requests and its business lease
+/// Trusted room-owner composition authenticates the exact native activation
 /// before entering this service. A database snapshot is a committed cut, never
-/// proof of a live distributed owner lease. Mutation admission is explicit: a
+/// proof that its activation is still live. Mutation admission is explicit: a
 /// suspended database call does not permit another mutation to enter the room.
 public actor V2RoomSubscriptionOwner {
     public struct Grant: Equatable, Sendable {
@@ -17,7 +17,6 @@ public actor V2RoomSubscriptionOwner {
         public let memberRevision: UInt64
         /// This user's cut, which can be newer than the shared fence baseline.
         public let baselineSequence: UInt64
-        public let remainingLeaseMilliseconds: Int64
     }
     public struct DrainReport: Equatable, Sendable {
         public let consumedThrough: UInt64
@@ -41,6 +40,7 @@ public actor V2RoomSubscriptionOwner {
     private let maximumDrainPages: Int
     /// Must perform bounded synchronous enqueue/coalescing, never socket work.
     private let notifyChanged: @Sendable (V2GatewayRealtimeIdentity) -> Void
+    private let notifyRetired: @Sendable (V2GatewayRealtimeIdentity) async -> Void
     private var appliedRoomControlVersion: Int64
     private var appliedMembershipRevision: UInt64
     private var trackedUserIDs: Set<UserID>
@@ -49,6 +49,8 @@ public actor V2RoomSubscriptionOwner {
     private var deliveryBindings: [V2GatewayRealtimeIdentity: V2RoomSubscriptionDeliveryPump] = [:]
     private var nextInput: UInt64 = 1
     private var nextSubscriptionGeneration: UInt64 = 1
+    private var permissionCommitPending = false
+    private var permissionCommitWaiter: CheckedContinuation<Void, Never>?
     private var busy = false
     private var activePermissionOperations = 0
     private var requiredControlVersion: Int64
@@ -60,7 +62,8 @@ public actor V2RoomSubscriptionOwner {
     private init(source: any V2RoomSubscriptionSource, snapshot: V2RoomSubscriptionSourceSnapshot,
                  relay: V2RoomSubscriptionRelay, activation: V2RoomActivationToken, maximumTrackedUsers: Int, maximumGateways: Int,
                  pageSize: Int, maximumDrainPages: Int,
-                 notifyChanged: @escaping @Sendable (V2GatewayRealtimeIdentity) -> Void) {
+                 notifyChanged: @escaping @Sendable (V2GatewayRealtimeIdentity) -> Void,
+                 notifyRetired: @escaping @Sendable (V2GatewayRealtimeIdentity) async -> Void) {
         self.activation = activation; self.source = source; self.roomID = snapshot.roomID; self.owner = snapshot.owner; self.relay = relay
         self.appliedRoomControlVersion = snapshot.roomControlVersion
         self.requiredControlVersion = snapshot.roomControlVersion
@@ -68,11 +71,14 @@ public actor V2RoomSubscriptionOwner {
         self.trackedUserIDs = Set(snapshot.members.map(\.userID)); self.maximumTrackedUsers = maximumTrackedUsers
         self.maximumGateways = maximumGateways; self.pageSize = pageSize; self.maximumDrainPages = maximumDrainPages
         self.notifyChanged = notifyChanged
+        self.notifyRetired = notifyRetired
     }
 
     public static func restore(source: any V2RoomSubscriptionSource, roomID: RoomID, owner: V2RoomDataOwner, activation: V2RoomActivationToken, deadline: ContinuousClock.Instant,
                                trackedUserIDs: Set<UserID>, maximumTrackedUsers: Int = V2GroupCapacityPolicy.largeMaximumMembers,
                                maximumGateways: Int = 64, pageSize: Int = 64, maximumDrainPages: Int = 16,
+                               observeAuthorization: @escaping V2RoomSubscriptionRelay.ObserveAuthorization = { _, _ in },
+                               notifyRetired: @escaping @Sendable (V2GatewayRealtimeIdentity) async -> Void = { _ in },
                                notifyChanged: @escaping @Sendable (V2GatewayRealtimeIdentity) -> Void = { _ in }) async throws -> V2RoomSubscriptionOwner {
         guard activation.roomID == roomID, activation.owner == owner, maximumTrackedUsers > 0, maximumGateways > 0, trackedUserIDs.count <= maximumTrackedUsers,
               (1...64).contains(pageSize), maximumDrainPages > 0 else { throw V2RoomSubscriptionOwnerError.invalidInput }
@@ -81,10 +87,10 @@ public actor V2RoomSubscriptionOwner {
         guard deadline > .now, snapshot.roomID == roomID, snapshot.owner == owner,
               Set(snapshot.members.map(\.userID)) == trackedUserIDs else { throw V2RoomSubscriptionOwnerError.stale }
         let relay = try V2RoomSubscriptionRelay.restored(from: snapshot, activation: activation, maximumMembers: maximumTrackedUsers,
-                                                       maximumGateways: maximumGateways)
+                                                       maximumGateways: maximumGateways, observeAuthorization: observeAuthorization)
         return .init(source: source, snapshot: snapshot, relay: relay, activation: activation, maximumTrackedUsers: maximumTrackedUsers,
                      maximumGateways: maximumGateways, pageSize: pageSize, maximumDrainPages: maximumDrainPages,
-                     notifyChanged: notifyChanged)
+                     notifyChanged: notifyChanged, notifyRetired: notifyRetired)
     }
 
     package func consumedSequence() async -> UInt64 { await relay.committedSequence() }
@@ -171,7 +177,6 @@ public actor V2RoomSubscriptionOwner {
             throw V2RoomSubscriptionOwnerError.overloaded
         }
         do {
-            let proofStarted = ContinuousClock.now
             let cut = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: [userID])
             guard cut.roomID == roomID, cut.owner == owner else { throw V2RoomSubscriptionSourceError.wrongOwner }
             guard cut.roomControlVersion == appliedRoomControlVersion, cut.roomControlVersion >= requiredControlVersion else {
@@ -206,66 +211,8 @@ public actor V2RoomSubscriptionOwner {
             gateway.users[userID] = member.memberRevision; gateways[identity] = gateway; changed = true
             let status = try requireStatus(await relay.status(for: identity))
             try checkDeadline()
-            let remaining = remainingLease(cut.remainingLeaseMilliseconds, since: proofStarted)
-            guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
-            return .init(fence: status.fence, memberRevision: member.memberRevision, baselineSequence: cut.highWatermark, remainingLeaseMilliseconds: remaining)
+            return .init(fence: status.fence, memberRevision: member.memberRevision, baselineSequence: cut.highWatermark)
         } catch { await failClosedIfNeeded(error); throw error }
-    }
-
-    /// Trusted composition obtains the proof inside this admission boundary.
-    /// Renew never reads members, advances the log, subscribes, or activates.
-    /// Reads the current cut without reserving the message consumption turn.
-    public func renewalCheckpoint() async -> (sequence: UInt64, controlVersion: Int64) {
-        (await relay.committedSequence(), appliedRoomControlVersion)
-    }
-
-    public func renew(gateway identity: V2GatewayRealtimeIdentity, userID: UserID,
-                      expectedFence: V2RoomSubscriptionFence, appliedControlSequence: UInt64,
-                      token: V2RoomActivationToken, deadline: ContinuousClock.Instant,
-                      leaseProof: @Sendable (V2RoomActivationToken, ContinuousClock.Instant) async throws -> V2RoomSubscriptionLeaseProof) async throws -> V2RoomSubscriptionRenewal {
-        guard !closed else { throw V2RoomSubscriptionOwnerError.closed }
-        guard token == activation else { throw V2RoomSubscriptionOwnerError.stale }
-        guard deadline > .now, !Task.isCancelled else { throw V2RoomSubscriptionOwnerError.deadlineExceeded }
-        guard expectedFence.activation == activation, activatedFences[identity] == expectedFence, deliveryBindings[identity] != nil,
-              gateways[identity]?.users[userID] != nil,
-              await relay.canRenew(gateway: identity, fence: expectedFence,
-                  appliedControlSequence: appliedControlSequence, userID: userID) else {
-            throw V2RoomSubscriptionOwnerError.catchUpRequired
-        }
-        guard !closed else { throw V2RoomSubscriptionOwnerError.closed }
-        guard activePermissionOperations < 64 else { throw V2RoomSubscriptionOwnerError.overloaded }
-        activePermissionOperations += 1
-        defer {
-            activePermissionOperations -= 1
-            resumeCloseIfIdle()
-        }
-        let started = ContinuousClock.now
-        let proof = try await leaseProof(activation, deadline)
-        guard proof.activation == activation else { throw V2RoomActorStateError.activationChanged }
-        let committedSequence = await relay.committedSequence()
-        guard proof.roomControlVersion == appliedRoomControlVersion, proof.roomControlVersion >= requiredControlVersion,
-              proof.committedRoomSequence <= UInt64(Int64.max) else {
-            throw V2RoomSubscriptionOwnerError.catchUpRequired
-        }
-        // Data consumption may progress independently. Revalidate the authority cut after suspension.
-        guard await relay.canRenew(gateway: identity, fence: expectedFence,
-            appliedControlSequence: appliedControlSequence, userID: userID) else {
-            throw V2RoomSubscriptionOwnerError.catchUpRequired
-        }
-        guard !closed, token == activation, expectedFence.activation == activation,
-              activatedFences[identity] == expectedFence, deliveryBindings[identity] != nil,
-              gateways[identity]?.users[userID] != nil,
-              proof.roomControlVersion == appliedRoomControlVersion, proof.roomControlVersion >= requiredControlVersion else {
-            throw V2RoomSubscriptionOwnerError.catchUpRequired
-        }
-        guard deadline > .now, !Task.isCancelled else {
-            throw V2RoomSubscriptionOwnerError.deadlineExceeded
-        }
-        let remaining = remainingLease(proof.remainingLeaseMilliseconds, since: started)
-        guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
-        // Authorization renewal never acknowledges or retires message deliveries.
-        return .init(fence: expectedFence, appliedControlSequence: appliedControlSequence,
-                     committedRoomSequence: max(proof.committedRoomSequence, committedSequence), remainingLeaseMilliseconds: remaining)
     }
 
     public func unsubscribe(gateway identity: V2GatewayRealtimeIdentity, userID: UserID,
@@ -313,7 +260,6 @@ public actor V2RoomSubscriptionOwner {
             }
         }
         do {
-            let started = ContinuousClock.now
             let cut = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: trackedUserIDs)
             guard cut.roomControlVersion >= requiredControlVersion else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
             let progress: DrainReport
@@ -341,9 +287,7 @@ public actor V2RoomSubscriptionOwner {
             }
             let status = try requireStatus(await relay.status(for: identity))
             try checkDeadline()
-            let remaining = remainingLease(cut.remainingLeaseMilliseconds, since: started)
-            guard remaining > 0 else { throw V2RoomCallFailure.notAccepted(.authorityLost) }
-            return .init(fence: status.fence, memberRevision: member.memberRevision, baselineSequence: cut.highWatermark, remainingLeaseMilliseconds: remaining)
+            return .init(fence: status.fence, memberRevision: member.memberRevision, baselineSequence: cut.highWatermark)
         } catch { await failClosedIfNeeded(error); throw error }
     }
 
@@ -381,6 +325,51 @@ public actor V2RoomSubscriptionOwner {
         } catch { await failClosedIfNeeded(error); throw error }
     }
 
+    /// Reserve the authorization cut before persistence starts. A suspended
+    /// transaction cannot let a subscription read or log consumer overtake its
+    /// committed result. Only the transaction-supplied cut updates memory.
+    package func withPermissionMutation<Result: Sendable>(token: V2RoomActivationToken,
+        deadline: ContinuousClock.Instant,
+        mutation: @escaping @Sendable (Set<UserID>, Int64) async throws -> V2RoomPermissionMutationResult<Result>
+    ) async throws -> Result {
+        guard !closed, token == activation, !permissionCommitPending else { throw V2RoomSubscriptionOwnerError.stale }
+        permissionCommitPending = true; activePermissionOperations += 1
+        defer {
+            permissionCommitPending = false; activePermissionOperations -= 1
+            resumeCloseIfIdle()
+        }
+        if busy { await withCheckedContinuation { permissionCommitWaiter = $0 } }
+        guard !closed, deadline > .now else { throw V2RoomSubscriptionOwnerError.closed }
+        busy = true; activeDeadline = deadline
+        defer { leave() }
+        do {
+            let committed = try await mutation(trackedUserIDs, max(requiredControlVersion, appliedRoomControlVersion))
+            if let effect = committed.effect {
+                guard !closed, effect.activation == activation, effect.snapshot.roomID == roomID,
+                      effect.snapshot.owner == owner, effect.snapshot.roomControlVersion >= requiredControlVersion,
+                      Set(effect.snapshot.members.map(\.userID)) == trackedUserIDs else {
+                    throw V2RoomSubscriptionOwnerError.stale
+                }
+                if effect.snapshot.roomControlVersion > appliedRoomControlVersion {
+                    let invalidated = try await relay.reconcileControlCut(effect.snapshot,
+                        requireTerminal: effect.requiresReceiveReset && effect.snapshot.membershipRevision == appliedMembershipRevision)
+                    appliedRoomControlVersion = effect.snapshot.roomControlVersion
+                    requiredControlVersion = effect.snapshot.roomControlVersion
+                    appliedMembershipRevision = effect.snapshot.membershipRevision
+                    if invalidated { activatedFences.removeAll(); changed = true }
+                }
+            }
+            guard !closed else { throw V2RoomSubscriptionOwnerError.closed }
+            return committed.result
+        } catch {
+            // The business dispatcher may already have committed. Stop this
+            // activation's grants; restoration owns all uncertain outcomes.
+            closed = true; activatedFences.removeAll(); changed = true
+            await relay.invalidate()
+            throw V2RoomCallFailure.outcomeUnknown
+        }
+    }
+
     /// A trusted permission-feed barrier retires old grants immediately, even
     /// while a message read owns the mutation turn. It performs no database read.
     package func observePermissionVersion(_ version: Int64, token: V2RoomActivationToken) async throws {
@@ -414,7 +403,7 @@ public actor V2RoomSubscriptionOwner {
 
     /// Reuses the physical host's existing batched head check. Only an already
     /// consumed H is advertised, and only exact activated shared subscriptions
-    /// participate. The advisory control cannot extend a lease or install Ready.
+    /// participate. The advisory control cannot grant authority or install Ready.
     package func refreshHeads(observedHighWatermark: UInt64, token: V2RoomActivationToken,
                               deadline: ContinuousClock.Instant) async throws {
         try enter(token: token, deadline: deadline); defer { leave() }
@@ -427,8 +416,20 @@ public actor V2RoomSubscriptionOwner {
     /// Physical-host coalesced wake; bounded by this owner's gateway limit.
     public func signalDelivery() async {
         guard !closed else { return }
+        // Last-user retirement can finish on a later pump ACK, without a new
+        // room command or a SQL poll. Hot nonempty rooms need no prune hops.
+        if gateways.values.contains(where: { $0.users.isEmpty }) {
+            if busy || permissionCommitPending { changed = true }
+            else {
+                busy = true
+                await prune()
+                leave()
+            }
+        }
         for (gateway, pump) in deliveryBindings { await pump.signal(.init(roomID: roomID, gateway: gateway)) }
     }
+
+    package func hasGateway(_ gateway: V2GatewayRealtimeIdentity) -> Bool { gateways[gateway] != nil }
 
     public func close() async throws {
         // Close admission immediately, then join the actual in-flight database
@@ -445,7 +446,7 @@ public actor V2RoomSubscriptionOwner {
         guard token == activation else { throw V2RoomSubscriptionOwnerError.stale }
         guard deadline > .now else { throw V2RoomSubscriptionOwnerError.deadlineExceeded }
         guard !closed else { throw V2RoomSubscriptionOwnerError.closed }
-        guard !busy else { throw V2RoomSubscriptionOwnerError.busy }
+        guard !busy, !permissionCommitPending else { throw V2RoomSubscriptionOwnerError.busy }
         busy = true; activeDeadline = deadline
     }
     private func leave() {
@@ -455,6 +456,7 @@ public actor V2RoomSubscriptionOwner {
             changed = false
         }
         busy = false; activeDeadline = nil
+        let pending = permissionCommitWaiter; permissionCommitWaiter = nil; pending?.resume()
         resumeCloseIfIdle()
     }
     private func resumeCloseIfIdle() {
@@ -475,12 +477,7 @@ public actor V2RoomSubscriptionOwner {
         guard !closed else { throw V2RoomSubscriptionOwnerError.closed }
         guard let deadline = activeDeadline, deadline > .now else { throw V2RoomSubscriptionOwnerError.deadlineExceeded }
     }
-    private func remainingLease(_ value: Int64, since started: ContinuousClock.Instant) -> Int64 {
-        let elapsed = started.duration(to: .now).components
-        let millis = Double(elapsed.seconds) * 1000 + Double(elapsed.attoseconds) / 1_000_000_000_000_000
-        guard millis.isFinite, millis < Double(value) else { return 0 }
-        return value - Int64(millis.rounded(.up))
-    }
+
     private func allocateGeneration() throws -> UInt64 {
         guard nextSubscriptionGeneration < UInt64.max else { throw V2RoomSubscriptionOwnerError.overloaded }
         let allocated = nextSubscriptionGeneration; nextSubscriptionGeneration += 1; return allocated
@@ -494,6 +491,7 @@ public actor V2RoomSubscriptionOwner {
             if let pump = deliveryBindings.removeValue(forKey: gateway) {
                 await pump.unbindAndJoin(.init(roomID: roomID, gateway: gateway))
             }
+            await notifyRetired(gateway)
         }
         let referenced = Set(gateways.values.flatMap { $0.users.keys })
         let unused = trackedUserIDs.subtracting(referenced)

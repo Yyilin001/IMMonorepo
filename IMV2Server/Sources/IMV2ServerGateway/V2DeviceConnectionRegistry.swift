@@ -229,6 +229,8 @@ public actor V2DeviceConnectionRegistry {
             maximumRelations: maximumRelations, maximumReferences: max(maximumConnections, maximumRelations),
             maximumConcurrentCalls: maximumConcurrentCalls, onCleanupFailure: onCleanupFailure)
         roomSubscriptionCoordinator = coordinator
+        ingress.configureSessionChanged { host in await coordinator.sessionChanged(host: host) }
+        ingress.configureBaselineRequired { room in await coordinator.requestBaselineIfRequired(roomID: room) }
         await coordinator.start()
     }
 

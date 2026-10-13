@@ -40,13 +40,6 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
     }
     let directory = snapshot.directoryCalls
     let transport = snapshot.transportCalls
-    lines.append("# TYPE im_v2_room_actor_renewal_actual_calls gauge")
-    lines.append("im_v2_room_actor_renewal_actual_calls \(transport.renewalActualCalls)")
-    for stage in V2RoomRenewalFailureStage.allCases {
-        let name = "im_v2_room_actor_renewal_failure_" + stage.rawValue + "_total"
-        lines.append("# TYPE \(name) counter")
-        lines.append("\(name) \(transport.renewalFailures[stage, default: 0])")
-    }
     let counters: [(String, UInt64)] = [
         ("cached_call_attempts", directory.cachedCalls),
         ("cached_call_responses", directory.cachedResponses),

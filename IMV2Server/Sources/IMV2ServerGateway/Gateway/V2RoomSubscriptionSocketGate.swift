@@ -9,10 +9,14 @@ import IMV2ActorContracts
 final class V2RoomSubscriptionSocketGate: Sendable {
     struct RoomPermission: Sendable, Equatable {
         let fence: V2RoomSubscriptionFence?
-        let deadline: ContinuousClock.Instant?
+        let session: V2RoomDeliverySessionGate?
         let authorizationID: UUID?
         let memberRevision: UInt64?
-        static let denied = Self(fence: nil, deadline: nil, authorizationID: nil, memberRevision: nil)
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.fence == rhs.fence && lhs.session === rhs.session
+                && lhs.authorizationID == rhs.authorizationID && lhs.memberRevision == rhs.memberRevision
+        }
+        static let denied = Self(fence: nil, session: nil, authorizationID: nil, memberRevision: nil)
     }
     private final class State {
         var lifecycle: UUID?
@@ -58,7 +62,7 @@ final class V2RoomSubscriptionSocketGate: Sendable {
         let value = state.value
         guard !value.closed, value.lifecycle == permit.lifecycle,
               let room = value.rooms[permit.fence.roomID], room.fence == permit.fence,
-              room.deadline.map({ $0 > now }) == true,
+              room.session?.isReady(at: now) == true,
               room.authorizationID == permit.authorizationID,
               room.memberRevision == permit.memberRevision else { return false }
         if permit.requiresRoomInterest {

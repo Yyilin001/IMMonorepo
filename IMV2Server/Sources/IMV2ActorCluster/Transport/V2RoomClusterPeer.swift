@@ -78,14 +78,23 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         return receipt
     }
     package func policySnapshots(_ request: V2PolicySnapshotRequestWire, on host: V2ActorHostIdentity,
-        deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire] {
+        deadline: ContinuousClock.Instant) async throws -> V2PolicySnapshotBatchWire {
         V2SendPathTrace.current?.mark("policy_rpc_client_enter")
         defer { V2SendPathTrace.current?.mark("policy_rpc_client_return") }
         let response = try await exchange(.policySnapshots(request), on: host, principal: .service, deadline: deadline, roomToken: nil)
         if case .failure(let failure) = response { throw failure }
-        guard case .policySnapshots(let states) = response, states.count == request.scopes.count,
-              Set(states.map { $0.scope.key }) == Set(request.scopes.map(\.key)) else { throw V2RoomCallFailure.outcomeUnknown }
-        return states
+        guard case .policySnapshots(let batch) = response, batch.session.source == host,
+              batch.session.recipient == request.subscriber.host, batch.interestRevision == request.interestRevision,
+              batch.snapshots.count == request.scopes.count,
+              Set(batch.snapshots.map { $0.scope.key }) == Set(request.scopes.map(\.key)) else { throw V2RoomCallFailure.outcomeUnknown }
+        return batch
+    }
+    package func releasePolicyInterests(_ request: V2PolicyInterestReleaseWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws {
+        guard request.source == host else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
+        let response = try await exchange(.releasePolicyInterests(request), on: host, principal: .service, deadline: deadline, roomToken: nil)
+        if case .failure(let failure) = response { throw failure }
+        guard case .acknowledged = response else { throw V2RoomCallFailure.outcomeUnknown }
     }
     package func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, on host: V2ActorHostIdentity,
         deadline: ContinuousClock.Instant) async throws {
@@ -142,13 +151,11 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private var activeExchanges = 0
     private var activeRecoveryBatches = 0
     private var recoveryStageStates: [V2RoomTransportRecoveryStage: RecoveryStageState] = [:]
-    private var renewalFailures: [V2RoomRenewalFailureStage: UInt64] = [:]
     private var batchCallerTimeouts: UInt64 = 0
     private var batchCallerCancellations: UInt64 = 0
     private var batchRejectedGlobal: UInt64 = 0
     private var batchRejectedPeer: UInt64 = 0
     private var recoveryBatchesByHost: [V2ActorHostID: Int] = [:]
-    private var renewalBatchesByHost: [V2ActorHostID: Int] = [:]
     private var accepting = true
 
     init(system: ClusterSystem, signer: V2ActorSigningIdentity,
@@ -311,8 +318,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
               hostRecoveryWaits: hostRecoveryWaits, activeHostRecoveries: recoveryProbes.count,
               recoveryStages: recoveryStageSnapshots(), batchCallerTimeouts: batchCallerTimeouts,
               batchCallerCancellations: batchCallerCancellations, batchRejectedGlobal: batchRejectedGlobal,
-              batchRejectedPeer: batchRejectedPeer,
-              renewalActualCalls: renewalBatchesByHost.values.reduce(0, +), renewalFailures: renewalFailures)
+              batchRejectedPeer: batchRejectedPeer)
     }
 
     public func sessionCount() -> Int { sessions.count }
@@ -450,10 +456,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
     }
 
-    public func renewRoom(_ command: V2RoomSubscriptionRenewCommand, token: V2RoomActivationToken,
-                          deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult {
-        try await roomSubscription(.renew(command), token: token, deadline: deadline)
-    }
+
 
     public func subscribeRoom(_ command: V2RoomSubscriptionSubscribeCommand, token: V2RoomActivationToken,
                               deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult {
@@ -487,9 +490,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         if case .activate(let value) = command, value.fence.activation != token {
             throw V2ActorAuthenticationError.wrongRecipient
         }
-        if case .renew(let value) = command, value.expectedFence.activation != token {
-            throw V2ActorAuthenticationError.wrongRecipient
-        }
+
         if case .reset(let value) = command, value.expectedFence.activation != token {
             throw V2ActorAuthenticationError.wrongRecipient
         }
@@ -507,22 +508,14 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                   grant.memberRevision <= UInt64(Int64.max),
                   grant.userBaselineSequence >= grant.fence.baselineSequence,
                   grant.userBaselineSequence <= UInt64(Int64.max),
-                  grant.remainingLeaseMilliseconds > 0,
-                  grant.remainingLeaseMilliseconds <= 300_000 else { throw V2RoomCallFailure.outcomeUnknown }
+                  grant.deliverySession.host == token.host,
+                  grant.deliverySession.gateway == command.gatewayDescriptor.identity else { throw V2RoomCallFailure.outcomeUnknown }
             if case .reset(let value) = command {
                 guard grant.fence.generation > value.expectedFence.generation,
                       grant.fence.subscriptionID != value.expectedFence.subscriptionID,
                       grant.fence.baselineSequence >= value.expectedFence.baselineSequence else {
                     throw V2RoomCallFailure.outcomeUnknown
                 }
-            }
-        case (.renew(let command), .renewed(let proof)):
-            guard proof.fence == command.expectedFence,
-                  proof.appliedControlSequence == command.appliedControlSequence,
-                  proof.committedRoomSequence >= command.expectedFence.baselineSequence,
-                  proof.committedRoomSequence <= UInt64(Int64.max),
-                  (1...300_000).contains(proof.remainingLeaseMilliseconds) else {
-                throw V2RoomCallFailure.outcomeUnknown
             }
         case (.activate, .activated), (.unsubscribe, .unsubscribed), (_, .failure): break
         default: throw V2RoomCallFailure.outcomeUnknown
@@ -651,94 +644,13 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         return physicalReferences.actor(for: token)
     }
 
-    public func renewRoomSubscriptions(on host: V2ActorHostIdentity,
-        items: [V2RoomSubscriptionRenewBatchItem], deadline: ContinuousClock.Instant) async throws -> [V2RoomSubscriptionRenewBatchOutcome] {
-        guard !items.isEmpty, items.count <= 64, Set(items.map { $0.token.roomID }).count == items.count else {
-            throw V2RoomCallFailure.notAccepted(.invalidRequest)
-        }
-        for item in items {
-            try V2RoomSubscriptionCommand.renew(item.command).validate()
-            guard item.token.host == host, item.token.roomID == item.command.roomID,
-                  item.command.expectedFence.activation == item.token,
-                  item.command.gatewayDescriptor.identity.serviceID == signer.serviceID.rawValue,
-                  item.command.gatewayDescriptor.identity.incarnationID == callerIncarnation else {
-                throw V2ActorAuthenticationError.forbidden
-            }
-            try trust.validateRealtimeReceiver(item.command.gatewayDescriptor.identity)
-        }
-        // Reserve the largest legal envelope before dispatch. A count-bounded
-        // batch can still exceed the wire budget because callback data repeats.
-        let template = V2ActorAuthenticatedCall(serviceID: signer.serviceID, callerIncarnation: callerIncarnation,
-            recipient: host, sessionID: UUID(), sequence: .max, attemptID: UUID(), traceID: UUID(),
-            remainingBudget: try .init(V2ActorMilliseconds.maximum), principal: .service,
-            request: .subscriptionRenewBatch([]))
-        let batches = try Self.renewalBatches(items, template: template,
-            maximumBytes: min(65_536, limits.maximumRequestBytes))
-        var results: [V2RoomSubscriptionRenewBatchOutcome] = []
-        for batch in batches {
-            results += try await renewRoomSubscriptionBatch(on: host, items: batch, deadline: deadline)
-        }
-        return results
-    }
+
 
     /// Preflight every batch before any RPC; an oversized single item is an
     /// explicit request failure, never a partially dispatched packing attempt.
-    static func renewalBatches(_ items: [V2RoomSubscriptionRenewBatchItem],
-        template: V2ActorAuthenticatedCall, maximumBytes: Int) throws -> [[V2RoomSubscriptionRenewBatchItem]] {
-        let empty = V2ActorAuthenticatedCall(version: template.version, serviceID: template.serviceID,
-            callerIncarnation: template.callerIncarnation, recipient: template.recipient,
-            sessionID: template.sessionID, sequence: template.sequence, attemptID: template.attemptID,
-            traceID: template.traceID, remainingBudget: template.remainingBudget,
-            principal: template.principal, request: .subscriptionRenewBatch([]))
-        let overhead = V2ActorPayloadBudget.retainedBytes(of: empty)
-        var batches: [[V2RoomSubscriptionRenewBatchItem]] = [], pending: [V2RoomSubscriptionRenewBatchItem] = []
-        var pendingBytes = overhead
-        for item in items {
-            let itemBytes = V2ActorPayloadBudget.retainedBytes(of: item)
-            guard itemBytes <= maximumBytes - overhead else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
-            let separator = pending.isEmpty ? 0 : 1
-            if pending.count == 64 || pendingBytes + separator + itemBytes > maximumBytes {
-                batches.append(pending); pending = []; pendingBytes = overhead
-            }
-            pendingBytes += itemBytes + (pending.isEmpty ? 0 : 1)
-            pending.append(item)
-        }
-        if !pending.isEmpty { batches.append(pending) }
-        return batches
-    }
 
-    private func renewRoomSubscriptionBatch(on host: V2ActorHostIdentity,
-        items: [V2RoomSubscriptionRenewBatchItem], deadline: ContinuousClock.Instant) async throws -> [V2RoomSubscriptionRenewBatchOutcome] {
-        let references = items.compactMap { item -> ReferenceSnapshot? in
-            guard let actor = physicalReferences.actor(for: item.token), let generation = referenceGenerations[item.token] else { return nil }
-            return .init(token: item.token, actor: actor, generation: generation)
-        }
-        let response = try await exchange(.subscriptionRenewBatch(items), on: host, principal: .service,
-            deadline: deadline, roomToken: nil)
-        if case .failure(let failure) = response { throw failure }
-        guard case .subscriptionRenewBatch(let results) = response, results.count == items.count else {
-            throw invalidRenewalReply()
-        }
-        for (item, result) in zip(items, results) {
-            guard result.token == item.token else { throw invalidRenewalReply() }
-            switch result.outcome {
-            case .result(.renewed(let proof)):
-                guard proof.fence == item.command.expectedFence,
-                      proof.appliedControlSequence == item.command.appliedControlSequence,
-                      proof.committedRoomSequence >= item.command.expectedFence.baselineSequence,
-                      proof.committedRoomSequence <= UInt64(Int64.max),
-                      (1...300_000).contains(proof.remainingLeaseMilliseconds) else { throw invalidRenewalReply() }
-            case .result(.failure): break
-            case .failure(let failure):
-                if failure == .outcomeUnknown { recordRenewalFailure(.remoteOutcomeUnknown) }
-                if isExplicitlyStale(failure), let reference = references.first(where: { $0.token == item.token }) {
-                    invalidateReference(reference)
-                }
-            default: throw invalidRenewalReply()
-            }
-        }
-        return results
-    }
+
+
 
     public func invokeRecoveryBatch(on host: V2ActorHostIdentity, items: [V2RoomRecoveryBatchCallItem],
                                     deadline: ContinuousClock.Instant) async throws -> [V2RoomRecoveryBatchCallOutcome] {
@@ -797,7 +709,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         defer { sendTrace?.mark("rpc_exchange_return") }
         let permittedSuspendedCleanup = permitsPinnedCleanup(request, host: host)
         let recoveryBatch: Bool
-        switch request { case .recoveryBatch, .subscriptionRenewBatch: recoveryBatch = true; default: recoveryBatch = false }
+        switch request { case .recoveryBatch: recoveryBatch = true; default: recoveryBatch = false }
         let requestBytes = recoveryBatch ? min(65_536, limits.maximumRequestBytes) : limits.maximumRequestBytes
         let replyBytes = recoveryBatch ? min(262_144, limits.maximumReplyBytes) : limits.maximumReplyBytes
         guard accepting, (!suspendedHosts.contains(host) || permittedSuspendedCleanup),
@@ -958,7 +870,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             throw failure
         }
         catch {
-            if case .subscriptionRenewBatch = request { recordRenewalFailure(.transportError) }
             // 激活也会写入租约。任一可写 RPC 开始后，
             // 网络故障都不能证明它没有提交。
             if !(error is V2ActorAuthenticationError), !Task.isCancelled {
@@ -986,7 +897,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         catch let failure as V2RoomCallFailure { throw failure }
         catch {
-            if case .subscriptionRenewBatch = request { recordRenewalFailure(.replyVerification) }
             throw transportFailure(for: request)
         }
     }
@@ -1023,13 +933,8 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             boundToken: token))
     }
 
-    private func recordRenewalFailure(_ stage: V2RoomRenewalFailureStage) {
-        renewalFailures[stage] = Self.increment(renewalFailures[stage, default: 0])
-    }
-    private func invalidRenewalReply() -> V2RoomCallFailure {
-        recordRenewalFailure(.invalidBatchReply)
-        return .outcomeUnknown
-    }
+
+
     private func transportFailure(for request: V2ActorRPCRequest) -> V2RoomCallFailure {
         if case .lookup = request { return .notAccepted(.unavailable) }
         return .outcomeUnknown
@@ -1058,13 +963,9 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let dispatchPermit = try budget.acquire(.transport)
         let recoveryBatch: Bool
         switch request { case .recoveryBatch: recoveryBatch = true; default: recoveryBatch = false }
-        let renewalBatch: Bool
-        switch request { case .subscriptionRenewBatch: renewalBatch = true; default: renewalBatch = false }
         // Maintenance has its own per-host quota. The outer actual-dispatch
         // limit still bounds total transport work, including timed-out callers.
-        if renewalBatch, renewalBatchesByHost[host.hostID, default: 0] >= 2 {
-            throw V2RoomCallFailure.notAccepted(.overloaded)
-        }
+
         if recoveryBatch {
             guard activeRecoveryBatches < 4 else {
                 batchRejectedGlobal = Self.increment(batchRejectedGlobal)
@@ -1102,13 +1003,12 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                     catch { return }
                     if completion.cancelCaller(with: failure) {
                         await recordDispatchTimeout(recoveryBatch: recoveryBatch,
-                            renewalBatch: renewalBatch, cancelled: false)
+                            cancelled: false)
                     }
                 }
                 dispatchedCalls[id] = .init(host: host, completion: completion, timer: timer,
                     permit: dispatchPermit, recoveryPermit: recoveryPermit,
-                    recoveryBatch: recoveryBatch, renewalBatch: renewalBatch)
-                if renewalBatch { renewalBatchesByHost[host.hostID, default: 0] += 1 }
+                    recoveryBatch: recoveryBatch)
                 if recoveryBatch {
                     startRecoveryStage(.actualDispatch, id: id, items: Self.batchItemCount(request))
                     activeRecoveryBatches += 1
@@ -1131,26 +1031,21 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         } onCancel: {
             if completion.cancelCaller(with: failure) {
                 Task { await self.recordDispatchTimeout(recoveryBatch: recoveryBatch,
-                    renewalBatch: renewalBatch, cancelled: true) }
+                    cancelled: true) }
             }
         }
     }
 
-    private func recordDispatchTimeout(recoveryBatch: Bool, renewalBatch: Bool, cancelled: Bool) {
+    private func recordDispatchTimeout(recoveryBatch: Bool, cancelled: Bool) {
         if recoveryBatch {
             if cancelled { batchCallerCancellations = Self.increment(batchCallerCancellations) }
             else { batchCallerTimeouts = Self.increment(batchCallerTimeouts) }
         }
-        if renewalBatch { recordRenewalFailure(cancelled ? .callerCancelled : .callerTimeout) }
     }
 
     private func completeDispatch(id: UUID) {
         guard let call = dispatchedCalls.removeValue(forKey: id) else { return }
-        if call.renewalBatch {
-            let remaining = renewalBatchesByHost[call.host.hostID, default: 1] - 1
-            if remaining == 0 { renewalBatchesByHost.removeValue(forKey: call.host.hostID) }
-            else { renewalBatchesByHost[call.host.hostID] = remaining }
-        }
+
         if call.recoveryBatch {
             finishRecoveryStage(.actualDispatch, id: id)
             activeRecoveryBatches -= 1
@@ -1177,7 +1072,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     }
 
     private static func batchItemCount(_ request: V2ActorRPCRequest) -> Int {
-        if case .subscriptionRenewBatch(let items) = request { return items.count }
         if case .recoveryBatch(let items) = request { return items.count }
         return 0
     }
@@ -1745,7 +1639,6 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let permit: V2RoomClusterBudget.Permit
         let recoveryPermit: V2RoomClusterBudget.Permit?
         let recoveryBatch: Bool
-        let renewalBatch: Bool
     }
 }
 

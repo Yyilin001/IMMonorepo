@@ -14,7 +14,7 @@ import Testing
 
 @Suite("Room subscription real Cluster transport", .serialized)
 struct V2RoomSubscriptionNetworkTests {
-    @Test("all callback types share global sixteen and per-peer two admission")
+    @Test("ordinary callbacks share global sixteen and per-peer two admission")
     func sharedCallbackAdmission() async throws {
         let system = await makeSystem(name: "callback-budget", port: Int.random(in: 30_000...44_999))
         let keys = try Keys()
@@ -87,8 +87,13 @@ struct V2RoomSubscriptionNetworkTests {
             let offered = Mutex<[V2GatewayRoomSubscriptionAuthority.Permit]>([])
             let ingress = V2GatewayRoomSubscriptionIngress(authority: authority,
                 offerEvent: { _, permits in offered.withLock { $0.append(contentsOf: permits) } }, offerHead: { _, _ in })
-            #expect(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "publisher", deadline: .now + .seconds(60)))
             try await first.configureRoomSubscription(ingress)
+            let session = V2RoomDeliverySession(host: ownerHost, gateway: first.descriptor.identity, generation: 1)
+            // The native Actor incarnation intentionally differs from the
+            // transport MAC session's caller incarnation.
+            #expect(try await caller.sendDeliverySession(.init(session: session, kind: .open, sequence: 1),
+                sourceShardID: "rooms", to: first.descriptor) == .accepted)
+            #expect(await ingress.install(fence: fence, sourceShardID: "rooms", serviceID: "publisher", session: session))
             let targetID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: first.descriptor.endpointReference)
             let remote = try V2GatewayRealtimeEndpoint.resolve(id: targetID, using: callerSystem)
             #expect(__isRemoteActor(remote))
@@ -115,7 +120,7 @@ struct V2RoomSubscriptionNetworkTests {
                 activationEpoch: try .init(1), host: ownerHost)
             let largeFence = V2RoomSubscriptionFence(activation: largeActivation, subscriptionID: UUID(),
                 generation: 1, baselineSequence: 0)
-            try #require(await ingress.install(fence: largeFence, sourceShardID: "rooms", serviceID: "publisher", deadline: .now + .seconds(60)))
+            try #require(await ingress.install(fence: largeFence, sourceShardID: "rooms", serviceID: "publisher", session: session))
             let largeMembers = [member] + (1..<513).map { _ in V2RoomSubscriptionMember(userID: .init(uuid: UUID()), memberRevision: 1) }
             let firstPage = V2RoomSubscriptionDelivery(fence: largeFence, deliverySequence: 1, authorizationSequence: 1,
                 payload: .baselinePage(index: 0, totalMembers: 513, members: Array(largeMembers.prefix(512))))
@@ -145,14 +150,17 @@ struct V2RoomSubscriptionNetworkTests {
             let authorizedAfterRevoke = await authority.enqueueFixtureIfCurrent(permit, enqueue: {})
             #expect(!authorizedAfterRevoke)
 
-            // The business lease moves while the data owner remains epoch 0.
+            // The native activation moves while the data owner remains epoch 0.
             // A fresh room activation starts its subscription generation at 1.
             let nextHost = V2ActorHostIdentity(hostID: ownerHost.hostID, incarnationID: UUID())
             let nextActivation = V2RoomActivationToken(roomID: room, owner: dataOwner,
                 activationEpoch: try .init(2), host: nextHost)
             let nextFence = V2RoomSubscriptionFence(activation: nextActivation, subscriptionID: UUID(),
                 generation: 1, baselineSequence: 1)
-            #expect(await ingress.install(fence: nextFence, sourceShardID: "rooms", serviceID: "publisher", deadline: .now + .seconds(60)))
+            let nextSession = V2RoomDeliverySession(host: nextHost, gateway: first.descriptor.identity, generation: 1)
+            #expect(try await caller.sendDeliverySession(.init(session: nextSession, kind: .open, sequence: 1),
+                sourceShardID: "rooms", to: first.descriptor) == .accepted)
+            #expect(await ingress.install(fence: nextFence, sourceShardID: "rooms", serviceID: "publisher", session: nextSession))
             let nextBaseline = V2RoomSubscriptionDelivery(fence: nextFence, deliverySequence: 1, authorizationSequence: 1,
                 payload: .baseline(members: [member]))
             #expect(try await caller.sendRoomSubscription(nextBaseline, sourceShardID: "rooms", to: first.descriptor) == .appliedThrough(1))
@@ -167,7 +175,7 @@ struct V2RoomSubscriptionNetworkTests {
                 activationEpoch: try .init(2), host: .init(hostID: nextHost.hostID, incarnationID: UUID()))
             let conflictingFence = V2RoomSubscriptionFence(activation: conflictingActivation, subscriptionID: UUID(),
                 generation: 2, baselineSequence: 1)
-            #expect(!(await ingress.install(fence: conflictingFence, sourceShardID: "rooms", serviceID: "publisher", deadline: .now + .seconds(60))))
+            #expect(!(await ingress.installTestSession(fence: conflictingFence, sourceShardID: "rooms", serviceID: "publisher")))
             #expect(try await caller.sendRoomSubscription(.init(fence: conflictingFence, deliverySequence: 1, authorizationSequence: 1,
                 payload: .baseline(members: [member])), sourceShardID: "rooms", to: first.descriptor) == .stale)
             #expect(offered.withLock { $0.count } == 2)
@@ -201,7 +209,7 @@ struct V2RoomSubscriptionNetworkTests {
             let replacementAuthority = V2GatewayRoomSubscriptionAuthority()
             let replacementIngress = V2GatewayRoomSubscriptionIngress(authority: replacementAuthority,
                 offerEvent: { _, _ in }, offerHead: { _, _ in })
-            #expect(await replacementIngress.install(fence: nextFence, sourceShardID: "rooms", serviceID: "publisher", deadline: .now + .seconds(60)))
+            #expect(await replacementIngress.installTestSession(fence: nextFence, sourceShardID: "rooms", serviceID: "publisher"))
             try await replacement.configureRoomSubscription(replacementIngress)
             // Resolution and handshake use the replacement's real node UID and
             // endpoint bytes; cached old-incarnation sessions cannot substitute.
@@ -274,14 +282,14 @@ struct V2RoomSubscriptionNetworkTests {
                         userID: user, token: token, deadline: deadline)
                     ordinary.withLock { $0[command.roomID] = grant.fence }
                     return .granted(.init(fence: grant.fence, memberRevision: grant.memberRevision,
-                        userBaselineSequence: grant.baselineSequence, remainingLeaseMilliseconds: grant.remainingLeaseMilliseconds))
+                        userBaselineSequence: grant.baselineSequence, deliverySession: testNetworkDeliverySession(fence: grant.fence, gateway: peer.descriptor.identity, authority: authority)))
                 }, reset: { command, token, deadline in
                     resets.withLock { $0 += 1 }
                     let grant = try await services[command.roomID]!.resetGrant(gateway: peer.descriptor.identity,
                         userID: user, expectedFence: command.expectedFence, token: token, deadline: deadline)
                     return .granted(.init(fence: grant.fence, memberRevision: grant.memberRevision,
-                        userBaselineSequence: grant.baselineSequence, remainingLeaseMilliseconds: grant.remainingLeaseMilliseconds))
-                }, renewBatch: { _, _, _ in [] }, activate: { command, token, deadline in
+                        userBaselineSequence: grant.baselineSequence, deliverySession: testNetworkDeliverySession(fence: grant.fence, gateway: peer.descriptor.identity, authority: authority)))
+                },  activate: { command, token, deadline in
                     let activated = try await services[command.roomID]!.activate(to: pump,
                         descriptor: peer.descriptor, userID: user, fence: command.fence, token: token, deadline: deadline)
                     return activated ? .activated : .failure(.stale)
@@ -369,7 +377,7 @@ private struct EmptySubscriptionSource: V2RoomSubscriptionSource {
     let owner: V2RoomDataOwner
     func snapshot(roomID: RoomID, owner: V2RoomDataOwner, trackedUserIDs: Set<UserID>) async throws -> V2RoomSubscriptionSourceSnapshot {
         .init(roomID: room, owner: self.owner, highWatermark: 0, membershipRevision: 0,
-            roomControlVersion: 0, remainingLeaseMilliseconds: 60_000,
+            roomControlVersion: 0,
             members: trackedUserIDs.map { .init(userID: $0, memberRevision: 0, authorized: true) })
     }
     func read(roomID: RoomID, owner: V2RoomDataOwner, afterRoomSequence: UInt64,

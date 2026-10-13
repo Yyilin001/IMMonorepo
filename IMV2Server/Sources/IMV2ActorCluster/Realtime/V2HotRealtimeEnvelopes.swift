@@ -182,3 +182,39 @@ extension ShardReply: V2ActorProtobufMessage {
         return try .init(recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID), result: result)
     }
 }
+
+extension RoomDeliverySessionCall: V2ActorProtobufMessage {
+    package func protobufBytes() throws -> Data {
+        var wire = Im_Actor_V1_HotDeliverySessionCall()
+        wire.header = callHeader(service: serviceID, version: version, incarnation: callerIncarnation,
+            recipient: recipient, session: sessionID, sequence: sequence, attempt: attemptID)
+        wire.sourceShardID = sourceShardID
+        wire.pulse.session = .init(pulse.session); wire.pulse.kind = pulse.kind.rawValue; wire.pulse.sequence = pulse.sequence
+        return try wire.serializedData()
+    }
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotDeliverySessionCall(serializedBytes: copy bytes)
+        try V2HotPB.check(wire, wire.hasHeader && wire.hasPulse)
+        try V2HotPB.check(wire.pulse, wire.pulse.hasSession)
+        guard let kind = V2RoomDeliverySessionPulse.Kind(rawValue: wire.pulse.kind) else { throw V2HotPB.Invalid.value }
+        let h = wire.header; try validate(h)
+        return try .init(serviceID: .init(h.serviceID), version: Int(h.version), callerIncarnation: V2HotPB.uuid(h.callerIncarnation),
+            recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence, attemptID: V2HotPB.uuid(h.attemptID),
+            sourceShardID: wire.sourceShardID, pulse: .init(session: wire.pulse.session.model(), kind: kind, sequence: wire.pulse.sequence))
+    }
+}
+extension RoomDeliverySessionReply: V2ActorProtobufMessage {
+    package func protobufBytes() throws -> Data {
+        var wire = Im_Actor_V1_HotDeliverySessionReply()
+        wire.header = replyHeader(recipient: recipient, session: sessionID, sequence: sequence, attempt: attemptID)
+        wire.result = result.rawValue; return try wire.serializedData()
+    }
+    package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
+        let wire = try Im_Actor_V1_HotDeliverySessionReply(serializedBytes: copy bytes)
+        try V2HotPB.check(wire, wire.hasHeader)
+        guard let result = V2RoomDeliverySessionResult(rawValue: wire.result) else { throw V2HotPB.Invalid.value }
+        let h = wire.header; try validate(h, reply: true)
+        return try .init(recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence,
+            attemptID: V2HotPB.uuid(h.attemptID), result: result)
+    }
+}

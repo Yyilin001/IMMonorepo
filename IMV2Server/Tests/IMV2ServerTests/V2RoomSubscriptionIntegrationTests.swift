@@ -27,7 +27,7 @@ struct V2RoomSubscriptionIntegrationTests {
                 operation: .subscribe(gateway: gateway, userID: user, memberRevision: 1,
                     subscriptionID: UUID(), generation: 1)))
             let baseline = try #require(await relay.pending(for: gateway).first)
-            #expect(await authority.install(fence: baseline.fence, serviceID: "owner", deadline: .now + .seconds(30)))
+            #expect(await authority.installTestSession(fence: baseline.fence, serviceID: "owner"))
             for delivery in await relay.pending(for: gateway) {
                 #expect(await authority.apply(delivery, authenticatedServiceID: "owner") == .applied(permits: []))
             }
@@ -59,16 +59,16 @@ struct V2RoomSubscriptionIntegrationTests {
             offerEvent: { _, _ in }, offerHead: { _, _ in })
         let first = V2RoomSubscriptionFence(activation: try activation(room, shardID: "old-shard", ownerEpoch: 0),
             subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        #expect(await ingress.install(fence: first, sourceShardID: "old-shard", serviceID: "owner", deadline: .now + .seconds(30)))
+        #expect(await ingress.installTestSession(fence: first, sourceShardID: "old-shard", serviceID: "owner"))
         let member = V2RoomSubscriptionMember(userID: user, memberRevision: 0)
         let baseline = V2RoomSubscriptionDelivery(fence: first, deliverySequence: 1, authorizationSequence: 1, payload: .baseline(members: [member]))
         #expect(await ingress.applyRoomSubscription(baseline, authenticatedServiceID: "owner", sourceShardID: "old-shard") == .appliedThrough(1))
         let sameOwner = V2RoomSubscriptionFence(activation: try activation(room, shardID: "new-shard", ownerEpoch: 0),
             subscriptionID: UUID(), generation: 2, baselineSequence: 0)
-        #expect(!(await ingress.install(fence: sameOwner, sourceShardID: "new-shard", serviceID: "owner", deadline: .now + .seconds(30))))
+        #expect(!(await ingress.installTestSession(fence: sameOwner, sourceShardID: "new-shard", serviceID: "owner")))
         let migrated = V2RoomSubscriptionFence(activation: try activation(room, shardID: "new-shard", ownerEpoch: 1),
             subscriptionID: UUID(), generation: 1, baselineSequence: 1)
-        #expect(await ingress.install(fence: migrated, sourceShardID: "new-shard", serviceID: "owner", deadline: .now + .seconds(30)))
+        #expect(await ingress.installTestSession(fence: migrated, sourceShardID: "new-shard", serviceID: "owner"))
         #expect(await ingress.applyRoomSubscription(baseline, authenticatedServiceID: "owner", sourceShardID: "old-shard") == .stale)
         let fresh = V2RoomSubscriptionDelivery(fence: migrated, deliverySequence: 1, authorizationSequence: 1, payload: .baseline(members: [member]))
         #expect(await ingress.applyRoomSubscription(fresh, authenticatedServiceID: "owner", sourceShardID: "new-shard") == .appliedThrough(1))
@@ -82,7 +82,7 @@ struct V2RoomSubscriptionIntegrationTests {
             offerEvent: { _, _ in bodies.withLock { $0 += 1 } }, offerHead: { _, _ in })
         let fence = V2RoomSubscriptionFence(activation: try activation(room, shardID: "room-shard", ownerEpoch: 1),
             subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        let installed = await ingress.install(fence: fence, sourceShardID: "room-shard", serviceID: "owner", deadline: .now + .seconds(30))
+        let installed = await ingress.installTestSession(fence: fence, sourceShardID: "room-shard", serviceID: "owner")
         #expect(installed)
         let connection = UUID(), lifecycle = UUID()
         await authority.registerFixtureConnection(connection, userID: user, lifecycle: lifecycle)
@@ -116,7 +116,7 @@ struct V2RoomSubscriptionIntegrationTests {
         try await relay.offer(.init(ownerEpoch: 1, inputSequence: 2,
             operation: .subscribe(gateway: gateway, userID: bob, memberRevision: 1, subscriptionID: subscription, generation: 1)))
         let baseline = try #require(await relay.pending(for: gateway).first)
-        let installed = await local.install(fence: baseline.fence, serviceID: "owner", deadline: .now + .seconds(30))
+        let installed = await local.installTestSession(fence: baseline.fence, serviceID: "owner")
         #expect(installed)
         for delivery in await relay.pending(for: gateway) {
             #expect(await local.apply(delivery, authenticatedServiceID: "owner") == .applied(permits: []))
@@ -149,8 +149,8 @@ struct V2RoomSubscriptionIntegrationTests {
         let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, offerEvent: { _, _ in }, offerHead: { _, _ in })
         let first = V2RoomSubscriptionFence(activation: try activation(room, shardID: "actual-shard", ownerEpoch: 0),
             subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        #expect(!(await ingress.install(fence: first, sourceShardID: "wrong-shard", serviceID: "owner", deadline: .now + .seconds(30))))
-        #expect(await ingress.install(fence: first, sourceShardID: "actual-shard", serviceID: "owner", deadline: .now + .seconds(30)))
+        #expect(!(await ingress.installTestSession(fence: first, sourceShardID: "wrong-shard", serviceID: "owner")))
+        #expect(await ingress.installTestSession(fence: first, sourceShardID: "actual-shard", serviceID: "owner"))
         let baseline = V2RoomSubscriptionDelivery(fence: first, deliverySequence: 1, authorizationSequence: 1, payload: .baseline(members: []))
         #expect(await ingress.applyRoomSubscription(baseline, authenticatedServiceID: "owner", sourceShardID: "wrong-shard") == .stale)
         #expect(await ingress.applyRoomSubscription(baseline, authenticatedServiceID: "owner", sourceShardID: "actual-shard") == .appliedThrough(1))
@@ -165,7 +165,7 @@ struct V2RoomSubscriptionIntegrationTests {
             try delivery.validate()
         }
         let authority = V2GatewayRoomSubscriptionAuthority()
-        #expect(!(await authority.install(fence: fence, serviceID: "owner", deadline: .now + .seconds(30))))
+        #expect(!(await authority.installTestSession(fence: fence, serviceID: "owner")))
         #expect(fence.roomID == token.roomID)
         #expect(fence.ownerEpoch == token.owner.epoch)
     }

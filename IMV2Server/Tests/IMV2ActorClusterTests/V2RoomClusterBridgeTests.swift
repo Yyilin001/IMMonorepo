@@ -296,30 +296,7 @@ struct V2RoomClusterBridgeTests {
         }
         try await fixture.system.shutdown().wait()
     }
-    @Test("saturated recovery does not reject bounded renewal batches from six authenticated peers")
-    func renewalAdmissionIsIndependentOfRecovery() throws {
-        var admission = V2RoomBatchAdmission(maximumRenewalBatches: 12)
-        func check(_ kind: V2RoomBatchAdmission.Kind, _ peer: String, accepted: Bool = true) throws {
-            let result = admission.acquire(kind, peer: try V2ActorServiceID(peer))
-            #expect(result == accepted)
-        }
-        for peer in ["gateway-0", "gateway-1"] {
-            try check(.recovery, peer)
-            try check(.recovery, peer)
-        }
-        try check(.recovery, "gateway-2", accepted: false)
-        for index in 0..<6 {
-            let peer = "gateway-\(index)"
-            try check(.renewal, peer)
-            try check(.renewal, peer)
-            try check(.renewal, peer, accepted: false)
-        }
-        try check(.renewal, "gateway-6", accepted: false)
-        admission.release(.renewal, peer: try V2ActorServiceID("gateway-0"))
-        try check(.renewal, "gateway-0")
-        admission.release(.recovery, peer: try V2ActorServiceID("gateway-0"))
-        try check(.recovery, "gateway-2")
-    }
+
     @Test("signed recovery batches enforce request bytes before caller dispatch and after host authentication")
     func signedRecoveryBatchRequestByteBoundary() async throws {
         let gate = RecoveryBatchGate()

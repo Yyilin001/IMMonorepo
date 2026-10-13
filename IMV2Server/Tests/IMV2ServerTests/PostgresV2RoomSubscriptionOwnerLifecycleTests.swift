@@ -123,7 +123,7 @@ private actor SubscriptionLifecycleInstance {
                 try await owner.subscribe(gateway: self.gateway, userID: self.user, token: self.token, deadline: item.deadline)
             }
             return .committed([.granted(.init(fence: grant.fence, memberRevision: grant.memberRevision,
-                userBaselineSequence: grant.baselineSequence, remainingLeaseMilliseconds: grant.remainingLeaseMilliseconds))])
+                userBaselineSequence: grant.baselineSequence, deliverySession: .init(host: token.host, gateway: gateway, generation: 1)))])
         } catch {
             do { return .committed([.failure(try v2RoomSubscriptionFailure(for: error))]) }
             catch { return v2RoomDomainCompletion(error) }

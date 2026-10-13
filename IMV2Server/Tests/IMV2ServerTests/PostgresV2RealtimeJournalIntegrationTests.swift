@@ -462,7 +462,7 @@ struct PostgresV2RoomSubscriptionDirtyHeadTests {
                 let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, offerEvent: { _, _ in }, offerHead: { _, _ in })
                 let gateway = V2GatewayRealtimeIdentity(nodeID: "test-gateway", serviceID: "test-gateway", incarnationID: UUID())
                 let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 8443)
-                let host = V2RoomSubscriptionHost(checkInterval: .seconds(3600), dirtyChanges: { tokens, cursor, limit, deadline in
+                let host = V2RoomSubscriptionHost(dirtyChanges: { tokens, cursor, limit, deadline in
                     try await store.pending(activeTokens: tokens, after: cursor, limit: limit, deadline: deadline)
                 }, dirtyAcknowledge: { receipts, deadline in try await store.acknowledge(receipts, deadline: deadline) })
                 activations.own(host)
@@ -481,7 +481,7 @@ struct PostgresV2RoomSubscriptionDirtyHeadTests {
                         activation: token, deadline: .now + .seconds(30), trackedUserIDs: [])
                     try await host.register(owner, token: token, lifetime: lifetime)
                     let grant = try await owner.subscribe(gateway: gateway, userID: userID, token: token, deadline: .now + .seconds(30))
-                    let installed = await ingress.install(fence: grant.fence, sourceShardID: "source", serviceID: "source-service", deadline: .now + .seconds(30))
+                    let installed = await ingress.installTestSession(fence: grant.fence, sourceShardID: "source", serviceID: "source-service")
                     #expect(installed)
                     let connection = UUID(), lifecycle = UUID()
                     await authority.registerFixtureConnection(connection, userID: userID, lifecycle: lifecycle)

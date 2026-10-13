@@ -11,6 +11,10 @@ public enum V2GroupCapabilityExecutionError: Error, Sendable { case admissionExp
 /// Domain event/projection mutations and the immutable proof share one transaction.
 public struct PostgresV2GroupCapabilityOperationStore: Sendable {
     private let database:any Database
+    private var permissionCommit: V2RoomPermissionCommit?
+    package func usingPermissionCommit(_ commit: V2RoomPermissionCommit?) -> Self {
+        var copy = self; copy.permissionCommit = commit; return copy
+    }
     private let clock:@Sendable () -> Date
     public init(database:any Database,clock:@escaping @Sendable () -> Date = Date.init) { self.database=database;self.clock=clock }
     public func admit(_ intent:V2GroupCapabilityIntent,token:V2RoomActivationToken) async throws -> V2GroupCapabilityAdmissionResult {
@@ -33,7 +37,7 @@ public struct PostgresV2GroupCapabilityOperationStore: Sendable {
         }
     }
     public func submit(_ command:V2GroupCapabilityCommand,token:V2RoomActivationToken,capacityProfile:V2CapacityProfile,eventID:EventID) async throws -> V2GroupCapabilityRecoveryResult {
-        try await v2WithRoomScopedTransaction(database:database) { transaction in
+        try await v2WithRoomPermissionCommit(database: database, permissionCommit: permissionCommit) { transaction in
             let sql=try await lock(identity:command.identity,token:token,database:transaction)
             if let proof=try await original(command.identity,command.fingerprint,sql:sql) { return proof }
             let now=try milliseconds(clock())

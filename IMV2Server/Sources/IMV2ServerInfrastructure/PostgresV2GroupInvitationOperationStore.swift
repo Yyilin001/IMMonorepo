@@ -11,6 +11,10 @@ import SQLKit
 /// immutable operation proof. Global quota authority comes from the account coordinator.
 public struct PostgresV2GroupInvitationOperationStore: Sendable {
     private let database: any Database
+    private var permissionCommit: V2RoomPermissionCommit?
+    package func usingPermissionCommit(_ commit: V2RoomPermissionCommit?) -> Self {
+        var copy = self; copy.permissionCommit = commit; return copy
+    }
     private let activation: V2RoomActivationWriteScope
     private let primitive: PostgresV2GroupInvitationStore
     private let issuer: V2GroupInviteSecretIssuer
@@ -55,7 +59,7 @@ public struct PostgresV2GroupInvitationOperationStore: Sendable {
         }
     }
     public func submit(_ execution: V2GroupInvitationExecutionRequest, now: Date = Date()) async throws -> V2GroupInvitationOperationRecoveryResult {
-        try await v2WithPostgresTransactionRetry(database:database,maximumRetryCount:0,classifyCommitFailure:true,useRoomDeadline:true) { tx in
+        try await v2WithRoomPermissionCommit(database: database, permissionCommit: permissionCommit) { tx in
             let sql = try sqlDatabase(tx); let command = execution.command; let intent = command.intent
             try await lock(intent,sql:sql); try await activation.require([intent.roomID.uuidValue!],sql:sql)
             if let prior = try await receipt(intent,sql:sql) { return prior.validates(intent:intent) ? .receipt(prior) : .fingerprintConflict }

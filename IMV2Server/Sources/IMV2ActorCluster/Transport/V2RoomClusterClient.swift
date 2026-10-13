@@ -119,11 +119,16 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
     }
 
     package func policySnapshots(_ request: V2PolicySnapshotRequestWire, on host: V2ActorHostIdentity,
-        deadline: ContinuousClock.Instant) async throws -> [V2PolicySnapshotWire] {
+        deadline: ContinuousClock.Instant) async throws -> V2PolicySnapshotBatchWire {
         let peer = try directory.peer(for: host)
         return try await peer.policySnapshots(request, on: host, deadline: deadline)
     }
 
+    package func releasePolicyInterests(_ request: V2PolicyInterestReleaseWire, on host: V2ActorHostIdentity,
+        deadline: ContinuousClock.Instant) async throws {
+        let peer = try directory.peer(for: host)
+        try await peer.releasePolicyInterests(request, on: host, deadline: deadline)
+    }
     package func updatePolicySnapshot(_ request: V2PolicySnapshotUpdateWire, on host: V2ActorHostIdentity,
         deadline: ContinuousClock.Instant) async throws {
         let peer = try directory.peer(for: host)
@@ -161,11 +166,7 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         return try await peer.invoke(token, request: request, principal: principal, deadline: deadline)
     }
 
-    public func renewRoom(_ command: V2RoomSubscriptionRenewCommand, token: V2RoomActivationToken,
-                          deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult {
-        let peer = try directory.peer(for: token.host)
-        return try await peer.renewRoom(command, token: token, deadline: deadline)
-    }
+
 
     public func subscribeRoom(_ command: V2RoomSubscriptionSubscribeCommand, token: V2RoomActivationToken,
                               deadline: ContinuousClock.Instant) async throws -> V2RoomSubscriptionResult {
@@ -221,11 +222,7 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         return await peer.finish(grant, completion: completion, deadline: deadline)
     }
 
-    public func renewRoomSubscriptions(on host: V2ActorHostIdentity,
-        items: [V2RoomSubscriptionRenewBatchItem], deadline: ContinuousClock.Instant) async throws -> [V2RoomSubscriptionRenewBatchOutcome] {
-        let peer = try directory.peer(for: host)
-        return try await peer.renewRoomSubscriptions(on: host, items: items, deadline: deadline)
-    }
+
 
     public func invokeRecoveryBatch(on host: V2ActorHostIdentity, items: [V2RoomRecoveryBatchCallItem],
                                     deadline: ContinuousClock.Instant) async throws -> [V2RoomRecoveryBatchCallOutcome] {
@@ -279,10 +276,7 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
             stages[stage] = .init(active: active, started: started, completed: completed,
                 totalMilliseconds: total, maxMilliseconds: maximum, oldestMilliseconds: oldest, itemsStarted: items)
         }
-        var failures: [V2RoomRenewalFailureStage: UInt64] = [:]
-        for snapshot in snapshots {
-            for (key, count) in snapshot.renewalFailures { failures[key, default: 0] &+= count }
-        }
+
         let cachedLocalCalls: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.cachedLocalCalls }
         let cachedRemoteCalls: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.cachedRemoteCalls }
         let roomLookups: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.roomLookups }
@@ -295,7 +289,6 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
         let batchCallerCancellations: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.batchCallerCancellations }
         let batchRejectedGlobal: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.batchRejectedGlobal }
         let batchRejectedPeer: UInt64 = snapshots.reduce(UInt64(0)) { $0 &+ $1.batchRejectedPeer }
-        let renewalActualCalls: Int = snapshots.reduce(Int(0)) { $0 + $1.renewalActualCalls }
         return V2RoomTransportCallMetricsSnapshot(
             cachedLocalCalls: cachedLocalCalls,
             cachedRemoteCalls: cachedRemoteCalls,
@@ -309,16 +302,11 @@ public final class V2RoomClusterClient: V2RoomClientTransport, V2RoomHostDiscove
             batchCallerTimeouts: batchCallerTimeouts,
             batchCallerCancellations: batchCallerCancellations,
             batchRejectedGlobal: batchRejectedGlobal,
-            batchRejectedPeer: batchRejectedPeer,
-            renewalActualCalls: renewalActualCalls,
-            renewalFailures: failures)
+            batchRejectedPeer: batchRejectedPeer)
     }
     static func recoveryProbeDeadline(for deadline: ContinuousClock.Instant,
         now: ContinuousClock.Instant = .now) -> ContinuousClock.Instant {
         V2RoomClusterPeer.recoveryProbeDeadline(for: deadline, now: now)
     }
-    static func renewalBatches(_ items: [V2RoomSubscriptionRenewBatchItem],
-        template: V2ActorAuthenticatedCall, maximumBytes: Int) throws -> [[V2RoomSubscriptionRenewBatchItem]] {
-        try V2RoomClusterPeer.renewalBatches(items, template: template, maximumBytes: maximumBytes)
-    }
+
 }

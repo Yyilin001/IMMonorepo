@@ -17,6 +17,7 @@ struct GatewayPolicyAssembly: Sendable {
     private let owners: PostgresV2PolicyOwnerDirectory
     private let worker: V2PolicyMaintenanceWorker
     private let pairService: V2RoomForwardPairService
+    private let snapshots: V2PolicySnapshotPublisher
 
     static func build(prepared: GatewayPreparedAssembly, logger: Logger) throws -> Self? {
         let configuration = prepared.roomOwners.actorConfiguration
@@ -35,15 +36,28 @@ struct GatewayPolicyAssembly: Sendable {
             stateReadAdmission: nil, stateMetrics: stateMetrics)
         let dispatcher = PostgresV2PolicyMutationDispatcher(database: database,
             projectionDelivery: prepared.projection.userShardProjectionDelivery)
-        let cache = V2NodePolicyStateCache()
         let endpoint = document.owners.first(where: { $0.hostID == hostID })?.endpoint
             ?? configuration.allowedShards.sorted()[0]
-        let subscriber = try V2PolicySnapshotSubscriberWire(hostID: identity.hostID, endpoint: endpoint)
+        let subscriber = try V2PolicySnapshotSubscriberWire(host: identity, endpoint: endpoint)
+        let cache = V2NodePolicyStateCache(identity: identity, subscriber: subscriber, releaseInterests: { request in
+            let client = try binding.client()
+            try await client.releasePolicyInterests(request, on: request.source, deadline: .now + .seconds(2))
+        })
         let snapshots = V2PolicySnapshotPublisher(targets: try configuration.discovery.peers.map { peer in
             try .init(hostID: peer.hostID,
                 endpoint: document.owners.first { $0.hostID == peer.hostID.uuidValue }?.endpoint
                     ?? peer.accessibleShardIDs.sorted()[0])
-        }, localHostID: identity.hostID, cache: cache, client: { try binding.client() })
+        }, identity: identity, cache: cache, validateRecipient: { target in
+            let client = try binding.client()
+            guard try await client.resolvePolicyHost(hostID: target.hostID, endpoint: target.endpoint) == target.host else {
+                throw V2PolicyAuthorizationLifecycleError.ownerChanged
+            }
+        }, send: { request, target in
+            let client = try binding.client()
+            let host = try await client.resolvePolicyHost(hostID: target.hostID, endpoint: target.endpoint)
+            guard host == target.host else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
+            try await client.updatePolicySnapshot(request, on: host, deadline: .now + .seconds(2))
+        })
         let owners = PostgresV2PolicyOwnerDirectory(journal: journal, dispatcher: dispatcher,
             ownerID: identity.incarnationID,
             snapshotPublisher: snapshots,
@@ -100,15 +114,18 @@ struct GatewayPolicyAssembly: Sendable {
                         "publication_failed": .stringConvertible(value.publication?.failed ?? -1)
                     ])
                 }
-            }), pairService: pairService)
+            }), pairService: pairService, snapshots: snapshots)
     }
 
     func startMaintenance() async throws {
+        await cache.startInterestReleases()
+        try await snapshots.start(qualified: { await binding.isQualified() })
         try await worker.start()
     }
     func shutdown() async {
         await pairService.close()
         await worker.shutdown()
+        await snapshots.shutdown()
         await cache.shutdown()
         await owners.shutdown()
         await binding.close()

@@ -78,3 +78,27 @@ extension V2GatewayByteStream {
             roomSubscriptionSocketGate: gate)
     }
 }
+
+import IMV2ActorContracts
+private let fixtureDeliveryGateway = V2GatewayRealtimeIdentity(nodeID: "fixture", serviceID: "fixture", incarnationID: UUID())
+extension V2GatewayRoomSubscriptionAuthority {
+    func installTestSession(fence: V2RoomSubscriptionFence, serviceID: String,
+                            afterAuthoritativeReset: Bool = false) async -> Bool {
+        let session = V2RoomDeliverySession(host: fence.activation.host, gateway: fixtureDeliveryGateway, generation: 1)
+        guard applyDeliverySession(.init(session: session, kind: .open, sequence: 1), serviceID: serviceID) == .accepted else { return false }
+        return await install(fence: fence, serviceID: serviceID, session: session, afterAuthoritativeReset: afterAuthoritativeReset)
+    }
+}
+extension V2GatewayRoomSubscriptionIngress {
+    func installTestSession(fence: V2RoomSubscriptionFence, sourceShardID: String, serviceID: String,
+                            afterAuthoritativeReset: Bool = false) async -> Bool {
+        guard fence.activation.owner.shardID == sourceShardID else { return false }
+        return await authority.installTestSession(fence: fence, serviceID: serviceID, afterAuthoritativeReset: afterAuthoritativeReset)
+    }
+}
+func testDeliverySession(fence: V2RoomSubscriptionFence, gateway: V2GatewayRealtimeIdentity,
+                         authority: V2GatewayRoomSubscriptionAuthority, serviceID: String = "owner") -> V2RoomDeliverySession {
+    let session = V2RoomDeliverySession(host: fence.activation.host, gateway: gateway, generation: 1)
+    _ = authority.applyDeliverySession(.init(session: session, kind: .open, sequence: 1), serviceID: serviceID)
+    return session
+}

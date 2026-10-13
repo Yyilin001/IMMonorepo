@@ -7,6 +7,31 @@ import Testing
 
 @Suite("Fixed RPC Protobuf boundary")
 struct V2HotRPCProtobufTests {
+    @Test("delivery session pulses use fixed PB and preserve every generation and identity")
+    func deliverySessionFixedEnvelope() throws {
+        let host = V2ActorHostIdentity(hostID: try .init("host"), incarnationID: UUID())
+        let gateway = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "gateway", incarnationID: UUID())
+        let session = V2RoomDeliverySession(host: host, gateway: gateway, generation: 9)
+        for kind in [V2RoomDeliverySessionPulse.Kind.open, .heartbeat, .retire] {
+            let call = RoomDeliverySessionCall(serviceID: try .init("publisher"), version: 1,
+                callerIncarnation: UUID(), recipient: gateway, sessionID: UUID(), sequence: 13, attemptID: UUID(),
+                sourceShardID: "rooms", pulse: .init(session: session, kind: kind, sequence: 7))
+            let bytes = try V2ActorProtobuf.encode(call)
+            let wire = try Im_Actor_V1_HotDeliverySessionCall(serializedBytes: bytes)
+            #expect(wire.pulse.kind == kind.rawValue && wire.pulse.sequence == 7)
+            #expect(wire.pulse.session.generation == 9 && wire.sourceShardID == "rooms")
+            #expect(try V2ActorProtobuf.decode(RoomDeliverySessionCall.self, from: bytes) == call)
+            for result in [V2RoomDeliverySessionResult.accepted, .resetRequired, .stale] {
+                let reply = RoomDeliverySessionReply(recipient: gateway, sessionID: call.sessionID,
+                    sequence: call.sequence, attemptID: call.attemptID, result: result)
+                #expect(try V2ActorProtobuf.decode(RoomDeliverySessionReply.self, from: V2ActorProtobuf.encode(reply)) == reply)
+            }
+            var invalid = wire; invalid.pulse.session.generation = 0
+            #expect(throws: (any Error).self) {
+                try V2ActorProtobuf.decode(RoomDeliverySessionCall.self, from: invalid.serializedData())
+            }
+        }
+    }
     @Test func invokeUsesFixedEnvelopeAndRejectsGenericHotRequest() throws {
         let room = RoomID(uuid: UUID()), host = V2ActorHostIdentity(hostID: try .init("host"), incarnationID: UUID())
         let token = try V2RoomActivationToken(roomID: room, owner: .init(shardID: "rooms", epoch: 0), activationEpoch: .init(1), host: host)
@@ -25,16 +50,5 @@ struct V2HotRPCProtobufTests {
         let control = V2ActorRPCRequest.activate(roomID: room, owner: token.owner)
         #expect(try V2ActorProtobuf.decode(V2ActorRPCRequest.self, from: V2ActorProtobuf.encode(control)) == control)
     }
-    @Test func renewalBatchAndMixedOutcomes() throws {
-        let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
-        let token = try V2RoomActivationToken(roomID: room, owner: .init(shardID: "rooms", epoch: 0), activationEpoch: .init(1), host: .init(hostID: .init("host"), incarnationID: UUID()))
-        let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-        let command = V2RoomSubscriptionRenewCommand(roomID: room, actorUserID: user, gatewayDescriptor: .init(identity: .init(nodeID: "gw", serviceID: "gw", incarnationID: UUID()), endpointReference: Data([1]), address: "localhost", port: 9999), expectedFence: fence, appliedControlSequence: 1)
-        let request = V2ActorRPCRequest.subscriptionRenewBatch([.init(token: token, command: command)])
-        #expect(try V2ActorProtobuf.decode(V2ActorRPCRequest.self, from: V2ActorProtobuf.encode(request)) == request)
-        let outcomes: [V2RoomSubscriptionRenewBatchOutcome] = [.init(token: token, outcome: .result(.activated)), .init(token: token, outcome: .failure(.outcomeUnknown))]
-        for response: V2ActorRPCResponse in [.subscriptionRenewBatch(outcomes), .completed(false), .acknowledged, .ready(token: token, physicalReference: Data([0, 1, 255]))] {
-            #expect(try V2ActorProtobuf.decode(V2ActorRPCResponse.self, from: V2ActorProtobuf.encode(response)) == response)
-        }
-    }
+
 }
