@@ -53,7 +53,6 @@ public actor V2RoomSubscriptionOwner {
     private var permissionCommitWaiter: CheckedContinuation<Void, Never>?
     private var busy = false
     private var activePermissionOperations = 0
-    private var requiredControlVersion: Int64
     private var activeDeadline: ContinuousClock.Instant?
     private var closed = false
     private var changed = false
@@ -66,7 +65,6 @@ public actor V2RoomSubscriptionOwner {
                  notifyRetired: @escaping @Sendable (V2GatewayRealtimeIdentity) async -> Void) {
         self.activation = activation; self.source = source; self.roomID = snapshot.roomID; self.owner = snapshot.owner; self.relay = relay
         self.appliedRoomControlVersion = snapshot.roomControlVersion
-        self.requiredControlVersion = snapshot.roomControlVersion
         self.appliedMembershipRevision = snapshot.membershipRevision
         self.trackedUserIDs = Set(snapshot.members.map(\.userID)); self.maximumTrackedUsers = maximumTrackedUsers
         self.maximumGateways = maximumGateways; self.pageSize = pageSize; self.maximumDrainPages = maximumDrainPages
@@ -179,7 +177,7 @@ public actor V2RoomSubscriptionOwner {
         do {
             let cut = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: [userID])
             guard cut.roomID == roomID, cut.owner == owner else { throw V2RoomSubscriptionSourceError.wrongOwner }
-            guard cut.roomControlVersion == appliedRoomControlVersion, cut.roomControlVersion >= requiredControlVersion else {
+            guard cut.roomControlVersion == appliedRoomControlVersion else {
                 V2RoomSubscriptionOwnerFailureMetrics.shared.record(.subscribeControlCutMismatch)
                 throw V2RoomSubscriptionOwnerError.catchUpRequired
             }
@@ -261,7 +259,7 @@ public actor V2RoomSubscriptionOwner {
         }
         do {
             let cut = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: trackedUserIDs)
-            guard cut.roomControlVersion >= requiredControlVersion else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
+            guard cut.roomControlVersion >= appliedRoomControlVersion else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
             let progress: DrainReport
             do { progress = try await advance(through: cut.highWatermark) }
             catch V2RoomSubscriptionSourceError.snapshotRequired {
@@ -308,7 +306,7 @@ public actor V2RoomSubscriptionOwner {
             let cut = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: [userID])
             let progress = try await advance(through: cut.highWatermark)
             guard progress.consumedThrough == cut.highWatermark else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
-            guard cut.roomControlVersion == appliedRoomControlVersion, cut.roomControlVersion >= requiredControlVersion else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
+            guard cut.roomControlVersion == appliedRoomControlVersion else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
             guard let member = cut.members.first, cut.members.count == 1, member.userID == userID,
                   member.authorized, member.memberRevision == attached else { throw V2RoomSubscriptionOwnerError.unauthorized }
             try await relay.seedAuthorizations(from: cut)
@@ -343,10 +341,10 @@ public actor V2RoomSubscriptionOwner {
         busy = true; activeDeadline = deadline
         defer { leave() }
         do {
-            let committed = try await mutation(trackedUserIDs, max(requiredControlVersion, appliedRoomControlVersion))
+            let committed = try await mutation(trackedUserIDs, appliedRoomControlVersion)
             if let effect = committed.effect {
                 guard !closed, effect.activation == activation, effect.snapshot.roomID == roomID,
-                      effect.snapshot.owner == owner, effect.snapshot.roomControlVersion >= requiredControlVersion,
+                      effect.snapshot.owner == owner, effect.snapshot.roomControlVersion >= appliedRoomControlVersion,
                       Set(effect.snapshot.members.map(\.userID)) == trackedUserIDs else {
                     throw V2RoomSubscriptionOwnerError.stale
                 }
@@ -354,7 +352,6 @@ public actor V2RoomSubscriptionOwner {
                     let invalidated = try await relay.reconcileControlCut(effect.snapshot,
                         requireTerminal: effect.requiresReceiveReset && effect.snapshot.membershipRevision == appliedMembershipRevision)
                     appliedRoomControlVersion = effect.snapshot.roomControlVersion
-                    requiredControlVersion = effect.snapshot.roomControlVersion
                     appliedMembershipRevision = effect.snapshot.membershipRevision
                     if invalidated { activatedFences.removeAll(); changed = true }
                 }
@@ -368,49 +365,6 @@ public actor V2RoomSubscriptionOwner {
             await relay.invalidate()
             throw V2RoomCallFailure.outcomeUnknown
         }
-    }
-
-    /// A trusted permission-feed barrier retires old grants immediately, even
-    /// while a message read owns the mutation turn. It performs no database read.
-    package func observePermissionVersion(_ version: Int64, token: V2RoomActivationToken) async throws {
-        guard !closed, token == activation else { throw V2RoomSubscriptionOwnerError.stale }
-        guard version >= 0 else { throw V2RoomSubscriptionOwnerError.invalidInput }
-        guard version > requiredControlVersion else { return }
-        requiredControlVersion = version
-        activatedFences.removeAll()
-        activePermissionOperations += 1
-        defer { activePermissionOperations -= 1; resumeCloseIfIdle() }
-        try await relay.invalidateAuthorizations()
-        await signalDelivery()
-    }
-
-    /// Resolve a changed durable control version at a complete fresh cut.
-    /// Terminal invalidation is complete only after actual Gateway application
-    /// (pump receipt), never merely starting or retaining a network call.
-    package func processControlCut(expectedVersion: Int64, token: V2RoomActivationToken, deadline: ContinuousClock.Instant) async throws -> Bool {
-        try enter(token: token, deadline: deadline); defer { leave() }
-        guard expectedVersion >= 0 else { throw V2RoomSubscriptionOwnerError.invalidInput }
-        if expectedVersion > appliedRoomControlVersion {
-            let cut = try await source.snapshot(roomID: roomID, owner: owner, trackedUserIDs: trackedUserIDs)
-            guard cut.roomControlVersion >= max(expectedVersion, requiredControlVersion) else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
-            let invalidated = try await relay.reconcileControlCut(cut, requireTerminal: cut.roomControlVersion > appliedRoomControlVersion && cut.membershipRevision == appliedMembershipRevision)
-            if invalidated { activatedFences.removeAll(); changed = true }
-            appliedRoomControlVersion = cut.roomControlVersion
-            appliedMembershipRevision = cut.membershipRevision
-        }
-        return !(await relay.controlInvalidationPending())
-    }
-
-    /// Reuses the physical host's existing batched head check. Only an already
-    /// consumed H is advertised, and only exact activated shared subscriptions
-    /// participate. The advisory control cannot grant authority or install Ready.
-    package func refreshHeads(observedHighWatermark: UInt64, token: V2RoomActivationToken,
-                              deadline: ContinuousClock.Instant) async throws {
-        try enter(token: token, deadline: deadline); defer { leave() }
-        let committed = await relay.committedSequence()
-        guard observedHighWatermark <= committed else { throw V2RoomSubscriptionOwnerError.catchUpRequired }
-        let active = Set(activatedFences.keys)
-        changed = try await relay.refreshHeads(highWatermark: committed, gateways: active) || changed
     }
 
     /// Physical-host coalesced wake; bounded by this owner's gateway limit.

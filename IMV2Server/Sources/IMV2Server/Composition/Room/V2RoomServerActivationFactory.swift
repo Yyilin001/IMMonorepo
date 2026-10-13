@@ -67,13 +67,8 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         guard maximumEditBytes > 0, maximumActiveRooms > 0, maximumRoomSubscriptionBindings > 0 else {
             throw V2ActorContractError.invalidConfiguration("room edit bytes")
         }
-        let dirtyHeads = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database, databaseWorkAdmission: databaseWorkAdmission)
         let host = V2RoomSubscriptionHost(maximumRooms: maximumActiveRooms,
-            maximumBindings: maximumRoomSubscriptionBindings, dirtyChanges: { tokens, cursor, limit, deadline in
-            try await dirtyHeads.pending(activeTokens: tokens, after: cursor, limit: limit, deadline: deadline)
-        }, dirtyAcknowledge: { heads, deadline in
-            try await dirtyHeads.acknowledge(heads, deadline: deadline)
-        })
+            maximumBindings: maximumRoomSubscriptionBindings)
         let facts = V2RoomCommittedFactsFeed(downstream: committedMessageObserver,
             notify: { host.signal(room: $0) }, maximumRooms: maximumActiveRooms)
         self.subscriptionHost = host; self.committedFacts = facts
@@ -779,13 +774,11 @@ private struct V2BoundRoomReceiptQueries: V2RoomReceiptQueryExecuting {
 /// One bounded drain worker and transport pump per physical owner. Commit
 /// notifications coalesce synchronously; transactions never await network work.
 package actor V2RoomSubscriptionHost {
-    private struct Entry: Sendable { let token: V2RoomActivationToken; let lifetime: V2RoomActivationLifetime; let owner: V2RoomSubscriptionOwner }
-    private struct HeadRefresh: Sendable { let token: V2RoomActivationToken; let highWatermark: UInt64 }
+    private struct Entry: Sendable { let token: V2RoomActivationToken; let owner: V2RoomSubscriptionOwner }
     private struct Pending: Sendable {
         var registeredRooms: Set<RoomID> = []
         var rooms: Set<RoomID> = []
         var deliveryRooms: Set<RoomID> = []
-        var heads: [RoomID: HeadRefresh] = [:]
         var closed = false
     }
     private nonisolated let pending = Mutex(Pending())
@@ -794,13 +787,6 @@ package actor V2RoomSubscriptionHost {
     private var entries: [RoomID: Entry] = [:]
     private var pump: V2RoomSubscriptionDeliveryPump?
     private var worker: Task<Void, Never>?
-    private var checkingChanges = false
-    private let now: @Sendable () -> ContinuousClock.Instant
-    private let dirtyChanges: V2RoomSubscriptionDirtyChanges
-    private var dirtyCursor: V2RoomSubscriptionDirtyCursor?
-    private let dirtyAcknowledge: V2RoomSubscriptionDirtyHeadAcknowledge?
-    private var dirtyHeads: [RoomID: V2RoomSubscriptionDirtyHead] = [:]
-    private var completedDirty: [RoomID: V2RoomSubscriptionDirtyHead] = [:]
     private var closed = false
     private let maximumRooms: Int
     private let maximumBindings: Int
@@ -809,23 +795,15 @@ package actor V2RoomSubscriptionHost {
         factsFeed.withLock { precondition($0 == nil); $0 = feed }
     }
 
-    package init(maximumRooms: Int = 8192, maximumBindings: Int = 8192,
-                 now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
-                 dirtyChanges: @escaping V2RoomSubscriptionDirtyChanges, dirtyAcknowledge: V2RoomSubscriptionDirtyHeadAcknowledge? = nil) {
+    package init(maximumRooms: Int = 8192, maximumBindings: Int = 8192) {
         precondition(maximumRooms > 0 && maximumBindings > 0)
         self.maximumRooms = maximumRooms; self.maximumBindings = maximumBindings
-        self.now = now
-        self.dirtyChanges = dirtyChanges; self.dirtyAcknowledge = dirtyAcknowledge
     }
 
     func configure(sendBatch: @escaping V2RoomSubscriptionDeliveryPump.SendBatch, maximumCalls: Int) async throws {
         guard !closed, pump == nil else { throw V2RoomSubscriptionOwnerError.invalidInput }
         let created = V2RoomSubscriptionDeliveryPump(maximumEntries: maximumBindings,
-            maximumCalls: maximumCalls, sendBatch: sendBatch,
-            requestBaseline: { _, _ in
-                // A fresh fence must travel through subscribe/grant/activate;
-                // a transport callback cannot install trusted authority.
-            })
+            maximumCalls: maximumCalls, sendBatch: sendBatch)
         pump = created
         await created.start()
         worker = Task { [weak self, stream = wakes.stream] in
@@ -841,7 +819,7 @@ package actor V2RoomSubscriptionHost {
         guard !closed, pump != nil, entries[token.roomID] == nil, entries.count < maximumRooms else {
             throw V2RoomSubscriptionOwnerError.overloaded
         }
-        entries[token.roomID] = .init(token: token, lifetime: lifetime, owner: owner)
+        entries[token.roomID] = .init(token: token, owner: owner)
         pending.withLock { $0.registeredRooms.insert(token.roomID) }
         if let feed = factsFeed.withLock({ $0 }), !feed.register(activation: token) {
             entries.removeValue(forKey: token.roomID)
@@ -852,56 +830,11 @@ package actor V2RoomSubscriptionHost {
     func unregister(token: V2RoomActivationToken) {
         guard entries[token.roomID]?.token == token else { return }
         entries.removeValue(forKey: token.roomID)
-        dirtyHeads.removeValue(forKey: token.roomID); completedDirty.removeValue(forKey: token.roomID)
         factsFeed.withLock { $0 }?.unregister(activation: token)
         pending.withLock { value in
             value.rooms.remove(token.roomID); value.registeredRooms.remove(token.roomID)
-            value.deliveryRooms.remove(token.roomID); value.heads.removeValue(forKey: token.roomID)
+            value.deliveryRooms.remove(token.roomID)
         }
-    }
-    /// One host-level durable control feed. No stationary-room lease/head probes.
-    package func checkChanges() async {
-        guard !closed, !checkingChanges, !entries.isEmpty else { return }
-        checkingChanges = true; defer { checkingChanges = false }
-        // A durable ACK may have committed before its response was lost. The
-        // pending query can then be empty; retained exact receipts still need
-        // the existing worker to retry and settle local ownership.
-        if !completedDirty.isEmpty { wakes.continuation.yield(()) }
-        let deadline = ContinuousClock.now + .seconds(10)
-        do {
-            for _ in 0..<64 {
-                let page = try await dirtyChanges(entries.values.map(\.token), dirtyCursor, 128, deadline)
-                guard !closed else { return }
-                dirtyCursor = page.nextCursor
-                for change in page.changes {
-                    guard let current = entries[change.activation.roomID], current.token == change.activation else { continue }
-                    dirtyHeads[change.activation.roomID] = change
-                    try await current.owner.observePermissionVersion(change.roomControlVersion, token: current.token)
-                    let consumedThrough = await current.owner.consumedSequence()
-                    guard entries[current.token.roomID]?.token == current.token else { continue }
-                    retainHead(token: current.token, highWatermark: change.highWatermark)
-                    if change.highWatermark > consumedThrough { signal(room: current.token.roomID) }
-                }
-                if dirtyCursor == nil {
-                    // Durable repair does not extend online authorization.
-                    return
-                }
-                guard .now < deadline else { return }
-            }
-        } catch { /* Retain durable repair responsibility for the next retry. */ }
-    }
-
-
-
-    private func retainHead(token: V2RoomActivationToken, highWatermark: UInt64) {
-        guard entries[token.roomID]?.token == token else { return }
-        pending.withLock { value in
-            guard !value.closed, value.registeredRooms.contains(token.roomID) else { return }
-            let old = value.heads[token.roomID]
-            value.heads[token.roomID] = .init(token: token,
-                highWatermark: old?.token == token ? max(old!.highWatermark, highWatermark) : highWatermark)
-        }
-        wakes.continuation.yield(())
     }
     nonisolated func signal(room: RoomID) {
         pending.withLock { value in
@@ -920,44 +853,13 @@ package actor V2RoomSubscriptionHost {
     private func consume() async {
         guard !closed else { return }
         let work = pending.withLock { value -> Pending in
-            let work = value; value.rooms.removeAll(keepingCapacity: true); value.deliveryRooms.removeAll(keepingCapacity: true); value.heads.removeAll(keepingCapacity: true); return work
+            let work = value; value.rooms.removeAll(keepingCapacity: true); value.deliveryRooms.removeAll(keepingCapacity: true); return work
         }
         for room in work.deliveryRooms { if let entry = entries[room] { await entry.owner.signalDelivery() } }
-        for request in work.heads.values {
-            guard !closed, let entry = entries[request.token.roomID], entry.token == request.token else { continue }
-            do {
-                if let dirty = dirtyHeads[request.token.roomID], dirty.activation == request.token {
-                    let complete = try await entry.owner.processControlCut(expectedVersion: dirty.roomControlVersion,
-                        token: request.token, deadline: .now + .seconds(10))
-                    guard complete else {
-                        // Actual terminal receipt, not offer/start, completes a
-                        // changed permission cut. The next existing cycle retries.
-                        await entry.owner.signalDelivery()
-                        continue
-                    }
-                }
-                try await entry.owner.refreshHeads(observedHighWatermark: request.highWatermark,
-                    token: request.token, deadline: .now + .seconds(10))
-                if let dirty = dirtyHeads[request.token.roomID], dirty.activation == request.token,
-                   dirty.highWatermark <= request.highWatermark { completedDirty[request.token.roomID] = dirty }
-            } catch V2RoomSubscriptionOwnerError.busy {
-                // The shared worker retains this advisory responsibility without
-                // another SQL read or an independent timer/Task per room.
-                retainHead(token: request.token, highWatermark: request.highWatermark)
-                try? await Task.sleep(for: .milliseconds(25))
-            } catch V2RoomSubscriptionOwnerError.catchUpRequired {
-                if !work.rooms.contains(request.token.roomID) { signal(room: request.token.roomID) }
-            } catch { /* Lost activation admits neither a head nor a lease. */ }
-        }
         for room in work.rooms {
             guard !closed, let entry = entries[room] else { continue }
             let feed = factsFeed.withLock { $0 }
             do {
-                if let dirty = dirtyHeads[room], dirty.activation == entry.token {
-                    let complete = try await entry.owner.processControlCut(expectedVersion: dirty.roomControlVersion,
-                        token: entry.token, deadline: .now + .seconds(10))
-                    guard complete else { await entry.owner.signalDelivery(); continue }
-                }
                 let batch = feed?.take(activation: entry.token)
                 let deadline = ContinuousClock.now + .seconds(10)
                 let report = try await V2RoomSQLDeadline.withDeadline(deadline) {
@@ -970,9 +872,6 @@ package actor V2RoomSubscriptionHost {
                 // Release only the Owner's actually consumed prefix. A commit
                 // that arrived during the await remains in the bounded feed.
                 feed?.acknowledge(activation: entry.token, consumedThrough: report.consumedThrough)
-                if let dirty = dirtyHeads[room], dirty.activation == entry.token, report.consumedThrough >= dirty.highWatermark {
-                    retainHead(token: entry.token, highWatermark: dirty.highWatermark)
-                }
                 if report.hasMore { signal(room: room) }
             } catch V2RoomSubscriptionOwnerError.busy {
                 // Bounded single-owner delay, with no unowned retry tasks.
@@ -992,49 +891,16 @@ package actor V2RoomSubscriptionHost {
                 if !closed { signal(room: room) }
             }
         }
-        if let dirtyAcknowledge, !completedDirty.isEmpty, !closed {
-            let ready = completedDirty.values.filter { receipt in
-                entries[receipt.activation.roomID]?.token == receipt.activation
-                    && dirtyHeads[receipt.activation.roomID] == receipt
-            }
-            do {
-                let deadline = ContinuousClock.now + .seconds(10)
-                let lifetimes = ready.compactMap { entries[$0.activation.roomID]?.lifetime }
-                guard lifetimes.count == ready.count else { return }
-                try await withPinnedAcknowledgement(lifetimes: lifetimes[...], deadline: deadline) { bounded in
-                    try await dirtyAcknowledge(Array(ready), bounded)
-                }
-                for receipt in ready where dirtyHeads[receipt.activation.roomID] == receipt {
-                    dirtyHeads.removeValue(forKey: receipt.activation.roomID)
-                    completedDirty.removeValue(forKey: receipt.activation.roomID)
-                }
-            } catch {
-                // Retry retained recovery work without an idle database poll.
-                // The factory owns this worker and joins it during shutdown.
-                try? await Task.sleep(for: .milliseconds(25))
-                if !closed { wakes.continuation.yield(()) }
-            }
-        }
-    }
-    private func withPinnedAcknowledgement(
-        lifetimes: ArraySlice<V2RoomActivationLifetime>, deadline: ContinuousClock.Instant,
-        operation: @escaping @Sendable (ContinuousClock.Instant) async throws -> Void
-    ) async throws {
-        guard let first = lifetimes.first else { try await operation(deadline); return }
-        try await first.withPin(deadline: deadline) { bounded in
-            try await self.withPinnedAcknowledgement(lifetimes: lifetimes.dropFirst(),
-                deadline: bounded, operation: operation)
-        }
     }
 
     func close() async {
         guard !closed else { return }; closed = true
-        pending.withLock { $0.closed = true; $0.rooms.removeAll(); $0.deliveryRooms.removeAll(); $0.heads.removeAll(); $0.registeredRooms.removeAll() }
+        pending.withLock { $0.closed = true; $0.rooms.removeAll(); $0.deliveryRooms.removeAll(); $0.registeredRooms.removeAll() }
         wakes.continuation.finish()
         worker?.cancel()
         if let worker { await worker.value }; worker = nil
         for entry in entries.values { try? await entry.owner.close() }
-        entries.removeAll(); dirtyHeads.removeAll(); completedDirty.removeAll()
+        entries.removeAll()
         let feed = factsFeed.withLock { value in let feed = value; value = nil; return feed }
         feed?.finish()
         if let pump { await pump.close() }; pump = nil

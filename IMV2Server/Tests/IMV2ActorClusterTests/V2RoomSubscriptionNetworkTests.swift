@@ -247,7 +247,7 @@ struct V2RoomSubscriptionNetworkTests {
         let pump = V2RoomSubscriptionDeliveryPump(maximumEntries: 3, maximumCalls: 1,
             send: { delivery, shard, target in
                 try await caller.sendRoomSubscription(delivery, sourceShardID: shard, to: target)
-            }, requestBaseline: { _, _ in })
+            })
         let forwarding = Task {
             for await (room, gateway) in signals.stream { await pump.signal(.init(roomID: room, gateway: gateway)) }
         }

@@ -43,29 +43,35 @@ struct V2RoomSubscriptionOwnerTests {
                 throw V2RoomSubscriptionOwnerError.busy
             }
             return .appliedThrough(delivery.deliverySequence)
-        }, requestBaseline: { _, _ in })
+        })
         await pump.start()
         #expect(try await service.activate(to: pump, descriptor: .init(identity: gateway, endpointReference: Data([1]),
             address: "127.0.0.1", port: 8443), userID: alice, fence: first.fence,
             token: activation, deadline: .now + .seconds(3)))
         await source.setControlVersion(1)
-        try await service.observePermissionVersion(1, token: activation)
+        try await service.withPermissionMutation(token: activation, deadline: .now + .seconds(3)) { users, version in
+            #expect(version == 0)
+            let snapshot = try await source.snapshot(roomID: room, owner: owner, trackedUserIDs: users)
+            return .init(result: (), effect: .init(activation: activation, snapshot: snapshot))
+        }
         await #expect(throws: V2RoomSubscriptionOwnerError.catchUpRequired) {
             try await service.subscribe(gateway: gateway, userID: alice, token: activation, deadline: .now + .seconds(3))
         }
         allowTerminal.withLock { $0 = true }
         await service.signalDelivery()
         let deadline = ContinuousClock.now + .seconds(3)
-        var complete = false
-        while !complete, ContinuousClock.now < deadline {
-            complete = try await service.processControlCut(expectedVersion: 1, token: activation, deadline: deadline)
-            if !complete { try await Task.sleep(for: .milliseconds(5)) }
+        var replacement: V2RoomSubscriptionOwner.Grant?
+        while replacement == nil, ContinuousClock.now < deadline {
+            do {
+                replacement = try await service.subscribe(gateway: gateway, userID: alice, token: activation, deadline: deadline)
+            } catch V2RoomSubscriptionOwnerError.catchUpRequired {
+                try await Task.sleep(for: .milliseconds(5))
+            }
         }
-        try #require(complete)
-        let replacement = try await service.subscribe(gateway: gateway, userID: alice, token: activation, deadline: deadline)
-        #expect(replacement.fence.generation == first.fence.generation + 1)
-        #expect(replacement.fence.subscriptionID != first.fence.subscriptionID)
-        #expect(replacement.memberRevision == first.memberRevision)
+        let restored = try #require(replacement)
+        #expect(restored.fence.generation == first.fence.generation + 1)
+        #expect(restored.fence.subscriptionID != first.fence.subscriptionID)
+        #expect(restored.memberRevision == first.memberRevision)
         try await service.close(); await pump.close()
     }
 
@@ -155,7 +161,7 @@ struct V2RoomSubscriptionOwnerTests {
         let activation = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
         let signals = AsyncStream<V2GatewayRealtimeIdentity>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let pump = V2RoomSubscriptionDeliveryPump(maximumEntries: 1, maximumCalls: 1,
-            send: { delivery, _, _ in .appliedThrough(delivery.deliverySequence) }, requestBaseline: { _, _ in })
+            send: { delivery, _, _ in .appliedThrough(delivery.deliverySequence) })
         let forwarding = Task {
             for await gateway in signals.stream { await pump.signal(.init(roomID: room, gateway: gateway)) }
         }
@@ -236,18 +242,30 @@ struct V2RoomSubscriptionOwnerTests {
         #expect(recovered.fence == first.fence && recovered.baselineSequence == 300)
         let unchanged = try await service.subscribe(gateway: gateway, userID: bob, token: activation, deadline: .now + .seconds(30))
         #expect(unchanged.fence == recovered.fence)
-        let received = AsyncStream<V2RoomSubscriptionDelivery>.makeStream(bufferingPolicy: .bufferingNewest(8))
+        let controls = Mutex<[V2RoomSubscriptionDelivery]>([])
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1, send: { delivery, _, _ in
-            received.continuation.yield(delivery); return .appliedThrough(delivery.deliverySequence)
-        }, requestBaseline: { _, _ in })
+            if delivery.payload.isAuthorizationControl { controls.withLock { $0.append(delivery) } }
+            return .appliedThrough(delivery.deliverySequence)
+        })
         await pump.start()
         #expect(try await service.activate(to: pump, descriptor: .init(identity: gateway, endpointReference: Data([1]),
             address: "127.0.0.1", port: 8443), userID: alice, fence: recovered.fence, token: activation, deadline: .now + .seconds(30)))
-        var iterator = received.stream.makeAsyncIterator()
-        let baseline = try #require(await iterator.next())
+        // Message and authorization lanes run independently. Inspect the
+        // authorization cut without assuming a cross-lane arrival order.
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !controls.withLock({ $0.contains { delivery in
+            if case .grant(let member, _) = delivery.payload { return member.userID == bob }
+            return false
+        } }) {
+            try #require(ContinuousClock.now < deadline)
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let applied = controls.withLock { $0 }
+        let baseline = try #require(applied.first)
         if case .baseline(let members) = baseline.payload { #expect(Set(members.map(\.userID)) == [alice]) }
-        else { Issue.record("reset renewal must preserve the full shared-user baseline") }
-        try await service.close(); await pump.close(); received.continuation.finish()
+        else { Issue.record("expected the original authorization baseline") }
+        #expect(applied.allSatisfy { $0.fence == first.fence })
+        try await service.close(); await pump.close()
     }
 
 

@@ -158,7 +158,7 @@ struct V2RoomDeliverySessionTests {
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1, send: { delivery, _, _ in
             if case .revoke = delivery.payload { await gate.hold() }
             return .appliedThrough(delivery.deliverySequence)
-        }, requestBaseline: { _, _ in })
+        })
         await pump.start()
         try #require(try await owner.activate(to: pump, descriptor: gateway, userID: user, fence: grant.fence,
             token: token, deadline: .now + .seconds(5)))
@@ -326,7 +326,7 @@ extension V2RoomDeliverySessionTests {
             guard case .applied = result else { return .stale }
             controls.withLock { $0.append(delivery.payload) }
             return .appliedThrough(delivery.deliverySequence)
-        }, requestBaseline: { _, _ in })
+        })
         await pump.start()
         try #require(try await owner.activate(to: pump, descriptor: gateway, userID: user, fence: grant.fence,
             token: token, deadline: .now + .seconds(5)))
@@ -346,7 +346,9 @@ extension V2RoomDeliverySessionTests {
             try #require(ContinuousClock.now < timeout); try await Task.sleep(for: .milliseconds(1))
         }
         #expect(await authority.authorizedMemberRevision(roomID: room, userID: user) == nil)
-        while try await !owner.processControlCut(expectedVersion: 1, token: token, deadline: .now + .seconds(5)) {
+        // The Gateway has applied the revoke; wait for the pump to settle its
+        // actual receipt before testing the next dependent subscription.
+        while await pump.snapshot().actualCalls > 0 {
             try #require(ContinuousClock.now < timeout); try await Task.sleep(for: .milliseconds(1))
         }
         await #expect(throws: V2RoomSubscriptionOwnerError.unauthorized) {

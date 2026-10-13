@@ -11,9 +11,10 @@ struct V2RoomSubscriptionDeliveryPumpTests {
     func malformedSharedReceiptsRetainEveryRoom(mode: String) async throws {
         let user = UserID(uuid: UUID())
         let gateway = V2GatewayRealtimeIdentity(nodeID: "malformed", serviceID: "gateway", incarnationID: UUID())
-        let requested = Mutex<Set<RoomID>>([])
+        let calls = Mutex(0)
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1,
             sendBatch: { batch, _, _ in
+                calls.withLock { $0 += 1 }
                 let first = batch.deliveries[0]
                 let receipt = V2RoomSubscriptionBatchReceipt(fence: first.fence,
                     result: .appliedThrough(first.deliverySequence))
@@ -23,7 +24,7 @@ struct V2RoomSubscriptionDeliveryPumpTests {
                     baselineSequence: first.fence.baselineSequence)
                 return .init(receipts: [receipt, .init(fence: mode == "duplicate" ? first.fence : foreign,
                     result: .appliedThrough(first.deliverySequence))])
-            }, requestBaseline: { key, _ in requested.withLock { $0.insert(key.roomID) } })
+            })
         var relays: [V2RoomSubscriptionRelay] = []
         for _ in 0..<2 {
             let room = RoomID(uuid: UUID())
@@ -40,9 +41,24 @@ struct V2RoomSubscriptionDeliveryPumpTests {
             relays.append(relay)
         }
         await pump.start()
-        do { try await waitUntil { requested.withLock { $0.count == 2 } } }
+        do { try await waitUntil {
+            let state = await pump.snapshot()
+            return calls.withLock { $0 == 1 } && state.actualCalls == 0 && state.queuedRooms == 0
+        } }
         catch { await pump.close(); throw error }
-        for relay in relays { #expect(await relay.pending(for: gateway).count == 1) }
+        for relay in relays {
+            #expect(await relay.pending(for: gateway).count == 1)
+            let fence = try #require(await relay.status(for: gateway)).fence
+            await pump.signal(.init(roomID: fence.roomID, gateway: gateway))
+        }
+        // Ordinary signal also wakes the empty message lane. Let that lane
+        // settle before checking that authorization did not restart its RPC.
+        do { try await waitUntil {
+            let state = await pump.snapshot()
+            return state.actualCalls == 0 && state.queuedRooms == 0
+        } }
+        catch { await pump.close(); throw error }
+        #expect(calls.withLock { $0 } == 1) // rejected authorization cannot restart on an ordinary wake
         await pump.close()
     }
 
@@ -52,7 +68,7 @@ struct V2RoomSubscriptionDeliveryPumpTests {
         let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 9999)
         let held = HeldSharedBatch()
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1,
-            sendBatch: { batch, _, _ in await held.send(batch) }, requestBaseline: { _, _ in })
+            sendBatch: { batch, _, _ in await held.send(batch) })
         var relays: [V2RoomSubscriptionRelay] = [], keys: [V2RoomSubscriptionDeliveryPump.Key] = []
         for _ in 0..<2 {
             let room = RoomID(uuid: UUID())
@@ -118,8 +134,7 @@ struct V2RoomSubscriptionDeliveryPumpTests {
         let user = UserID(uuid: UUID())
         let gateway = V2GatewayRealtimeIdentity(nodeID: "retry", serviceID: "gateway", incarnationID: UUID())
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1,
-            sendBatch: { _, _, _ in throw LostReply.lost },
-            requestBaseline: { _, _ in Issue.record("Transport loss is not a stale authority") })
+            sendBatch: { _, _, _ in throw LostReply.lost })
         var relays: [V2RoomSubscriptionRelay] = []
         for _ in 0..<32 {
             let room = RoomID(uuid: UUID())
@@ -172,8 +187,7 @@ struct V2RoomSubscriptionDeliveryPumpTests {
         let gateway = V2GatewayRealtimeIdentity(nodeID: "shared", serviceID: "gateway", incarnationID: UUID())
         let transport = MultiRoomTransport()
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 2, maximumBatchItems: 8,
-            sendBatch: { batch, shard, _ in await transport.send(batch, shard: shard) },
-            requestBaseline: { _, _ in Issue.record("Unexpected baseline request") })
+            sendBatch: { batch, shard, _ in await transport.send(batch, shard: shard) })
         var relays: [V2RoomSubscriptionRelay] = []
         for index in 0..<4 {
             let room = RoomID(uuid: UUID()), shard = index < 2 ? "a" : "b"
@@ -242,8 +256,7 @@ struct V2RoomSubscriptionDeliveryPumpTests {
         }
         let transport = BatchTransport()
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 2, maximumBatchItems: 8,
-            sendBatch: { batch, _, _ in await transport.send(batch) },
-            requestBaseline: { _, _ in Issue.record("Unexpected baseline request") })
+            sendBatch: { batch, _, _ in await transport.send(batch) })
         let accepted = await pump.bind(.init(roomID: room, gateway: gateway), relay: relay,
             descriptor: .init(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 9999), sourceShardID: "rooms")
         #expect(accepted)
@@ -285,8 +298,7 @@ struct V2RoomSubscriptionDeliveryPumpTests {
         }
         let transport = HeldTransport()
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 2,
-            send: { delivery, _, target in await transport.send(delivery, target: target.identity) },
-            requestBaseline: { _, _ in Issue.record("Unexpected baseline request") })
+            send: { delivery, _, target in await transport.send(delivery, target: target.identity) })
         for gateway in [slow, fast] {
             let accepted = await pump.bind(.init(roomID: room, gateway: gateway), relay: relay,
                 descriptor: .init(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 9999),
@@ -329,9 +341,7 @@ struct V2RoomSubscriptionDeliveryPumpTests {
             userID: user, memberRevision: 0, subscriptionID: UUID(), generation: 1)))
         let transport = HeldMessageTransport()
         let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1,
-            send: { delivery, _, _ in await transport.send(delivery) }, requestBaseline: { _, _ in
-                Issue.record("Body pressure cannot request an authorization baseline")
-            })
+            send: { delivery, _, _ in await transport.send(delivery) })
         #expect(await pump.bind(.init(roomID: room, gateway: gateway), relay: relay,
             descriptor: .init(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 9999), sourceShardID: "rooms"))
         await pump.start()

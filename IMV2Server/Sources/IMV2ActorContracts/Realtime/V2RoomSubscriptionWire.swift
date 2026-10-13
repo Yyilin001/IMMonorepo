@@ -4,7 +4,7 @@ import IMV2Core
 /// A room subscription has its own generation, independent of partition interests.
 public struct V2RoomSubscriptionFence: Hashable, Codable, Sendable {
     /// The actual trusted room activation, including host process incarnation.
-    /// Constructing this value never grants or renews an activation lease.
+    /// Constructing this value never grants activation or session authority.
     public let activation: V2RoomActivationToken
     public var roomID: RoomID { activation.roomID }
     public var ownerEpoch: Int64 { activation.owner.epoch }

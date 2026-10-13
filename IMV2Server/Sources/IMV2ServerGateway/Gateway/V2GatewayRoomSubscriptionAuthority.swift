@@ -517,8 +517,8 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         }
     }
 
-    /// A new fence requires a baseline; equal live fences renew without making
-    /// other users/devices stale. Epoch/generation history survives retirement.
+    /// A new fence requires a baseline. Reinstalling the same live fence is
+    /// idempotent only for the same session; epoch/generation history survives retirement.
     @discardableResult
     func install(fence: V2RoomSubscriptionFence, serviceID: String,
                         session: V2RoomDeliverySessionGate, afterAuthoritativeReset: Bool = false,
@@ -543,7 +543,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 } else {
                     // Same data epoch can start a new activation at generation 1.
                     // An equal activation epoch on another host is a conflict,
-                    // never a newer lease or a reason to revive old authority.
+                    // never a newer activation or a reason to revive old authority.
                     guard fence.activation.isNewer(than: old.fence.activation) else { return false }
                 }
             }

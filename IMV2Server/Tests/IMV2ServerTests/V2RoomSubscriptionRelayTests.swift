@@ -71,29 +71,6 @@ struct V2RoomSubscriptionRelayTests {
 
 
 
-    @Test func acknowledgedFinalBodyStillGetsBoundedAdvisoryHeadRepair() async throws {
-        let room = try RoomID("room"), user = try UserID("user")
-        let relay = try V2RoomSubscriptionRelay(activation: roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0),
-            baselineSequence: 0, members: [.init(userID: user, memberRevision: 1)])
-        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1,
-            operation: .subscribe(gateway: gateway, userID: user, memberRevision: 1, subscriptionID: UUID(), generation: 1)))
-        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 2, operation: .event(try event(room, sequence: 1))))
-        let fence = try #require(await relay.status(for: gateway)).fence
-        // Admission ACK proves Gateway acceptance, not the device's cursor.
-        try await relay.acknowledgeAll(gateway: gateway, fence: fence, through: 2)
-        #expect(try await relay.refreshHeads(highWatermark: 1, gateways: [gateway]))
-        #expect(!(try await relay.refreshHeads(highWatermark: 1, gateways: [gateway])))
-        let pending = await relay.pending(for: gateway)
-        #expect(pending.count == 1 && pending[0].payload == .head(highWatermark: 1))
-        #expect(pending[0].deliverySequence == 3 && pending[0].fence == fence)
-        try await relay.acknowledgeAll(gateway: gateway, fence: fence, through: 3)
-        #expect(try await relay.refreshHeads(highWatermark: 1, gateways: [gateway]))
-        #expect(await relay.pending(for: gateway).first?.deliverySequence == 4)
-        await #expect(throws: V2RoomSubscriptionRelayError.roomSequenceGap) {
-            try await relay.refreshHeads(highWatermark: 2, gateways: [gateway])
-        }
-    }
-
     @Test func reorderingDuplicateAndSharedUserRevocation() async throws {
         let room = try RoomID("room"), alice = try UserID("alice"), bob = try UserID("bob"), id = UUID()
         let relay = try V2RoomSubscriptionRelay(activation: roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 3), baselineSequence: 0,

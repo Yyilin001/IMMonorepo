@@ -1,4 +1,14 @@
-# 执行分区所有权：现状、事务证明与迁移规格
+# 执行分区所有权历史提案（已被替代）
+
+> 归档说明（2026-10-13）：以下为 2026-10-03 的历史提案及当时的静态审计，不代表当前实现。分布式 Actor 的原生宿主身份、activation 生命周期已替代逐房间数据库执行租约；本提案中的执行分区租约方案未作为现行架构采用。文中旧类型、文件和行号仅用于追溯。
+
+当前权限链路由房间 Owner 在持久化前预留权限变更轮次，事务提交后将完整权限 cut 安装到内存，再经独立授权通道发送控制事件。Gateway 在最终 socket enqueue 前检查当前成员授权、fence 和 Host–Gateway 共享控制会话。会话失效后旧授权不能被心跳复活，恢复需获取新的可信基线。
+
+当前 Host 只消费提交事实及显式恢复信号；未接入生产的 `checkChanges`、专用 dirty-head 查询/确认、Owner 版本观察与额外 head 刷新分支已删除。`realtime_dirty_room_heads` 仍由实时变更日志使用，不能随旧 Host 查询器删除。数据库保留初始化、恢复、策略持久化及日志职责；其他业务自身的租约不属于本次删除范围。
+
+实现入口：[原生 activation 生命周期](../../IMV2Server/Sources/IMV2ActorRuntime/Hosting/V2RoomActivationLifetime.swift)、[权限提交](../../IMV2Server/Sources/IMV2ServerInfrastructure/Room/Administration/V2RoomPermissionCommit.swift)、[房间订阅 Owner](../../IMV2Server/Sources/IMV2ServerApplication/V2RoomSubscriptionOwner.swift)、[共享控制会话](../../IMV2Server/Sources/IMV2ServerApplication/V2RoomDeliverySessionHost.swift)。
+
+## 历史提案正文
 
 日期：2026-10-03。本文是基于当前工作树的只读设计，不表示下面的新类型、表或协议已经实现；没有改生产代码、启动服务或执行数据库迁移。实现前应以实际冻结 revision 校对行号。
 

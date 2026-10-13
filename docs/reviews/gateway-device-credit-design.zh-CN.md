@@ -1,10 +1,12 @@
 # Gateway 设备字节额度与恢复通道设计
 
+> 归档说明（2026-10-13）：以下保留设备字节额度设计及 r8 时点的历史审计，不能作为当前房间续期实现说明。当前已取消逐房间授权续期及 Host 周期 head probe；权限由提交后的内存 cut 和有序控制事件主动推进，存活由 Host–Gateway 共享控制会话检测。会话心跳不读取逐房间数据库，也不提供 H 或成员权限；断线恢复重新建立可信基线。H/G/C 与设备字节额度的职责边界仍适用，历史问题是否已修复应以当前代码和回归结果为准。
+
 本文是当前实现的只读审计和下一阶段实现建议。没有修改生产代码、冻结 Loader 或数据库，也没有构建、启动服务或重新执行测试。第一阶段 H/G/C 心跳闭环已接入；本阶段尚未实现设备正文 credit。
 
 ## 边界与进度含义
 
-- **H**：当前合法房间订阅已接收的可信最大提交头；只有 Owner/Relay 的有序投递或可信续期结果可推进它。H 提示可合并，不能替代授权控制事件。
+- **H**：当前合法房间订阅已接收的可信最大提交头；只有 Owner/Relay 的有序投递或可信基线可推进它。H 提示可合并，不能替代授权控制事件。
 - **G**：Gateway 实际 socket enqueue 的观测。它证明本地写入接纳，不证明客户端收到、应用或持久化。
 - **C**：该认证连接所代表设备报告的本地持久提交游标。正确客户端只在投影与连续游标同一 GRDB 事务提交后报告。服务端 accepted C 仅表示接纳报告，无法证明远端磁盘事实；它不发权限、不续租、不代替其他设备。
 - **Source control receipt**：Gateway 对 exact fence 连续控制前缀的接纳。它用于 Source 的有序责任结算，与设备 C 是两种不同的确认。
@@ -22,7 +24,7 @@
 | 设备队列 | `V2NIOGatewayForegroundWriter` 默认普通队列 256 KiB/32 帧；单次 drain 默认 64 KiB/32 帧；按 EventLoop lane 批调度，非 writable 时等待 channel 通知 | 已有本地队列预算与调度，没有 C 驱动的正文 flight 额度 |
 | 实际写入权限 | NIO drain 在 `channel.write` 前调用 `Authority.enqueueIfCurrent`；scoped writer 在 `writeAndFlush` 前同样执行同步 gate | exact room/user/connection lifecycle、interest nonce、授权代、期限检查与 enqueue 不跨 await |
 | H 保留 | HeadWorker 有界保留每 room 最大 H；ByteStream 单 detail-room 保留最新 H、offer 身份、实际提交身份 | 新的可信同 H offer 能再次实际提交；失效 permit 暂停等待新 offer，不忙重试 |
-| H 补齐 | Host 复用原 5 秒批量 head probe 刷新共享 H；既有 Pump 投递；可信续期 H 也可补齐 | 无逐设备 SQL；不能为了 H 提高 lease 续期频率 |
+| H 补齐 | Owner/Relay 有序投递、可信基线；设备心跳读取 Gateway 已接纳的 H | 无逐设备 SQL；共享会话心跳不查询或推进房间 H |
 | 设备 C | Session 复用 Heartbeat；Authority 按 connection O(1) 读取合法 interest；ByteStream 接纳同 scope 单调 C 且 C≤H，即使无报告也返回本地状态 | 已有进度交换，尚未用它结算正文 bytes 或控制慢端状态 |
 | 客户端持久边界 | `GRDBV2LocalSyncStore.roomProgressAppliedSequence` 只读取已提交房间 cursor；排除 snapshot activation、明确撤权、`history_incomplete` | 正文接收、服务端 G、latest-visible 摘要均不能替代 C |
 
@@ -172,9 +174,9 @@ func retire(scope: DeviceScope)
 
 ### 后续最小修复与证明范围
 
-后续如获得实施授权，应在 **activation 替换** 时保持未重新授权用户的 acquire 责任；不能仅凭旧 receipt 把其标记为新 fence 已授权。通过现有有界 call owner 为仍有引用的各 room/user 重新 subscribe（每用户一次，设备共享），新 Source fresh authorization 后经已安装 fence 的 ordered grant 生效；全程维持实际 enqueue permit。稳定续期仍按 Gateway/room 共享，不退回 per-user lease renew。
+后续如获得实施授权，应在 **activation 替换** 时保持未重新授权用户的 acquire 责任；不能仅凭旧 receipt 把其标记为新 fence 已授权。通过现有有界 call owner 为仍有引用的各 room/user 重新 subscribe（每用户一次，设备共享），新 Source fresh authorization 后经已安装 fence 的 ordered grant 生效；全程维持实际 enqueue permit。当前存活检查由 Host–Gateway 共享控制会话承担；恢复必须重新验证各仍有引用的成员。
 
-同 activation 的 Source reset 若明确返回所有当前授权共享用户，则可以采用 full baseline 同步；不能假定新 activation 首次 subscribe 也有这些用户。若选择新的批量 acquire 接口，应共享 room/lease proof读取，但仍明确验证每用户授权与当前引用，不能把 Gateway 声称的用户名单当权限。
+同 activation 的 Source reset 若明确返回所有当前授权共享用户，则可以采用 full baseline 同步；不能假定新 activation 首次 subscribe 也有这些用户。若选择新的批量 acquire 接口，应共享房间初始化快照读取，但仍明确验证每用户授权与当前引用，不能把 Gateway 声称的用户名单当权限。
 
 必要回归应使用真实 Owner/Relay + Gateway：同 room/Gateway 两个不同用户，各至少一设备；重建更高 activation，代表用户先完成 acquire，确认另一用户未被本地 receipt replacement 伪造授权；随后受控完成其 fresh acquire，确认新的 ordered grant、实际 H/正文、heartbeat 同 scope状态和最终持久 C 都恢复。增加撤权用户不重新附着、关闭引用不重新附着、await 后 scope/lifecycle 改变补偿、实际任务名额与 close join 测试。
 

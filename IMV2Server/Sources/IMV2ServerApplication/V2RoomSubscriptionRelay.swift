@@ -427,7 +427,7 @@ public actor V2RoomSubscriptionRelay {
     }
 
     /// Permission controls do not await or acknowledge message consumption.
-    package func invalidateAuthorizations() throws {
+    private func invalidateAuthorizations() throws {
         for gateway in Array(subscriptions.keys) {
             guard var subscription = subscriptions[gateway], !subscription.controlInvalidated else { continue }
             guard subscription.nextSequence < .max else { throw V2RoomSubscriptionRelayError.overloaded }
@@ -445,32 +445,6 @@ public actor V2RoomSubscriptionRelay {
         return selected.contains { subscription in
             subscription.controlInvalidated && subscription.pending.contains { $0.payload == .authorizationInvalidated }
         }
-    }
-
-    /// Advisory anti-entropy for already-consumed committed facts. It never
-    /// grants members or changes a fence. An outstanding equal/newer head/body
-    /// owns delivery responsibility, so periodic ticks cannot grow that queue.
-    package func refreshHeads(highWatermark: UInt64, gateways: Set<V2GatewayRealtimeIdentity>) throws -> Bool {
-        guard highWatermark <= roomSequence else { throw V2RoomSubscriptionRelayError.roomSequenceGap }
-        var changed = false
-        for gateway in gateways {
-            guard var subscription = subscriptions[gateway], !subscription.members.isEmpty, !subscription.controlInvalidated else { continue }
-            subscription.latestHighWatermark = max(subscription.latestHighWatermark, highWatermark)
-            if subscription.needsBaseline { subscriptions[gateway] = subscription; continue }
-            let outstanding = subscription.pending.contains { delivery in
-                switch delivery.payload {
-                case .head(let head): return head >= highWatermark
-                case .broadcast(let event), .event(let event, _): return event.highWatermark >= highWatermark
-                case .baseline, .baselinePage: return delivery.fence.baselineSequence >= highWatermark
-                default: return false
-                }
-            }
-            if !outstanding {
-                append(.head(highWatermark: highWatermark), to: &subscription)
-                subscriptions[gateway] = subscription; changed = true
-            }
-        }
-        return changed
     }
 
     public func status(for gateway: V2GatewayRealtimeIdentity) -> Status? {

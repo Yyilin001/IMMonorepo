@@ -157,42 +157,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
     }
 
     @Test("a durable send automatically reaches both recipient devices through the Owner and remote Gateway",
-          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"),
-          arguments: [false, true])
-    func durableSendAutomaticRecipientCoverage(loseCommitNotification: Bool) async throws {
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func durableSendAutomaticRecipientCoverage() async throws {
         _ = try #require(ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_SECONDARY_DATABASE_URL"])
         try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
             try await sql.raw("CREATE TABLE IF NOT EXISTS im_v2.realtime_control_versions(topic_kind text NOT NULL,topic_id text NOT NULL,version bigint NOT NULL,membership_discovery_version bigint NOT NULL DEFAULT 0,session_control_version bigint NOT NULL DEFAULT 0,PRIMARY KEY(topic_kind,topic_id))").run()
-            if loseCommitNotification {
-                let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-                    .deletingLastPathComponent().deletingLastPathComponent()
-                let source = try String(contentsOf: root.appending(path: "IMV2/sql/realtime-change-journal.sql"), encoding: .utf8)
-                for statement in postgresStatements(in: source) {
-                    guard !statement.isEmpty, statement != "BEGIN", statement != "COMMIT" else { continue }
-                    try await sql.raw("\(unsafeRaw: statement)").run()
-                }
-            }
             let recipient = UserID(uuid: memberTwoUUID)
-            let dirtyHeads = try PostgresV2RoomSubscriptionDirtyHeadStore(database: database)
-            let activeLifetime = Mutex<V2RoomActivationLifetime?>(nil)
-            let host = V2RoomSubscriptionHost(dirtyChanges: { _, cursor, limit, deadline in
-                    guard loseCommitNotification, let lifetime = activeLifetime.withLock({ $0 }) else {
-                        return .init(changes: [], nextCursor: nil)
-                    }
-                    return try await lifetime.withPin(deadline: deadline) { validUntil in
-                        try await dirtyHeads.pending(activeTokens: [lifetime.token], after: cursor,
-                            limit: limit, deadline: validUntil)
-                    }
-                }, dirtyAcknowledge: { heads, deadline in
-                    guard loseCommitNotification else { return }
-                    guard let lifetime = activeLifetime.withLock({ $0 }),
-                          heads.allSatisfy({ $0.activation == lifetime.token }) else {
-                        throw V2RoomSubscriptionSourceError.wrongOwner
-                    }
-                    try await lifetime.withPin(deadline: deadline) { validUntil in
-                        try await dirtyHeads.acknowledge(heads, deadline: validUntil)
-                    }
-                })
+            let host = V2RoomSubscriptionHost()
             let facts = V2RoomCommittedFactsFeed(notify: { host.signal(room: $0) })
             host.install(feed: facts)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
@@ -201,7 +172,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 writes: PostgresV2RoomWriteStore(database: database,
                     strangerMessagePolicy: try .init(maximumMessagesPerWindow: 100, window: 86_400),
                     contentReviewMode: .disabled).usingControlDatabase(database), clock: { now },
-                committedMessageObserver: loseCommitNotification ? nil : facts)
+                committedMessageObserver: facts)
             let recovery = try PostgresV2RoomRecoveryStore(database: database)
             let topology = try PostgresV2RoomRecoveryTopology(database: database,
                 stores: [recovery], orderedStoreIdentities: ["room-a"])
@@ -209,8 +180,6 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
             let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 71, count: 32))
             try await withRoomActivationLifetime(database: database, roomID: roomID) { token, lifetime in
-                activeLifetime.withLock { $0 = lifetime }
-                defer { activeLifetime.withLock { $0 = nil } }
                 let source = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime)
                 let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: roomID,
                     owner: token.owner, activation: token, deadline: .now + .seconds(5), trackedUserIDs: [recipient],

@@ -1,5 +1,7 @@
 # G3 caller-only Gateway TCP verification
 
+> 历史记录说明（2026-10-13）：本文的代码路径、数据库租约/续期描述及测试结论属于文中固定的旧版本，保留作历史证据。当前房间执行使用原生分布式 Actor activation，在线授权使用主动权限传播与 Host–Gateway 共享控制会话；旧房间租约及 Host dirty-head 控制查询链已移除。历史通过或失败不代表当前版本的验证结果。
+
 Status: **Linux Release end-to-end passed** on 2026-09-24. Static validation passed Python compilation, the three-node host/caller/worker permission checks, and `docker compose config --quiet` with the generated independent `actor-host` service.
 
 Run the existing disposable application stack with `--remote-gateway`:

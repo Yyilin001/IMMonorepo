@@ -204,8 +204,7 @@ struct V2AccountDeliveryTCPTests {
                 let automaticOwner = try #require(automaticOwner)
                 try await automaticHost.register(automaticOwner.owner, token: automaticOwner.activation, lifetime: automaticOwner.lifetime)
             } else {
-                pump = V2RoomSubscriptionDeliveryPump(send: sendDelivery,
-                    requestBaseline: { _, _ in Issue.record("unexpected baseline reset") })
+                pump = V2RoomSubscriptionDeliveryPump(send: sendDelivery)
                 await pump.start()
             }
             ownerPumps.append(pump)

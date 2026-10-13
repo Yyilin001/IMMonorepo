@@ -6,7 +6,7 @@ public enum V2RoomSubscriptionDeliveryResult: Equatable, Codable, Sendable {
 }
 
 /// Installed by trusted gateway composition. RPC publishers cannot install
-/// lease deadlines, room ownership, subscription generations or member grants.
+/// session authority, room ownership, subscription generations or member grants.
 public protocol V2RoomSubscriptionHandler: Sendable {
     func applyDeliverySession(_ pulse: V2RoomDeliverySessionPulse,
                               authenticatedServiceID: String) async -> V2RoomDeliverySessionResult

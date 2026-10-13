@@ -1,5 +1,7 @@
 # G5 隔离真实发送 canary
 
+> 历史记录说明（2026-10-13）：本文的代码路径、数据库租约/续期描述及测试结论属于文中固定的旧版本，保留作历史证据。当前房间执行使用原生分布式 Actor activation，在线授权使用主动权限传播与 Host–Gateway 共享控制会话；旧房间租约及 Host dirty-head 控制查询链已移除。历史通过或失败不代表当前版本的验证结果。
+
 > 历史 V1 记录：本文的固定旧 revision、NET_ADMIN 诊断选项及旧容量结果不属于当前原生分布式 Actor 的可运行协议。当前入口要求显式原生基线 revision、三个 Placement 节点和一致的 Actor 指标检查，见[当前契约](../room-virtual-actor-contract.md)。
 
 `IMV2/scripts/test_v2_virtual_actor_capacity_canary.py` 用同一份容量 fixture 对冻结 main 或 candidate 各执行一次真实 TLS/protobuf Gateway 发送。它不编译、不修改源码，不依赖用户默认 Compose；每次随机创建 `imv2-va-cap-*` 项目、loopback 随机端口、control + N 个 owner PG、Gateway 和单次 loader，最后只销毁该项目的容器/卷。源码 checkout 必须干净且与 `--source-sha` 完全相等。Gateway 和 loader 都来自显式 Linux Release 产品目录；runner 用已完成的 `result.json` 核对源码、lockfile、固定 Swift 镜像和 ELF SHA-256，再复制到本次私有运行目录并重新哈希。

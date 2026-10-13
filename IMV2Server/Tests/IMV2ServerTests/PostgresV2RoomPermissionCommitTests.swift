@@ -40,7 +40,6 @@ struct PostgresV2RoomPermissionCommitTests {
                 }
                 #expect(await owner.consumedSequence() == 1)
                 // The new version is already installed: this does not need SQL.
-                #expect(try await owner.processControlCut(expectedVersion: 0, token: token, deadline: .now + .seconds(5)))
                 try await owner.close()
             }
         }

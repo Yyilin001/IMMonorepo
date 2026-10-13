@@ -12,8 +12,8 @@ SPEC.loader.exec_module(hotspots)
 
 
 class ReportCoverageTests(unittest.TestCase):
-    def test_subscription_expiry_and_owner_failures_remain_distinct_counters(self):
-        head = 'im_v2_room_subscription_head_delivery_total{stage="renewalAuthorityExpired"}'
+    def test_subscription_readiness_and_owner_failures_remain_distinct_counters(self):
+        head = 'im_v2_room_subscription_head_delivery_total{stage="progressAuthorityNotReady"}'
         owner = 'im_v2_room_subscription_owner_failures_total{reason="catchUpRequired"}'
         baseline = hotspots.prometheus(f'{head} 2\n{owner} 3')
         current = hotspots.prometheus(f'{head} 9\n{owner} 8')

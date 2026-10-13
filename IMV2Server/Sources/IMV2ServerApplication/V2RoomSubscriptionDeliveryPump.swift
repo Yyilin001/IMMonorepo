@@ -4,7 +4,7 @@ import IMV2ActorContracts
 
 /// Owns bounded online RPCs independently of room commit and socket workers.
 /// A transport deadline bounds each admitted call. Failed admission retains
-/// Relay responsibility; a stale receiver requests only its own new baseline.
+/// Relay responsibility; rejected authorization waits for a trusted new baseline.
 public actor V2RoomSubscriptionDeliveryPump {
     public struct Key: Hashable, Sendable {
         public let roomID: RoomID
@@ -15,32 +15,31 @@ public actor V2RoomSubscriptionDeliveryPump {
     }
     public typealias Send = @Sendable (V2RoomSubscriptionDelivery, String, V2GatewayRealtimeDescriptor) async throws -> V2RoomSubscriptionDeliveryResult
     public typealias SendBatch = @Sendable (V2RoomSubscriptionDeliveryBatch, String, V2GatewayRealtimeDescriptor) async throws -> V2RoomSubscriptionBatchResult
-    public typealias RequestBaseline = @Sendable (Key, V2RoomSubscriptionRelay.Status) -> Void
     private let controls: V2RoomSubscriptionLanePump
     private let messages: V2RoomSubscriptionLanePump
     private var bindingFlights: [Key: Task<Bool, Never>] = [:]
     private var closed = false
     public init(maximumEntries: Int = 8192, maximumCalls: Int = 4,
-                send: @escaping Send, requestBaseline: @escaping RequestBaseline) {
+                send: @escaping Send) {
         let batch: SendBatch = { batch, shard, target in
             let delivery = batch.deliveries[0]
             let result = try await send(delivery, shard, target)
             return .init(receipts: [.init(fence: delivery.fence, result: result)])
         }
         controls = .init(maximumEntries: maximumEntries, maximumCalls: min(2, maximumCalls), maximumBatchItems: 1,
-            maximumBatchBytes: 1_048_576, lane: .authorization, sendBatch: batch, requestBaseline: requestBaseline)
+            maximumBatchBytes: 1_048_576, lane: .authorization, sendBatch: batch)
         messages = .init(maximumEntries: maximumEntries, maximumCalls: maximumCalls, maximumBatchItems: 1,
-            maximumBatchBytes: 1_048_576, lane: .message, sendBatch: batch, requestBaseline: requestBaseline)
+            maximumBatchBytes: 1_048_576, lane: .message, sendBatch: batch)
     }
     public init(maximumEntries: Int = 8192, maximumCalls: Int,
                 maximumBatchItems: Int = 64, maximumBatchBytes: Int = 245_760,
-                sendBatch: @escaping SendBatch, requestBaseline: @escaping RequestBaseline) {
+                sendBatch: @escaping SendBatch) {
         controls = .init(maximumEntries: maximumEntries, maximumCalls: min(2, maximumCalls),
             maximumBatchItems: maximumBatchItems, maximumBatchBytes: maximumBatchBytes,
-            lane: .authorization, sendBatch: sendBatch, requestBaseline: requestBaseline)
+            lane: .authorization, sendBatch: sendBatch)
         messages = .init(maximumEntries: maximumEntries, maximumCalls: maximumCalls,
             maximumBatchItems: maximumBatchItems, maximumBatchBytes: maximumBatchBytes,
-            lane: .message, sendBatch: sendBatch, requestBaseline: requestBaseline)
+            lane: .message, sendBatch: sendBatch)
     }
     public func snapshot() async -> (actualCalls: Int, activeRoomPrefixes: Int, queuedGroups: Int, queuedRooms: Int, retryGroups: Int) {
         let a = await controls.snapshot(), b = await messages.snapshot()
@@ -98,7 +97,6 @@ package enum V2RoomSubscriptionLane: Sendable { case authorization, message }
 private actor V2RoomSubscriptionLanePump {
     typealias Key = V2RoomSubscriptionDeliveryPump.Key
     typealias SendBatch = V2RoomSubscriptionDeliveryPump.SendBatch
-    typealias RequestBaseline = V2RoomSubscriptionDeliveryPump.RequestBaseline
     private struct Entry: Sendable {
         let id: UUID
         let relay: V2RoomSubscriptionRelay
@@ -138,7 +136,6 @@ private actor V2RoomSubscriptionLanePump {
     private let sendBatch: SendBatch
     private let maximumBatchItems: Int
     private let maximumBatchBytes: Int
-    private let requestBaseline: RequestBaseline
     private var entries: [Key: Entry] = [:]
     private var active: [UUID: Task<Void, Never>] = [:]
     private var activeKeys: Set<Key> = []
@@ -167,11 +164,11 @@ private actor V2RoomSubscriptionLanePump {
     private let lane: V2RoomSubscriptionLane
     init(maximumEntries: Int, maximumCalls: Int, maximumBatchItems: Int,
          maximumBatchBytes: Int, lane: V2RoomSubscriptionLane,
-         sendBatch: @escaping SendBatch, requestBaseline: @escaping RequestBaseline) {
+         sendBatch: @escaping SendBatch) {
         precondition(maximumEntries > 0 && maximumCalls > 0 && maximumBatchItems > 0 && maximumBatchItems <= 64 && maximumBatchBytes > 0)
         self.maximumEntries = maximumEntries; self.maximumCalls = maximumCalls
         self.maximumBatchItems = maximumBatchItems; self.maximumBatchBytes = maximumBatchBytes
-        self.lane = lane; self.sendBatch = sendBatch; self.requestBaseline = requestBaseline
+        self.lane = lane; self.sendBatch = sendBatch
     }
     func reserveBinding(_ key: Key) -> Bool {
         guard !closed, !activeKeys.contains(key), bindingReservations[key] == nil,
@@ -305,7 +302,7 @@ private actor V2RoomSubscriptionLanePump {
                 let status = snapshot.status
                 bindingFences[Binding(key: key, entryID: entry.id)] = status.fence
                 if status.needsBaseline {
-                    releaseReservation(key, entryID: entry.id); requireBaseline(key, entry: entry, status: status); continue
+                    releaseReservation(key, entryID: entry.id); waitForBaseline(key, entry: entry); continue
                 }
                 let pending = snapshot.pending
                 var last: V2RoomSubscriptionDelivery?
@@ -319,7 +316,7 @@ private actor V2RoomSubscriptionLanePump {
                 } else {
                     releaseReservation(key, entryID: entry.id)
                     if pending.isEmpty { continue }
-                    if builder.count == 0 { requireBaseline(key, entry: entry, status: status) }
+                    if builder.count == 0 { waitForBaseline(key, entry: entry) }
                     else { signal(key); break }
                 }
             }
@@ -347,10 +344,9 @@ private actor V2RoomSubscriptionLanePump {
             queue.removeFirst(queueIndex); queueIndex = 0
         }
     }
-    private func requireBaseline(_ key: Key, entry: Entry, status: V2RoomSubscriptionRelay.Status) {
+    private func waitForBaseline(_ key: Key, entry: Entry) {
         guard entries[key]?.id == entry.id else { return }
         var current = entry; current.waitingBaseline = true; entries[key] = current
-        requestBaseline(key, status)
     }
     private func complete(_ callID: UUID, group: Group, work: [Work],
                           result: Result<V2RoomSubscriptionBatchResult, any Error>) async {
@@ -391,7 +387,7 @@ private actor V2RoomSubscriptionLanePump {
                 }
             } else if case .success = result {
                 if lane == .authorization {
-                    if let status = await entry.relay.status(for: key.gateway) { requireBaseline(key, entry: entry, status: status) }
+                    waitForBaseline(key, entry: entry)
                 } else {
                     signal(key)
                     if retrying[group] == nil {

@@ -1,5 +1,7 @@
 # G5 可复现容量夹具（待采样）
 
+> 历史记录说明（2026-10-13）：本文的代码路径、数据库租约/续期描述及测试结论属于文中固定的旧版本，保留作历史证据。当前房间执行使用原生分布式 Actor activation，在线授权使用主动权限传播与 Host–Gateway 共享控制会话；旧房间租约及 Host dirty-head 控制查询链已移除。历史通过或失败不代表当前版本的验证结果。
+
 `IMV2/scripts/prepare_v2_virtual_actor_capacity_fixture.py` 只生成文件，不连接数据库，也不启动默认 local-account Compose。它给现有 `IMV2GatewayLoadGenerator` 写出 `targetRoomIDs`，避免稳态阶段重新 `openDirectRoom`。一份输出供 main 与 candidate 复用；不要分别重新生成密钥/凭证。业务行按各自 checkout 的 `IMV2/sql/schema.sql` 安装到全新 disposable 数据库后，逻辑 UUID、房间成员、owner 分布和凭证映射相同。
 
 示例（输出目录必须不存在）：

@@ -1,5 +1,7 @@
 # 账户在线成员覆盖增量改造核对
 
+> 历史记录说明（2026-10-13）：本文的代码路径、数据库租约/续期描述及测试结论属于文中固定的旧版本，保留作历史证据。当前房间执行使用原生分布式 Actor activation，在线授权使用主动权限传播与 Host–Gateway 共享控制会话；旧房间租约及 Host dirty-head 控制查询链已移除。历史通过或失败不代表当前版本的验证结果。
+
 2026-10-05 历史上限改动当前证据：真实 App r100 的产品、独立事实、全部故障场景及服务／数据库清理通过，forcedKillCount=0、exitFailureCount=0，capacityAcceptance=false；该 App 场景未强制退役历史淘汰。另当前 Signed Actor 认证和房间回调运输两套件20项通过，未跳过（/tmp/imv2-retired-history-real-owner-signed-final.log）。新增容量1／退役历史1／连续3房间场景，实际协调器调用实际 Owner.resetGrant，验证新 generation、实际跨节点 Signed TCP 基线回调、Gateway 安装许可及旧 fence 回调拒绝。范围：Owner 请求方向在本地调用，持久化 source 使用替身；不构成请求方向远端 RPC 或真实 PostgreSQL 的淘汰场景证明。App 证据：/tmp/imv2-account-progress-20261005-r100/candidate/app-room-progress-canary.json。按用户要求停止追加重复 App、数据库和压力验证。
 
 2026-10-05 退役 fence 数量上限：Authority 增加最大退役记录数量（默认等于活跃房间上限），活跃记录＋退役记录有界；每次退役最多淘汰一条。首次淘汰后，未知房间必须经过当前 Owner 的 reset，协调器验证相同 activation、更高 generation 和不同 subscriptionID，才把本地 afterAuthoritativeReset 证明传入安装；普通 grant 或网络 delivery 不能绕过未知房间安装拒绝。保留记录仍按原 floor 校验，Ingress 不保留退役来源。成本是发生历史淘汰后，未知房间重新接入增加一次 reset，正常发送／投递不增加此调用。容量1连续100房间、正常／失败 activate 清理、普通旧 grant 拒绝、重复退役及既有许可／水位回归共53项通过。首次新增直接回归错误地要求被淘汰记录的重复退役返回true，已修正并保留失败日志；最终证据 /tmp/imv2-bounded-retired-fence-final.log。当前 r99 不含此次历史上限修改；实际 Signed Actor／真实 App 验证仍待完成，原正式容量与 r77 原因未关闭。
