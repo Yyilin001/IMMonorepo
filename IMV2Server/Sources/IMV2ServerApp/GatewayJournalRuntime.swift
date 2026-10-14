@@ -25,7 +25,7 @@ final class GatewayJournalRuntime: Sendable {
     private let worker = Mutex<Task<Void, Never>?>(nil)
     private let clock = Mutex<Task<Void, Never>?>(nil)
     private let wakes = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
-    private let cold = GatewayJournalColdFlights()
+    private let recovery: GatewayJournalRecoveryCoordinator
     private let logger = Logger(label: "imv2.gateway.journal")
     private let reportedFailures = Mutex<Set<String>>([])
 
@@ -63,10 +63,12 @@ final class GatewayJournalRuntime: Sendable {
                  publisher: V2RealtimeJournalPublisher,
                  fanout: V2RealtimeJournalFanout, aliases: [String], coordinator: V2RealtimeInterestCoordinator,
                  registry: V2DeviceConnectionRegistry,
+                 recovery: GatewayJournalRecoveryCoordinator,
                  identity: V2GatewayRealtimeIdentity) {
         self.catalog = catalog; self.receiver = receiver; self.projection = projection; self.authority = authority
         self.publisher = publisher; self.fanout = fanout; self.aliases = aliases
         self.coordinator = coordinator; self.registry = registry; self.identity = identity
+        self.recovery = recovery
     }
 
     static func build(catalog: GatewayJournalSourceCatalog, handle: V2RealtimeTransportHandle,
@@ -79,8 +81,10 @@ final class GatewayJournalRuntime: Sendable {
         let receiver = V2GatewayJournalProjectionReceiver(projection: projection, maximumBindings: bindingCapacity)
         let authenticationAliases = try Set(catalog.logicalAliases.filter { try catalog.entry(logicalAlias: $0).isAuthenticationSource })
         guard receiver.configureAuthenticationSources(authenticationAliases) else { throw V2RealtimeJournalError.invalidInput }
-        let authority = GatewayJournalAuthorityAssembly.build(catalog: catalog, coordinator: coordinator,
+        let recovery = GatewayJournalAuthorityAssembly.recovery(catalog: catalog, coordinator: coordinator,
             registry: registry, receiver: receiver)
+        let authority = GatewayJournalAuthorityAssembly.build(catalog: catalog, coordinator: coordinator,
+            registry: registry, receiver: receiver, recovery: recovery)
         let fanout = try V2RealtimeJournalFanout(sourceIdentity: { try catalog.entry(logicalAlias: $0).identity },
             recipients: { await service.journalRecipients(partitionID: $0) },
             isCurrent: { await service.journalRecipientIsCurrent($0) }, requestColdSnapshot: { recipient, source, fence, cut in
@@ -96,11 +100,11 @@ final class GatewayJournalRuntime: Sendable {
         let publisher = try V2RealtimeJournalPublisher(sources: sources,
             apply: { try await fanout.apply(sourceID: $0, lease: $1, batch: $2) })
         do { try await handle.configureJournalProjection(authority) }
-        catch { await publisher.close(); await fanout.close(); await authority.shutdown(); throw error }
+        catch { await recovery.close(); await publisher.close(); await fanout.close(); await authority.shutdown(); throw error }
         await registry.configureJournalUserControlReceiver(receiver)
         let runtime = GatewayJournalRuntime(catalog: catalog, receiver: receiver, projection: projection,
             authority: authority, publisher: publisher, fanout: fanout,
-            aliases: aliases, coordinator: coordinator, registry: registry, identity: identity)
+            aliases: aliases, coordinator: coordinator, registry: registry, recovery: recovery, identity: identity)
         coordinator.configureJournalCoverageObserver { [weak runtime] change in
             guard let runtime else { return }
             if case .invalidated(let partition) = change {
@@ -144,22 +148,19 @@ final class GatewayJournalRuntime: Sendable {
         }
         clock.withLock { $0 = timer }; wakes.continuation.yield(())
     }
-    private func refresh(_ source: V2RealtimeJournalSource) async throws {
+    private func refresh(_ source: V2RealtimeJournalSource, minimumCut: Int64 = 0) async throws {
         try Task.checkCancellation()
         guard let coverage = coordinator.journalCoverage(partitionID: source.partitionID) else {
             let error = GatewayJournalAuthorityError.coverageChanged
             recordFailure(error, phase: "coldRefresh")
             throw error
         }
-        let key = GatewayJournalColdFlights.Key(source: source, routingToken: coverage.token.leaseToken,
-            routingEpoch: coverage.token.epoch, session: coverage.sessionID, revision: coverage.revision)
         do {
-            try await cold.run(key: key) { [self] in
-                guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
-                try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                    registry: registry, receiver: receiver, source: source, gatewayIdentity: identity)
-                guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
-            }
+            guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
+            try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
+                registry: registry, receiver: receiver, source: source, gatewayIdentity: identity,
+                recovery: recovery, minimumCut: minimumCut)
+            guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
         } catch {
             recordFailure(error, phase: "coldRefresh")
             // Queue saturation is a retry, never a grant. Current coverage
@@ -214,7 +215,8 @@ final class GatewayJournalRuntime: Sendable {
               proof.value.snapshot.cuts.first(where: { $0.partitionID == source.partitionID })?.publishedThrough == cut,
               receiver.renew(source: source, serviceID: coverage.token.host.serviceID, fence: binding.fence,
                 deadline: min(coverage.deadline, proof.validUntil), current: { self.coordinator.confirmsJournalCoverage(coverage) }) else {
-            try await refresh(source); return
+            let minimumCut = proof.value.snapshot.cuts.first(where: { $0.partitionID == source.partitionID })?.publishedThrough ?? 0
+            try await refresh(source, minimumCut: minimumCut); return
         }
         return
     }
@@ -239,77 +241,7 @@ final class GatewayJournalRuntime: Sendable {
     func close() async {
         let task = worker.withLock { value -> Task<Void, Never>? in defer { value = nil }; return value }
         let timer = clock.withLock { value -> Task<Void, Never>? in defer { value = nil }; return value }
-        timer?.cancel(); wakes.continuation.finish(); task?.cancel(); await cold.close(); await timer?.value; await task?.value
+        timer?.cancel(); wakes.continuation.finish(); task?.cancel(); await recovery.close(); await timer?.value; await task?.value
         await publisher.close(); await fanout.close(); await authority.shutdown()
-    }
-}
-
-/// Four real SQL flights; queued sources consume no tasks. FIFO admission means
-/// a slow source occupies one slot while other sources continue independently.
-private actor GatewayJournalColdFlights {
-    struct Key: Hashable, Sendable {
-        let source: V2RealtimeJournalSource
-        let routingToken: UUID
-        let routingEpoch: Int64
-        let session: UUID
-        let revision: Int64
-    }
-    private struct Pending {
-        let operation: @Sendable () async throws -> Void
-        var waiters: [CheckedContinuation<Void, any Error>]
-    }
-    private var pending: [Key: Pending] = [:]
-    private var queue: [Key] = []
-    private var actual: [Key: Task<Void, Never>] = [:]
-    private var closed = false
-    private var waiting = 0
-
-    func run(key: Key, operation: @escaping @Sendable () async throws -> Void) async throws {
-        guard !closed else { throw CancellationError() }
-        guard (waiting < 1_024), pending[key] != nil || (pending.count < 256) else {
-            throw V2RealtimePublicationBackpressure.receiverQueue
-        }
-        try await withCheckedThrowingContinuation { continuation in
-            waiting += 1
-            if var value = pending[key] {
-                value.waiters.append(continuation); pending[key] = value
-            } else {
-                pending[key] = Pending(operation: operation, waiters: [continuation]); queue.append(key)
-            }
-            admit()
-        }
-    }
-    private func admit() {
-        while !closed, (actual.count < 4), !queue.isEmpty {
-            let key = queue.removeFirst()
-            guard let operation = pending[key]?.operation else { continue }
-            actual[key] = Task {
-                let result: Result<Void, any Error>
-                do { try Task.checkCancellation(); try await operation(); result = .success(()) }
-                catch { result = .failure(error) }
-                finished(key, result: result)
-            }
-        }
-    }
-    private func finished(_ key: Key, result: Result<Void, any Error>) {
-        actual.removeValue(forKey: key)
-        if let value = pending.removeValue(forKey: key) {
-            waiting -= value.waiters.count
-            for waiter in value.waiters { waiter.resume(with: result) }
-        }
-        admit()
-    }
-    func close() async {
-        closed = true
-        let queued = queue; queue.removeAll()
-        for key in queued {
-            if let value = pending.removeValue(forKey: key) {
-                waiting -= value.waiters.count
-                for waiter in value.waiters { waiter.resume(throwing: CancellationError()) }
-            }
-        }
-        let running = Array(actual.values)
-        for task in running { task.cancel() }
-        for task in running { await task.value }
     }
 }

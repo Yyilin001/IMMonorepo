@@ -250,6 +250,8 @@ def gateway_env(args, kind, database, index, actors, manifest):
         IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(actor/f'{kind}.json'),
         IM_V2_IDLE_TIMEOUT_MS='600000', IM_V2_LOG_LEVEL='notice' if app_canary_enabled(args) else 'warning')
     if kind == 'candidate':
+        if getattr(args, 'candidate_heartbeat_diagnostics', False):
+            values['IM_V2_GATEWAY_HEARTBEAT_DIAGNOSTICS'] = 'true'
         values['IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PER_CONNECTION'] = str(getattr(args, 'candidate_message_send_inflight_per_connection', 4))
         values['IM_V2_SEND_PATH_TRACE_MODE'] = getattr(args, 'candidate_send_path_trace_mode', 'sampled')
         if getattr(args, 'candidate_actor_binary_invocations', 'enabled') != 'enabled':
@@ -2422,6 +2424,8 @@ def main():
                         help='candidate bounded per-connection message SQL shape cache')
     parser.add_argument('--candidate-send-path-trace-mode', choices=('sampled', 'all'), default='sampled',
                         help='candidate detailed diagnostics: stable 1/64 operation sample or all slow requests')
+    parser.add_argument('--candidate-heartbeat-diagnostics', action='store_true',
+                        help='opt-in server heartbeat spans on a stable 1/64 of connections; diagnostic run, not a capacity comparison')
     parser.add_argument('--candidate-message-send-inflight-per-connection', type=int, choices=range(1, 33), default=4,
                         help='candidate per-TCP business send window; loader uses the same window (default: 4)')
     parser.add_argument('--candidate-message-write-connections', type=int, default=8,
@@ -2582,6 +2586,8 @@ def main():
                   candidateEventLoopThreads=args.candidate_event_loop_threads,
                   candidateDBTaskExecutor='event_loop',
                   candidateSendPathTraceMode=args.candidate_send_path_trace_mode,
+                  candidateHeartbeatDiagnostics=args.candidate_heartbeat_diagnostics,
+                  heartbeatDiagnosticOverhead=args.candidate_heartbeat_diagnostics,
                   candidateMessageWritePreparedQueries=args.candidate_message_write_prepared_queries,
                   candidateActorBinaryInvocations=args.candidate_actor_binary_invocations,
                   messageTransport='tcp',messageRecoveryTransport='tcp_query',

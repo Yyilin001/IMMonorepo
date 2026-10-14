@@ -18,6 +18,7 @@ struct V2ConnectionDirectory: Sendable {
     private(set) var identityByConnection: [UUID: V2AuthenticatedConnection] = [:]
     private(set) var lifecycleByConnection: [UUID: UInt64] = [:]
     private(set) var registrationTimes: [UUID: ContinuousClock.Instant] = [:]
+    private(set) var journalInterests = V2GatewayJournalInterestIndex()
     // Actual SQL admission/renewal/removal and compensation ownership. Removal
     // of a connection does not release these slots or allow ID reuse.
     private(set) var connectionOperations: [UUID: Int] = [:]
@@ -40,6 +41,7 @@ struct V2ConnectionDirectory: Sendable {
         identityByConnection[connectionID] = identity
         streamsByDevice[identity.deviceID, default: [:]][connectionID] = stream
         streamsByUser[identity.userID, default: [:]][connectionID] = stream
+        journalInterests.insert(connection: connectionID, identity: identity, lifecycle: lifecycle)
         return true
     }
 
@@ -59,6 +61,7 @@ struct V2ConnectionDirectory: Sendable {
         identityByConnection.removeValue(forKey: connectionID)
         lifecycleByConnection.removeValue(forKey: connectionID)
         registrationTimes.removeValue(forKey: connectionID)
+        journalInterests.remove(connectionID)
         streamsByDevice[current.identity.deviceID]?.removeValue(forKey: connectionID)
         if streamsByDevice[current.identity.deviceID]?.isEmpty == true {
             streamsByDevice.removeValue(forKey: current.identity.deviceID)

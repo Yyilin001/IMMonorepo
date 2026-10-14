@@ -180,6 +180,19 @@ class ReportCoverageTests(unittest.TestCase):
         unchanged = hotspots.counter_summary([(2, baseline)], (1, baseline))
         self.assertIsNone(unchanged[prefix+'sum']['meanMilliseconds'])
 
+    def test_heartbeat_stages_pair_the_exact_cohort_and_preserve_fractional_milliseconds(self):
+        prefix = 'im_v2_heartbeat_stage_milliseconds_'
+        all_labels = '{stage="lease_entry",cohort="all"}'
+        slow_labels = '{stage="lease_entry",cohort="slow"}'
+        baseline = hotspots.prometheus(f'{prefix}sum{all_labels} 0.1\n{prefix}count{all_labels} 1\n'
+            f'{prefix}sum{slow_labels} 0\n{prefix}count{slow_labels} 0')
+        current = hotspots.prometheus(f'{prefix}sum{all_labels} 1.3\n{prefix}count{all_labels} 5\n'
+            f'{prefix}sum{slow_labels} 1\n{prefix}count{slow_labels} 2')
+        result = hotspots.counter_summary([(2, current)], (1, baseline))
+        self.assertAlmostEqual(result[prefix+'sum'+all_labels]['meanMilliseconds'], 0.3)
+        self.assertEqual(result[prefix+'sum'+slow_labels]['meanMilliseconds'], 0.5)
+        self.assertIn('overlaps', result[prefix+'sum'+all_labels]['meanScope'])
+
     def test_sql_continuation_pairs_source_and_independent_segment_counts(self):
         prefix = 'im_v2_send_operation_sql_continuation_duration_milliseconds_'
         ready = '{source="scalar_fence_rooms",part="settled_to_resumed"}'

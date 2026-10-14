@@ -332,6 +332,7 @@ public actor V2GatewayByteStream {
     private let session: V2GatewaySession
     private let handler: any V2GatewayCommandHandler
     private let connectionID: UUID
+    nonisolated let heartbeatDiagnosticsSelected: Bool
     private let registry: V2DeviceConnectionRegistry
     private nonisolated let foregroundTransport = V2GatewayForegroundTransport()
     private var authenticatedResponseWritten = false
@@ -456,6 +457,8 @@ public actor V2GatewayByteStream {
         self.session = session
         self.handler = V2PresencePublicationGatewayHandler(delegate:handler,registry:registry,connectionID:connectionID)
         self.connectionID = connectionID
+        self.heartbeatDiagnosticsSelected = V2GatewayHeartbeatDiagnostics.enabled
+            && V2GatewayHeartbeatDiagnostics.selects(connectionID)
         self.registry = registry
         self.authorPresentationDispatcher = authorPresentationDispatcher
         self.authorPresentationIngress = authorPresentationIngress
@@ -559,6 +562,8 @@ public actor V2GatewayByteStream {
         do {
             guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
             for frame in inbound {
+                let heartbeatProbe = frame.heartbeatProbe
+                heartbeatProbe?.mark(.streamEntered)
 
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 if let concurrentMessageSendRespond,
@@ -631,15 +636,19 @@ public actor V2GatewayByteStream {
                 // become optional work for a replacement view of the same room.
                 let authorView = authorPresentationIngress == nil ? nil : authorPresentationView
 
+                heartbeatProbe?.mark(.sessionSubmitted)
                 let exchange = try await session.receive(
                     frame,
                     handler: handler,
                     originatingConnectionID: connectionID,
                     captureAuthorSample: authorView != nil,
                     roomProgress: { [weak self] heartbeat in
-                        await self?.exchangeRoomProgress(heartbeat) ?? []
+                        heartbeatProbe?.mark(.progressEntered)
+                        defer { heartbeatProbe?.mark(.progressCompleted) }
+                        return await self?.exchangeRoomProgress(heartbeat) ?? []
                     }
                 )
+                heartbeatProbe?.mark(.sessionReturned)
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
                 let newlyAuthenticated = try await registerAuthenticatedDeviceIfNeeded()
                 if newlyAuthenticated {
@@ -648,13 +657,22 @@ public actor V2GatewayByteStream {
                     await authenticationCompleted?(allowsLargeFrames)
                 }
                 guard !transportClosed else { throw V2ConnectionStateError.unexpectedCommand }
-                try await updateAcknowledgedConnectionControls(
-                    inbound: exchange.request,
-                    response: exchange.responseEnvelope
-                )
+                if let heartbeatProbe {
+                    try await V2GatewayHeartbeatDiagnostics.$current.withValue(heartbeatProbe) {
+                        try await updateAcknowledgedConnectionControls(
+                            inbound: exchange.request, response: exchange.responseEnvelope)
+                    }
+                } else {
+                    try await updateAcknowledgedConnectionControls(
+                        inbound: exchange.request,
+                        response: exchange.responseEnvelope
+                    )
+                }
                 await endAuthorPresentationSubscription(inbound: exchange.request, response: exchange.responseEnvelope)
                 try exchange.wireResponse.validate(limits: frameLimits)
-                try await respond(exchange.wireResponse)
+                var wireResponse = exchange.wireResponse
+                wireResponse.heartbeatProbe = heartbeatProbe
+                try await respond(wireResponse)
                 if newlyAuthenticated, !transportClosed, registeredIdentity != nil {
                     authenticatedResponseWritten = true
                     await registry.authenticationResponseWritten(connectionID: connectionID)
@@ -1722,8 +1740,10 @@ public actor V2GatewayByteStream {
             else { return }
             await registry.notifyTyping(roomID: try .init(request.roomID), actorUserID: identity.userID, isTyping: request.isTyping, expiresAt: request.isTyping ? Date().addingTimeInterval(6) : Date(), sourceConnectionID: connectionID)
         case .heartbeat:
+            V2GatewayHeartbeatDiagnostics.current?.mark(.registrySubmitted)
             guard await registry.refreshLivePresence(connectionID: connectionID)
             else { throw V2GatewaySessionError.authenticatedConnectionLimit }
+            V2GatewayHeartbeatDiagnostics.current?.mark(.registryReturned)
         default:
             return
         }

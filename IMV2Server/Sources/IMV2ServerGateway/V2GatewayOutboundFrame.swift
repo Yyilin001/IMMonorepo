@@ -31,6 +31,7 @@ struct V2ProtobufOutputBytes: SwiftProtobufContiguousBytes {
 /// Immutable owned bytes can cross task boundaries and be shared for fanout.
 /// Data conversion is confined to the public Data-based transport boundary.
 struct V2GatewayOutboundFrame: Sendable {
+    var heartbeatProbe: V2GatewayHeartbeatProbe?
     let header: V2Frame
     let buffer: ByteBuffer
     var payloadCount: Int { buffer.readableBytes - V2Frame.headerLength }

@@ -16,18 +16,34 @@ enum GatewayJournalAuthorityError: String, Error {
 /// source-local database ownership, and a same-MVCC authoritative snapshot.
 /// None of those witnesses can be installed by the remote RPC payload.
 enum GatewayJournalAuthorityAssembly {
+    static func recovery(catalog: GatewayJournalSourceCatalog,
+                         coordinator: V2RealtimeInterestCoordinator,
+                         registry: V2DeviceConnectionRegistry,
+                         receiver: V2GatewayJournalProjectionReceiver) -> GatewayJournalRecoveryCoordinator {
+        let sourceCount = Set(catalog.logicalAliases.compactMap { try? catalog.entry(logicalAlias: $0).identity.sourceID }).count
+        return GatewayJournalRecoveryCoordinator(maximumSources: max(1, sourceCount) * 256,
+            isCurrent: { work, _ in
+                receiver.recoveryCheckpoint(source: work.batch.source, fence: work.batch.fence,
+                    minimumCut: work.minimumCut) != nil
+            }, execute: { work in
+                try await recover(catalog: catalog, coordinator: coordinator, registry: registry,
+                    receiver: receiver, request: work.batch, serviceID: work.service,
+                    minimumCut: work.minimumCut, controls: work.controls, baseline: work.baseline)
+            })
+    }
     static func build(catalog: GatewayJournalSourceCatalog,
                       coordinator: V2RealtimeInterestCoordinator,
                       registry: V2DeviceConnectionRegistry,
-                      receiver: V2GatewayJournalProjectionReceiver) -> V2GatewayJournalAuthorityIngress {
+                      receiver: V2GatewayJournalProjectionReceiver,
+                      recovery: GatewayJournalRecoveryCoordinator) -> V2GatewayJournalAuthorityIngress {
         let sourceCount = Set(catalog.logicalAliases.compactMap {
             try? catalog.entry(logicalAlias: $0).identity.sourceID
         }).count
         return V2GatewayJournalAuthorityIngress(receiver: receiver, maximumSources: max(1, sourceCount) * 256,
         recoverControls: { request, serviceID, minimumCut, controls in
-            try await recover(catalog: catalog, coordinator: coordinator, registry: registry,
-                receiver: receiver, request: request, serviceID: serviceID,
-                minimumCut: minimumCut, controls: controls)
+            _ = try await recovery.run(.init(batch: request, service: serviceID, minimumCut: minimumCut,
+                interestRevision: await registry.journalUserControlInterestRevision(partitionID: request.source.partitionID),
+                controls: controls))
         }, recover: { _, _, _ in throw V2RealtimeJournalError.invalidInput },
         notify: { _ in })
     }
@@ -37,7 +53,9 @@ enum GatewayJournalAuthorityAssembly {
                         receiver: V2GatewayJournalProjectionReceiver,
                         source: V2RealtimeJournalSource,
                         gatewayIdentity: V2GatewayRealtimeIdentity,
-                        minimumCut: Int64 = 0) async throws {
+                        recovery: GatewayJournalRecoveryCoordinator,
+                        minimumCut: Int64 = 0,
+                        controls: V2GatewayJournalRecoveryControls = .init()) async throws {
         guard let coverage = coordinator.journalCoverage(partitionID: source.partitionID) else {
             throw GatewayJournalAuthorityError.coverageChanged
         }
@@ -55,19 +73,20 @@ enum GatewayJournalAuthorityAssembly {
             gatewayIncarnationID: gatewayIdentity.incarnationID)
         let request = V2RealtimeJournalProjectionBatch(source: source, fence: fence,
             payload: .baseline(minimumCut: minimumCut))
-        try await recover(catalog: catalog, coordinator: coordinator, registry: registry,
-            receiver: receiver, request: request,
-            serviceID: coverage.token.host.serviceID, minimumCut: minimumCut,
-            controls: .init())
+        _ = try await recovery.run(.init(batch: request, service: coverage.token.host.serviceID,
+            minimumCut: minimumCut,
+            interestRevision: await registry.journalUserControlInterestRevision(partitionID: source.partitionID),
+            controls: controls))
     }
 
-    private static func recover(catalog: GatewayJournalSourceCatalog,
+    @concurrent private static func recover(catalog: GatewayJournalSourceCatalog,
                                 coordinator: V2RealtimeInterestCoordinator,
                                 registry: V2DeviceConnectionRegistry,
                                 receiver: V2GatewayJournalProjectionReceiver,
                                 request: V2RealtimeJournalProjectionBatch,
                                 serviceID: String, minimumCut: Int64,
-                                controls: V2GatewayJournalRecoveryControls) async throws {
+                                controls: V2GatewayJournalRecoveryControls,
+                                baseline: GatewayJournalRecoveryCoordinator.Proof?) async throws -> GatewayJournalRecoveryCoordinator.Proof {
             guard let coverage = coordinator.journalCoverage(partitionID: request.source.partitionID),
                   coverage.token.epoch == request.fence.routingPartitionEpoch,
                   coverage.token.leaseToken == request.fence.routingLeaseToken,
@@ -92,15 +111,48 @@ enum GatewayJournalAuthorityAssembly {
             let deadline = min(coverage.deadline, observedAt + .seconds(authority.remainingLeaseSeconds))
             guard deadline > .now else { throw GatewayJournalAuthorityError.sourceExpired }
             let requestedAt = ContinuousClock.now
-            let requested = await registry.journalUserControlInterests().filter { interest in
-                V2RealtimeTopicKey(kind: .userSync, id: interest.userID.rawValue).partitionID() == request.source.partitionID
-            }
+            let selection = await registry.journalUserControlInterests(partitionID: request.source.partitionID)
+            let requested = selection.interests
             let users = Set(requested.map(\.userID))
             guard Set(controls.versions.keys).isSubset(of: users) else { throw GatewayJournalAuthorityError.userSelectionChanged }
+            if let baseline, baseline.interestRevision == selection.revision,
+               receiver.renew(source: request.source, serviceID: serviceID, fence: request.fence,
+                    deadline: deadline, current: { coordinator.confirmsJournalCoverage(coverage) }),
+               var checkpoint = receiver.recoveryCheckpoint(source: request.source, fence: request.fence, minimumCut: 0) {
+                // Bounded replay shares the same actual flight as cold reads.
+                // It cannot race another baseline install for this generation.
+                for _ in 0..<4 {
+                    if checkpoint >= minimumCut {
+                        GatewayJournalRecoveryCoordinator.record(.replayAdvanced)
+                        return .init(cut: checkpoint, interestRevision: selection.revision,
+                            versions: baseline.versions, devices: baseline.devices, controls: baseline.controls)
+                    }
+                    let range = try await entry.store.replay(partitionID: request.source.partitionID, after: checkpoint, limit: 128)
+                    guard deadline > .now, coordinator.confirmsJournalCoverage(coverage),
+                          await registry.journalUserControlInterestRevision(partitionID: request.source.partitionID) == selection.revision,
+                          let advanced = GatewayJournalControlCatchUp.apply(range, after: checkpoint,
+                            source: request.source, fence: request.fence, service: serviceID, localUsers: users, receiver: receiver),
+                          advanced > checkpoint else { break }
+                    checkpoint = advanced
+                }
+                if checkpoint >= minimumCut {
+                    GatewayJournalRecoveryCoordinator.record(.replayAdvanced)
+                    return .init(cut: checkpoint, interestRevision: selection.revision,
+                        versions: baseline.versions, devices: baseline.devices, controls: baseline.controls)
+                }
+                GatewayJournalRecoveryCoordinator.record(.replayFallback)
+            }
+            GatewayJournalRecoveryCoordinator.record(.snapshotLoaded)
             var versions: [UserID: UInt64] = [:]
             var userCut: Int64?
             if !users.isEmpty {
-                let tickets = Array(requested).sorted { $0.connectionID.uuidString < $1.connectionID.uuidString }
+                // Connection order has no authorization semantics. Raw UUID
+                // bytes give a stable order without formatting a String per comparison.
+                let tickets = Array(requested).sorted { lhs, rhs in
+                    withUnsafeBytes(of: lhs.connectionID.uuid) { left in
+                        withUnsafeBytes(of: rhs.connectionID.uuid) { right in left.lexicographicallyPrecedes(right) }
+                    }
+                }
                 for offset in stride(from: 0, to: tickets.count, by: 128) {
                     let selected = Set(tickets[offset..<min(offset + 128, tickets.count)])
                     let selectedUsers = Set(selected.map(\.userID))
@@ -139,14 +191,25 @@ enum GatewayJournalAuthorityAssembly {
             let snapshot = V2RealtimeJournalProjectionBatch(source: request.source, fence: request.fence,
                 payload: .snapshot(cut: userCut!, rooms: []))
             guard deadline > .now, coordinator.confirmsJournalCoverage(coverage) else { throw GatewayJournalAuthorityError.coverageChanged }
+            let current = await registry.journalUserControlInterests(partitionID: request.source.partitionID)
+            // Revocations/removals are covered by this read. A new lifecycle is
+            // not, even when the user topic's routing generation stayed unchanged.
+            guard current.interests.isSubset(of: requested) else { throw GatewayJournalAuthorityError.userSelectionChanged }
+            let currentUsers = Set(current.interests.map(\.userID))
+            try Task.checkCancellation()
             guard receiver.install(source: request.source, serviceID: serviceID, fence: request.fence,
                     deadline: deadline, rooms: [], viewers: [],
                     current: { coordinator.confirmsJournalCoverage(coverage) }) else { throw GatewayJournalAuthorityError.roomBindingRejected }
-            guard receiver.installUserControlFloors(source: request.source, fence: request.fence, versions: versions,
+            guard receiver.installUserControlFloors(source: request.source, fence: request.fence,
+                    versions: versions.filter { currentUsers.contains($0.key) },
                     isAuthenticationSource: entry.isAuthenticationSource) else { throw GatewayJournalAuthorityError.userBindingRejected }
             guard receiver.authorizeSnapshot(snapshot) else { throw GatewayJournalAuthorityError.snapshotRejected }
             guard case .applied = receiver.applyJournalProjection(snapshot, authenticatedServiceID: serviceID) else { throw GatewayJournalAuthorityError.snapshotNotApplied }
-
+            return .init(cut: userCut!, interestRevision: current.revision, versions: versions,
+                devices: Set(requested.compactMap { interest in
+                    guard let user = interest.userID.uuidValue, let device = interest.deviceID.uuidValue else { return nil }
+                    return V2RealtimeJournalDeviceKey(userID: user, deviceID: device)
+                }), controls: controls)
     }
 
 }

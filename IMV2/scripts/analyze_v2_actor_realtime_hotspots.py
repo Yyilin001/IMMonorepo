@@ -17,7 +17,7 @@ import sys
 METRIC = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{.*\})?\s+([^\s]+)')
 PREFIXES = ('im_v2_database_loan_', 'im_v2_database_work_', 'im_v2_gateway_message_send_', 'im_v2_gateway_commands_',
             'im_v2_gateway_command_duration_', 'im_v2_gateway_message_operation_internal_failures_', 'im_v2_send_operation_', 'im_v2_send_preparation_',
-            'im_v2_room_actor_', 'im_v2_room_subscription_', 'im_v2_actor_realtime_', 'im_v2_gateway_event_loop_lag_')
+            'im_v2_room_actor_', 'im_v2_room_subscription_', 'im_v2_actor_realtime_', 'im_v2_gateway_event_loop_lag_', 'im_v2_heartbeat_', 'im_v2_gateway_journal_')
 
 
 def read_jsonl(path):
@@ -120,6 +120,10 @@ def counter_summary(points, baseline):
             count = result.get('im_v2_gateway_event_loop_lag_milliseconds_count', {}).get('delta')
             summary['meanMilliseconds'] = summary['delta']/count if count and summary['delta'] is not None else None
             summary['meanScope'] = 'completed_event_loop_probe_delta; same disclosed counter boundary, excludes delayed probes not yet resumed'
+        elif key.startswith('im_v2_heartbeat_stage_milliseconds_sum'):
+            count = result.get(key.replace('_milliseconds_sum', '_milliseconds_count'), {}).get('delta')
+            summary['meanMilliseconds'] = summary['delta']/count if count and summary['delta'] is not None else None
+            summary['meanScope'] = 'completed_sampled_heartbeat_delta; same stage/cohort and disclosed counter boundary; entry/return include runtime scheduling, server_total overlaps its child stages'
         elif key.startswith('im_v2_gateway_command_duration_milliseconds_sum'):
             count = result.get(key.replace('_milliseconds_sum', '_milliseconds_count'), {}).get('delta')
             summary['meanMilliseconds'] = summary['delta']/count if count and summary['delta'] is not None else None

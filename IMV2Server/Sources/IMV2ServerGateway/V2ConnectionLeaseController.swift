@@ -102,6 +102,9 @@ public actor V2ConnectionLeaseController {
     }
 
     public func heartbeat(connectionID: UUID, lifecycle: UInt64) async -> Bool {
+        let probe = V2GatewayHeartbeatDiagnostics.current
+        probe?.mark(.leaseEntered)
+        defer { probe?.mark(.leaseCompleted) }
         guard !closed, var lease = leases[connectionID], lease.lifecycle == lifecycle else { return false }
         lease.heartbeat = .now
         leases[connectionID] = lease

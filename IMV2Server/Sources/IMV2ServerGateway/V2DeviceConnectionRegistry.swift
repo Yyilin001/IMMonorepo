@@ -33,6 +33,7 @@ public actor V2DeviceConnectionRegistry {
     private nonisolated let journalUserBaseline = Mutex<V2CallbackBox<@Sendable (UserID) async throws -> V2GatewayJournalUserBaselineProof>?>(nil)
     private var journalDeviceFloors: [V2RealtimeJournalSource: [V2RealtimeJournalDeviceKey: Int64]] = [:]
     private var journalUserFloors: [V2RealtimeJournalSource: [UUID: V2RealtimeJournalUserControl]] = [:]
+    private var journalSourcesByUser: [UUID: Set<V2RealtimeJournalSource>] = [:]
     private nonisolated let journalInterestChanged = Mutex<V2CallbackBox<@Sendable () -> Void>?>(nil)
     private nonisolated let journalReceiver = Mutex<V2GatewayJournalProjectionReceiver?>(nil)
     private nonisolated let roomSubscriptionAuthority = Mutex<V2GatewayRoomSubscriptionAuthority?>(nil)
@@ -395,14 +396,14 @@ public actor V2DeviceConnectionRegistry {
         if let authority = roomSubscriptionAuthority.withLock({ $0 }) {
             let localLifecycle = UUID()
             guard authority.registerConnection(connectionID, userID: identity.userID, lifecycle: localLifecycle) else {
-                _ = directory.remove(connectionID, lifecycle: lifecycle); return false
+                _ = removeDirectoryConnection(connectionID, lifecycle: lifecycle); return false
             }
             if let gate = await stream.roomSubscriptionSocketGate {
                 await authority.bindSocket(connectionID, lifecycle: localLifecycle, gate: gate)
             }
             guard !realtimeRecoveryClosed, directory.lifecycleByConnection[connectionID] == lifecycle else {
                 authority.removeConnection(connectionID, lifecycle: localLifecycle)
-                _ = directory.remove(connectionID, lifecycle: lifecycle)
+                _ = removeDirectoryConnection(connectionID, lifecycle: lifecycle)
                 return false
             }
             roomSubscriptionConnections[connectionID] = .init(lifecycle: localLifecycle)
@@ -468,8 +469,28 @@ public actor V2DeviceConnectionRegistry {
         await routePresence(targetUserID:identity.userID,isOnline:observation.isOnline,expiresAt:observation.expiresAt)
     }
 
+    private func removeDirectoryConnection(_ connectionID: UUID, lifecycle: UInt64? = nil) -> V2ConnectionDirectory.Handle? {
+        let entry = directory.journalInterests.entry(connectionID)
+        guard let removed = directory.remove(connectionID, lifecycle: lifecycle) else { return nil }
+        if let entry, let user = entry.user {
+            let sources = journalSourcesByUser[user] ?? []
+            if !directory.journalInterests.contains(user: user) {
+                journalSourcesByUser.removeValue(forKey: user)
+                for source in sources { journalUserFloors[source]?.removeValue(forKey: user) }
+            }
+            if let device = entry.device, !directory.journalInterests.contains(device: device) {
+                for source in sources { journalDeviceFloors[source]?.removeValue(forKey: device) }
+            }
+            for source in sources {
+                if journalUserFloors[source]?.isEmpty == true { journalUserFloors.removeValue(forKey: source) }
+                if journalDeviceFloors[source]?.isEmpty == true { journalDeviceFloors.removeValue(forKey: source) }
+            }
+        }
+        return removed
+    }
+
     public func unregister(connectionID: UUID) async {
-        guard let removed = directory.remove(connectionID) else { return }
+        guard let removed = removeDirectoryConnection(connectionID) else { return }
         let roomReference = removeRoomSubscriptionConnection(connectionID)
         journalInterestChanged.withLock { $0?.callback }?()
         removed.stream.invalidateForegroundAuthorization()
@@ -819,10 +840,13 @@ public actor V2DeviceConnectionRegistry {
     /// Capture lifecycle tickets before the authority read. A snapshot cannot
     /// close a later connection that reused the same account/device identity.
     public func journalUserControlInterests() -> Set<V2GatewayJournalUserControlInterest> {
-        Set(directory.identityByConnection.compactMap { id, identity in
-            guard let lifecycle = directory.lifecycleByConnection[id] else { return nil }
-            return .init(connectionID: id, userID: identity.userID, deviceID: identity.deviceID, lifecycle: lifecycle)
-        })
+        directory.journalInterests.allInterests()
+    }
+    public func journalUserControlInterests(partitionID: Int) -> V2GatewayJournalInterestSnapshot {
+        directory.journalInterests.snapshot(partitionID)
+    }
+    public func journalUserControlInterestRevision(partitionID: Int) -> UInt64 {
+        directory.journalInterests.revision(partitionID)
     }
 
     /// This port is called only by the trusted source-DB cold reader. The remote
@@ -915,23 +939,19 @@ public actor V2DeviceConnectionRegistry {
         }), snapshot.devices.allSatisfy({ state in
             state.latestChangeVersion >= (journalDeviceFloors[source]?[.init(userID: state.userID, deviceID: state.deviceID)] ?? 0)
         }) else { return nil }
-        // Preserve floors for still-local users only; each source stores at most
-        // one shared control record per viewer, never one record per device.
-        let localUsers = Set(directory.identityByConnection.values.compactMap { $0.userID.uuidValue })
-        var installed = (journalUserFloors[source] ?? [:]).filter { localUsers.contains($0.key) }
-        for control in snapshot.users where localUsers.contains(control.userID) { installed[control.userID] = control }
-        journalUserFloors[source] = installed
+        // Update only this snapshot's identities. The last local connection's
+        // removal prunes its floors synchronously, including during revocation.
+        for control in snapshot.users where directory.journalInterests.contains(user: control.userID) {
+            journalUserFloors[source, default: [:]][control.userID] = control
+            journalSourcesByUser[control.userID, default: []].insert(source)
+        }
         if isAuthenticationSource {
-            let localDevices = Set(directory.identityByConnection.values.compactMap { identity -> V2RealtimeJournalDeviceKey? in
-                guard let user = identity.userID.uuidValue, let device = identity.deviceID.uuidValue else { return nil }
-                return .init(userID: user, deviceID: device)
-            })
-            var installedDevices = (journalDeviceFloors[source] ?? [:]).filter { localDevices.contains($0.key) }
             for state in snapshot.devices {
                 let key = V2RealtimeJournalDeviceKey(userID: state.userID, deviceID: state.deviceID)
-                if localDevices.contains(key) { installedDevices[key] = state.latestChangeVersion }
+                if directory.journalInterests.contains(device: key) {
+                    journalDeviceFloors[source, default: [:]][key] = state.latestChangeVersion
+                }
             }
-            journalDeviceFloors[source] = installedDevices
         }
         for user in membershipUsers {
             let version = userControls[user]?.membershipDiscoveryVersion
@@ -1168,10 +1188,15 @@ public actor V2DeviceConnectionRegistry {
     /// Local heartbeats only update liveness; the controller owns SQL renewal.
     @discardableResult
     public func refreshLivePresence(connectionID: UUID) async -> Bool {
+        let probe = V2GatewayHeartbeatDiagnostics.current
+        probe?.mark(.registryEntered)
+        defer { probe?.mark(.registryCompleted) }
         guard !leaseRenewalsClosed, directory.identityByConnection[connectionID] != nil,
               let lifecycle = directory.lifecycleByConnection[connectionID] else { return false }
         guard let leaseController else { return true }
+        probe?.mark(.leaseSubmitted)
         let accepted = await leaseController.heartbeat(connectionID: connectionID, lifecycle: lifecycle)
+        probe?.mark(.leaseReturned)
         return accepted && directory.lifecycleByConnection[connectionID] == lifecycle
     }
 
@@ -1484,7 +1509,7 @@ public actor V2DeviceConnectionRegistry {
         lifecycle: Generation
     ) async {
         guard directory.identityByConnection[connectionID] == identity,
-              directory.remove(connectionID, lifecycle: lifecycle) != nil else { return }
+              removeDirectoryConnection(connectionID, lifecycle: lifecycle) != nil else { return }
         let roomReference = removeRoomSubscriptionConnection(connectionID)
         if let roomReference { await roomSubscriptionCoordinator?.release(reference: roomReference) }
         journalInterestChanged.withLock { $0?.callback }?()

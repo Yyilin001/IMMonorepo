@@ -53,13 +53,14 @@ struct GatewayJournalSourceCatalogTests {
             let receiver = V2GatewayJournalProjectionReceiver(projection: V2RealtimeJournalSharedProjection())
             try #require(receiver.configureAuthenticationSources(["source"]))
             let source = try catalog.source(logicalAlias: "source", partitionID: partition)
+            let recovery = GatewayJournalAuthorityAssembly.recovery(catalog: catalog, coordinator: coordinator, registry: registry, receiver: receiver)
             do {
                 try #require(await registry.register(stream, connectionID: connection,
                     identity: .init(userID: user, deviceID: device, capabilityProfile: "base"), publicationSuppressed: true))
                 try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_control_versions(topic_kind,topic_id,version,session_control_version) VALUES('userSync',\(bind: user.rawValue)::uuid::text,1,1)").run()
                 await #expect(throws: GatewayJournalAuthorityError.coverageChanged) {
                     try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                        registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway)
+                        registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
                 }
                 try await coordinator.activate(topic)
                 let coverage = try #require(coordinator.journalCoverage(partitionID: partition))
@@ -68,15 +69,16 @@ struct GatewayJournalSourceCatalogTests {
                 let publisher = try #require(try await entry.store.claim(partitionIDs: [partition], identity: host,
                     token: UUID(), leaseDuration: 30).first)
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway)
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
                 let binding = try #require(receiver.bindingSnapshot(source: source))
                 #expect(binding.fence.routingLeaseToken == routingLease.token)
                 #expect(binding.fence.sourceLeaseToken == publisher.token)
                 #expect(binding.fence.sessionID == coverage.sessionID)
                 #expect(receiver.authenticationBinding(userID: user)?.controlVersion == 1)
                 try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_control_versions SET version=2,session_control_version=2 WHERE topic_kind='userSync' AND topic_id=\(bind: user.rawValue)::uuid::text").run()
+                var changed = V2GatewayJournalRecoveryControls(); changed.versions[user] = 2
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway)
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery, controls: changed)
                 #expect(receiver.authenticationBinding(userID: user)?.controlVersion == 2)
                 #expect(await registry.journalUserControlInterests().count == 1)
                 try await sql.raw("INSERT INTO \(unsafeRaw: schema).auth_devices(user_id,device_id,created_at,last_active_at) VALUES(\(bind: user.rawValue)::uuid,\(bind: device.rawValue)::uuid,clock_timestamp(),clock_timestamp())").run()
@@ -84,27 +86,28 @@ struct GatewayJournalSourceCatalogTests {
                 let operation = UUID()
                 #expect(try await sessions.revokeCurrentDevice(actorUserID: user, currentDeviceID: device, operationID: operation) == .applied)
                 #expect(try await sessions.revokeCurrentDevice(actorUserID: user, currentDeviceID: device, operationID: operation) == .idempotent)
+                changed.versions[user] = 3; changed.devices = [.init(userID: user.uuidValue!, deviceID: device.uuidValue!)]
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway)
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery, controls: changed)
                 #expect(await registry.journalUserControlInterests().isEmpty)
                 // A subsequent cold read forgets departed users from receiver floors.
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway)
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
                 #expect(receiver.authenticationBinding(userID: user) == nil)
                 try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_journal_publisher_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE partition_id=\(bind: partition)").run()
                 await #expect(throws: GatewayJournalAuthorityError.sourceLeaseChanged) {
                     try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                        registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway)
+                        registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
                 }
                 await coordinator.deactivate(topic)
                 #expect(receiver.bindingSnapshot(source: source) == nil)
                 await coordinator.shutdown(); await service.shutdown()
                 await registry.unregister(connectionID: connection); try await stream.finish()
-                receiver.shutdown(); await registry.shutdownRealtimeRecovery()
+                await recovery.close(); receiver.shutdown(); await registry.shutdownRealtimeRecovery()
             } catch {
                 await coordinator.shutdown(); await service.shutdown()
                 await registry.unregister(connectionID: connection); try? await stream.finish()
-                receiver.shutdown(); await registry.shutdownRealtimeRecovery()
+                await recovery.close(); receiver.shutdown(); await registry.shutdownRealtimeRecovery()
                 throw error
             }
         }

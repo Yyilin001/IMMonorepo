@@ -53,6 +53,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     // 撤销关闭回调尚未就绪前，绝不能让认证帧在在线设备注册表中登记。
     private var callbacksReady = false
     private var lastInboundAt: NIODeadline?
+    private var decodeChunkReceivedAt: UInt64 = 0
     private var idleCheck: Scheduled<Void>?
     private var authenticationDeadline: Scheduled<Void>?
     private var closeReason: V2GatewayConnectionClosure?
@@ -279,7 +280,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
     public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         lastInboundAt = now()
         let buffer = unwrapInboundIn(data)
-        guard pending.append(buffer) else {
+        guard pending.append(buffer, observedAt: V2GatewayHeartbeatDiagnostics.enabled ? NIODeadline.now().uptimeNanoseconds : 0) else {
             close(context: context, reason: .inboundQueueLimit)
             return
         }
@@ -362,8 +363,9 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                     needsFrameDrain = false
                     inbound = ByteBuffer()
                 } else {
-                    guard let next = pending.popFirst() else { return }
-                    inbound = next
+                    guard let next = pending.popFirstObserved() else { return }
+                    inbound = next.bytes
+                    decodeChunkReceivedAt = next.observedAt
                 }
                 frames = try decoder.append(inbound)
                 needsFrameDrain = frames.count == stream.frameLimits.maximumFramesPerAppend
@@ -374,6 +376,13 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
             return
         }
         guard !frames.isEmpty else { return }
+        if V2GatewayHeartbeatDiagnostics.enabled, stream.heartbeatDiagnosticsSelected {
+            for index in frames.indices where frames[index].command == .heartbeat {
+                let probe = V2GatewayHeartbeatProbe(chunkReceivedAt: decodeChunkReceivedAt)
+                probe.mark(.dispatched)
+                frames[index].heartbeatProbe = probe
+            }
+        }
         processing = true
         let inboundFrames = frames
         let stream = stream
@@ -382,11 +391,14 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let eventLoop = context.eventLoop
         let logger = logger
         processingTask = Task {
+            for frame in inboundFrames { frame.heartbeatProbe?.mark(.taskEntered) }
+            defer { for frame in inboundFrames { frame.heartbeatProbe?.finish(success: false) } }
             let outcome: V2GatewayProcessingOutcome
             do {
                 try Task.checkCancellation()
                 let writeResponse: @Sendable (V2GatewayOutboundFrame) async throws -> Void = { response in
                     try Task.checkCancellation()
+                    response.heartbeatProbe?.mark(.writeSubmitted)
                     try await eventLoop.flatSubmit {
                         boundHandler.value.writeFrameWhenWritable(
                             response,
@@ -484,7 +496,15 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         _ frame: V2GatewayOutboundFrame,
         context: ChannelHandlerContext
     ) -> EventLoopFuture<Void> {
+        frame.heartbeatProbe?.mark(.writeEntered)
         let promise = context.eventLoop.makePromise(of: Void.self)
+        if let probe = frame.heartbeatProbe {
+            promise.futureResult.whenComplete { result in
+                probe.mark(.writeCompleted)
+                if case .success = result, frame.header.command == .heartbeatAck { probe.finish(success: true) }
+                else { probe.finish(success: false) }
+            }
+        }
         guard !closed, context.channel.isActive else {
             promise.fail(V2GatewayTransportWriteError.channelClosed)
             return promise.futureResult
@@ -1021,9 +1041,13 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
 /// 因此排空一个写满的碎片化连接时，
 /// 绝不会在共享事件循环上搬移成千上万个保留的 `Data` 值。
 struct V2GatewayInboundQueue {
+    struct Chunk {
+        var bytes: ByteBuffer
+        let observedAt: UInt64
+    }
     private let maximumBytes: Int
     private let maximumChunks: Int
-    private var chunks: CircularBuffer<ByteBuffer>
+    private var chunks: CircularBuffer<Chunk>
     private(set) var queuedBytes = 0
 
     init(maximumBytes: Int, maximumChunks: Int) {
@@ -1036,7 +1060,7 @@ struct V2GatewayInboundQueue {
     var isEmpty: Bool { chunks.isEmpty }
     var count: Int { chunks.count }
 
-    mutating func append(_ bytes: ByteBuffer) -> Bool {
+    mutating func append(_ bytes: ByteBuffer, observedAt: UInt64 = 0) -> Bool {
         guard chunks.count < maximumChunks,
               bytes.readableBytes <= maximumBytes,
               queuedBytes <= maximumBytes - bytes.readableBytes
@@ -1047,15 +1071,19 @@ struct V2GatewayInboundQueue {
             owned.writeBuffer(&bytes)
             bytes = owned
         }
-        chunks.append(bytes)
+        chunks.append(.init(bytes: bytes, observedAt: observedAt))
         queuedBytes += bytes.readableBytes
         return true
     }
 
     mutating func popFirst() -> ByteBuffer? {
-        guard let bytes = chunks.popFirst() else { return nil }
-        queuedBytes -= bytes.readableBytes
-        return bytes
+        popFirstObserved()?.bytes
+    }
+
+    mutating func popFirstObserved() -> Chunk? {
+        guard let chunk = chunks.popFirst() else { return nil }
+        queuedBytes -= chunk.bytes.readableBytes
+        return chunk
     }
 
     mutating func removeAll() {

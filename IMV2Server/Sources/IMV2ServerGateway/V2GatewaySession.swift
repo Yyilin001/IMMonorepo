@@ -294,6 +294,8 @@ public actor V2GatewaySession {
         captureAuthorSample: Bool = false,
         roomProgress: (@Sendable (IMV2Heartbeat) async -> [IMV2GroupEventProgressState])? = nil
     ) async throws -> V2GatewaySessionExchange {
+        frame.heartbeatProbe?.mark(.sessionEntered)
+        defer { frame.heartbeatProbe?.mark(.sessionCompleted) }
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         let envelope = try decode(frame)
         let response: V2GatewaySessionResponse
@@ -626,7 +628,9 @@ public actor V2GatewaySession {
                     UUID(uuidString: $0.roomID) != nil && $0.scopeGeneration > 0
                         && $0.appliedRoomSequence <= UInt64(Int64.max)
                 }) else { throw V2GatewaySessionError.unsupportedCommand }
+                frame.heartbeatProbe?.mark(.progressSubmitted)
                 response.heartbeatAck.roomSubscriptionStates = await roomProgress?(heartbeat) ?? []
+                frame.heartbeatProbe?.mark(.progressReturned)
             } else if case .groupEventPull(let request) = envelope.body,
                       let preparedGroupEventPageCache,
                       let preparedHandler = handler as? any V2PreparedGroupEventCommandHandling {

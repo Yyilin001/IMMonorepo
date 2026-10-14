@@ -268,6 +268,22 @@ public final class V2GatewayJournalProjectionReceiver: V2RealtimeJournalProjecti
         }
     }
 
+    /// A previously installed trusted control baseline can satisfy a duplicate
+    /// repair only while its exact generation, deadline and checkpoint are live.
+    public func recoveryCheckpoint(source: V2RealtimeJournalSource,
+                                   fence: V2RealtimeJournalProjectionFence, minimumCut: Int64) -> Int64? {
+        state.withLock { value in
+            guard minimumCut >= 0, !value.closed, let binding = value.bindings[source],
+                  binding.deadline > now(), binding.current(), binding.fence.sameGeneration(as: fence),
+                  binding.requiredUserControls.allSatisfy({ user, version in
+                      binding.userControlFloors[user, default: 0] >= version
+                  }), let cut = projection.controlCheckpoint(source: source, isCurrent: { _, installed in
+                      binding.fence.sameGeneration(as: installed)
+                  }), cut >= minimumCut else { return nil }
+            return cut
+        }
+    }
+
     /// Called only after trusted source and routing observers confirmed this
     /// exact generation. An expired binding always requires a fresh baseline.
     @discardableResult

@@ -64,6 +64,11 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                 gateway_port=21453, metrics_port=23464, pg_user='test', pg_host='localhost', pg_port=24533)
             manifest = dict(userBucket='user-a', shardID='room-a', capacityProfileID='standard', commandWindowLimit=100)
             defaults = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertNotIn('IM_V2_GATEWAY_HEARTBEAT_DIAGNOSTICS', defaults)
+            args.candidate_heartbeat_diagnostics = True
+            diagnostic = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(diagnostic['IM_V2_GATEWAY_HEARTBEAT_DIAGNOSTICS'], 'true')
+            args.candidate_heartbeat_diagnostics = False
             self.assertEqual(defaults['IM_V2_DATABASE_EVENT_LOOP_THREADS'], '4')
             self.assertEqual(defaults['IM_V2_DATABASE_MESSAGE_WRITE_CONNECTIONS_PER_EVENT_LOOP'], '2')
             self.assertEqual(defaults['IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS'], '1')
