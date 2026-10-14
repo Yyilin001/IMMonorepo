@@ -29,10 +29,6 @@ actor GatewayJournalRecoveryCoordinator {
                 && controls.membershipRooms.values.reduce(0, { $0 + $1.count }) <= 4096
                 && controls.membershipVersions.count <= 4096
         }
-        var hasControlChanges: Bool {
-            !controls.versions.isEmpty || !controls.devices.isEmpty
-                || !controls.membershipRooms.isEmpty || !controls.membershipVersions.isEmpty
-        }
     }
     struct Key: Hashable, Sendable {
         let source: V2RealtimeJournalSource
@@ -56,11 +52,13 @@ actor GatewayJournalRecoveryCoordinator {
         let cut: Int64
         let interestRevision: UInt64
         let versions: [UserID: UInt64]
+        /// Local device state was read, or the checked interest selection proved
+        /// the changed device has no local socket. A new lifecycle cannot reuse it.
         var devices: Set<V2RealtimeJournalDeviceKey> = []
         /// All side effects represented by these requirements already settled.
         let controls: V2GatewayJournalRecoveryControls
-        func satisfies(_ work: Work) -> Bool {
-            cut >= work.minimumCut && interestRevision >= work.interestRevision
+        func satisfies(_ work: Work, requireCut: Bool = true) -> Bool {
+            (!requireCut || cut >= work.minimumCut) && interestRevision >= work.interestRevision
                 && work.controls.versions.allSatisfy { versions[$0.key, default: 0] >= $0.value }
                 && work.controls.devices.isSubset(of: devices)
                 && work.controls.membershipVersions.allSatisfy { controls.membershipVersions[$0.key, default: 0] >= $0.value }
@@ -70,13 +68,13 @@ actor GatewayJournalRecoveryCoordinator {
     enum Reason: String, CaseIterable, Sendable {
         case requested, cacheHit, joined, executed, followup, failed, cancelled
         case firstBaseline, generationChanged, interestsChanged, requirementsAdvanced, bindingUnavailable
-        case replayAdvanced, replayFallback, snapshotLoaded
+        case replayAdvanced, replayFallback, snapshotLoaded, incrementalLoaded, selectedConnections, sourceProofQueries, sourceProofPartitions
     }
     private static let metrics = Mutex<[Reason: UInt64]>([:])
-    nonisolated static func record(_ reason: Reason) { metrics.withLock { $0[reason, default: 0] += 1 } }
+    nonisolated static func record(_ reason: Reason, amount: UInt64 = 1) { metrics.withLock { $0[reason, default: 0] += amount } }
     nonisolated static func prometheus() -> String {
         let values = metrics.withLock { $0 }
-        var lines = ["# HELP im_v2_gateway_journal_recovery_total Shared local/remote control recovery by fixed reason. Reasons overlap; execution counts are actual passes.",
+        var lines = ["# HELP im_v2_gateway_journal_recovery_total Shared local/remote control recovery by fixed reason. Reasons overlap; execution counts are actual passes, selectedConnections counts DB-read tickets, sourceProofPartitions counts requested partitions.",
                      "# TYPE im_v2_gateway_journal_recovery_total counter"]
         for reason in Reason.allCases { lines.append("im_v2_gateway_journal_recovery_total{reason=\"\(reason.rawValue)\"} \(values[reason, default: 0])") }
         return lines.joined(separator: "\n") + "\n"
@@ -124,8 +122,14 @@ actor GatewayJournalRecoveryCoordinator {
         Self.record(.requested)
         if let (key, proof) = completed[work.batch.source] {
             if key == work.key, proof.interestRevision == work.interestRevision,
-               proof.satisfies(work), isCurrent(work, proof) {
-                Self.record(.cacheHit); return proof
+               proof.satisfies(work, requireCut: false), isCurrent(work, proof) {
+                // The live receiver proves the requested cut was already applied
+                // with installed floors. No new DB snapshot is needed merely
+                // because the cached recovery finished at an earlier checkpoint.
+                let advanced = Proof(cut: max(proof.cut, work.minimumCut), interestRevision: proof.interestRevision,
+                    versions: proof.versions, devices: proof.devices, controls: proof.controls)
+                completed[work.batch.source] = (key, advanced)
+                Self.record(.cacheHit); return advanced
             }
             if key != work.key { Self.record(.generationChanged) }
             else if proof.interestRevision != work.interestRevision { Self.record(.interestsChanged) }
@@ -179,7 +183,7 @@ actor GatewayJournalRecoveryCoordinator {
             if value.waiters.isEmpty { pending.removeValue(forKey: key); continue }
             var work = value.work
             if let (installedKey, proof) = completed[key.source], installedKey == key,
-               proof.interestRevision == work.interestRevision, !work.hasControlChanges {
+               proof.interestRevision == work.interestRevision {
                 work.baseline = proof
             }
             Self.record(.executed)

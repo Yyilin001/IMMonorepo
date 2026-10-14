@@ -7,6 +7,41 @@ import IMV2ActorContracts
 
 @Suite("Trusted journal receiver and socket authority")
 struct V2GatewayJournalProjectionReceiverTests {
+    @Test("checkpoint diagnostics preserve denial boundaries and identify control versus expiry")
+    func checkpointFailureReasons() {
+        let f = Fixture(), time = Mutex(ContinuousClock.now), coverage = Mutex(true)
+        let start = time.withLock { $0 }
+        let receiver = V2GatewayJournalProjectionReceiver(projection: .init(), now: { time.withLock { $0 } })
+        func result(_ cut: Int64 = 0) -> Result<Int64, V2GatewayJournalProjectionReceiver.RecoveryCheckpointFailure> {
+            receiver.assessedRecoveryCheckpoint(source: f.source, fence: f.fence, minimumCut: cut)
+        }
+        #expect(result(-1) == .failure(.invalidCut))
+        #expect(result() == .failure(.missingBinding))
+        let installed = receiver.install(source: f.source, serviceID: "publisher", fence: f.fence,
+            deadline: start + .seconds(10), rooms: [f.room], viewers: [f.user], current: { coverage.withLock { $0 } })
+        #expect(installed)
+        #expect(result() == .failure(.missingCheckpoint))
+        let snapshot = f.snapshot()
+        #expect(receiver.authorizeSnapshot(snapshot))
+        guard case .applied = receiver.applyJournalProjection(snapshot, authenticatedServiceID: "publisher") else {
+            Issue.record("baseline missing"); return
+        }
+        #expect(result() == .success(5))
+        #expect(result(6) == .failure(.checkpointBehind))
+        #expect(receiver.recoveryCheckpoint(source: f.source, fence: f.fence, minimumCut: 6) == nil)
+        let changes = V2RealtimeJournalProjectionBatch(source: f.source, fence: f.fence,
+            payload: .changes(fromExclusive: 5, throughInclusive: 6, entries: [
+                .init(sequence: 6, change: .userControlInvalidation(userID: f.user, controlVersion: 8, deviceID: UUID()))
+            ]))
+        #expect(receiver.applyJournalProjection(changes, authenticatedServiceID: "publisher") == .snapshotRequired)
+        #expect(result() == .failure(.pendingUserControls))
+        coverage.withLock { $0 = false }
+        #expect(result() == .failure(.coverageChanged))
+        time.withLock { $0 = start + .seconds(11) }
+        #expect(result() == .failure(.expired))
+        receiver.shutdown()
+        #expect(result() == .failure(.closed))
+    }
     @Test("live room grants cannot outlive independent authentication coverage")
     func authenticationCoverageFencesActualWrites() {
         let f = Fixture(), time = Mutex(ContinuousClock.now)

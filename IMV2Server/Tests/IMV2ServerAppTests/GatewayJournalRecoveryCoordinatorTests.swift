@@ -9,6 +9,26 @@ import IMV2ServerGateway
 
 @Suite("Shared Journal recovery owner", .timeLimit(.minutes(1)))
 struct GatewayJournalRecoveryCoordinatorTests {
+    @Test("an already applied live checkpoint advances cached proof without a new SQL recovery")
+    func advancedLiveCheckpoint() async throws {
+        let applied = Mutex<Int64>(1), calls = Mutex(0)
+        let owner = GatewayJournalRecoveryCoordinator(isCurrent: { work, _ in
+            applied.withLock { $0 >= work.minimumCut }
+        }, execute: { work in
+            calls.withLock { $0 += 1 }; applied.withLock { $0 = max($0, work.minimumCut) }
+            return .init(cut: work.minimumCut, interestRevision: work.interestRevision,
+                versions: work.controls.versions, controls: work.controls)
+        })
+        var request = work(user: UserID(uuid: UUID()), version: 1)
+        _ = try await owner.run(request)
+        applied.withLock { $0 = 3 }; request.minimumCut = 3
+        #expect(try await owner.run(request).cut == 3)
+        #expect(calls.withLock { $0 } == 1)
+        request.minimumCut = 4
+        #expect(try await owner.run(request).cut == 4)
+        #expect(calls.withLock { $0 } == 2)
+        await owner.close()
+    }
     @Test("late higher versions require another pass while equal local and remote requests share one")
     func strongerArrival() async throws {
         let harness = RecoveryHarness(), user = UserID(uuid: UUID())

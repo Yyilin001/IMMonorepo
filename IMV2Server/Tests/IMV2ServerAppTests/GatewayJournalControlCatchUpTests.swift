@@ -8,38 +8,34 @@ import IMV2ServerGateway
 
 @Suite("Trusted Journal control catch-up")
 struct GatewayJournalControlCatchUpTests {
-    @Test("unrelated and already-installed controls advance without a user snapshot")
-    func unchangedControls() throws {
-        let f = try fixture()
-        let other = UserID(uuid: UUID())
-        let entries = [
-            entry(sequence: 1, user: other, version: 50),
-            entry(sequence: 2, user: f.user, version: 3)]
-        let batch = V2RealtimeJournalBatch(partitionID: 1, publishedThrough: 2, trimmedThrough: 0, requiresSnapshot: false, entries: entries)
-        let cut = GatewayJournalControlCatchUp.apply(batch, after: 0, source: f.source,
-            fence: f.fence, service: "host", localUsers: [f.user], receiver: f.receiver)
-        #expect(cut == 2)
-        #expect(f.receiver.recoveryCheckpoint(source: f.source, fence: f.fence, minimumCut: 2) == 2)
+    @Test("a late rejected recovery cannot retire a successor binding")
+    func conditionalRetirement() throws {
+        let f = try fixture(), old = f.fence
+        let next = V2RealtimeJournalProjectionFence(publisherIncarnationID: old.publisherIncarnationID,
+            sourceLeaseEpoch: old.sourceLeaseEpoch + 1, sourceLeaseToken: UUID(), sourceLeaseExpiresAt: .distantFuture,
+            routingPartitionEpoch: old.routingPartitionEpoch, routingLeaseToken: old.routingLeaseToken,
+            sessionID: old.sessionID, interestGeneration: old.interestGeneration, gatewayIncarnationID: old.gatewayIncarnationID)
+        try #require(f.receiver.install(source: f.source, serviceID: "host", fence: next,
+            deadline: .now + .seconds(60), rooms: [], viewers: []))
+        f.receiver.retire(source: f.source, fence: old)
+        #expect(f.receiver.recoveryBindingSnapshot(source: f.source)?.fence == next)
+        #expect(f.receiver.recoveryCheckpoint(source: f.source, fence: next, minimumCut: 0) == nil)
+        f.receiver.retire(source: f.source, fence: next)
+        #expect(f.receiver.recoveryBindingSnapshot(source: f.source) == nil)
     }
-    @Test("newer local policy blocks the projection instead of granting from a replay")
-    func newerControl() throws {
+    @Test("blocked projection retains only previously installed same-generation floors")
+    func retainedFloors() throws {
         let f = try fixture()
-        let batch = V2RealtimeJournalBatch(partitionID: 1, publishedThrough: 1, trimmedThrough: 0, requiresSnapshot: false,
-            entries: [entry(sequence: 1, user: f.user, version: 4)])
-        #expect(GatewayJournalControlCatchUp.apply(batch, after: 0, source: f.source, fence: f.fence,
-            service: "host", localUsers: [f.user], receiver: f.receiver) == nil)
+        let projected = V2RealtimeJournalProjectionBatch(source: f.source, fence: f.fence,
+            payload: .changes(fromExclusive: 0, throughInclusive: 1, entries: [
+                .init(sequence: 1, change: .userControlInvalidation(userID: f.user, controlVersion: 4, deviceID: nil, membershipRoomID: nil))]))
+        #expect(f.receiver.applyJournalProjection(projected, authenticatedServiceID: "host") == .snapshotRequired)
         #expect(f.receiver.recoveryCheckpoint(source: f.source, fence: f.fence, minimumCut: 0) == nil)
-    }
-    @Test("trimmed, missing, opaque and expired evidence require a baseline", arguments: [0,1,2,3])
-    func missingEvidence(kind: Int) throws {
-        let f = try fixture()
-        var row = entry(sequence: kind == 1 ? 2 : 1, user: f.user, version: 3)
-        if kind == 2 { row = .init(partitionID: 1, sequence: 1, sourceEventID: UUID(), topicKind: "userSync", topicID: f.user.rawValue, changeKind: "legacy") }
-        if kind == 3 { f.receiver.retire(source: f.source) }
-        let batch = V2RealtimeJournalBatch(partitionID: 1, publishedThrough: 2, trimmedThrough: kind == 0 ? 1 : 0,
-            requiresSnapshot: kind == 0, entries: [row])
-        #expect(GatewayJournalControlCatchUp.apply(batch, after: 0, source: f.source, fence: f.fence,
-            service: "host", localUsers: [f.user], receiver: f.receiver) == nil)
+        #expect(f.receiver.retainsRecoveryFloors(source: f.source, fence: f.fence, versions: [f.user: 3]))
+        #expect(!f.receiver.retainsRecoveryFloors(source: f.source, fence: f.fence, versions: [f.user: 4]))
+        #expect(!f.receiver.retainsRecoveryFloors(source: f.source, fence: f.fence, versions: [UserID(uuid: UUID()): 0]))
+        f.receiver.retire(source: f.source)
+        #expect(!f.receiver.retainsRecoveryFloors(source: f.source, fence: f.fence, versions: [f.user: 3]))
     }
     private struct Fixture {
         let user: UserID
@@ -61,9 +57,6 @@ struct GatewayJournalControlCatchUpTests {
         guard case .applied = receiver.applyJournalProjection(snapshot, authenticatedServiceID: "host") else { throw CatchUpError.initialSnapshot }
         return .init(user: user, source: source, fence: fence, receiver: receiver)
     }
-    private func entry(sequence: Int64, user: UserID, version: Int64) -> V2RealtimeJournalEntry {
-        .init(partitionID: 1, sequence: sequence, sourceEventID: UUID(), topicKind: "userSync",
-            topicID: user.rawValue, changeKind: "userControl", userControlVersion: version)
-    }
+
 }
 private enum CatchUpError: Error { case initialSnapshot }

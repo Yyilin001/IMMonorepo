@@ -17,6 +17,38 @@ import IMV2Core
 @Suite("Source catalog database proof", .serialized)
 struct GatewayJournalSourceCatalogTests {
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func batchedSourceProofsRejectExpiredReplacedAndForeignSources() async throws {
+        try await withCatalogDatabase { database, sql, schema in
+            let catalog = try await GatewayJournalSourceCatalog.load(registrations: [
+                .init(logicalAliases: ["source"], database: database, schema: schema)
+            ])
+            let entry = try catalog.entry(logicalAlias: "source")
+            let owner = V2GatewayRealtimeIdentity(nodeID: "owner", serviceID: "source", incarnationID: UUID())
+            let leases = try await entry.store.claim(partitionIDs: [1, 2, 3], identity: owner, token: UUID(), leaseDuration: 30)
+            let began = ContinuousClock.now
+            let proofs = try await catalog.sourceProofs(logicalAlias: "source", partitionIDs: [1, 2, 3, 4, 1])
+            #expect(Set(proofs.keys) == [1, 2, 3])
+            for lease in leases {
+                let proof = try #require(proofs[lease.partitionID])
+                #expect(proof.lease.token == lease.token && proof.lease.identity == owner)
+                #expect(proof.value.publishedThrough == 0 && proof.value.trimmedThrough == 0)
+                #expect(proof.validUntil > .now && proof.validUntil <= began + .seconds(30))
+            }
+            try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_journal_publisher_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE partition_id IN(1,2)").run()
+            let live = try await catalog.sourceProofs(logicalAlias: "source", partitionIDs: [1, 2, 3])
+            #expect(Set(live.keys) == [3])
+            let successor = V2GatewayRealtimeIdentity(nodeID: "new", serviceID: "source", incarnationID: UUID())
+            _ = try await entry.store.claim(partitionIDs: [1], identity: successor, token: UUID(), leaseDuration: 30)
+            let replaced = try await catalog.sourceProofs(logicalAlias: "source", partitionIDs: [1])
+            #expect(replaced[1]?.lease.identity == successor)
+            #expect(replaced[1]?.lease.epoch == (proofs[1]?.lease.epoch ?? 0) + 1)
+            try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_journal_source_identity SET database_incarnation=\(bind: UUID()) WHERE singleton").run()
+            await #expect(throws: GatewayJournalSourceCatalog.CatalogError.identityChanged) {
+                _ = try await catalog.sourceProofs(logicalAlias: "source", partitionIDs: [1, 3])
+            }
+        }
+    }
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func productionRecoveryRequiresAcknowledgedCoverageAndCurrentSourceLease() async throws {
         try await withCatalogDatabase(schema: "im_v2") { database, sql, schema in
             let catalog = try await GatewayJournalSourceCatalog.load(registrations: [
@@ -54,9 +86,19 @@ struct GatewayJournalSourceCatalogTests {
             try #require(receiver.configureAuthenticationSources(["source"]))
             let source = try catalog.source(logicalAlias: "source", partitionID: partition)
             let recovery = GatewayJournalAuthorityAssembly.recovery(catalog: catalog, coordinator: coordinator, registry: registry, receiver: receiver)
+            var otherUser = UserID(uuid: UUID())
+            while V2RealtimeTopicKey(kind: .userSync, id: otherUser.rawValue).partitionID() != partition { otherUser = UserID(uuid: UUID()) }
+            let otherDevice = DeviceID(uuid: UUID()), otherConnection = UUID()
+            let otherStream = V2GatewayByteStream(frameLimits: frameLimits,
+                session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: CatalogRecoveryAuthenticator(),
+                    capabilityProfile: "base", commandAdmission: CatalogRecoveryAdmission()),
+                handler: CatalogRecoveryCommandHandler(), connectionID: otherConnection, registry: registry)
             do {
                 try #require(await registry.register(stream, connectionID: connection,
                     identity: .init(userID: user, deviceID: device, capabilityProfile: "base"), publicationSuppressed: true))
+                try #require(await registry.register(otherStream, connectionID: otherConnection,
+                    identity: .init(userID: otherUser, deviceID: otherDevice, capabilityProfile: "base"), publicationSuppressed: true))
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_control_versions(topic_kind,topic_id,version,session_control_version) VALUES('userSync',\(bind: otherUser.rawValue)::uuid::text,1,1)").run()
                 try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_control_versions(topic_kind,topic_id,version,session_control_version) VALUES('userSync',\(bind: user.rawValue)::uuid::text,1,1)").run()
                 await #expect(throws: GatewayJournalAuthorityError.coverageChanged) {
                     try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
@@ -76,11 +118,27 @@ struct GatewayJournalSourceCatalogTests {
                 #expect(binding.fence.sessionID == coverage.sessionID)
                 #expect(receiver.authenticationBinding(userID: user)?.controlVersion == 1)
                 try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_control_versions SET version=2,session_control_version=2 WHERE topic_kind='userSync' AND topic_id=\(bind: user.rawValue)::uuid::text").run()
+                // Newer committed state not yet represented by a published control
+                // must not make a selective repair read or advance an unrelated user.
+                try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_control_versions SET version=2,session_control_version=2 WHERE topic_kind='userSync' AND topic_id=\(bind: otherUser.rawValue)::uuid::text").run()
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_control_publication_floors(topic_kind,topic_id,published_version) VALUES('userSync',\(bind: user.rawValue)::uuid::text,1)").run()
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_change_outbox(partition_id,topic_kind,topic_id,change_kind,user_control_version) VALUES(\(bind: partition),'userSync',\(bind: user.rawValue)::uuid::text,'userControl',2)").run()
+                let published = try await entry.store.publishPending(lease: publisher, limit: 128)
+                #expect(published.publishedThrough == 1)
+                #expect(receiver.applyJournalProjection(.init(source: source, fence: binding.fence,
+                    payload: .changes(fromExclusive: 0, throughInclusive: 1, entries: [
+                        .init(sequence: 1, change: .userControlInvalidation(userID: user, controlVersion: 2, deviceID: nil, membershipRoomID: nil))])),
+                    authenticatedServiceID: host.serviceID) == .snapshotRequired)
                 var changed = V2GatewayJournalRecoveryControls(); changed.versions[user] = 2
+                // A device without a local socket has no revocation side effect;
+                // its hint must settle rather than spin additional owner passes.
+                changed.devices = [.init(userID: user.uuidValue!, deviceID: UUID())]
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery, controls: changed)
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery,
+                    minimumCut: 1, controls: changed)
                 #expect(receiver.authenticationBinding(userID: user)?.controlVersion == 2)
-                #expect(await registry.journalUserControlInterests().count == 1)
+                #expect(receiver.authenticationBinding(userID: otherUser)?.controlVersion == 1)
+                #expect(await registry.journalUserControlInterests().count == 2)
                 try await sql.raw("INSERT INTO \(unsafeRaw: schema).auth_devices(user_id,device_id,created_at,last_active_at) VALUES(\(bind: user.rawValue)::uuid,\(bind: device.rawValue)::uuid,clock_timestamp(),clock_timestamp())").run()
                 let sessions = V2PostgresDeviceSessionService(database: database)
                 let operation = UUID()
@@ -89,23 +147,34 @@ struct GatewayJournalSourceCatalogTests {
                 changed.versions[user] = 3; changed.devices = [.init(userID: user.uuidValue!, deviceID: device.uuidValue!)]
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
                     registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery, controls: changed)
-                #expect(await registry.journalUserControlInterests().isEmpty)
+                #expect(await registry.journalUserControlInterests().count == 1)
                 // A subsequent cold read forgets departed users from receiver floors.
                 try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
                     registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
                 #expect(receiver.authenticationBinding(userID: user) == nil)
                 try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_journal_publisher_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE partition_id=\(bind: partition)").run()
+                let nextPublisher = try #require(try await entry.store.claim(partitionIDs: [partition], identity: host,
+                    token: UUID(), leaseDuration: 30).first)
+                let nextProof = try #require(try await catalog.sourceProofs(logicalAlias: "source", partitionIDs: [partition])[partition])
+                try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway,
+                    recovery: recovery, sourceProof: nextProof)
+                #expect(receiver.bindingSnapshot(source: source)?.fence.sourceLeaseEpoch == nextPublisher.epoch)
+                #expect(nextPublisher.epoch > publisher.epoch)
+                try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_journal_publisher_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE partition_id=\(bind: partition)").run()
                 await #expect(throws: GatewayJournalAuthorityError.sourceLeaseChanged) {
                     try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
-                        registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
+                        registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery, minimumCut: 2)
                 }
                 await coordinator.deactivate(topic)
                 #expect(receiver.bindingSnapshot(source: source) == nil)
                 await coordinator.shutdown(); await service.shutdown()
+                await registry.unregister(connectionID: otherConnection); try await otherStream.finish()
                 await registry.unregister(connectionID: connection); try await stream.finish()
                 await recovery.close(); receiver.shutdown(); await registry.shutdownRealtimeRecovery()
             } catch {
                 await coordinator.shutdown(); await service.shutdown()
+                await registry.unregister(connectionID: otherConnection); try? await otherStream.finish()
                 await registry.unregister(connectionID: connection); try? await stream.finish()
                 await recovery.close(); receiver.shutdown(); await registry.shutdownRealtimeRecovery()
                 throw error
@@ -149,49 +218,16 @@ struct GatewayJournalSourceCatalogTests {
                 identity: .init(nodeID: "source", serviceID: "publisher", incarnationID: UUID()),
                 token: UUID(), leaseDuration: 15)
             let lease = try #require(leases.first)
-            let source = try catalog.source(logicalAlias: "room-a", partitionID: 3)
             let began = ContinuousClock.now
-            let proof = try await catalog.provedSnapshot(source: source) {
-                // Renewal during a read cannot extend the old read's witness.
-                _ = try await room.store.renew([lease], leaseDuration: 30)
-                return 7
-            }
-            #expect(proof.value == 7 && proof.lease.epoch == lease.epoch)
+            let proof = try #require(try await catalog.sourceProofs(logicalAlias: "room-a", partitionIDs: [3])[3])
+            _ = try await room.store.renew([lease], leaseDuration: 30)
+            #expect(proof.lease.epoch == lease.epoch)
             #expect(proof.validUntil > .now && proof.validUntil <= began + .seconds(15))
-            let authoritative = try await catalog.userSnapshotProof(source: source, userIDs: [], deviceIDs: [])
-            #expect(authoritative.value.snapshot.identity == room.identity && authoritative.value.snapshot.users.isEmpty)
+
         }
     }
 
-    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
-    func readCannotReturnProofAfterSourceLeaseExpiresOrChangesGeneration() async throws {
-        try await withCatalogDatabase { database, sql, schema in
-            let catalog = try await GatewayJournalSourceCatalog.load(registrations: [
-                .init(logicalAliases: ["source"], database: database, schema: schema)
-            ])
-            let entry = try catalog.entry(logicalAlias: "source")
-            let owner = V2GatewayRealtimeIdentity(nodeID: "first", serviceID: "publisher", incarnationID: UUID())
-            _ = try await entry.store.claim(partitionIDs: [4], identity: owner, token: UUID(), leaseDuration: 30)
-            let source = try catalog.source(logicalAlias: "source", partitionID: 4)
-            await #expect(throws: GatewayJournalSourceCatalog.CatalogError.sourceNotReady) {
-                _ = try await catalog.provedSnapshot(source: source) {
-                    try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_journal_publisher_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE partition_id=4").run()
-                    return 1
-                }
-            }
-            _ = try await entry.store.claim(partitionIDs: [4], identity: owner, token: UUID(), leaseDuration: 30)
-            await #expect(throws: GatewayJournalSourceCatalog.CatalogError.sourceNotReady) {
-                _ = try await catalog.provedSnapshot(source: source) {
-                    try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_journal_publisher_leases SET expires_at=clock_timestamp()-interval '1 second' WHERE partition_id=4").run()
-                    let successor = try await entry.store.claim(partitionIDs: [4],
-                        identity: .init(nodeID: "successor", serviceID: "publisher", incarnationID: UUID()),
-                        token: UUID(), leaseDuration: 30)
-                    #expect(successor.count == 1)
-                    return 2
-                }
-            }
-        }
-    }
+
 }
 
 /// Uses only the explicitly disposable test URL; no HTTP service or process

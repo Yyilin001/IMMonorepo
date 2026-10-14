@@ -4,36 +4,41 @@ import IMV2ActorContracts
 import IMV2ServerContracts
 import IMV2ServerGateway
 
-/// A trusted, contiguous DB journal range can advance unchanged control floors.
-/// Missing history, opaque records or a newer local control require a snapshot.
-enum GatewayJournalControlCatchUp {
-    static func apply(_ batch: V2RealtimeJournalBatch, after: Int64,
-                      source: V2RealtimeJournalSource, fence: V2RealtimeJournalProjectionFence,
-                      service: String, localUsers: Set<UserID>, receiver: V2GatewayJournalProjectionReceiver) -> Int64? {
-        guard batch.partitionID == source.partitionID, !batch.requiresSnapshot,
-              batch.trimmedThrough <= after, batch.publishedThrough >= after else { return nil }
-        var expected = after
-        var entries: [V2RealtimeJournalProjectionEntry] = []
+/// Selective reads are safe only after every sequence up to a fixed trusted
+/// cut was examined. The DB read may see newer state; it cannot advance this cut.
+struct GatewayJournalControlCatchUp {
+    private(set) var through: Int64
+    let target: Int64
+    private(set) var controls: V2GatewayJournalRecoveryControls
+    let localUsers: Set<UserID>
+    let installedVersions: [UserID: UInt64]
+
+    var selectedUsers: Set<UserID> {
+        Set(controls.versions.keys).union(controls.devices.map { UserID(uuid: $0.userID) })
+            .union(controls.membershipRooms.keys).union(controls.membershipVersions.keys)
+    }
+
+    mutating func append(_ batch: V2RealtimeJournalBatch, partitionID: Int) -> Bool {
+        guard batch.partitionID == partitionID, !batch.requiresSnapshot,
+              batch.trimmedThrough <= through, batch.publishedThrough >= target else { return false }
         for entry in batch.entries {
-            guard expected < Int64.max, entry.partitionID == source.partitionID,
-                  entry.sequence == expected + 1, entry.sequence <= batch.publishedThrough else { return nil }
-            expected = entry.sequence
+            if through == target { break }
+            guard through < Int64.max, entry.partitionID == partitionID,
+                  entry.sequence == through + 1, entry.sequence <= batch.publishedThrough else { return false }
+            through = entry.sequence
             if entry.topicKind == "userSync" {
                 guard let uuid = UUID(uuidString: entry.topicID), let version = entry.userControlVersion,
-                      version > 0 else { return nil }
+                      version > 0 else { return false }
                 let user = UserID(uuid: uuid)
-                if localUsers.contains(user) {
-                    entries.append(.init(sequence: entry.sequence, change: .userControlInvalidation(
-                        userID: user, controlVersion: UInt64(version), deviceID: entry.deviceID,
-                        membershipRoomID: entry.membershipRoomID.map { RoomID(uuid: $0) })))
+                guard localUsers.contains(user), UInt64(version) > installedVersions[user, default: 0] else { continue }
+                controls.versions[user] = max(controls.versions[user, default: 0], UInt64(version))
+                if let device = entry.deviceID { controls.devices.insert(.init(userID: uuid, deviceID: device)) }
+                if let room = entry.membershipRoomID {
+                    controls.membershipRooms[user, default: []].insert(RoomID(uuid: room))
+                    controls.membershipVersions[user] = max(controls.membershipVersions[user, default: 0], UInt64(version))
                 }
             }
         }
-        guard expected > after || batch.publishedThrough == after else { return nil }
-        let projected = V2RealtimeJournalProjectionBatch(source: source, fence: fence,
-            payload: .changes(fromExclusive: after, throughInclusive: expected, entries: entries))
-        guard case .applied(let receipt) = receiver.applyJournalProjection(projected, authenticatedServiceID: service),
-              receipt.appliedThrough >= expected else { return nil }
-        return receipt.appliedThrough
+        return through == target || !batch.entries.isEmpty
     }
 }

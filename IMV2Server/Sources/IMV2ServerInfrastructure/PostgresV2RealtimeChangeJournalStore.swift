@@ -42,6 +42,57 @@ public struct PostgresV2RealtimeChangeJournalStore: V2RealtimeJournalProjectionS
             epoch: row.lease_epoch,token: row.lease_token,remainingLeaseSeconds: row.remaining_seconds)
     }
 
+    public struct SourceProof: Sendable {
+        public let identity: V2RealtimeJournalSourceIdentity
+        public let lease: V2RealtimePartitionLease
+        public let cut: V2RealtimeJournalPartitionCut
+    }
+
+    /// One statement snapshot covers identity, publisher generation and cuts.
+    /// No user/device state, JSON tree, explicit transaction or row lock.
+    public func sourceProofs(partitionIDs: [Int]) async throws -> [SourceProof] {
+        guard partitionIDs.count <= 256, partitionIDs.allSatisfy({ (0..<256).contains($0) }) else {
+            throw V2RealtimeJournalError.invalidInput
+        }
+        guard !partitionIDs.isEmpty else { return [] }
+        struct Row: Decodable {
+            let source_id: UUID
+            let database_incarnation: UUID
+            let partition_id: Int
+            let published_through: Int64
+            let trimmed_through: Int64
+            let host_id: String
+            let service_id: String
+            let process_incarnation: UUID
+            let lease_epoch: Int64
+            let lease_token: UUID
+            let remaining_seconds: Double
+        }
+        let rows = try await sqlDatabase(database).raw("""
+            WITH observed AS MATERIALIZED(SELECT clock_timestamp() AS now)
+            SELECT i.source_id,i.database_incarnation,p.partition_id,p.published_through,p.trimmed_through,
+                   l.host_id,l.service_id,l.process_incarnation,l.lease_epoch,l.lease_token,
+                   extract(epoch FROM l.expires_at-observed.now)::double precision AS remaining_seconds
+            FROM \(unsafeRaw: schema).realtime_journal_source_identity i
+            CROSS JOIN observed
+            JOIN \(unsafeRaw: schema).realtime_journal_partitions p ON p.partition_id=ANY(\(bind: partitionIDs)::integer[])
+            JOIN \(unsafeRaw: schema).realtime_journal_publisher_leases l ON l.partition_id=p.partition_id
+            WHERE i.singleton AND l.lease_epoch>0 AND l.expires_at>observed.now
+            """).all(decoding: Row.self)
+        return try rows.map { row in
+            guard row.remaining_seconds.isFinite, row.remaining_seconds > 0,
+                  row.published_through >= 0, row.trimmed_through >= 0,
+                  row.trimmed_through <= row.published_through else {
+                throw V2RealtimeJournalError.corruptPersistenceState
+            }
+            return .init(identity: .init(sourceID: row.source_id, databaseIncarnation: row.database_incarnation),
+                lease: .init(partitionID: row.partition_id,
+                    identity: .init(nodeID: row.host_id, serviceID: row.service_id, incarnationID: row.process_incarnation),
+                    epoch: row.lease_epoch, token: row.lease_token, remainingLeaseSeconds: row.remaining_seconds),
+                cut: .init(partitionID: row.partition_id, publishedThrough: row.published_through, trimmedThrough: row.trimmed_through))
+        }
+    }
+
     public func roomHeadSnapshot(roomIDs: [UUID], partitionID: Int) async throws -> V2RealtimeRoomHeadSnapshot {
         guard roomIDs.count <= 256, (0..<256).contains(partitionID),
               roomIDs.allSatisfy({ V2RealtimeTopicKey(kind: .roomEvents, id: $0.uuidString.lowercased()).partitionID() == partitionID }) else {

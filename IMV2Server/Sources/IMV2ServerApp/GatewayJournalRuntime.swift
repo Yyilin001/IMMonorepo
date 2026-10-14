@@ -148,7 +148,8 @@ final class GatewayJournalRuntime: Sendable {
         }
         clock.withLock { $0 = timer }; wakes.continuation.yield(())
     }
-    private func refresh(_ source: V2RealtimeJournalSource, minimumCut: Int64 = 0) async throws {
+    private func refresh(_ source: V2RealtimeJournalSource, minimumCut: Int64 = 0,
+        sourceProof: GatewayJournalSourceCatalog.SourceProof? = nil) async throws {
         try Task.checkCancellation()
         guard let coverage = coordinator.journalCoverage(partitionID: source.partitionID) else {
             let error = GatewayJournalAuthorityError.coverageChanged
@@ -159,7 +160,7 @@ final class GatewayJournalRuntime: Sendable {
             guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
             try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
                 registry: registry, receiver: receiver, source: source, gatewayIdentity: identity,
-                recovery: recovery, minimumCut: minimumCut)
+                recovery: recovery, minimumCut: minimumCut, sourceProof: sourceProof)
             guard coordinator.confirmsJournalCoverage(coverage) else { throw V2RealtimeJournalError.authorityLost }
         } catch {
             recordFailure(error, phase: "coldRefresh")
@@ -171,14 +172,46 @@ final class GatewayJournalRuntime: Sendable {
         try Task.checkCancellation()
     }
     private func reconcile() async {
+        let span = GatewayJournalDiagnostics.begin()
+        defer { GatewayJournalDiagnostics.end(span, stage: .reconcile) }
         // Include room-DB user partitions: membership triggers are physically
         // local and must not be mistaken for the authentication source.
-        for coverage in coordinator.activeJournalCoverages().sorted(by: { $0.token.partitionID < $1.token.partitionID }) {
-            let partition = coverage.token.partitionID
-            for alias in aliases {
-                if Task.isCancelled { return }
-                do { try await reconcileSource(catalog.source(logicalAlias: alias, partitionID: partition)) }
-                catch { recordFailure(error, phase: "reconcile") }
+        let partitions = coordinator.activeJournalCoverages().map { $0.token.partitionID }.sorted()
+        guard !partitions.isEmpty else { return }
+        for alias in aliases {
+            if Task.isCancelled { return }
+            var captured: [Int: V2RealtimeJournalProjectionFence] = [:]
+            for partition in partitions {
+                if let source = try? catalog.source(logicalAlias: alias, partitionID: partition),
+                   let binding = receiver.recoveryBindingSnapshot(source: source) { captured[partition] = binding.fence }
+            }
+            do {
+                let proofSpan = GatewayJournalDiagnostics.begin()
+                let proofs: [Int: GatewayJournalSourceCatalog.SourceProof]
+                do {
+                    defer { GatewayJournalDiagnostics.end(proofSpan, stage: .batchProof) }
+                    proofs = try await catalog.sourceProofs(logicalAlias: alias, partitionIDs: partitions)
+                }
+                for partition in partitions {
+                    try Task.checkCancellation()
+                    do {
+                        let sourceSpan = GatewayJournalDiagnostics.begin()
+                        defer { GatewayJournalDiagnostics.end(sourceSpan, stage: .reconcileSource) }
+                        let source = try catalog.source(logicalAlias: alias, partitionID: partition)
+                        guard let proof = proofs[partition] else {
+                            if let fence = captured[partition] { receiver.retire(source: source, fence: fence) }
+                            throw GatewayJournalSourceCatalog.CatalogError.sourceNotReady
+                        }
+                        try await reconcileSource(source, proof: proof)
+                    } catch { recordFailure(error, phase: "reconcile") }
+                }
+            } catch {
+                if error as? GatewayJournalSourceCatalog.CatalogError == .identityChanged {
+                    for (partition, fence) in captured {
+                        if let source = try? catalog.source(logicalAlias: alias, partitionID: partition) { receiver.retire(source: source, fence: fence) }
+                    }
+                }
+                recordFailure(error, phase: "reconcile")
             }
         }
     }
@@ -202,23 +235,27 @@ final class GatewayJournalRuntime: Sendable {
         lease.identity == host && lease.identity.incarnationID == fence.publisherIncarnationID
             && lease.epoch == fence.sourceLeaseEpoch && lease.token == fence.sourceLeaseToken
     }
-    private func reconcileSource(_ source: V2RealtimeJournalSource) async throws {
-        guard let coverage = coordinator.journalCoverage(partitionID: source.partitionID),
-              let binding = receiver.bindingSnapshot(source: source) else { try await refresh(source); return }
-        let proof = try await catalog.userSnapshotProof(source: source, userIDs: [], deviceIDs: [])
-        guard Self.matchesSourceLease(proof.lease, fence: binding.fence, host: coverage.token.host),
-              binding.fence.routingLeaseToken == coverage.token.leaseToken,
-              binding.fence.routingPartitionEpoch == coverage.token.epoch,
-              binding.fence.sessionID == coverage.sessionID, binding.fence.interestGeneration == coverage.revision,
-              coordinator.confirmsJournalCoverage(coverage), proof.validUntil > .now,
-              let cut = projection.controlCheckpoint(source: source, isCurrent: { _, f in binding.fence.sameGeneration(as: f) }),
-              proof.value.snapshot.cuts.first(where: { $0.partitionID == source.partitionID })?.publishedThrough == cut,
-              receiver.renew(source: source, serviceID: coverage.token.host.serviceID, fence: binding.fence,
-                deadline: min(coverage.deadline, proof.validUntil), current: { self.coordinator.confirmsJournalCoverage(coverage) }) else {
-            let minimumCut = proof.value.snapshot.cuts.first(where: { $0.partitionID == source.partitionID })?.publishedThrough ?? 0
-            try await refresh(source, minimumCut: minimumCut); return
-        }
-        return
+    private func reconcileSource(_ source: V2RealtimeJournalSource,
+        proof: GatewayJournalSourceCatalog.SourceProof) async throws {
+        let ready = { () -> Bool in
+            let checkSpan = GatewayJournalDiagnostics.begin()
+            defer { GatewayJournalDiagnostics.end(checkSpan, stage: .bindingCheck) }
+            guard let coverage = coordinator.journalCoverage(partitionID: source.partitionID),
+                  let binding = receiver.bindingSnapshot(source: source) else { return false }
+            guard Self.matchesSourceLease(proof.lease, fence: binding.fence, host: coverage.token.host),
+                  binding.fence.routingLeaseToken == coverage.token.leaseToken,
+                  binding.fence.routingPartitionEpoch == coverage.token.epoch,
+                  binding.fence.sessionID == coverage.sessionID, binding.fence.interestGeneration == coverage.revision,
+                  coordinator.confirmsJournalCoverage(coverage), proof.validUntil > .now,
+                  let cut = projection.controlCheckpoint(source: source, isCurrent: { _, f in binding.fence.sameGeneration(as: f) }),
+                  proof.value.publishedThrough <= cut,
+                  receiver.renew(source: source, serviceID: coverage.token.host.serviceID, fence: binding.fence,
+                    deadline: min(coverage.deadline, proof.validUntil), current: { self.coordinator.confirmsJournalCoverage(coverage) }) else {
+                return false
+            }
+            return true
+        }()
+        if !ready { try await refresh(source, minimumCut: proof.value.publishedThrough, sourceProof: proof) }
     }
     private func ensureUserBaseline(_ user: UserID) async throws -> V2GatewayJournalUserBaselineProof {
         try Task.checkCancellation()

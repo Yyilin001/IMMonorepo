@@ -268,19 +268,62 @@ public final class V2GatewayJournalProjectionReceiver: V2RealtimeJournalProjecti
         }
     }
 
+    /// Request preparation may reuse a live source generation even while user
+    /// floors/checkpoint are blocked. This never grants auth or delivery; the
+    /// shared actual recovery must revalidate the database publisher generation.
+    public func recoveryBindingSnapshot(source: V2RealtimeJournalSource)
+        -> (fence: V2RealtimeJournalProjectionFence, deadline: ContinuousClock.Instant)? {
+        state.withLock { value in
+            guard !value.closed, let binding = value.bindings[source], binding.deadline > now(), binding.current() else { return nil }
+            return (binding.fence, binding.deadline)
+        }
+    }
+
     /// A previously installed trusted control baseline can satisfy a duplicate
     /// repair only while its exact generation, deadline and checkpoint are live.
+    public enum RecoveryCheckpointFailure: String, Error, CaseIterable, Sendable {
+        case invalidCut, closed, missingBinding, expired, coverageChanged, generationChanged
+        case pendingUserControls, missingCheckpoint, checkpointBehind
+    }
+
     public func recoveryCheckpoint(source: V2RealtimeJournalSource,
                                    fence: V2RealtimeJournalProjectionFence, minimumCut: Int64) -> Int64? {
+        if case .success(let cut) = assessedRecoveryCheckpoint(source: source, fence: fence, minimumCut: minimumCut) { return cut }
+        return nil
+    }
+
+    /// The diagnostic result uses the same lock and checks as authorization;
+    /// it does not re-read the receiver or grant any additional authority.
+    public func assessedRecoveryCheckpoint(source: V2RealtimeJournalSource,
+        fence: V2RealtimeJournalProjectionFence, minimumCut: Int64) -> Result<Int64, RecoveryCheckpointFailure> {
         state.withLock { value in
-            guard minimumCut >= 0, !value.closed, let binding = value.bindings[source],
-                  binding.deadline > now(), binding.current(), binding.fence.sameGeneration(as: fence),
-                  binding.requiredUserControls.allSatisfy({ user, version in
-                      binding.userControlFloors[user, default: 0] >= version
-                  }), let cut = projection.controlCheckpoint(source: source, isCurrent: { _, installed in
-                      binding.fence.sameGeneration(as: installed)
-                  }), cut >= minimumCut else { return nil }
-            return cut
+            guard minimumCut >= 0 else { return .failure(.invalidCut) }
+            guard !value.closed else { return .failure(.closed) }
+            guard let binding = value.bindings[source] else { return .failure(.missingBinding) }
+            guard binding.deadline > now() else { return .failure(.expired) }
+            guard binding.current() else { return .failure(.coverageChanged) }
+            guard binding.fence.sameGeneration(as: fence) else { return .failure(.generationChanged) }
+            guard binding.requiredUserControls.allSatisfy({ user, version in
+                binding.userControlFloors[user, default: 0] >= version
+            }) else { return .failure(.pendingUserControls) }
+            guard let cut = projection.controlCheckpoint(source: source, isCurrent: { _, installed in
+                binding.fence.sameGeneration(as: installed)
+            }) else { return .failure(.missingCheckpoint) }
+            guard cut >= minimumCut else { return .failure(.checkpointBehind) }
+            return .success(cut)
+        }
+    }
+
+    /// A blocked projection can retain its previously verified floors. This is
+    /// only a prerequisite for trusted contiguous replay + selected DB reads;
+    /// it does not grant delivery or revive an expired/replaced binding.
+    public func retainsRecoveryFloors(source: V2RealtimeJournalSource,
+                                     fence: V2RealtimeJournalProjectionFence,
+                                     versions: [UserID: UInt64]) -> Bool {
+        state.withLock { value in
+            guard !value.closed, let binding = value.bindings[source], binding.deadline > now(),
+                  binding.current(), binding.fence.sameGeneration(as: fence) else { return false }
+            return versions.allSatisfy { user, version in binding.userControlFloors[user].map { $0 >= version } ?? false }
         }
     }
 
@@ -306,6 +349,14 @@ public final class V2GatewayJournalProjectionReceiver: V2RealtimeJournalProjecti
 
     public func retire(source: V2RealtimeJournalSource) {
         state.withLock { value in
+            value.bindings.removeValue(forKey: source)
+            projection.remove(source: source)
+        }
+    }
+
+    public func retire(source: V2RealtimeJournalSource, fence: V2RealtimeJournalProjectionFence) {
+        state.withLock { value in
+            guard value.bindings[source]?.fence.sameGeneration(as: fence) == true else { return }
             value.bindings.removeValue(forKey: source)
             projection.remove(source: source)
         }

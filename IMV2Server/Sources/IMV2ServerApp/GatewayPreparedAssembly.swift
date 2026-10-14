@@ -151,6 +151,7 @@ struct GatewayPreparedAssembly {
                     V2RoomSubscriptionHeadDeliveryMetrics.shared.snapshot())
                     + v2RenderPrometheusGatewayHeartbeatDiagnostics()
                     + GatewayJournalRecoveryCoordinator.prometheus()
+                    + GatewayJournalDiagnostics.prometheus()
             })
     }
 }

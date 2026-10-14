@@ -244,7 +244,7 @@ public actor V2RealtimeJournalFanout {
                     return .init(roomID: RoomID(uuid: head.roomID), highWatermark: UInt64(head.roomSequence),
                                  ownerEpoch: UInt64(head.ownerEpoch), controlVersion: UInt64(head.roomControlVersion))
                 }
-                for chunk in try chunks(filtered) {
+                for chunk in try Self.chunks(filtered, maximumItems: maximumItems, maximumBytes: maximumBytes - 4_096) {
                     let batch = V2RealtimeJournalProjectionBatch(source: source, fence: fence, payload: .heads(chunk))
                     var result = try await send(recipient.session.gateway, batch)
                     if result == .snapshotRequired {
@@ -275,7 +275,7 @@ public actor V2RealtimeJournalFanout {
     private func sendControlRanges(_ entries: [V2RealtimeJournalProjectionEntry], through: Int64, lane: Key,
                                    source: V2RealtimeJournalSource, fence: V2RealtimeJournalProjectionFence,
                                    recipient: V2RealtimeJournalRecipient) async throws {
-        let groups = try chunks(entries)
+        let groups = try Self.chunks(entries, maximumItems: maximumItems, maximumBytes: maximumBytes - 4_096)
         let ranges = groups.isEmpty ? [[]] : groups
         for (index, chunk) in ranges.enumerated() {
             let end = index == ranges.count - 1 ? through : chunk.last!.sequence
@@ -295,16 +295,22 @@ public actor V2RealtimeJournalFanout {
         }
     }
 
-    private func chunks<T: Encodable>(_ items: [T]) throws -> [[T]] {
+    nonisolated static func chunks<T>(_ items: [T], maximumItems: Int, maximumBytes: Int) throws -> [[T]] {
+        guard maximumItems > 0, maximumBytes >= 32 else { throw V2RealtimeJournalError.invalidInput }
         var result: [[T]] = [], chunk: [T] = []
+        chunk.reserveCapacity(min(maximumItems, items.count))
+        // The array container costs 32 bytes in retained-model accounting.
+        // Count each item once; subtraction also prevents integer overflow.
+        var retainedBytes = 32
         for item in items {
-            let candidate = chunk + [item]
-            let encodedSize = V2ActorPayloadBudget.retainedBytes(of: candidate)
-            if candidate.count > maximumItems || encodedSize > maximumBytes - 4_096 {
-                guard !chunk.isEmpty else { throw V2RealtimeJournalError.invalidInput }
+            let cost = V2ActorPayloadBudget.retainedBytes(of: item)
+            guard cost <= maximumBytes - 32 else { throw V2RealtimeJournalError.invalidInput }
+            if chunk.count >= maximumItems || cost > maximumBytes - retainedBytes {
                 result.append(chunk); chunk = [item]
-                guard (V2ActorPayloadBudget.retainedBytes(of: chunk)) <= maximumBytes - 4_096 else { throw V2RealtimeJournalError.invalidInput }
-            } else { chunk = candidate }
+                retainedBytes = 32 + cost
+            } else {
+                chunk.append(item); retainedBytes += cost
+            }
         }
         if !chunk.isEmpty { result.append(chunk) }
         return result

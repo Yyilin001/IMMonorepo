@@ -113,39 +113,30 @@ struct GatewayJournalSourceCatalog: Sendable {
         return .init(snapshot: snapshot,isAuthenticationSource: entry.isAuthenticationSource)
     }
 
-    struct SourceSnapshotProof<Value: Sendable>: Sendable {
-        let value: Value
+    struct SourceProof: Sendable {
+        let identity: V2RealtimeJournalSourceIdentity
+        let value: V2RealtimeJournalPartitionCut
         let lease: V2RealtimePartitionLease
         /// Conservative process-local deadline; never serialize as wall time.
         let validUntil: ContinuousClock.Instant
     }
 
-    func userSnapshotProof(source: V2RealtimeJournalSource, userIDs: Set<UserID>,
-                           deviceIDs: [V2RealtimeJournalDeviceKey], minimumPublishedThrough: Int64 = 0) async throws
-        -> SourceSnapshotProof<UserSnapshotWitness> {
-        try await provedSnapshot(source: source) {
-            try await userSnapshot(source: source, userIDs: userIDs, deviceIDs: deviceIDs,
-                                   minimumPublishedThrough: minimumPublishedThrough)
+    func sourceProofs(logicalAlias: String, partitionIDs: [Int]) async throws
+        -> [Int: SourceProof] {
+        let entry = try entry(logicalAlias: logicalAlias)
+        let began = ContinuousClock.now
+        GatewayJournalRecoveryCoordinator.record(.sourceProofQueries)
+        GatewayJournalRecoveryCoordinator.record(.sourceProofPartitions, amount: UInt64(Set(partitionIDs).count))
+        let proofs = try await entry.store.sourceProofs(partitionIDs: partitionIDs)
+        var result: [Int: SourceProof] = [:]
+        for proof in proofs {
+            guard proof.identity == entry.identity else { throw CatalogError.identityChanged }
+            let deadline = began + .seconds(proof.lease.remainingLeaseSeconds)
+            if deadline > .now {
+                result[proof.cut.partitionID] = .init(identity: proof.identity, value: proof.cut, lease: proof.lease, validUntil: deadline)
+            }
         }
-    }
-    func provedSnapshot<Value: Sendable>(source: V2RealtimeJournalSource,
-        read: () async throws -> Value) async throws -> SourceSnapshotProof<Value> {
-        let entry = try entry(logicalAlias: source.sourceID)
-        guard source.incarnationID == entry.identity.databaseIncarnation else { throw CatalogError.identityChanged }
-        let clock = ContinuousClock()
-        let began = clock.now
-        guard let before = try await entry.store.currentPublisherLease(partitionID: source.partitionID) else {
-            throw CatalogError.sourceNotReady
-        }
-        let firstDeadline = began.advanced(by: .seconds(before.remainingLeaseSeconds))
-        let value = try await read()
-        let checked = clock.now
-        guard let after = try await entry.store.currentPublisherLease(partitionID: source.partitionID),
-              before.partitionID == after.partitionID, before.identity == after.identity,
-              before.epoch == after.epoch, before.token == after.token else { throw CatalogError.sourceNotReady }
-        let deadline = min(firstDeadline, checked.advanced(by: .seconds(after.remainingLeaseSeconds)))
-        guard clock.now < deadline else { throw CatalogError.sourceNotReady }
-        return .init(value: value, lease: after, validUntil: deadline)
+        return result
     }
 
 }
