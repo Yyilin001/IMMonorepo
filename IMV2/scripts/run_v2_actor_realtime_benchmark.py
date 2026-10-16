@@ -69,6 +69,17 @@ DEFAULT_LOADER_LOCAL_PORT_BASE = 25_000
 LOADER_LOCAL_PORT_SPAN = 10_000
 LOADER_LOCAL_PORT_COUNT = ((PARTS + NODES - 1) // NODES) * LOADER_LOCAL_PORT_SPAN
 
+
+def configure_topology(nodes, loader_partitions):
+    """Explicit simulation topology; legacy six-node runs keep their defaults."""
+    global NODES, PARTS, LOADER_LOCAL_PORT_COUNT
+    if nodes not in (1, 2, 4, 6) or not nodes <= loader_partitions <= 12 or loader_partitions % nodes:
+        raise ValueError('nodes must be 1/2/4/6 and evenly divide 1...12 loader partitions')
+    count = (loader_partitions // nodes) * LOADER_LOCAL_PORT_SPAN
+    if count > 64_512:
+        raise ValueError('loader source ranges exceed the available TCP ports; use fewer partitions')
+    NODES, PARTS, LOADER_LOCAL_PORT_COUNT = nodes, loader_partitions, count
+
 def current_candidate_wire_version():
     source = (ROOT / 'IMV2Server/Sources/IMV2ServerGateway/Generated/IMV2ProtocolVersion.swift').read_text()
     match = re.search(r'current: UInt32 = (\d+)', source)
@@ -334,11 +345,14 @@ def account_env(args, kind, database, actors, manifest):
 
 
 def prepare(args, manifest):
-    actors = args.output_dir/'actors6'
+    actors = args.output_dir/f'actors{NODES}'
     command = ['python3',str(ROOT/'IMV2/scripts/prepare_v2_room_actor_configuration.py'),
                '--output-dir',str(actors),'--shards',manifest['shardID'],'--user-buckets',manifest['userBucket'],
-               '--maximum-rooms-per-host',str(max(10000, (manifest['rooms'] * 5 + NODES * 4 - 1) // (NODES * 4))),
+               '--maximum-rooms-per-host',str(getattr(args, 'maximum_rooms_per_host', None)
+                   or max(10000, (manifest['rooms'] * 5 + NODES * 4 - 1) // (NODES * 4))),
                '--caller',f'account=localhost:{args.actor_port+NODES}']
+    if getattr(args, 'actor_identity_seed', None):
+        command += ['--identity-seed', args.actor_identity_seed]
     if getattr(args, 'actor_partition_canary', None) is not None:
         command += ['--caller', f'partition-inspector=localhost:{args.actor_port+NODES+4}']
     # Exercise the redesigned candidate through the real local benchmark
@@ -2009,6 +2023,9 @@ def run_revision(args, kind, actors, counts, manifest):
     stop_monitor = threading.Event()
     def start(command, name, environment=None):
         stream=(directory/(name+'.log')).open('x'); streams.append(stream)
+        if getattr(args, 'process_launcher_config', None) is not None:
+            command = ['python3', str(ROOT/'IMV2/scripts/v2_benchmark_container_process.py'),
+                       '--configuration', str(args.process_launcher_config), '--name', name, '--'] + command
         proc=subprocess.Popen(command,env=environment,stdout=stream,stderr=stream); processes.append(proc)
         return proc
     def monitor():
@@ -2511,6 +2528,12 @@ def run_revision(args, kind, actors, counts, manifest):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--nodes', type=int, choices=(1, 2, 4, 6), default=6)
+    parser.add_argument('--loader-partitions', type=int, default=12)
+    parser.add_argument('--maximum-rooms-per-host', type=int, metavar='128...65536')
+    parser.add_argument('--actor-identity-seed', help='Test namespace UUID fixing logical Host/voter IDs across repeats')
+    parser.add_argument('--process-launcher-config', type=Path,
+                        help='explicit Docker simulation resources; ordinary runs launch local processes')
     parser.add_argument('--fixture',required=True,type=Path)
     parser.add_argument('--output-dir',required=True,type=Path,help='must not exist; never overwrite evidence')
     parser.add_argument('--baseline-checkout',type=Path, help='required for baseline/both; candidate-only defaults to current checkout')
@@ -2596,6 +2619,17 @@ def main():
     parser.add_argument('--app-tls-key', type=Path)
     parser.add_argument('--planned-reconnect-inflight-canary', action='store_true', help='explicit lost-ACK injection; requires small canary <=500 users; never capacity mode')
     args=parser.parse_args()
+    if args.maximum_rooms_per_host is not None and not 128 <= args.maximum_rooms_per_host <= 65536:
+        parser.error('maximum rooms per host must be 128...65536')
+    try:
+        configure_topology(args.nodes, args.loader_partitions)
+    except ValueError as error:
+        parser.error(str(error))
+    if args.nodes != 6 and (args.kind != 'candidate' or not args.allow_scaled_diagnostic
+            or args.actor_partition_canary is not None or app_canary_enabled(args)):
+        parser.error('variable topology requires candidate scaled simulation without fault/App modes')
+    if args.process_launcher_config is not None:
+        args.process_launcher_config = args.process_launcher_config.resolve(strict=True)
     if args.candidate_tcp_event_loop_threads is not None and not 1 <= args.candidate_tcp_event_loop_threads <= 256:
         parser.error('candidate TCP EventLoop threads must be 1...256')
     if args.pg_wal_sync_method is not None and args.shared_postgres:
@@ -2663,7 +2697,7 @@ def main():
             if phase['name'] == args.measurement_phase: break
     non_capacity = args.allow_small_canary or args.allow_scaled_diagnostic
     if manifest['users']!=50000 and not non_capacity:parser.error('capacity acceptance requires exactly 50000 users; use an explicit diagnostic mode for smaller workloads')
-    if manifest['users']<PARTS:parser.error('fixture needs at least 12 users')
+    if manifest['users']<PARTS:parser.error(f'fixture needs at least {PARTS} users')
     if args.planned_reconnect_inflight_canary and (not args.allow_small_canary or manifest['users'] > 500):
         parser.error('inflight reconnect injection requires explicit small canary <=500 users')
     try:
@@ -2705,6 +2739,7 @@ def main():
     evidence=dict(fixtureManifestSHA256=sha(args.fixture/'manifest.json'),fixture=manifest,
                   scenarioSHA256=sha(args.scenario),measurementPhase=args.measurement_phase,platform=platform.platform(),cpuCount=os.cpu_count(),
                   fdLimitBefore=soft,fdLimit=hard,nodes=NODES,loaderPartitions=0 if app_canary_enabled(args) else PARTS,
+                  processLauncherConfigurationSHA256=sha(args.process_launcher_config) if args.process_launcher_config else None,
                   ownedPostgresSharedBuffersMiB=args.pg_shared_buffers_mib,
                   ownedPostgresWALIOTimeDiagnostic=args.pg_track_wal_io_timing,
                   ownedPostgresWALSyncMethod=args.pg_wal_sync_method,

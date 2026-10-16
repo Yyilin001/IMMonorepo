@@ -54,6 +54,20 @@ class LocalPolicyConfigurationTests(unittest.TestCase):
             else:
                 self.assertNotIn("policyPlacement", document)
 
+    def test_seeded_topology_keeps_fresh_private_keys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            roots=[Path(temporary)/name for name in ('a','b')]
+            for root in roots:
+                command=self.command.copy()
+                command[command.index('--output-dir')+1]=str(root)
+                command += ['--identity-seed','cc50ac35-0881-4366-9502-08f8bb6c118a']
+                subprocess.run(command,check=True,capture_output=True)
+                validate(root)
+            first,second=[json.loads((root/'topology.json').read_text()) for root in roots]
+            self.assertEqual(first,second)
+            self.assertNotEqual((roots[0]/'gateway/signing.key').read_bytes(),
+                                (roots[1]/'gateway/signing.key').read_bytes())
+
     def test_legacy_or_different_writer_placement_is_rejected(self):
         for name in ("gateway", "account", "operator"):
             with self.subTest(process=name):

@@ -3,6 +3,27 @@ import Testing
 @testable import IMV2Core
 
 struct IdentifierTests {
+    @Test("fixed UUID codec matches Foundation for all byte values and preserves opaque near misses")
+    func fixedUUIDCodecMatchesFoundation() throws {
+        for offset in 0..<256 {
+            let bytes = (0..<16).map { UInt8((offset + $0 * 17) & 255) }
+            let uuid = bytes.withUnsafeBytes { UUID(uuid: $0.loadUnaligned(as: uuid_t.self)) }
+            let canonical = uuid.uuidString
+            for spelling in [canonical, canonical.lowercased(), canonical.prefix(18) + canonical.dropFirst(18).lowercased()] {
+                let identifier = try RoomID(String(spelling))
+                #expect(identifier.uuidValue == uuid)
+                #expect(identifier.rawValue == canonical)
+                #expect(identifier == RoomID(uuid: uuid))
+            }
+            #expect(RoomID(uuid: uuid).rawValue == canonical)
+        }
+        for value in ["F90A83A4_DEC2-4BF5-80AA-4068A71AFC9F", "F90A83A4-DEC2-4BF5-80AA-4068A71AFC9G",
+                      "F90A83A4DEC24BF580AA4068A71AFC9F", String(repeating: "a", count: 36)] {
+            let identifier = try RoomID(value)
+            #expect(identifier.uuidValue == UUID(uuidString: value))
+            #expect(identifier.rawValue == (UUID(uuidString: value)?.uuidString ?? value))
+        }
+    }
     @Test("entity identifiers use bounded RFC 3986 unreserved encoding")
     func acceptsURLSafeOpaqueIdentifier() throws {
         let identifier = try MediaID("device_01-asset.~v2")

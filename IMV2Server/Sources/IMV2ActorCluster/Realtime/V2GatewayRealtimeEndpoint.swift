@@ -335,12 +335,30 @@ actor V2GatewayRealtimeInbound {
         }
         let validated = try validateRoomSubscriptionBatch(call.batch, sourceShardID: call.sourceShardID, limits: limits)
         try session.accept(sequence: call.sequence, attemptID: call.attemptID)
-        let result = await roomSubscriptionHandler?.applyRoomSubscriptionBatch(validated,
-            authenticatedServiceID: peer.serviceID.rawValue, sourceShardID: call.sourceShardID)
-            ?? V2RoomSubscriptionBatchResult(receipts: validated.rooms.map(\.fence).map { .init(fence: $0, result: .stale) })
-        try validateRoomSubscriptionBatchReceipt(result, validated: validated)
+        let result = try await applyRoomSubscriptionBatch(validated, serviceID: peer.serviceID, sourceShardID: call.sourceShardID)
         return try sessionReply(RoomSubscriptionBatchReply(recipient: identity, sessionID: call.sessionID,
             sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: limits.maximumPacketBytes)
+    }
+    // Only the native composition's exact local descriptor can reach this
+    // typed boundary. Network callers still use authenticated session packets.
+    func deliverLocalRoomSubscriptionBatch(_ validated: V2ValidatedRoomSubscriptionBatch,
+                                           serviceID: V2ActorServiceID, sourceShardID: String) async throws -> V2RoomSubscriptionBatchResult {
+        try Task.checkCancellation()
+        guard accepting else { throw V2ActorAuthenticationError.overloaded }
+        let peer = try trust.configuredService(serviceID)
+        guard peer.permissions.contains(.realtimePublish),
+              serviceOwnerAccess[serviceID]?.contains(sourceShardID) == true else {
+            throw V2ActorAuthenticationError.forbidden
+        }
+        return try await applyRoomSubscriptionBatch(validated, serviceID: serviceID, sourceShardID: sourceShardID)
+    }
+    private func applyRoomSubscriptionBatch(_ validated: V2ValidatedRoomSubscriptionBatch,
+                                            serviceID: V2ActorServiceID, sourceShardID: String) async throws -> V2RoomSubscriptionBatchResult {
+        let result = await roomSubscriptionHandler?.applyRoomSubscriptionBatch(validated,
+            authenticatedServiceID: serviceID.rawValue, sourceShardID: sourceShardID)
+            ?? V2RoomSubscriptionBatchResult(receipts: validated.rooms.map(\.fence).map { .init(fence: $0, result: .stale) })
+        try validateRoomSubscriptionBatchReceipt(result, validated: validated)
+        return result
     }
     func deliverySession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
@@ -480,6 +498,7 @@ public actor V2RealtimeClusterSender {
     private let signer: V2ActorSigningIdentity
     private let trust: V2ActorTrustStore
     private let limits: V2RealtimeTransportLimits
+    private let local: (descriptor: V2GatewayRealtimeDescriptor, inbound: V2GatewayRealtimeInbound)?
     private let incarnation = UUID()
     private var stopped = false
     private var active = 0
@@ -512,8 +531,10 @@ public actor V2RealtimeClusterSender {
         let expires: ContinuousClock.Instant
         var sequence: UInt64
     }
-    init(system: ClusterSystem, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore, limits: V2RealtimeTransportLimits) {
+    init(system: ClusterSystem, signer: V2ActorSigningIdentity, trust: V2ActorTrustStore, limits: V2RealtimeTransportLimits,
+         local: (V2GatewayRealtimeDescriptor, V2GatewayRealtimeInbound)? = nil) {
         self.system = system; self.signer = signer; self.trust = trust; self.limits = limits
+        self.local = local
     }
     public func send(_ batch: V2RealtimeBatch, to target: V2GatewayRealtimeDescriptor) async throws -> V2RealtimeAcceptance {
         try Task.checkCancellation()
@@ -635,6 +656,13 @@ public actor V2RealtimeClusterSender {
         defer {
             if authorization { releaseAuthorization(to: target.identity) }
             else { releaseCallback(to: target.identity) }
+        }
+        if let local, target == local.descriptor {
+            let serviceID = signer.serviceID
+            return try await RemoteCall.with(timeout: limits.callTimeout) {
+                try await local.inbound.deliverLocalRoomSubscriptionBatch(validated,
+                    serviceID: serviceID, sourceShardID: sourceShardID)
+            }
         }
         var session = try await session(for: target)
         try Task.checkCancellation()
@@ -853,7 +881,8 @@ func buildRealtimeTransport(system: ClusterSystem, identity: V2GatewayRealtimeId
     try descriptor.validate()
     inbound.bindEndpointReference(descriptor.endpointReference)
     return V2RealtimeTransportHandle(system: system, descriptor: descriptor,
-                                    sender: V2RealtimeClusterSender(system: system, signer: signer, trust: trust, limits: limits),
+                                    sender: V2RealtimeClusterSender(system: system, signer: signer, trust: trust, limits: limits,
+                                        local: (descriptor, inbound)),
                                     endpoint: endpoint, inbound: inbound)
 }
 

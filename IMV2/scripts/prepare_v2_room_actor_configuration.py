@@ -40,6 +40,12 @@ def write_json(path: Path, value: object) -> None:
     path.chmod(0o600)
 
 
+def logical_ids(names, role, seed=None):
+    """Freeze benchmark placement without reusing keys or process incarnations."""
+    return {name: str(uuid.uuid5(seed, role + ':' + name) if seed else uuid.uuid4())
+            for name in sorted(names)}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -59,6 +65,8 @@ def main() -> None:
     parser.add_argument("--policy-endpoint", help="Configured shard alias used for the policy control RPC")
     parser.add_argument("--maximum-rooms-per-host", type=int, default=10000,
                         help="Advertised and actual active room capacity of each Host")
+    parser.add_argument("--identity-seed", type=uuid.UUID,
+                        help="Test-only namespace for repeatable logical Host/voter IDs; keys stay fresh")
     args = parser.parse_args()
     if not 128 <= args.maximum_rooms_per_host <= 65536:
         parser.error("maximum rooms per host must be within 128..65536")
@@ -100,9 +108,9 @@ def main() -> None:
             "-addext", "basicConstraints=critical,CA:TRUE",
             "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     host_names = {item[0] for item in args.hosts}
-    host_ids = {name: str(uuid.uuid4()) for name in host_names}
+    host_ids = logical_ids(host_names, 'host', args.identity_seed)
     voter_names = {item[0] for item in args.voters}
-    voter_ids = {name: str(uuid.uuid4()) for name in voter_names}
+    voter_ids = logical_ids(voter_names, 'voter', args.identity_seed)
     occupied = {(address, port) for _, address, port in nodes}
     client_ports = {}
     for name, address, port in args.hosts + args.callers:
@@ -193,7 +201,7 @@ def main() -> None:
         if name not in voter_names and name not in args.exclusion_supervisor:
             document["policyPlacement"] = placement
         write_json(directory / "configuration.json", document)
-    write_json(root / "topology.json", dict(hosts=args.hosts, callers=args.callers, voters=args.voters, shards=shards, hostIDs=host_ids, voterIDs=voter_ids, policyPlacement=placement, exclusionSupervisors=args.exclusion_supervisor))
+    write_json(root / "topology.json", dict(hosts=args.hosts, callers=args.callers, voters=args.voters, shards=shards, hostIDs=host_ids, voterIDs=voter_ids, identitySeed=str(args.identity_seed) if args.identity_seed else None, policyPlacement=placement, exclusionSupervisors=args.exclusion_supervisor))
     print(f"Created {len(nodes)} local/test node configurations in {root}")
     print("Mount only each process's own node directory; keep the CA private key outside application containers.")
 

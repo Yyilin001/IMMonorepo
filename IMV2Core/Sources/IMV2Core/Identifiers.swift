@@ -32,6 +32,11 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
     /// - Parameter rawValue: 非空、至多 128 字节的 URL 路径安全文本。
     /// - Throws: 格式或长度不合规时抛出 ``V2CoreError/invalidIdentifier``。
     public init(_ rawValue: String) throws {
+        if let canonical = V2IdentifierUUID.parse(rawValue) {
+            self.rawValue = canonical.text
+            self.uuidValue = canonical.uuid
+            return
+        }
         guard !rawValue.isEmpty,
               rawValue.utf8.count <= Self.maximumUTF8Bytes,
               rawValue.utf8.allSatisfy(Self.isUnreservedASCII)
@@ -59,7 +64,7 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
     ///
     /// - Parameter uuid: 由可信类型边界提供的 UUID；输出使用其规范字符串。
     public init(uuid: UUID) {
-        self.rawValue = uuid.uuidString
+        self.rawValue = V2IdentifierUUID.format(uuid)
         self.uuidValue = uuid
     }
 
@@ -119,6 +124,72 @@ public struct V2Identifier<Tag: V2IdentifierTag>: Hashable, Codable, Sendable, C
 
     private enum CodingKeys: String, CodingKey {
         case rawValue
+    }
+}
+
+/// Canonical UUIDs dominate protobuf and database boundaries. Decode their
+/// fixed ASCII layout without Foundation's locale-aware scanf/snprintf path.
+/// Other spellings still pass through the existing validation and fallback.
+private enum V2IdentifierUUID {
+    static func parse(_ text: String) -> (uuid: UUID, text: String)? {
+        guard text.utf8.count == 36 else { return nil }
+        var source = text
+        return source.withUTF8 { bytes in
+            var tuple: uuid_t = (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0)
+            var hasLowercase = false
+            let valid = withUnsafeMutableBytes(of: &tuple) { output -> Bool in
+                var input = 0
+                for index in 0..<16 {
+                    if input == 8 || input == 13 || input == 18 || input == 23 {
+                        guard bytes[input] == 45 else { return false }
+                        input += 1
+                    }
+                    let high = bytes[input], low = bytes[input + 1]
+                    guard let a = hex(high), let b = hex(low) else { return false }
+                    hasLowercase = hasLowercase || (97...102).contains(high) || (97...102).contains(low)
+                    output[index] = a << 4 | b
+                    input += 2
+                }
+                return true
+            }
+            guard valid else { return nil }
+            let canonical = hasLowercase ? String(unsafeUninitializedCapacity: 36) { output in
+                for index in 0..<36 {
+                    let byte = bytes[index]
+                    output[index] = (97...102).contains(byte) ? byte - 32 : byte
+                }
+                return 36
+            } : text
+            return (UUID(uuid: tuple), canonical)
+        }
+    }
+
+    static func format(_ uuid: UUID) -> String {
+        var tuple = uuid.uuid
+        return withUnsafeBytes(of: &tuple) { bytes in
+            String(unsafeUninitializedCapacity: 36) { output in
+                var position = 0
+                for index in 0..<16 {
+                    if index == 4 || index == 6 || index == 8 || index == 10 {
+                        output[position] = 45; position += 1
+                    }
+                    let byte = bytes[index], high = byte >> 4, low = byte & 15
+                    output[position] = high < 10 ? high + 48 : high + 55
+                    output[position + 1] = low < 10 ? low + 48 : low + 55
+                    position += 2
+                }
+                return 36
+            }
+        }
+    }
+
+    private static func hex(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: byte - 48
+        case 65...70: byte - 55
+        case 97...102: byte - 87
+        default: nil
+        }
     }
 }
 
