@@ -14,6 +14,69 @@ import Testing
 
 @Suite("Room subscription real Cluster transport", .serialized)
 struct V2RoomSubscriptionNetworkTests {
+    @Test("unknown delivery peers return retryable reset without spending the RPC budget on membership")
+    func deliveryOpenDoesNotWaitForMembership() async throws {
+        let system = await makeSystem(name: "delivery-membership-budget", port: Int.random(in: 30_000...44_999))
+        let keys = try Keys()
+        let identity = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "gateway", incarnationID: UUID())
+        let inbound = V2GatewayRealtimeInbound(identity: identity, signer: keys.gateway, trust: keys.trust,
+            ingress: RejectingIngress(), serviceOwnerAccess: [keys.publisher.serviceID: ["rooms"]], limits: .init())
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let ingress = V2GatewayRoomSubscriptionIngress(authority: authority, offerEvent: { _, _ in }, offerHead: { _, _ in })
+        let sender = V2RealtimeClusterSender(system: system, signer: keys.gateway, trust: keys.trust, limits: .init())
+        let reference = Data([1, 2, 3])
+        inbound.bindEndpointReference(reference)
+        var failure: (any Error)?
+        do {
+            try await inbound.configureRoomSubscription(ingress)
+            await inbound.startDeliveryLifecycle(system: system, sender: sender)
+            let hello = RealtimeHello(serviceID: keys.publisher.serviceID, version: 1, callerIncarnation: UUID(),
+                recipient: identity, handshakeID: UUID(), endpointDigest: Data(SHA256.hash(data: reference)))
+            let grantPacket = try await inbound.openSession(keys.publisher.sign(hello, maximumBytes: 16_384))
+            let grant = try keys.trust.verify(grantPacket, as: RealtimeGrant.self, maximumBytes: 16_384).0
+            let delivery = V2RoomDeliverySession(host: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()),
+                gateway: identity, generation: 1)
+            // The endpoint is the actual local listener, but incarnation zero
+            // can never be a generated native member. No unrelated port is contacted.
+            let absent = Cluster.Node(endpoint: system.cluster.node.endpoint, nid: .init(0))
+            let began = ContinuousClock.now
+            for sequence in UInt64(1)...4 {
+                let call = RoomDeliverySessionCall(serviceID: keys.publisher.serviceID, version: 1,
+                    callerIncarnation: hello.callerIncarnation, recipient: identity, sessionID: grant.sessionID,
+                    sequence: sequence, attemptID: UUID(), sourceNode: absent, sourceShardID: "rooms",
+                    pulse: .init(session: delivery, kind: .open, sequence: 1))
+                let packet = try await inbound.deliverySession(keys.publisher.sign(call, maximumBytes: 16_384))
+                let reply = try keys.trust.verify(packet, as: RoomDeliverySessionReply.self, maximumBytes: 16_384).0
+                #expect(reply.result == .resetRequired)
+                #expect(authority.sessionGate(delivery, serviceID: "publisher") == nil)
+            }
+            #expect(began.duration(to: .now) < .seconds(1))
+            #expect(await inbound.deliveryPeerJoinRequestCount == 1)
+            // A retry can establish the same uninstalled generation once its
+            // exact peer is observed; the rejected opens grant no authority.
+            var accepted = false, sequence: UInt64 = 5
+            let limit = ContinuousClock.now + .seconds(2)
+            while !accepted {
+                let call = RoomDeliverySessionCall(serviceID: keys.publisher.serviceID, version: 1,
+                    callerIncarnation: hello.callerIncarnation, recipient: identity, sessionID: grant.sessionID,
+                    sequence: sequence, attemptID: UUID(), sourceNode: system.cluster.node, sourceShardID: "rooms",
+                    pulse: .init(session: delivery, kind: .open, sequence: 1))
+                let packet = try await inbound.deliverySession(keys.publisher.sign(call, maximumBytes: 16_384))
+                let reply = try keys.trust.verify(packet, as: RoomDeliverySessionReply.self, maximumBytes: 16_384).0
+                accepted = reply.result == .accepted
+                try #require(ContinuousClock.now < limit)
+                sequence += 1
+                if !accepted { try await Task.sleep(for: .milliseconds(5)) }
+            }
+            #expect(authority.sessionGate(delivery, serviceID: "publisher") != nil)
+        } catch { failure = error }
+        await inbound.stop()
+        #expect(await sender.stop(deadline: .now + .seconds(2)))
+        await authority.shutdown()
+        try await system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
     @Test("ordinary callbacks share global sixteen and per-peer two admission")
     func sharedCallbackAdmission() async throws {
         let system = await makeSystem(name: "callback-budget", port: Int.random(in: 30_000...44_999))
@@ -228,8 +291,8 @@ struct V2RoomSubscriptionNetworkTests {
         if let failure { throw failure }
     }
 
-    @Test("native peer loss retires idle authorization; recovery requires a successor and new baseline")
-    func nativePeerLifecycleRetiresIdleSession() async throws {
+    @Test("native peer loss retires idle authorization; recovery requires a successor and new baseline", arguments: [false, true])
+    func nativePeerLifecycleRetiresIdleSession(unilateral: Bool) async throws {
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
         let keys = try Keys(), user = UserID(uuid: UUID())
         let callerSystem = await makeSystem(name: "session-owner", port: callerPort)
@@ -270,7 +333,9 @@ struct V2RoomSubscriptionNetworkTests {
             let sourceNode = callerSystem.cluster.node, gatewayNode = peerSystem.cluster.node
             _ = try await callerSystem.cluster.waitFor(gatewayNode, atLeast: .joining, within: .seconds(2))
             await peerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: sourceNode, status: .up).asUnreachable)))
-            await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asUnreachable)))
+            if !unilateral {
+                await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asUnreachable)))
+            }
             let limit = ContinuousClock.now + .seconds(3)
             while oldGate.isReady() {
                 try #require(ContinuousClock.now < limit); try await Task.sleep(for: .milliseconds(1))
@@ -279,10 +344,15 @@ struct V2RoomSubscriptionNetworkTests {
             #expect(authority.applyDeliverySession(.init(session: old, kind: .open, sequence: 3), serviceID: "publisher") == .resetRequired)
 
             await peerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: sourceNode, status: .up).asReachable)))
-            await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asReachable)))
+            if !unilateral {
+                await callerSystem.cluster.events.publish(.reachabilityChange(.init(member: .init(node: gatewayNode, status: .up).asReachable)))
+            } else {
+                #expect(try await sessions.retain(activation: token, gateway: peer.descriptor) == old)
+            }
             var fresh: V2RoomDeliverySession?
             while fresh == nil {
-                if let result = try? await sessions.retain(activation: token, gateway: peer.descriptor), result.generation > old.generation {
+                if let result = try? await sessions.retain(activation: token, gateway: peer.descriptor,
+                    replacing: unilateral ? old : nil), result.generation > old.generation {
                     fresh = result
                 }
                 try #require(ContinuousClock.now < limit)

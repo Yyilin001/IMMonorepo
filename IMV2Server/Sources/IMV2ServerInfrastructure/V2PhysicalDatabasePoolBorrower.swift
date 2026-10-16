@@ -92,6 +92,7 @@ final class V2PhysicalDatabasePoolBorrower: Sendable {
     }
 
     private func schedulePump() {
+        guard gates.count > 1 else { return }
         // Capacity callbacks may arrive on an SQL completion stack, including
         // while selection holds state. Coalesce them onto the facade loop:
         // peer grants must not synchronously re-enter loan completion.

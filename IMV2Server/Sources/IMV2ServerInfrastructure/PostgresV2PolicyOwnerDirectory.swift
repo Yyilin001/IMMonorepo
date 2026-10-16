@@ -25,13 +25,15 @@ package actor PostgresV2PolicyOwnerDirectory {
     private var pendingScanCursor: V2PolicyJournalCursor?
     private var pendingScanUpper: V2PolicyJournalCursor?
     private var recovering = false
-    private let snapshots = V2NodePolicyStateCache()
+    private let snapshots: V2NodePolicyStateCache
     private let snapshotPublisher: V2PolicySnapshotPublisher?
 
     package init(journal: PostgresV2PolicyAuthorizationJournal, dispatcher: PostgresV2PolicyMutationDispatcher,
                  ownerID: UUID = UUID(), maximumOwners: Int = 4_096, maximumRoots: Int = 64,
                  committed: (@Sendable (V2PolicyAuthorizationScope) async throws -> Void)? = nil,
                  snapshotPublisher: V2PolicySnapshotPublisher? = nil,
+                 snapshotMaximumEntries: Int = 32_768,
+                 snapshotObservation: (@Sendable (V2NodePolicyStateCache.Event) -> Void)? = nil,
                  leaseSeconds: Double = 30, ownsScope: @escaping @Sendable (String) -> Bool = { _ in true }) {
         precondition(maximumOwners > 0 && maximumRoots > 0 && maximumRoots <= 1_024)
         precondition(leaseSeconds.isFinite && leaseSeconds > 0 && leaseSeconds <= 300)
@@ -40,6 +42,7 @@ package actor PostgresV2PolicyOwnerDirectory {
         self.leaseSeconds = leaseSeconds
         self.ownsScope = ownsScope
         self.committed = committed; self.snapshotPublisher = snapshotPublisher
+        self.snapshots = V2NodePolicyStateCache(maximumEntries: snapshotMaximumEntries, observe: snapshotObservation)
     }
 
     package func change(_ mutation: V2DurablePolicyMutation) async throws -> V2PolicyMutationResult {
@@ -107,7 +110,7 @@ package actor PostgresV2PolicyOwnerDirectory {
     package func cachedSnapshots(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot]? {
         guard !closed else { throw V2PolicyAuthorizationLifecycleError.closed }
         guard scopes.allSatisfy({ ownsScope($0.key) }) else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
-        return try await snapshots.cachedSnapshots(scopes: scopes, requestedAt: .now)
+        return try snapshots.cachedSnapshots(scopes: scopes, requestedAt: .now)
     }
     package func publishSnapshot(scope: V2PolicyAuthorizationScope) async throws {
         let snapshot = try await registrationSnapshots(scopes: [scope])[0]

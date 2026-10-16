@@ -110,6 +110,7 @@ let package = Package(
         .target(
             name: "IMV2ServerApplication",
             dependencies: ["IMV2ServerContracts", "IMV2Core", "IMV2ActorContracts",
+                .product(name: "HashTreeCollections", package: "swift-collections"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log")]
         ),
@@ -293,7 +294,7 @@ let package = Package(
         // is intentionally absent from the server image build products.
         .executableTarget(
             name: "IMV2GatewayLoadGenerator",
-            dependencies: ["IMV2ServerInfrastructure",
+            dependencies: ["IMV2ServerInfrastructure", "IMV2LoadGeneratorSupport",
                 "IMV2ToolHTTP",
                 "IMV2Core",
                 "IMV2Compression",
@@ -306,6 +307,8 @@ let package = Package(
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
             ]
         ),
+        .target(name: "IMV2LoadGeneratorSupport"),
+        .testTarget(name: "IMV2LoadGeneratorSupportTests", dependencies: ["IMV2LoadGeneratorSupport"]),
         .executableTarget(
             name: "VirtualActorCompatibilityProbe",
             dependencies: ["IMV2ServerInfrastructure",

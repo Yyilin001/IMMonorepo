@@ -1,4 +1,5 @@
 import Foundation
+import HashTreeCollections
 import IMV2ActorContracts
 import IMV2ServerContracts
 
@@ -134,15 +135,19 @@ private actor V2RealtimeSubscriptionPartition {
         var fingerprints: [Int: Data] = [:]
         var items = 0; var bytes = 0
     }
-    private struct Session {
+    private final class Session {
         var wire: V2RealtimeShardSession
         var revision: Int64 = 0
         var fingerprint = Data()
         var deadline: ContinuousClock.Instant
-        var interests: [V2RealtimeTopicKey: Int64] = [:]
+        var interests: TreeDictionary<V2RealtimeTopicKey, Int64> = [:]
         var staging: Staging?
         var closed = false
         var descriptorBytes = 0
+        var interestBytes = 0
+        init(wire: V2RealtimeShardSession, deadline: ContinuousClock.Instant, descriptorBytes: Int) {
+            self.wire = wire; self.deadline = deadline; self.descriptorBytes = descriptorBytes
+        }
     }
     // Incarnation and generation watermarks survive close/expiry until this
     // partition epoch retires. Payload memory is reclaimed on expiry; at most
@@ -171,18 +176,17 @@ private actor V2RealtimeSubscriptionPartition {
         return .init(appliedRevision: session?.revision ?? 0, remainingSessionMilliseconds: milliseconds, status: status)
     }
     private func release(_ session: Session) {
-        let interests = session.interests.map { V2RealtimeShardInterest(key: $0.key, interestGeneration: $0.value) }
-        budget.release(items: interests.count + (session.staging?.items ?? 0),
-            bytes: interests.reduce(0) { $0 + V2RealtimeIndexBudget.bytes($1) } + (session.staging?.bytes ?? 0) + session.descriptorBytes)
+        budget.release(items: session.interests.count + (session.staging?.items ?? 0),
+            bytes: session.interestBytes + (session.staging?.bytes ?? 0) + session.descriptorBytes)
     }
     /// Closed sessions retain only identity/generation/revision/fingerprint.
     /// Actor references and staged/installed topics share the process byte cap
     /// while active, and are released before leaving a tombstone.
     private func tombstone(_ session: Session) -> Session {
-        var compact = session
+        let compact = session
         compact.wire = .init(gateway: .init(identity: session.wire.gateway.identity, endpointReference: Data(), address: "", port: 0),
             sessionID: session.wire.sessionID, sessionGeneration: session.wire.sessionGeneration)
-        compact.interests.removeAll(); compact.staging = nil; compact.closed = true; compact.descriptorBytes = 0
+        compact.interests = [:]; compact.staging = nil; compact.closed = true; compact.descriptorBytes = 0; compact.interestBytes = 0
         return compact
     }
     private func rejection(_ requested: V2RealtimeShardToken) -> V2RealtimeShardControlReply.Status? {
@@ -229,7 +233,7 @@ private actor V2RealtimeSubscriptionPartition {
         if renewal {
             // Authenticated heartbeat is independent of subscription revisions.
             // It cannot create/revive a session or discard an in-progress snapshot.
-            guard var current = sessions[identity], !current.closed, current.deadline > .now,
+            guard let current = sessions[identity], !current.closed, current.deadline > .now,
                   current.wire == request.session else { return reply(sessions[identity], .requiresSnapshot) }
             current.deadline = min(deadline, .now + .seconds(30))
             sessions[identity] = current
@@ -269,8 +273,9 @@ private actor V2RealtimeSubscriptionPartition {
         switch request.mutation {
         case .delta(let changes):
             guard !changes.isEmpty, changes.count <= 128, current.staging == nil else { return reply(current, .requiresSnapshot) }
-            var updated = current.interests
             var keys: Set<V2RealtimeTopicKey> = []
+            var updates: [(V2RealtimeTopicKey, Int64?)] = []
+            var itemDelta = 0, byteDelta = 0
             for change in changes {
                 let key: V2RealtimeTopicKey; let generation: Int64
                 switch change {
@@ -279,22 +284,34 @@ private actor V2RealtimeSubscriptionPartition {
                 }
                 guard key.partitionID() == token.partitionID, !key.id.isEmpty, key.id.utf8.count <= 128,
                       generation > 0, keys.insert(key).inserted else { return reply(current, .requiresSnapshot) }
+                let previous = current.interests[key]
                 switch change {
-                case .upsert: updated[key] = generation
-                case .remove: if updated[key] == generation { updated.removeValue(forKey: key) }
+                case .upsert:
+                    updates.append((key, generation))
+                    if previous == nil { itemDelta += 1; byteDelta += key.id.utf8.count + 192 }
+                case .remove:
+                    if previous == generation {
+                        updates.append((key, nil)); itemDelta -= 1; byteDelta -= key.id.utf8.count + 192
+                    }
                 }
             }
-            let oldBytes = current.interests.keys.reduce(0) { $0 + $1.id.utf8.count + 192 }
-            let newBytes = updated.keys.reduce(0) { $0 + $1.id.utf8.count + 192 }
-            guard budget.reserve(items: max(0, updated.count - current.interests.count), bytes: max(0, newBytes - oldBytes)) else { return reply(current, .overloaded) }
-            budget.release(items: max(0, current.interests.count - updated.count), bytes: max(0, oldBytes - newBytes))
-            current.interests = updated
+            // Validate and reserve the complete delta before mutating any state.
+            guard budget.reserve(items: max(0, itemDelta), bytes: max(0, byteDelta)) else { return reply(current, .overloaded) }
+            budget.release(items: max(0, -itemDelta), bytes: max(0, -byteDelta))
+            for (key, generation) in updates {
+                current.interests[key] = generation
+                if generation != nil { index[key, default: []].insert(identity) }
+                else {
+                    index[key]?.remove(identity)
+                    if index[key]?.isEmpty == true { index.removeValue(forKey: key) }
+                }
+            }
+            current.interestBytes += byteDelta; retainedBindings += itemDelta
         case .snapshotChunk(let id, let index, let total, let digest, let interests):
             guard (1...782).contains(total), (0..<total).contains(index), interests.count <= 128, digest.count == 32,
                   interests.allSatisfy({ $0.key.partitionID() == token.partitionID && !$0.key.id.isEmpty && $0.key.id.utf8.count <= 128 && $0.interestGeneration > 0 }),
                   Set(interests.map(\.key)).count == interests.count else { return reply(current, .requiresSnapshot) }
-            if current.staging == nil { current.staging = .init(id: id, total: total, digest: digest, base: request.baseRevision, next: request.nextRevision) }
-            var stage = current.staging!
+            var stage = current.staging ?? Staging(id: id, total: total, digest: digest, base: request.baseRevision, next: request.nextRevision)
             guard stage.id == id, stage.total == total, stage.digest == digest,
                   stage.base == request.baseRevision, stage.next == request.nextRevision else { return reply(current, .requiresSnapshot) }
             if let fingerprint = stage.fingerprints[index] {
@@ -311,19 +328,18 @@ private actor V2RealtimeSubscriptionPartition {
                 budget.release(items: stage.items, bytes: stage.bytes); current.staging = nil
                 sessions[identity] = current; return reply(current, .requiresSnapshot)
             }
-            let oldBytes = current.interests.keys.reduce(0) { $0 + $1.id.utf8.count + 192 }
+            let oldBytes = current.interestBytes
             let installedBytes = all.reduce(0) { $0 + V2RealtimeIndexBudget.bytes($1) }
             budget.release(items: current.interests.count, bytes: oldBytes + stage.bytes - installedBytes)
-            current.interests = Dictionary(uniqueKeysWithValues: all.map { ($0.key, $0.interestGeneration) })
+            removeFromIndex(current)
+            current.interests = TreeDictionary(uniqueKeysWithValues: all.map { ($0.key, $0.interestGeneration) })
+            current.interestBytes = installedBytes
+            retainedBindings += current.interests.count
+            for key in current.interests.keys { self.index[key, default: []].insert(identity) }
             current.staging = nil
         case .renew: throw V2RealtimeDirectoryError.invalidInput // handled before revision mutation
         case .close:
-            release(current); current = tombstone(current)
-        }
-        if let old = sessions[identity] { removeFromIndex(old) }
-        if !current.closed {
-            retainedBindings += current.interests.count
-            for key in current.interests.keys { index[key, default: []].insert(identity) }
+            release(current); removeFromIndex(current); current = tombstone(current)
         }
         current.revision = request.nextRevision; current.fingerprint = request.payloadFingerprint
         current.deadline = min(deadline, .now + .seconds(30)); sessions[identity] = current

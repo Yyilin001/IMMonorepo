@@ -9,6 +9,64 @@ import Testing
 
 @Suite("Physical database loan ownership")
 struct V2PhysicalDatabaseLoanGateTests {
+    @Test("returned immediate, queued and combined loans release their lease and observation objects", arguments: [0, 1, 2])
+    func returnedLoansDropObjects(style: Int) async throws {
+        let resources = makeV2DatabaseTestResources()
+        let loop = resources.eventLoopGroup.next()
+        let gate = V2PhysicalDatabaseLoanGate(eventLoop: loop, policy: try .init(
+            maximumConnections: 1, reservedRenewalConnections: 0,
+            maximumQueued: 4, maximumWait: .seconds(5)))
+        let references = try await releaseAndDropLoan(gate, style: style)
+        // Complete all delivery callbacks before checking ARC, rather than
+        // mistaking a pending EventLoop job for a retained ownership cycle.
+        try await loop.submit { () }.get()
+        #expect(gate.snapshot().classes[.ordinary]?.inFlight == 0)
+        #expect(references.isReleased)
+        await gate.shutdown()
+        try await resources.shutdown()
+    }
+    private func releaseAndDropLoan(_ gate: V2PhysicalDatabaseLoanGate, style: Int) async throws -> WeakLoanObjects {
+        let held = style == 1 ? try await gate.acquire(loanClass: .ordinary).get() : nil
+        let request: V2PhysicalDatabaseLoanRequest
+        if style == 2 {
+            request = try #require(gate.requestIfAvailable(loanClass: .ordinary, combineImmediateDelivery: true))
+            request.whenComplete { _ in }
+        } else { request = gate.request(loanClass: .ordinary) }
+        if style == 1 { #expect(gate.snapshot().classes[.ordinary]?.queued == 1) }
+        held?.release()
+        let lease = try await request.future.get()
+        let references = WeakLoanObjects(lease: lease)
+        lease.release()
+        lease.release()
+        return references
+    }
+    @Test("one deadline timer follows cancelled and newly earlier waiters while capacity stays occupied")
+    func deadlineTimerTracksQueueChanges() async throws {
+        let resources = makeV2DatabaseTestResources()
+        let loop = resources.eventLoopGroup.next()
+        let gate = V2PhysicalDatabaseLoanGate(eventLoop: loop, policy: try .init(
+            maximumConnections: 1, reservedRenewalConnections: 0,
+            maximumQueued: 4, maximumWait: .seconds(5)))
+        let held = try await gate.acquire(loanClass: .ordinary).get()
+        let later = gate.request(loanClass: .ordinary, deadline: .now + .seconds(3))
+        let cancelled = gate.request(loanClass: .sync, deadline: .now + .seconds(1))
+        try await loop.submit { () }.get()
+        cancelled.cancel()
+        do { _ = try await cancelled.future.get(); Issue.record("cancelled waiter must fail") }
+        catch { #expect(error as? V2PhysicalDatabaseLoanFailure == .cancelled) }
+        let earlier = gate.request(loanClass: .activation, deadline: .now + .milliseconds(30))
+        do { _ = try await earlier.future.get(); Issue.record("deadline must fire without a capacity return") }
+        catch { #expect(error as? V2PhysicalDatabaseLoanFailure == .timedOut) }
+        #expect(gate.snapshot().classes[.ordinary]?.queued == 1)
+        #expect(gate.snapshot().classes[.activation]?.queued == 0)
+        #expect(gate.snapshot().classes[.sync]?.rejections[.cancelled] == 1)
+        #expect(gate.snapshot().classes[.activation]?.rejections[.timedOut] == 1)
+        held.release()
+        let next = try await later.future.get()
+        next.release()
+        await gate.shutdown()
+        try await resources.shutdown()
+    }
     @Test("idle renewal capacity serves ordinary work and queued renewal takes the next returned slot")
     func elasticRenewalCapacity() async throws {
         let resources = makeV2DatabaseTestResources()
@@ -609,6 +667,17 @@ struct V2PhysicalDatabaseLoanGateTests {
         } catch { #expect(error as? V2PhysicalDatabaseLoanFailure == .closed) }
         try await resources.shutdown()
     }
+}
+private final class WeakLoanObjects: Sendable {
+    private struct State: Sendable {
+        weak var lease: V2PhysicalDatabaseLoanLease?
+        weak var observation: V2DatabaseLoanObservation?
+    }
+    private let state: Mutex<State>
+    init(lease: V2PhysicalDatabaseLoanLease) {
+        state = Mutex(.init(lease: lease, observation: lease.observation))
+    }
+    var isReleased: Bool { state.withLock { $0.lease == nil && $0.observation == nil } }
 }
 
 /// Holds the protocol operation's real EventLoopFuture, rather than teaching

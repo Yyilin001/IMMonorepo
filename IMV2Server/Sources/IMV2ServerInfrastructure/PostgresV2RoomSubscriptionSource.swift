@@ -34,7 +34,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
 
     public func snapshot(roomID: RoomID, owner: V2RoomDataOwner,
                          trackedUserIDs: Set<UserID>) async throws -> V2RoomSubscriptionSourceSnapshot {
-        return try await withOwnedCut { sql in
+        return try await withReadConnection { sql in
             try await self.snapshotSQL(roomID: roomID, owner: owner, trackedUserIDs: trackedUserIDs, sql: sql)
         }
     }
@@ -58,7 +58,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
                        WHERE topic_kind='roomEvents' AND topic_id=r.room_id::text),0) AS room_control_version,
                    (\(states))::text AS members_json
             FROM \(unsafeRaw: schema).rooms r WHERE r.room_id = \(bind: room)
-            """).first(decoding: SnapshotRow.self) else { throw V2RoomSubscriptionSourceError.roomNotFound }
+            """).first(decoding: SnapshotRow.self) else { throw V2RoomActorStateError.roomNotFound }
         try validateOwner(shard: row.room_shard_id, epoch: row.owner_epoch, sequence: row.room_sequence, owner: owner)
         guard row.membership_revision >= 0, row.room_control_version >= 0 else { throw V2RoomSubscriptionSourceError.corruptPersistence }
         let members = try decodeMembers(row.members_json, requested: trackedUserIDs)
@@ -67,7 +67,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
 
     public func read(roomID: RoomID, owner: V2RoomDataOwner, afterRoomSequence: UInt64,
                      trackedUserIDs: Set<UserID>, limit: Int) async throws -> V2RoomSubscriptionSourcePage {
-        return try await withOwnedCut { sql in
+        return try await withReadConnection { sql in
             try await self.readSQL(roomID: roomID, owner: owner, afterRoomSequence: afterRoomSequence,
                 trackedUserIDs: trackedUserIDs, limit: limit, sql: sql)
         }
@@ -80,7 +80,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
         }
         let (room, users) = try inputs(roomID, owner, trackedUserIDs)
         let rows = try await sql.raw(readQuery(room: room, users: users, after: Int64(afterRoomSequence), limit: limit)).all(decoding: EventRow.self)
-        guard let first = rows.first else { throw V2RoomSubscriptionSourceError.roomNotFound }
+        guard let first = rows.first else { throw V2RoomActorStateError.roomNotFound }
         try validateOwner(shard: first.room_shard_id, epoch: first.owner_epoch, sequence: first.high_watermark, owner: owner)
         guard first.trimmed_through >= 0, afterRoomSequence >= UInt64(first.trimmed_through),
               afterRoomSequence <= UInt64(first.high_watermark) else { throw V2RoomSubscriptionSourceError.snapshotRequired }
@@ -199,37 +199,21 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
             """
     }
 
-    package func withOwnedCut<Value: Sendable>(
+    /// snapshotSQL/readSQL each select and validate the Owner, head and
+    /// authorization in one statement snapshot. Pin its native activation
+    /// through actual SQL completion and reject publication after withdrawal.
+    package func withReadConnection<Value: Sendable>(
         _ operation: @escaping @Sendable (any SQLDatabase) async throws -> Value
     ) async throws -> Value {
         let deadline = V2RoomSQLDeadline.boundedTransactionDeadline()
         return try await lifetime.withPin(deadline: deadline) { validUntil in
             return try await v2WithAdmittedRoomDatabaseWork(admission, workClass: .interactiveRead,
                 callerDeadline: validUntil) {
-                try await v2WithRoomActivationTransaction(database: database, deadline: validUntil,
-                    readOnlyRepeatableRead: true) { transaction in
-                    guard let sql = transaction as? any SQLDatabase else {
-                        throw V2RoomSubscriptionSourceError.invalidInput
-                    }
-                    guard let row = try await sql.raw("""
-                        SELECT room_shard_id, owner_epoch FROM \(unsafeRaw: schema).rooms
-                        WHERE room_id=\(bind: activation.roomID.uuidValue!)
-                        """).first(decoding: ReadOwnerRow.self) else {
-                        throw V2RoomActorStateError.roomNotFound
-                    }
-                    guard row.room_shard_id == activation.owner.shardID,
-                          row.owner_epoch == activation.owner.epoch else {
-                        throw V2RoomActorStateError.ownerChanged
-                    }
-                    return try await operation(sql)
+                try await v2WithRoomSnapshotConnection(database: database, deadline: validUntil) { sql in
+                    try await operation(sql)
                 }
             }
         }
-    }
-
-    private struct ReadOwnerRow: Decodable {
-        let room_shard_id: String
-        let owner_epoch: Int64
     }
 
     private func inputs(_ roomID: RoomID, _ owner: V2RoomDataOwner, _ users: Set<UserID>) throws -> (UUID, [UUID]) {
@@ -266,7 +250,7 @@ public struct PostgresV2RoomSubscriptionSource: V2RoomSubscriptionSource {
         return members
     }
     private func validateOwner(shard: String, epoch: Int64, sequence: Int64, owner: V2RoomDataOwner) throws {
-        guard shard == owner.shardID, epoch == owner.epoch else { throw V2RoomSubscriptionSourceError.wrongOwner }
+        guard shard == owner.shardID, epoch == owner.epoch else { throw V2RoomActorStateError.ownerChanged }
         guard sequence >= 0 else { throw V2RoomSubscriptionSourceError.corruptPersistence }
     }
     private static let knownTypes: Set<String> = [

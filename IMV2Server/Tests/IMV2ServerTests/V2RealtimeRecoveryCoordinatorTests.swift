@@ -8,6 +8,134 @@ import Testing
 
 @Suite("Recovery coordinator authority boundaries")
 struct V2RealtimeRecoveryCoordinatorTests {
+    @Test("missing coverage parks demand until an authoritative callback without polling",
+          arguments: [false, true])
+    func missingCoverageWaitsForAuthoritativeReady(retireWhileWaiting: Bool) async throws {
+        let coordinator = V2RealtimeRecoveryCoordinator()
+        let interest = RecoveryTicketGatedInterests(pauseActivation: false)
+        let current = Mutex<V2RealtimeCoverageConfirmation?>(nil), readyWrites = Mutex(0), recoveringWrites = Mutex(0)
+        let (fixture, registry) = try await makeAuthenticatedTypingContext { write in
+            let version = UInt8(IMV2ProtocolVersion.current)
+            var decoder = V2FrameDecoder(limits: try! .init(maximumPayloadBytes: 4096, acceptedVersions: [version]))
+            guard let frame = try? decoder.append(write.bytes).first,
+                  let envelope = try? V2ServerProtobufFrameCodec.decode(frame) else { return false }
+            let accepted = write.enqueueIfCurrent({})
+            if accepted, case .realtimeCoverage(let coverage)? = envelope.body,
+               coverage.scope == .typing, coverage.state == .ready { readyWrites.withLock { $0 += 1 } }
+            if accepted, case .realtimeCoverage(let coverage)? = envelope.body,
+               coverage.scope == .typing, coverage.state == .recovering { recoveringWrites.withLock { $0 += 1 } }
+            return accepted
+        }
+        let room = RoomID(uuid: UUID()), owner = try V2RoomDataOwner(shardID: "rooms", epoch: 1)
+        let topic = V2RealtimeTopic(kind: .roomTyping, id: room.rawValue, owner: owner)
+        let key = V2RealtimeRecoveryKey(connection: fixture.handle.connectionID, kind: topic.kind, id: topic.id)
+        await coordinator.configureLiveActivity(interest)
+        await coordinator.configureCoverage(current: { _, _ in current.withLock { $0 } },
+            confirms: { _, _, proof in current.withLock { $0?.interestGeneration == proof.interestGeneration } })
+        coordinator.installConnection(fixture)
+        func cleanup() async {
+            await coordinator.shutdown()
+            await fixture.handle.stream.closeForAccountRecovery()
+            await registry.shutdownRealtimeRecovery()
+        }
+        do {
+            await coordinator.beginScopeRecovery(connection: key.connection, kind: key.kind, id: key.id)
+            try await waitForInterest {
+                let state = await coordinator.realtimeRecoverySnapshot()
+                let owned = await coordinator.schedulingOwnershipSnapshot()
+                return await interest.activations == 1 && state.desired == 1 && state.queued == 0
+                    && state.actual == 0 && owned.scheduler == 0 && owned.wake == 0
+            }
+            let before = coordinator.schedulingTelemetrySnapshot()
+            try await Task.sleep(for: .milliseconds(200))
+            #expect(coordinator.schedulingTelemetrySnapshot().timings[.pumpPass]?.count == before.timings[.pumpPass]?.count)
+            #expect(readyWrites.withLock { $0 } == 0)
+            if retireWhileWaiting {
+                await coordinator.endScope(connection: key.connection, kind: key.kind, id: key.id,
+                    stream: fixture.handle.stream)
+            }
+            let proof = V2RealtimeCoverageConfirmation(token: .init(partitionID: V2RealtimeTopicKey(topic).partitionID(),
+                host: .init(nodeID: "fixture", serviceID: "fixture", incarnationID: UUID()), epoch: 1, leaseToken: UUID()),
+                sessionID: UUID(), interestGeneration: 1, highWatermark: 0, deadline: .now + .seconds(30))
+            current.withLock { $0 = proof }
+            await coordinator.realtimeCoverageReady(confirmations: [topic: proof], confirms: { _, _ in true })
+            try await waitForInterest {
+                let state = await coordinator.realtimeRecoverySnapshot()
+                return state.desired == 0 && state.actual == 0 && state.positions == 0
+                    && readyWrites.withLock { $0 } == (retireWhileWaiting ? 0 : 1)
+            }
+            #expect(await interest.activations == 1)
+            if !retireWhileWaiting {
+                let previouslyRecovering = recoveringWrites.withLock { $0 }
+                current.withLock { $0 = nil }
+                await coordinator.invalidateRealtimeCoverage(topics: [topic], registeredThrough: .now)
+                try await waitForInterest {
+                    let state = await coordinator.realtimeRecoverySnapshot()
+                    let owned = await coordinator.schedulingOwnershipSnapshot()
+                    return state.desired == 1 && state.positions == 0 && state.actual == 0
+                        && owned.scheduler == 0 && owned.wake == 0
+                        && recoveringWrites.withLock { $0 } == previouslyRecovering + 1
+                }
+                let parked = coordinator.schedulingTelemetrySnapshot()
+                try await Task.sleep(for: .milliseconds(200))
+                #expect(coordinator.schedulingTelemetrySnapshot().timings[.pumpPass]?.count == parked.timings[.pumpPass]?.count)
+                current.withLock { $0 = proof }
+                await coordinator.realtimeCoverageReady(confirmations: [topic: proof], confirms: { _, _ in true })
+                try await waitForInterest { readyWrites.withLock { $0 } == 2 }
+                #expect(await interest.activations == 1)
+            }
+        } catch { await cleanup(); throw error }
+        await cleanup()
+    }
+
+    @Test("persistent Ready validation failure backs off and later recovers without a new scope")
+    func refusedReadyRetriesBackOff() async throws {
+        let coordinator = V2RealtimeRecoveryCoordinator()
+        let interest = RecoveryTicketGatedInterests(pauseActivation: false)
+        let allowed = Mutex(false), refusals = Mutex(0), readyWrites = Mutex(0)
+        let (fixture, registry) = try await makeAuthenticatedTypingContext { write in
+            let version = UInt8(IMV2ProtocolVersion.current)
+            var decoder = V2FrameDecoder(limits: try! .init(maximumPayloadBytes: 4096, acceptedVersions: [version]))
+            guard let frame = try? decoder.append(write.bytes).first,
+                  let envelope = try? V2ServerProtobufFrameCodec.decode(frame) else { return false }
+            let accepted = write.enqueueIfCurrent({})
+            if accepted, case .realtimeCoverage(let coverage)? = envelope.body,
+               coverage.scope == .typing, coverage.state == .ready { readyWrites.withLock { $0 += 1 } }
+            return accepted
+        }
+        let room = RoomID(uuid: UUID()), owner = try V2RoomDataOwner(shardID: "rooms", epoch: 1)
+        let topic = V2RealtimeTopic(kind: .roomTyping, id: room.rawValue, owner: owner)
+        let proof = V2RealtimeCoverageConfirmation(token: .init(partitionID: V2RealtimeTopicKey(topic).partitionID(),
+            host: .init(nodeID: "fixture", serviceID: "fixture", incarnationID: UUID()), epoch: 1, leaseToken: UUID()),
+            sessionID: UUID(), interestGeneration: 1, highWatermark: 0, deadline: .now + .seconds(30))
+        await coordinator.configureLiveActivity(interest)
+        await coordinator.configureCoverage(current: { _, _ in proof }, confirms: { _, _, _ in
+            if allowed.withLock({ $0 }) { return true }
+            refusals.withLock { $0 += 1 }; return false
+        })
+        coordinator.installConnection(fixture)
+        func cleanup() async {
+            await coordinator.shutdown()
+            await fixture.handle.stream.closeForAccountRecovery()
+            await registry.shutdownRealtimeRecovery()
+        }
+        do {
+            await coordinator.beginScopeRecovery(connection: fixture.handle.connectionID, kind: topic.kind, id: topic.id)
+            try await waitForInterest { refusals.withLock { $0 } == 3 }
+            try await Task.sleep(for: .milliseconds(150))
+            #expect(refusals.withLock { $0 } == 3)
+            #expect(readyWrites.withLock { $0 } == 0)
+            #expect(await coordinator.realtimeRecoverySnapshot().actual == 0)
+            allowed.withLock { $0 = true }
+            try await waitForInterest {
+                let state = await coordinator.realtimeRecoverySnapshot()
+                return readyWrites.withLock { $0 } == 1 && state.desired == 0 && state.positions == 0
+            }
+            #expect(await interest.activations == 1)
+        } catch { await cleanup(); throw error }
+        await cleanup()
+    }
+
     @Test("SQL lowercase user topic finds its canonical authenticated account scope")
     func accountScopeTopicIndexNormalizesIncomingUUID() throws {
         let index = V2RealtimeScopeGenerations()
@@ -523,6 +651,27 @@ struct V2RealtimeRecoveryCoordinatorTests {
         #expect(enqueueAllowed7)
         let enqueueAllowed8 = !coordinator.recoveryWritePermit(key, generation: old)({})
         #expect(enqueueAllowed8)
+        await coordinator.shutdown()
+    }
+
+    @Test("passive account observation cannot create recovery work or scope authority")
+    func passiveAccountObservation() async throws {
+        let coordinator = V2RealtimeRecoveryCoordinator()
+        let context = try makeContext(lifecycle: 812)
+        coordinator.installConnection(context)
+        for _ in 0..<3 {
+            let observed = await coordinator.accountCoverageDiagnostic(connectionID: context.handle.connectionID)
+            #expect(observed.current)
+            #expect(observed.generation == nil)
+            #expect(!observed.demand && !observed.installed && !observed.interestAcquired)
+            #expect(!observed.currentCoverage && !observed.retainedReady && !observed.actualJob && !observed.outbound)
+        }
+        let work = await coordinator.realtimeRecoverySnapshot()
+        let ownership = await coordinator.schedulingOwnershipSnapshot()
+        #expect(work.desired == 0 && work.actual == 0 && work.positions == 0)
+        #expect(ownership.scheduler == 0 && ownership.wake == 0)
+        #expect(coordinator.revokeConnection(context.handle.connectionID, lifecycle: context.handle.lifecycle).isEmpty)
+        #expect(await !coordinator.accountCoverageDiagnostic(connectionID: context.handle.connectionID).current)
         await coordinator.shutdown()
     }
 

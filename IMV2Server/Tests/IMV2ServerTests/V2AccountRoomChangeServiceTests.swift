@@ -11,6 +11,40 @@ import Synchronization
 
 @Suite("Account notification service", .timeLimit(.minutes(1)))
 struct V2AccountRoomChangeServiceTests {
+    @Test("Host room capacity exhaustion uses a slow jittered retry rather than ordinary congestion backoff")
+    func capacityRetryClassification() {
+        let id = UUID(uuidString: "01020000-0000-0000-0000-000000000000")!
+        let capacity = V2AccountRoomChangeService.retryDelayMilliseconds(
+            V2RoomCallFailure.notAccepted(.roomCapacityExhausted), failures: 1, id: id)
+        let congestion = V2AccountRoomChangeService.retryDelayMilliseconds(
+            V2RoomCallFailure.notAccepted(.overloaded), failures: 1, id: id)
+        #expect(capacity == 30_258 && congestion == 101)
+        #expect(V2RoomCallFailure.notAccepted(.roomCapacityExhausted)
+            .retryAction(policy: .readOnly, hasStableOperationID: false) == .returnFailure)
+    }
+    @Test("temporary Owner overload during membership refresh preserves the ready account and retries owned work")
+    func transientRefreshKeepsCoverage() async throws {
+        let routes = AccountOnlineDeliveryProbe(), sink = AccountNotificationSink()
+        let room = try entry(), directory = AccountMembershipDirectoryProbe(entries: [])
+        let service = try V2AccountRoomChangeService(states: AccountStateReader(),
+            directoryPage: { _, _ in await directory.page() },
+            onlineDelivery: .init(activate: { user, room, reference in try await routes.activate(user, room, reference) },
+                deactivate: { await routes.deactivate($0) }))
+        let ticket = try await service.begin(userID: .init(uuid: UUID()), connectionID: UUID(),
+            send: { await sink.send($0) }, close: { await sink.close() })
+        try await service.bootstrap(ticket)
+        await directory.replace([room])
+        await routes.refuseNextActivations(2, reason: .overloaded)
+        await service.refreshServerMemberships(userID: ticket.userID)
+        try await service.requireBootstrapReady(ticket)
+        #expect(await routes.rooms == [room.roomID])
+        #expect(await sink.closes == 0)
+        let metrics = await service.initializationMetricsSnapshot()
+        #expect(metrics.readyAccounts == 1 && metrics.failures == 0 && metrics.retries == 2)
+        await service.stop(ticket)
+        #expect(await service.initializationMetricsSnapshot().readyAccounts == 0)
+        await service.shutdown()
+    }
     @Test("revocation history overflow retires coverage and releases all Owner references", arguments: [false, true])
     func historyOverflowReleasesCoverage(ready: Bool) async throws {
         let routes = AccountOnlineDeliveryProbe(), sink = AccountNotificationSink()
@@ -39,7 +73,7 @@ struct V2AccountRoomChangeServiceTests {
     func automaticBootstrapFailureBeforeReady() async throws {
         let reader = AccountStateReader(), sink = AccountNotificationSink()
         let service = try V2AccountRoomChangeService(states: reader,
-            directoryPage: { _, _ in throw V2RoomRecoveryReadError.topologyChanged }, onlineDelivery: .init(activate: { _, _, _ in }, deactivate: { _ in }))
+            directoryPage: { _, _ in throw V2RoomRecoveryReadError.corruptPersistence }, onlineDelivery: .init(activate: { _, _, _ in }, deactivate: { _ in }))
         let ticket = try await service.begin(userID: .init(uuid: UUID()), connectionID: UUID(),
             send: { await sink.send($0) }, close: { await sink.close() })
         try await service.bootstrap(ticket, waitForCompletion: false)
@@ -287,21 +321,22 @@ struct V2AccountRoomChangeServiceTests {
         await service.shutdown()
     }
 
-    @Test("server bootstrap rejects a changed membership directory topology")
+    @Test("server bootstrap restarts a changed directory topology before publishing Ready")
     func bootstrapTopologyChange() async throws {
         let reader = AccountStateReader(), sink = AccountNotificationSink()
         let room = try entry()
+        let scans = Mutex(0)
         let service = try V2AccountRoomChangeService(states: reader,
             directoryPage: { _, cursor in
-                .init(rooms: cursor == nil ? [room] : [], nextCursor: cursor == nil ? "next" : nil,
-                    topologyGeneration: cursor == nil ? "before" : "after")
+                let scan = scans.withLock { value in value += 1; return value }
+                return .init(rooms: cursor == nil ? [room] : [], nextCursor: scan == 1 ? "next" : nil,
+                    topologyGeneration: scan == 1 ? "before" : "after")
             }, onlineDelivery: .init(activate: { _, _, _ in }, deactivate: { _ in }))
         let ticket = try await service.begin(userID: .init(uuid: UUID()), connectionID: UUID(),
             send: { await sink.send($0) }, close: { await sink.close() })
-        await #expect(throws: V2RoomRecoveryReadError.topologyChanged) {
-            try await service.bootstrap(ticket)
-        }
-        // The Registry owns rollback of the exact session after bootstrap fails.
+        try await service.bootstrap(ticket)
+        try await service.requireBootstrapReady(ticket)
+        #expect(scans.withLock { $0 } == 3)
         await service.stop(ticket)
         #expect(await sink.notifications.isEmpty)
         await service.shutdown()
@@ -506,6 +541,7 @@ struct V2AccountRoomChangeServiceTests {
         let ticket = try await service.begin(userID: .init(uuid: UUID()), connectionID: UUID(),
             send: { await sink.send($0) }, close: { await sink.close() })
         let room = try entry()
+        try await service.bootstrap(ticket)
         try await service.install([room], ticket: ticket)
         await service.resume(ticket)
         await reader.setUnavailable(true)

@@ -87,7 +87,8 @@ struct PostgresV2RoomRecoveryStoreTests {
                 } else { Issue.record("stale token must retain its precise data owner failure") }
                 let sample = observed.loanMetricsSnapshot().observations[.roomRecovery]!
                 #expect(sample.sqlPhases[.readBody]!.count == 1)
-                #expect(sample.sqlPhases[.fence]!.count == 3)
+                // Timeout setup and one setwise durable-owner validation.
+                #expect(sample.sqlPhases[.fence]!.count == 2)
                 #expect(sample.sqlPhases[.transactionControl]!.count == 2)
             }
         }

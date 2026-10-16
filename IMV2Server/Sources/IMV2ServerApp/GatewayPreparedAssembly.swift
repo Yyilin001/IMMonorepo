@@ -4,6 +4,7 @@ import IMV2ServerContracts
 import IMV2ServerGateway
 import Logging
 import IMV2ActorApplication
+import IMV2ActorContracts
 import IMV2ServerHTTP
 import Vapor
 import IMV2Server
@@ -104,9 +105,12 @@ struct GatewayPreparedAssembly {
         let readReceiptBatcher = V2AggregatedReadReceiptBatchMetrics(
             owners: roomOwners.physicalResources.values.map(\.receiptBatchMetrics))
         let schedulingRegistry = frontdoor.connectionRegistry
-        V2SendPathTraceLogging.install(collection:
-            ProcessInfo.processInfo.environment["IM_V2_SEND_PATH_TRACE_MODE"] == "all"
-                ? .all : .sampledOperations)
+        let traceCollection: V2SendPathTrace.Collection? = switch ProcessInfo.processInfo.environment["IM_V2_SEND_PATH_TRACE_MODE"] {
+        case "all": .all
+        case "sampled": .sampledOperations
+        default: nil
+        }
+        V2SendPathTraceLogging.install(collection: traceCollection)
         V2VaporMetricsRoutes.register(on: app, telemetry: frontdoor.prometheusTelemetry,
             connectionMetrics: frontdoor.connectionRegistry, transportMetrics: frontdoor.transportMetrics,
             durableWorkMetrics: ownerMaintenance.durableWorkMetrics,
@@ -139,7 +143,7 @@ struct GatewayPreparedAssembly {
                                        granted: renewal.granted, rejected: renewal.rejected),
                         sync: .init(inFlight: sync.inFlight, queued: sync.queued,
                                     granted: sync.granted, rejected: sync.rejected),
-                        observations: v2LoanObservationMetrics(snapshot.observations))
+                        observations: v2LoanObservationMetrics(snapshot.observations), pools: topology.loanMetricsByPool())
                 }, gatewayMessageSendBudget: frontdoor.messageSendBudget,
                 roomRecoveryBatches: {
                     v2AggregateRecoveryBatchPressure(physicalRecoveryOwners.map { $0.recoveryBatchPressureSnapshot() })

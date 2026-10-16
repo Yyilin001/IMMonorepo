@@ -151,14 +151,16 @@ enum GatewayJournalAuthorityAssembly {
             var selected = requested
             var effectiveControls = controls
             var incrementalCut: Int64?
-            let sameInterests = baseline?.interestRevision == selection.revision
-            let knownUsers = sameInterests && users.allSatisfy({ baseline?.versions[$0] != nil })
-            let liveFloors = knownUsers && receiver.retainsRecoveryFloors(source: request.source, fence: request.fence,
-                versions: baseline!.versions.filter { users.contains($0.key) })
+            let retainedInterests = baseline?.interests.intersection(requested) ?? []
+            let newInterests = requested.subtracting(retainedInterests)
+            let retainedUsers = Set(retainedInterests.map(\.userID))
+            let knownUsers = baseline != nil && retainedUsers.allSatisfy { baseline?.versions[$0] != nil }
+            let retainedVersions = baseline?.versions.filter { retainedUsers.contains($0.key) } ?? [:]
+            let liveFloors = knownUsers && receiver.retainsConnectionBaseline(source: request.source,
+                fence: request.fence, versions: retainedVersions)
             if GatewayJournalDiagnostics.enabled {
                 if baseline != nil {
-                    if !sameInterests { GatewayJournalDiagnostics.fallback(.interestChanged) }
-                    else if !knownUsers { GatewayJournalDiagnostics.fallback(.missingUser) }
+                    if !knownUsers { GatewayJournalDiagnostics.fallback(.missingUser) }
                     else if !liveFloors { GatewayJournalDiagnostics.fallback(.floorsUnavailable) }
                 } else { GatewayJournalDiagnostics.fallback(.noBaseline) }
             }
@@ -175,12 +177,12 @@ enum GatewayJournalAuthorityAssembly {
                 valid = valid && plan.through == target && plan.selectedUsers.isSubset(of: users)
                     && deadline > .now && coordinator.confirmsJournalCoverage(coverage)
                     && currentRevision == selection.revision
-                    && receiver.retainsRecoveryFloors(source: request.source, fence: request.fence, versions: baseline.versions.filter { users.contains($0.key) })
+                    && receiver.retainsConnectionBaseline(source: request.source, fence: request.fence, versions: retainedVersions)
                 if valid {
-                    selected = requested.filter { plan.selectedUsers.contains($0.userID) }
+                    selected = requested.filter { newInterests.contains($0) || plan.selectedUsers.contains($0.userID) }
                     effectiveControls = plan.controls
                     incrementalCut = target
-                    if selected.isEmpty,
+                    if selected.isEmpty, baseline.interestRevision == selection.revision,
                        let liveCut = receiver.recoveryCheckpoint(source: request.source, fence: request.fence, minimumCut: 0),
                        receiver.renew(source: request.source, serviceID: serviceID, fence: request.fence,
                            deadline: deadline, current: { coordinator.confirmsJournalCoverage(coverage) }) {
@@ -189,7 +191,7 @@ enum GatewayJournalAuthorityAssembly {
                         if case .applied(let receipt) = receiver.applyJournalProjection(advance, authenticatedServiceID: serviceID) {
                             GatewayJournalRecoveryCoordinator.record(.replayAdvanced)
                             return .init(cut: receipt.appliedThrough, interestRevision: selection.revision,
-                                versions: baseline.versions, devices: baseline.devices, controls: baseline.controls)
+                                versions: baseline.versions, interests: requested, devices: baseline.devices, controls: baseline.controls)
                         }
                     }
                     GatewayJournalRecoveryCoordinator.record(selected.isEmpty ? .replayAdvanced : .incrementalLoaded)
@@ -260,9 +262,9 @@ enum GatewayJournalAuthorityAssembly {
             try Task.checkCancellation()
             let installSpan = GatewayJournalDiagnostics.begin()
             defer { GatewayJournalDiagnostics.end(installSpan, stage: .install) }
-            if incrementalCut != nil, let baseline {
-                guard receiver.retainsRecoveryFloors(source: request.source, fence: request.fence,
-                    versions: baseline.versions.filter { users.contains($0.key) }) else { throw GatewayJournalAuthorityError.userBindingRejected }
+            if incrementalCut != nil {
+                guard receiver.retainsConnectionBaseline(source: request.source, fence: request.fence,
+                    versions: retainedVersions) else { throw GatewayJournalAuthorityError.userBindingRejected }
             }
             guard receiver.install(source: request.source, serviceID: serviceID, fence: request.fence,
                     deadline: deadline, rooms: [], viewers: [],
@@ -272,8 +274,8 @@ enum GatewayJournalAuthorityAssembly {
                     isAuthenticationSource: entry.isAuthenticationSource) else { throw GatewayJournalAuthorityError.userBindingRejected }
             guard receiver.authorizeSnapshot(snapshot) else { throw GatewayJournalAuthorityError.snapshotRejected }
             guard case .applied = receiver.applyJournalProjection(snapshot, authenticatedServiceID: serviceID) else { throw GatewayJournalAuthorityError.snapshotNotApplied }
-            return .init(cut: userCut!, interestRevision: current.revision, versions: versions,
-                devices: Set(requested.compactMap { interest in
+            return .init(cut: userCut!, interestRevision: current.revision, versions: versions.filter { currentUsers.contains($0.key) }, interests: current.interests,
+                devices: Set(current.interests.compactMap { interest in
                     guard let user = interest.userID.uuidValue, let device = interest.deviceID.uuidValue else { return nil }
                     return V2RealtimeJournalDeviceKey(userID: user, deviceID: device)
                 }).union(effectiveControls.devices), controls: effectiveControls)

@@ -3,11 +3,11 @@ import Foundation
 import IMV2Core
 
 public struct V2UserRoomDirectoryService: Sendable {
-    private let topologySource: any V2RoomRecoveryTopologyReading
+    private let snapshotSource: any V2RoomRecoveryDirectoryReading
     private let cursorCodec: V2UserRoomDirectoryCursorCodec
 
-    public init(topologySource: any V2RoomRecoveryTopologyReading, cursorCodec: V2UserRoomDirectoryCursorCodec) {
-        self.topologySource = topologySource
+    public init(snapshotSource: any V2RoomRecoveryDirectoryReading, cursorCodec: V2UserRoomDirectoryCursorCodec) {
+        self.snapshotSource = snapshotSource
         self.cursorCodec = cursorCodec
     }
 
@@ -15,37 +15,28 @@ public struct V2UserRoomDirectoryService: Sendable {
         guard actorUserID.uuidValue != nil, pageSize > 0, pageSize <= 100 else {
             throw V2RoomRecoveryReadError.invalidRequest
         }
-        let topology = try await topologySource.topology()
-        let index: Int
-        let after: RoomID?
-        if let cursor {
-            let position = try cursorCodec.decode(cursor, userID: actorUserID,
-                topologyGeneration: topology.generation, storeCount: topology.stores.count)
-            index = position.storeIndex
-            after = position.after
-        } else {
-            index = 0
-            after = nil
-        }
-        // 每页只请求一次物理存储，过滤后为空的页也一样。
-        let slice = try await topology.stores[index].rooms(actorUserID: actorUserID, after: after, limit: pageSize)
+        let position = try cursor.map { try cursorCodec.decode($0, userID: actorUserID,
+            storeCount: snapshotSource.storeCount) }
+        let index = position?.storeIndex ?? 0
+        let after = position?.after
+        let snapshot = try await snapshotSource.snapshot(actorUserID: actorUserID, after: after,
+            limit: pageSize, storeIndex: index)
+        if let position, position.topologyGeneration != snapshot.generation { throw V2RoomRecoveryReadError.topologyChanged }
+        let slice = snapshot.slice
         guard slice.entries.count <= pageSize,
               Set(slice.entries.map(\.roomID)).count == slice.entries.count,
               !slice.hasMore || slice.scannedThrough != nil,
               slice.scannedThrough == nil || slice.scannedThrough != after else {
             throw V2RoomRecoveryReadError.corruptPersistence
         }
-        guard try await topologySource.topology().generation == topology.generation else {
-            throw V2RoomRecoveryReadError.topologyChanged
-        }
         let next: String?
         if slice.hasMore {
-            next = try cursorCodec.encode(userID: actorUserID, topologyGeneration: topology.generation,
+            next = try cursorCodec.encode(userID: actorUserID, topologyGeneration: snapshot.generation,
                 storeIndex: index, after: slice.scannedThrough)
-        } else if index + 1 < topology.stores.count {
-            next = try cursorCodec.encode(userID: actorUserID, topologyGeneration: topology.generation,
+        } else if index + 1 < snapshotSource.storeCount {
+            next = try cursorCodec.encode(userID: actorUserID, topologyGeneration: snapshot.generation,
                 storeIndex: index + 1, after: nil)
         } else { next = nil }
-        return .init(rooms: slice.entries, nextCursor: next, topologyGeneration: topology.generation)
+        return .init(rooms: slice.entries, nextCursor: next, topologyGeneration: snapshot.generation)
     }
 }

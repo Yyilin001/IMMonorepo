@@ -10,14 +10,14 @@ struct V2RoomTurnLaneTests {
     func idleDrainUsesCurrentActivity() async throws {
         let fixture = try Fixture()
         let observed = await fixture.lane.snapshot()
-        #expect(fixture.lane.wasActive(after: observed.lastActivity - .seconds(300)))
-        #expect(!fixture.lane.wasActive(after: observed.lastActivity))
+        #expect(fixture.lane.idleDeadline(timeout: .seconds(300)) == observed.lastActivity + .seconds(300))
+        #expect(fixture.lane.idleDeadline(timeout: .zero) == observed.lastActivity)
         let executing = fixture.submit(.init(id: 0, send: false, hold: true))
         await fixture.executor.waitForStarts(1)
         let queued = fixture.submit(.init(id: 1, send: false))
         do {
             try await fixture.waitForQueue(1)
-            #expect(fixture.lane.wasActive(after: observed.lastActivity))
+            #expect(fixture.lane.idleDeadline(timeout: .zero) > observed.lastActivity)
             // A recent synchronous observation is merely a filter; when a
             // probe proceeds, executing/queued ownership is still authoritative.
             #expect(await fixture.lane.beginIdleDrain(ifLastActivityAtOrBefore: .now) == false)
@@ -29,7 +29,7 @@ struct V2RoomTurnLaneTests {
             #expect(await fixture.lane.beginIdleDrain(ifLastActivityAtOrBefore: observed.lastActivity) == false)
             #expect(await fixture.lane.snapshot().phase == .ready)
             let finalActivity = await fixture.lane.snapshot().lastActivity
-            #expect(!fixture.lane.wasActive(after: .now))
+            #expect(fixture.lane.idleDeadline(timeout: .zero) <= .now)
             #expect(await fixture.lane.beginIdleDrain(ifLastActivityAtOrBefore: .now))
             let late = fixture.submit(.init(id: 2, send: false))
             await expectFailure(.notAccepted(.retired), from: late)
@@ -369,7 +369,7 @@ struct V2RoomTurnLaneTests {
         #expect(try await next.value == 1)
         #expect(await fixture.executor.observations().maximumConcurrentTurns == 1)
         try await fixture.waitForBudget(0)
-        #expect(fixture.lane.wasActive(after: beforeActualCompletion))
+        #expect(fixture.lane.idleDeadline(timeout: .zero) > beforeActualCompletion)
     }
 
     @Test("unknown transaction stops successors and holds capacity until fenced retirement")
@@ -455,7 +455,7 @@ struct V2RoomTurnLaneTests {
         #expect(!(await fixture.lane.abortReservation(grant)))
         let beforeFinish = ContinuousClock.now
         #expect(await fixture.lane.finishReservation(grant, completion: .committed))
-        #expect(fixture.lane.wasActive(after: beforeFinish))
+        #expect(fixture.lane.idleDeadline(timeout: .zero) > beforeFinish)
         #expect(try await next.value == 1)
         try await fixture.waitForBudget(0)
         let successor = try await fixture.lane.reserve(requestID: UUID(), deadline: .now + .seconds(3))
@@ -463,7 +463,7 @@ struct V2RoomTurnLaneTests {
         #expect(await fixture.lane.snapshot().hasReservation)
         let beforeAbort = ContinuousClock.now
         #expect(await fixture.lane.abortReservation(successor))
-        #expect(fixture.lane.wasActive(after: beforeAbort))
+        #expect(fixture.lane.idleDeadline(timeout: .zero) > beforeAbort)
         try await fixture.waitForBudget(0)
     }
 

@@ -5,6 +5,7 @@ import Foundation
 ///
 /// 表示部署配置中的连接池用途，不是每次请求的准入类别，也不包含动态数据库或分片标识。
 public enum V2DatabasePoolMetricClass: String, CaseIterable, Sendable {
+    case initialization
     /// 多类工作共用的连接池。
     case shared
     /// 个人事件跨库提交期间持有路由围栏的专用连接池。
@@ -75,14 +76,31 @@ public struct V2DatabasePoolTopologySnapshot: Equatable, Sendable {
 
 /// A granted loan remains occupied until its actual database future settles, including driver borrow wait.
 /// These counters are loan admission observations, not actual connection utilization.
+public enum V2DatabaseLoanRejectionReason: String, CaseIterable, Sendable {
+    case invalidPolicy = "invalid_policy", queueFull = "queue_full", timedOut = "timeout", cancelled, closed
+}
 public struct V2DatabaseLoanClassMetrics: Equatable, Sendable {
     public let inFlight: Int
     public let queued: Int
     public let granted: UInt64
     public let rejected: UInt64
-    public init(inFlight: Int = 0, queued: Int = 0, granted: UInt64 = 0, rejected: UInt64 = 0) {
+    public let rejections: [V2DatabaseLoanRejectionReason: UInt64]
+    public init(inFlight: Int = 0, queued: Int = 0, granted: UInt64 = 0, rejected: UInt64 = 0,
+                rejections: [V2DatabaseLoanRejectionReason: UInt64] = [:]) {
         self.inFlight = inFlight; self.queued = queued
-        self.granted = granted; self.rejected = rejected
+        self.granted = granted; self.rejected = rejected; self.rejections = rejections
+    }
+}
+public struct V2DatabasePoolLoanMetrics: Equatable, Sendable {
+    public let poolClass: V2DatabasePoolMetricClass
+    public let ordinary: V2DatabaseLoanClassMetrics
+    public let activation: V2DatabaseLoanClassMetrics
+    public let sync: V2DatabaseLoanClassMetrics
+    public let renewal: V2DatabaseLoanClassMetrics
+    public init(poolClass: V2DatabasePoolMetricClass, ordinary: V2DatabaseLoanClassMetrics,
+                activation: V2DatabaseLoanClassMetrics, sync: V2DatabaseLoanClassMetrics, renewal: V2DatabaseLoanClassMetrics) {
+        self.poolClass = poolClass; self.ordinary = ordinary; self.activation = activation
+        self.sync = sync; self.renewal = renewal
     }
 }
 
@@ -161,6 +179,7 @@ public struct V2DatabaseLoanObservationSourceMetric: Equatable, Sendable {
 /// Process aggregate with four fixed classes and no database or owner identifiers.
 /// Activation and Sync share ordinary capacity, reported separately from general work.
 public struct V2DatabaseLoanMetricsSnapshot: Equatable, Sendable {
+    public let pools: [V2DatabasePoolLoanMetrics]
     public let ordinary: V2DatabaseLoanClassMetrics
     public let activation: V2DatabaseLoanClassMetrics
     public let sync: V2DatabaseLoanClassMetrics
@@ -169,9 +188,10 @@ public struct V2DatabaseLoanMetricsSnapshot: Equatable, Sendable {
     public let observations: [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric]?
     public init(ordinary: V2DatabaseLoanClassMetrics = .init(), activation: V2DatabaseLoanClassMetrics = .init(),
                 renewal: V2DatabaseLoanClassMetrics = .init(), sync: V2DatabaseLoanClassMetrics = .init(),
-                observations: [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric]? = nil) {
+                observations: [V2DatabaseLoanObservationMetricSource: V2DatabaseLoanObservationSourceMetric]? = nil,
+                pools: [V2DatabasePoolLoanMetrics] = []) {
         self.ordinary = ordinary; self.activation = activation; self.renewal = renewal; self.sync = sync
-        self.observations = observations
+        self.observations = observations; self.pools = pools
     }
 }
 
@@ -278,6 +298,7 @@ public enum V2GatewayMessageSendRejectionReason: String, CaseIterable, Sendable 
     case connectionCount = "connection_count"
     case connectionBytes = "connection_bytes"
     case processBytes = "process_bytes"
+    case processCount = "process_count"
 }
 
 /// Shared process reservation ownership, including tasks waiting for actual settlement.
@@ -286,15 +307,18 @@ public struct V2GatewayMessageSendMetricsSnapshot: Equatable, Sendable {
     public let reservedBytes: Int
     public let peakInFlightRequests: Int
     public let peakReservedBytes: Int
+    public let maximumInFlightRequests: Int
     public let rejections: [V2GatewayMessageSendRejectionReason: UInt64]
 
     public init(inFlightRequests: Int = 0, reservedBytes: Int = 0,
                 peakInFlightRequests: Int = 0, peakReservedBytes: Int = 0,
-                rejections: [V2GatewayMessageSendRejectionReason: UInt64] = [:]) {
+                rejections: [V2GatewayMessageSendRejectionReason: UInt64] = [:],
+                maximumInFlightRequests: Int = 0) {
         self.inFlightRequests = inFlightRequests
         self.reservedBytes = reservedBytes
         self.peakInFlightRequests = peakInFlightRequests
         self.peakReservedBytes = peakReservedBytes
+        self.maximumInFlightRequests = maximumInFlightRequests
         self.rejections = Dictionary(uniqueKeysWithValues:
             V2GatewayMessageSendRejectionReason.allCases.map { ($0, rejections[$0, default: 0]) })
     }
@@ -429,7 +453,24 @@ public struct V2RecoverySchedulingSnapshot: Equatable, Sendable {
 /// Outbound ownership after handoff is reported separately; root tasks and provider queries
 /// have separate attempt gauges. Aliases and overlapping phases must not be added together.
 /// These are Registry scopes, not Coordinator partition jobs or client-applied cursors.
+public struct V2AccountInitializationMetricsSnapshot: Equatable, Sendable {
+    public let accounts: Int
+    public let readyAccounts: Int
+    public let active: Int
+    public let queued: Int
+    public let deferred: Int
+    public let completed: UInt64
+    public let retries: UInt64
+    public let failures: UInt64
+    public init(accounts: Int, readyAccounts: Int, active: Int, queued: Int, deferred: Int,
+                completed: UInt64, retries: UInt64, failures: UInt64) {
+        self.accounts = accounts; self.readyAccounts = readyAccounts
+        self.active = active; self.queued = queued; self.deferred = deferred
+        self.completed = completed; self.retries = retries; self.failures = failures
+    }
+}
 public struct V2RegistryRecoveryMetricsSnapshot: Equatable, Sendable {
+    public var accountInitialization: V2AccountInitializationMetricsSnapshot? = nil
     public var stages: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryStage: V2RegistryRecoveryStageSnapshot]]
     public var reasons: [V2RegistryRecoveryScopeKind: [V2RegistryRecoveryReason: Int]]
     public var duplicateRetained: [V2RegistryRecoveryScopeKind: UInt64]

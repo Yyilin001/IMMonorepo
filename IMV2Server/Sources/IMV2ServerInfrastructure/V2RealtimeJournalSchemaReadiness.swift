@@ -44,16 +44,7 @@ public enum V2RealtimeJournalSchemaReadiness {
                     ('realtime_dirty_room_heads','pending','bool','NO'),
                     ('realtime_control_versions','membership_discovery_version','int8','NO'),
                     ('realtime_control_versions','session_control_version','int8','NO'),
-                    ('realtime_device_control_versions','latest_change_version','int8','NO'),
-                    ('realtime_journal_consumers','gateway_incarnation','uuid','NO'),
-                    ('realtime_journal_consumers','session_id','uuid','NO'),
-                    ('realtime_journal_consumers','session_generation','int8','NO'),
-                    ('realtime_journal_consumers','session_revision','int8','NO'),
-                    ('realtime_journal_consumers','coverage_expires_at','timestamptz','NO'),
-                    ('realtime_journal_consumers','control_cursor','int8','NO'),
-                    ('realtime_journal_consumers','offered_through','int8','NO'),
-                    ('realtime_journal_consumer_heads','room_id','uuid','NO'),
-                    ('realtime_journal_consumer_heads','revision','int8','NO')
+                    ('realtime_device_control_versions','latest_change_version','int8','NO')
                 ) expected(table_name,column_name,udt_name,is_nullable)
                 WHERE NOT EXISTS(SELECT 1 FROM information_schema.columns actual
                     WHERE actual.table_schema=\(bind: schema) AND actual.table_name=expected.table_name
@@ -71,7 +62,7 @@ public enum V2RealtimeJournalSchemaReadiness {
                       AND (expected.trigger_type<>4 OR t.tgnewtable='new_realtime_rows'))
             ) AND NOT EXISTS (
                 SELECT 1 FROM (VALUES('realtime_change_outbox_partition_idx'),('realtime_change_outbox_topic_idx'),
-                    ('realtime_dirty_room_heads_pending_idx'),('realtime_journal_consumers_pending_idx')) expected(index_name)
+                    ('realtime_dirty_room_heads_pending_idx')) expected(index_name)
                 WHERE NOT EXISTS(SELECT 1 FROM pg_class r JOIN pg_namespace n ON n.oid=r.relnamespace
                     JOIN pg_index i ON i.indexrelid=r.oid WHERE n.nspname=\(bind: schema)
                     AND r.relname=expected.index_name AND i.indisvalid AND i.indisready)
@@ -86,9 +77,7 @@ public enum V2RealtimeJournalSchemaReadiness {
                     ('realtime_control_publication_floors','topic_kind,topic_id','p'),
                     ('realtime_control_versions','topic_kind,topic_id','p'),
                     ('realtime_dirty_room_heads','room_id','p'),
-                    ('realtime_device_control_versions','user_id,device_id','p'),
-                    ('realtime_journal_consumers','partition_id,gateway_incarnation','p'),
-                    ('realtime_journal_consumer_heads','partition_id,gateway_incarnation,room_id','p')
+                    ('realtime_device_control_versions','user_id,device_id','p')
                 ) expected(table_name,key_columns,constraint_type)
                 WHERE NOT EXISTS(SELECT 1 FROM pg_constraint c JOIN pg_class r ON r.oid=c.conrelid
                     JOIN pg_namespace n ON n.oid=r.relnamespace

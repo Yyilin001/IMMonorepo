@@ -15,6 +15,16 @@ public struct V2RoomActivationDrainResult: Sendable {
     public let proof: V2RoomHostDrainProof?
 }
 
+public struct V2RoomActivationChangeFeed: Sendable {
+    public let id: UUID
+    public let wakes: AsyncStream<Void>
+}
+
+public enum V2RoomActivationChanges: Equatable, Sendable {
+    case rooms(Set<RoomID>)
+    case rescan
+}
+
 /// 负责一个进程实例的有界激活和物理退役。
 /// 每个回调在修改房间条目前，都要与本地代次和完整激活令牌核对。
 public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
@@ -44,10 +54,20 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     // Pure snapshot reads retain lifecycle ownership, never a command reservation.
     private var recoveryBatchesInFlight = 0
     private var idleTask: Task<Void, Never>?
+    // Exactly one indexed hint per ready activation. Activity advances lazily
+    // when a hint becomes due, without a Host hop on each message.
+    private var idleDeadlines = V2RoomTurnDeadlines()
+    private var idleRooms: [UUID: RoomID] = [:]
+    package private(set) var idleMaintenancePassCount: UInt64 = 0
+    package private(set) var idleRoomProbeCount: UInt64 = 0
+    package var scheduledIdleRoomCount: Int { idleDeadlines.count }
     private var qualificationWatchdog: Task<Void, Never>?
     private var qualificationWatchdogID: UUID?
-    private var changeRevision: UInt64 = 0
-    private var changeObserver: (id: UUID, continuation: AsyncStream<UInt64>.Continuation)?
+    private var qualificationWatchdogDeadline: ContinuousClock.Instant?
+    private var observedQualificationGeneration: UUID?
+    private var changeObserver: (id: UUID, continuation: AsyncStream<Void>.Continuation)?
+    private var changedRooms: Set<RoomID> = []
+    private var changesNeedRescan = false
     // Controlled scheduler seam: production leaves this nil. The observer runs
     // only after the real lane/budget settlement, before Host state cleanup.
     private var reservationFinishObserver: (@Sendable (V2RoomReservation) async -> Void)?
@@ -86,29 +106,44 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
     /// The authenticated eligibility controller calls this after updating its
     /// shared proof. Membership alone never grants room ownership.
     public func qualificationDidChange() {
-        let probe = V2SynchronousActorTurnProbe.start("host_qualification_scan")
-        defer { probe?.finish() }
-        qualificationWatchdog?.cancel(); qualificationWatchdog = nil
-        qualificationWatchdogID = nil
         let proof = liveQualification()
-        if proof == nil || entries.values.contains(where: { $0.qualificationGeneration != proof?.generation }) {
+        let generationChanged = observedQualificationGeneration != proof?.generation
+        if generationChanged {
+            let probe = V2SynchronousActorTurnProbe.start("host_qualification_scan")
+            defer { probe?.finish() }
+            observedQualificationGeneration = proof?.generation
+            let stale = entries.values.filter { proof?.generation != $0.qualificationGeneration }
+            if proof == nil || !stale.isEmpty { authorityChanges.continuation.yield(()) }
+            for entry in stale { beginRetirement(entry, uncertain: true) }
+        } else if proof == nil {
             authorityChanges.continuation.yield(())
         }
-        for entry in Array(entries.values) where proof?.generation != entry.qualificationGeneration {
-            beginRetirement(entry, uncertain: true)
+        guard started, accepting, let proof else {
+            qualificationWatchdog?.cancel(); qualificationWatchdog = nil
+            qualificationWatchdogID = nil; qualificationWatchdogDeadline = nil
+            return
         }
-        guard started, accepting, let proof else { signalChange(); return }
+        // A healthy same-generation refresh may extend validity. The existing
+        // earlier watchdog will re-read that proof; no scan or replacement task
+        // is needed. A shortened deadline must replace it immediately.
+        if !generationChanged, qualificationWatchdog != nil,
+           let scheduled = qualificationWatchdogDeadline, scheduled <= proof.validUntil {
+            pumpActivations()
+            return
+        }
+        qualificationWatchdog?.cancel()
         let id = UUID(); qualificationWatchdogID = id
+        qualificationWatchdogDeadline = proof.validUntil
         qualificationWatchdog = Task { [weak self] in
             do { try await ContinuousClock().sleep(until: proof.validUntil) } catch { return }
             await self?.qualificationDeadlineReached(id)
         }
-        signalChange()
         pumpActivations()
     }
 
     private func qualificationDeadlineReached(_ id: UUID) {
         guard qualificationWatchdogID == id else { return }
+        qualificationWatchdog = nil; qualificationWatchdogID = nil; qualificationWatchdogDeadline = nil
         // An authenticated refresh may extend the same generation. Re-read its
         // exact current deadline, rather than treating an old timer as expiry.
         qualificationDidChange()
@@ -123,11 +158,19 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         liveQualification()?.generation == entry.qualificationGeneration
     }
 
+    /// Admission health is independent of room population. Session acquisition
+    /// must not materialize a room-statistics snapshot to read this scalar.
+    public var isAcceptingRequests: Bool { accepting && liveQualification() != nil }
+
+    package var retainedRestoreTimerCount: Int {
+        entries.values.reduce(0) { $0 + ($1.restoreTimer == nil ? 0 : 1) }
+    }
+
     public func snapshot() -> V2RoomActivationHostSnapshot {
         let probe = V2SynchronousActorTurnProbe.start("host_snapshot_scan")
         defer { probe?.finish() }
         return .init(
-            accepting: accepting && liveQualification() != nil,
+            accepting: isAcceptingRequests,
             activeRooms: entries.values.filter { $0.phase == .ready && isSafe($0) }.count,
             pendingRooms: pendingRooms,
             activationWaiters: waiterCount,
@@ -153,29 +196,63 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         (try? readyEntry(token)) != nil
     }
 
-    /// 单个本地观察者接收有界且合并后的变更信号，随后核对 `readyTokens()`。
-    /// 缓慢的观察者不能阻塞续期或 SQL。
-    public func changes() -> AsyncStream<UInt64> {
+    /// Exact candidates are checked in one actor turn; unrelated rooms are
+    /// never enumerated by ordinary reference cleanup.
+    public func readyTokens(among candidates: [V2RoomActivationToken]) -> Set<V2RoomActivationToken> {
+        Set(candidates.filter { (try? readyEntry($0)) != nil })
+    }
+
+    public nonisolated var roomCapacity: Int { configuration.maximumActiveRooms }
+
+    /// One observer owns the bounded coalesced delta. Wake coalescing does not
+    /// drop room IDs. Initial attachment or overflow requests one full rescan.
+    public func changes() -> V2RoomActivationChangeFeed {
         changeObserver?.continuation.finish()
         let id = UUID()
-        let (stream, continuation) = AsyncStream<UInt64>.makeStream(
+        let (stream, continuation) = AsyncStream<Void>.makeStream(
             bufferingPolicy: .bufferingNewest(1)
         )
         changeObserver = (id, continuation)
+        changedRooms = []; changesNeedRescan = true
         continuation.onTermination = { [weak self] _ in
             Task { await self?.removeChangeObserver(id: id) }
         }
-        continuation.yield(changeRevision)
-        return stream
+        continuation.yield(())
+        return .init(id: id, wakes: stream)
+    }
+
+    public func takeChanges(observerID: UUID) -> V2RoomActivationChanges? {
+        guard changeObserver?.id == observerID else { return nil }
+        if changesNeedRescan {
+            changesNeedRescan = false; changedRooms = []
+            return .rescan
+        }
+        let rooms = changedRooms; changedRooms = []
+        return .rooms(rooms)
+    }
+
+    public func stopObservingChanges(observerID: UUID) {
+        guard changeObserver?.id == observerID else { return }
+        changeObserver?.continuation.finish()
+        removeChangeObserver(id: observerID)
     }
 
     private func removeChangeObserver(id: UUID) {
-        if changeObserver?.id == id { changeObserver = nil }
+        if changeObserver?.id == id {
+            changeObserver = nil; changedRooms = []; changesNeedRescan = false
+        }
     }
 
-    private func signalChange() {
-        changeRevision &+= 1
-        changeObserver?.continuation.yield(changeRevision)
+    private func signalChange(roomID: RoomID) {
+        guard let observer = changeObserver else { return }
+        if !changesNeedRescan {
+            if changedRooms.contains(roomID) || changedRooms.count < configuration.maximumActiveRooms {
+                changedRooms.insert(roomID)
+            } else {
+                changedRooms = []; changesNeedRescan = true
+            }
+        }
+        observer.continuation.yield(())
     }
 
     public func activate(
@@ -211,9 +288,12 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                 throw V2RoomCallFailure.notAccepted(.retired)
             }
         } else {
-            guard entries.count < configuration.maximumActiveRooms,
-                  pendingRooms < configuration.maximumPendingActivations
-            else { throw V2RoomCallFailure.notAccepted(.overloaded) }
+            guard entries.count < configuration.maximumActiveRooms else {
+                throw V2RoomCallFailure.notAccepted(.roomCapacityExhausted)
+            }
+            guard pendingRooms < configuration.maximumPendingActivations else {
+                throw V2RoomCallFailure.notAccepted(.overloaded)
+            }
             let entry = Entry(roomID: roomID, owner: owner, qualificationGeneration: proof.generation)
             entries[roomID] = entry
             pendingRooms += 1
@@ -452,6 +532,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         accepting = false
         hostAdmission.close()
         qualificationWatchdog?.cancel(); qualificationWatchdog = nil; qualificationWatchdogID = nil
+        qualificationWatchdogDeadline = nil
         idleTask?.cancel()
         for entry in Array(entries.values) { beginRetirement(entry, uncertain: false) }
     }
@@ -552,10 +633,14 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
             let restoreDeadline = min(clock.now + configuration.callTimeout.duration,
                                       liveQualification()?.validUntil ?? clock.now)
             entry.restoreTimer = Task { [weak self] in
-                do { try await ContinuousClock().sleep(until: restoreDeadline) }
-                catch { return }
-                await self?.restoreTimedOut(roomID: roomID, generation: generation,
-                                            token: token)
+                do {
+                    try await ContinuousClock().sleep(until: restoreDeadline)
+                    await self?.restoreTimedOut(roomID: roomID, generation: generation, token: token)
+                } catch { }
+                // Cancel requests do not settle the task. Release its handle
+                // only after sleep/timeout handling actually returns; a late
+                // predecessor cannot clear a successor's deadline ownership.
+                await self?.restoreTimerSettled(roomID: roomID, generation: generation)
             }
             do {
                 let restoration = V2RoomActivationRestorationContext(token: token,
@@ -593,11 +678,12 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                     }
                 )
                 entry.phase = .ready
+                scheduleIdleProbe(entry, at: entry.lane!.idleDeadline(timeout: configuration.idleTimeout.duration))
                 authority.setPhase(.ready)
                 let handle = V2RoomExecutionHandle(token: token, lane: entry.lane!, authority: authority)
                 executionHandles.withLock { $0[roomID] = handle }
                 clearPending(entry)
-                signalChange()
+                signalChange(roomID: roomID)
                 completeWaiters(entry, result: .success(.ready(token)))
             } catch {
                 entry.restoreInFlight = false
@@ -679,6 +765,11 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         beginRetirement(entry, uncertain: true)
     }
 
+    private func restoreTimerSettled(roomID: RoomID, generation: UUID) {
+        guard let entry = entries[roomID], entry.generation == generation else { return }
+        entry.restoreTimer = nil
+    }
+
     private func scheduleAuthorityLoss(roomID: RoomID, generation: UUID, token: V2RoomActivationToken) {
         guard let entry = entries[roomID], entry.generation == generation,
               entry.token == token else { return }
@@ -687,6 +778,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
 
     private func beginRetirement(_ entry: Entry, uncertain: Bool) {
         guard entries[entry.roomID] === entry, entry.phase != .stopped else { return }
+        removeIdleProbe(entry)
         if entry.phase == .uncertain || (entry.phase == .draining && !uncertain) { return }
         let wasReady = entry.phase == .ready
         if uncertain { entry.phase = .uncertain; entry.idleRetirement = false }
@@ -699,7 +791,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                 if handles[entry.roomID]?.token == entry.token { handles.removeValue(forKey: entry.roomID) }
             }
         }
-        if wasReady { signalChange() }
+        if wasReady { signalChange(roomID: entry.roomID) }
         completeWaiters(entry, result: .failure(V2RoomCallFailure.notAccepted(
             uncertain ? .authorityLost : .retired
         )))
@@ -747,6 +839,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
             guard await lane.completeRetirement() else { return false }
         }
         entry.restoreTimer?.cancel()
+        removeIdleProbe(entry)
         clearPending(entry)
         entry.phase = .stopped
         entry.executionAuthority?.setPhase(.stopped)
@@ -762,6 +855,7 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
 
     private func finishPending(_ entry: Entry, result: Result<V2RoomActivationResolution, any Error>) {
         guard entries[entry.roomID] === entry else { return }
+        removeIdleProbe(entry)
         clearPending(entry)
         completeWaiters(entry, result: result)
         entries.removeValue(forKey: entry.roomID)
@@ -805,16 +899,42 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
         }
     }
 
+    private func scheduleIdleProbe(_ entry: Entry, at deadline: ContinuousClock.Instant) {
+        guard accepting, entries[entry.roomID] === entry, entry.phase == .ready else { return }
+        idleDeadlines.remove(entry.generation)
+        idleDeadlines.insert(id: entry.generation, deadline: deadline)
+        idleRooms[entry.generation] = entry.roomID
+    }
+
+    private func removeIdleProbe(_ entry: Entry) {
+        idleDeadlines.remove(entry.generation)
+        idleRooms.removeValue(forKey: entry.generation)
+    }
+
     private func idleLoop() async {
+        let interval = min(configuration.idleTimeout.duration, .seconds(1))
         while accepting {
-            do { try await clock.sleep(for: min(configuration.idleTimeout.duration, .seconds(1))) }
+            do { try await clock.sleep(for: interval) }
             catch { return }
             guard accepting else { return }
+            idleMaintenancePassCount &+= 1
             var probe = V2SynchronousActorTurnProbe.start("host_idle_scan")
-            for entry in Array(entries.values) where entry.phase == .ready && entry.inFlightCalls == 0 && (entry.executionAuthority?.inFlight ?? 0) == 0 {
-                guard let lane = entry.lane else { continue }
+            let cut = clock.now
+            while let due = idleDeadlines.first, due.deadline <= cut {
+                idleDeadlines.remove(due.id)
+                guard let roomID = idleRooms.removeValue(forKey: due.id), let entry = entries[roomID],
+                      entry.generation == due.id, entry.phase == .ready, let lane = entry.lane else { continue }
+                idleRoomProbeCount &+= 1
+                guard entry.inFlightCalls == 0, (entry.executionAuthority?.inFlight ?? 0) == 0 else {
+                    scheduleIdleProbe(entry, at: clock.now + interval)
+                    continue
+                }
+                let next = lane.idleDeadline(timeout: configuration.idleTimeout.duration)
+                if next > clock.now {
+                    scheduleIdleProbe(entry, at: next)
+                    continue
+                }
                 let cutoff = clock.now - configuration.idleTimeout.duration
-                guard !lane.wasActive(after: cutoff) else { continue }
                 probe?.finish(); probe = nil
                 let claimed = await lane.beginIdleDrain(ifLastActivityAtOrBefore: cutoff)
                 probe = V2SynchronousActorTurnProbe.start("host_idle_scan")
@@ -822,6 +942,9 @@ public actor V2RoomActivationHost<Request: Sendable, Response: Sendable> {
                 if claimed {
                     entry.idleRetirement = true
                     beginRetirement(entry, uncertain: false)
+                } else {
+                    scheduleIdleProbe(entry, at: max(clock.now + interval,
+                        lane.idleDeadline(timeout: configuration.idleTimeout.duration)))
                 }
             }
             probe?.finish()

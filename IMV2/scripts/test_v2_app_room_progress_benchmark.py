@@ -32,26 +32,18 @@ class AppRoomProgressBenchmarkTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'no_history_removed'):
                     trim_owned_app_journal(args, 'imv2_va_actor_candidate_0123456789ab')
 
-    def test_trim_rejects_missing_or_changed_cursor_proof(self):
+    def test_trim_uses_only_current_journal_schema(self):
         args = SimpleNamespace(pg_host='127.0.0.1', pg_port=18539,
             pg_user='fixture', pg_bin_directory=Path('/fixture'))
-        for proof, failure in [({}, 'no_consumer_cursors_checked'),
-                ({'consumerCursorRowsChecked': 2}, 'consumer_cursors_changed'),
-                ({'consumerCursorRowsChecked': 2, 'consumerCursorsPreserved': False}, 'consumer_cursors_changed')]:
-            import json
-            output = json.dumps(dict(advancedPartitions=1, removedEntries=3, **proof))
-            with patch('run_v2_actor_realtime_benchmark.subprocess.run',
-                    return_value=SimpleNamespace(returncode=0, stdout=output)):
-                with self.assertRaisesRegex(RuntimeError, failure):
-                    trim_owned_app_journal(args, 'imv2_va_actor_candidate_0123456789ab')
-
-    def test_trim_accepts_measured_empty_consumer_set(self):
-        args = SimpleNamespace(pg_host='127.0.0.1', pg_port=18539,
-            pg_user='fixture', pg_bin_directory=Path('/fixture'))
-        output = '{"advancedPartitions":1,"removedEntries":3,"consumerCursorRowsChecked":0,"consumerCursorsPreserved":true}'
+        output = '{"advancedPartitions":1,"removedEntries":3}'
         with patch('run_v2_actor_realtime_benchmark.subprocess.run',
-                return_value=SimpleNamespace(returncode=0, stdout=output)):
-            self.assertEqual(trim_owned_app_journal(args, 'imv2_va_actor_candidate_0123456789ab')['consumerCursorRowsChecked'], 0)
+                return_value=SimpleNamespace(returncode=0, stdout=output)) as run:
+            self.assertEqual(trim_owned_app_journal(args, 'imv2_va_actor_candidate_0123456789ab')['removedEntries'], 3)
+            sql = run.call_args.args[0][-1]
+            self.assertIn('FOR UPDATE', sql)
+            self.assertIn('published_through AS cut', sql)
+            self.assertNotIn('realtime_journal_consumer', sql)
+            self.assertNotIn('UPDATE im_v2.room', sql)
 
     def test_mode_selection_source_result_and_existing_modes(self):
         for flag,module,result in [('app_outbox_canary','v2_app_outbox_canary','app-outbox-canary.json'),

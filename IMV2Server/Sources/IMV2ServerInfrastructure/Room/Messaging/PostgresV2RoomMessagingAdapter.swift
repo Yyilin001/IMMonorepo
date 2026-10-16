@@ -14,12 +14,11 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     private let mutations: PostgresV2MessageMutationOperationStore?
     private let reactionOperations: PostgresV2MessageReactionOperationStore?
     private let capacityProfile: V2CapacityProfile
-    private let identifiers: V2AcceptanceIDFactory
     private let maximumEditBytes: Int
     private let now: @Sendable () -> Date
 
     init(token: V2RoomActivationToken,
-         capacityProfile: V2CapacityProfile, identifiers: V2AcceptanceIDFactory,
+         capacityProfile: V2CapacityProfile,
          maximumEditBytes: Int, now: @escaping @Sendable () -> Date,
          mutations: PostgresV2MessageMutationOperationStore?,
          sendOperations: PostgresV2MessageSendOperationStore?,
@@ -27,8 +26,10 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
          sendOperationOwnerBatcher: V2DurableSendOperationOwnerBatcher?,
          directSendPreparation: V2RoomSendPreparation?) throws {
         _ = try V2RoomActivationWriteScope(tokens: [token])
-        guard sendOperations == nil || directSendPreparation != nil else {
-            throw V2ActorContractError.invalidConfiguration("message policy preparation required")
+        guard sendOperations == nil
+            ? (directSendPreparation == nil && sendOperationOwnerBatcher == nil)
+            : (directSendPreparation != nil && sendOperationOwnerBatcher != nil) else {
+            throw V2ActorContractError.invalidConfiguration("message send preparation and scheduler required")
         }
         self.token = token
         self.sendOperations = sendOperations
@@ -37,7 +38,6 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
         self.mutations = mutations
         self.reactionOperations = reactionOperations
         self.capacityProfile = capacityProfile
-        self.identifiers = identifiers
         self.maximumEditBytes = maximumEditBytes
         self.now = now
     }
@@ -88,7 +88,7 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
     func prepareSendOperationBatch(_ commands: [V2MessageSendOperationCommand],
                                    deadline: ContinuousClock.Instant) async throws -> V2PreparedRoomSendOperationBatch {
         V2SendPathTrace.current?.mark("persistence_prepare_enter")
-        guard let sendOperations, let prepare = directSendPreparation else {
+        guard let batcher = sendOperationOwnerBatcher, let prepare = directSendPreparation else {
             throw V2RoomCallFailure.notAccepted(.invalidRequest)
         }
         let startedAt = ContinuousClock.now
@@ -97,11 +97,7 @@ struct PostgresV2RoomMessagingAdapter: V2RoomMessagingPersisting {
         let trace = V2SendPathTrace.current
         return .init {
             try await V2SendPathTrace.$current.withValue(trace) {
-                if let batcher = self.sendOperationOwnerBatcher {
-                    return try await batcher.execute(prepared)
-                }
-                return try await sendOperations.executePreparedSendBatch(prepared,
-                    capacityProfile: self.capacityProfile, identifiers: self.identifiers, now: self.now)
+                return try await batcher.execute(prepared)
             }
         }
     }
@@ -111,7 +107,6 @@ public extension V2RoomMessagingExecutor {
     init(token: V2RoomActivationToken,
          capacityProfile: V2CapacityProfile,
          limits: V2MessageCommandLimits, maximumEditBytes: Int,
-         identifiers: V2AcceptanceIDFactory = .init(),
          now: @escaping @Sendable () -> Date = Date.init,
          mutations: PostgresV2MessageMutationOperationStore? = nil,
          sendOperations: PostgresV2MessageSendOperationStore? = nil,
@@ -119,7 +114,7 @@ public extension V2RoomMessagingExecutor {
          directSendPreparation: V2RoomSendPreparation? = nil,
          reactionOperations: PostgresV2MessageReactionOperationStore? = nil) throws {
         let adapter = try PostgresV2RoomMessagingAdapter(token: token,
-            capacityProfile: capacityProfile, identifiers: identifiers,
+            capacityProfile: capacityProfile,
             maximumEditBytes: maximumEditBytes, now: now, mutations: mutations,
             sendOperations: sendOperations, reactionOperations: reactionOperations,
             sendOperationOwnerBatcher: sendOperationOwnerBatcher,

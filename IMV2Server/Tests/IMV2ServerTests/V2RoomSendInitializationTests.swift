@@ -2,6 +2,7 @@ import Foundation
 import FluentKit
 import IMV2ActorContracts
 import IMV2Core
+import IMV2ServerContracts
 @testable import IMV2ServerInfrastructure
 @testable import IMV2ServerApplication
 import SQLKit
@@ -24,7 +25,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     """).run()
             }
             try await withRoomActivation(database: database, roomID: roomID) { token in
-                let initialization = try await v2RestoreRoomSendInitialization(database: database, token: token)
+                let observations = V2DatabaseLoanObservationRegistry()
+                let loan = observations.make(source: .query, at: .now)
+                loan.granted(at: .now); loan.driverEntered()
+                defer { loan.finish() }
+                let observed = v2ObserveBorrowedDatabase(database, observation: loan)
+                let initialization = try await v2RestoreRoomSendInitialization(database: observed, token: token)
+                #expect(observations.snapshot()[.query]?.sqlPhases[.other]?.count == 1)
+                #expect(observations.snapshot()[.query]?.sqlPhases[.transactionControl]?.count == 0)
                 #expect(initialization.kind == (direct ? "direct" : "group"))
                 #expect((initialization.directState != nil) == direct)
                 if let state = initialization.directState {
@@ -80,7 +88,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 await directory.retire(token: token)
                 memory.invalidate(token)
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: roomUUID)").run()
-                await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                await #expect(throws: V2RoomOwnerFenceError.ownerChanged) {
                     _ = try await v2RestoreRoomSendInitialization(database: database, token: token)
                 }
                 await directory.shutdown()

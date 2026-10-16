@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import IMV2ActorContracts
 @testable import IMV2ServerApplication
 @testable import IMV2ServerInfrastructure
@@ -6,6 +7,49 @@ import Testing
 
 @Suite("versioned memory policy snapshots", .timeLimit(.minutes(1)))
 struct V2PolicyFactsSnapshotCacheTests {
+    @Test("room-sized capacity retains a working set larger than the former fixed node threshold")
+    func roomSizedWorkingSet() async throws {
+        let capacity = try V2NodePolicyStateCache.capacityForActiveRooms(7_000)
+        let evictions = Mutex(0), source = SnapshotCacheSource()
+        let cache = V2NodePolicyStateCache(maximumEntries: capacity, observe: { event in
+            if case .capacityEviction = event { evictions.withLock { $0 += 1 } }
+        })
+        let scopes = (0..<35_000).map { _ in V2PolicyAuthorizationScope.account(UUID()) }
+        for offset in stride(from: 0, to: scopes.count, by: 4) {
+            _ = try await cache.loadSnapshots(scopes: Array(scopes[offset..<min(offset + 4, scopes.count)]), loader: source.read)
+        }
+        let reads = await source.reads
+        #expect(try await cache.cachedSnapshots(scopes: Array(scopes.prefix(4)))?.count == 4)
+        #expect(try await cache.cachedSnapshots(scopes: Array(scopes.suffix(4)))?.count == 4)
+        #expect(await source.reads == reads)
+        #expect(evictions.withLock { $0 } == 0)
+        await cache.shutdown()
+    }
+
+    @Test("invalid and overflowing room capacities cannot create unbounded policy retention")
+    func invalidRoomCapacity() {
+        #expect(throws: V2ActorContractError.self) { try V2NodePolicyStateCache.capacityForActiveRooms(0) }
+        #expect(throws: V2ActorContractError.self) { try V2NodePolicyStateCache.capacityForActiveRooms(Int.max) }
+    }
+
+    @Test("capacity eviction is counted independently of cold reads, updates and explicit invalidation")
+    func capacityEvictionObservation() async throws {
+        let evictions = Mutex(0), source = SnapshotCacheSource()
+        let cache = V2NodePolicyStateCache(maximumEntries: 1, observe: { event in
+            if case .capacityEviction = event { evictions.withLock { $0 += 1 } }
+        })
+        let first = V2PolicyAuthorizationScope.account(UUID()), second = V2PolicyAuthorizationScope.account(UUID())
+        _ = try await cache.loadSnapshots(scopes: [first], loader: source.read)
+        try await cache.install(source.snapshot(first, version: 2, active: false))
+        #expect(evictions.withLock { $0 } == 0)
+        _ = try await cache.loadSnapshots(scopes: [second], loader: source.read)
+        #expect(evictions.withLock { $0 } == 1)
+        await cache.invalidate(second)
+        _ = try await cache.loadSnapshots(scopes: [first], loader: source.read)
+        #expect(evictions.withLock { $0 } == 1)
+        await cache.shutdown()
+    }
+
     @Test("a shared cold loader keeps its initiating send trace across the detached boundary")
     func coldLoaderTrace() async throws {
         let cache = V2NodePolicyStateCache(), source = SnapshotCacheSource()

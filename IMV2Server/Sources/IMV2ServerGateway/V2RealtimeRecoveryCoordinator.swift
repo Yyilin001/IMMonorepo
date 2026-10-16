@@ -644,6 +644,17 @@ actor V2RealtimeRecoveryCoordinator {
             if let proof = preparedPresenceObservations[key], proof.deadline <= .now {
                 preparedPresenceObservations.removeValue(forKey: key)
             }
+            if pendingRecoveryStates[key] == nil, interestIsAcquired(key, demand: demand),
+               let current = realtimeCoverageConfirmation,
+               current(key.kind, key.id).map({ $0.deadline > .now }) != true {
+                // The native interest owner restores coverage and calls
+                // realtimeCoverageReady. Keep the demand/H on its primary
+                // node, but own no queue slot, task or per-scope polling timer.
+                // A pending Recovering transition still runs once so the
+                // socket is informed before this wait begins.
+                realtimeRecoveryDemands.setScheduling(nil, for: key, now: .now)
+                return
+            }
         }
         let kind = recoveryServiceClass(key, demand: demand)
         var refreshAt: ContinuousClock.Instant?
@@ -672,6 +683,26 @@ actor V2RealtimeRecoveryCoordinator {
 
     nonisolated func schedulingTelemetrySnapshot() -> V2RecoverySchedulingSnapshot {
         schedulingTelemetry.snapshot()
+    }
+
+    /// Diagnostic-only actor-local read; no provider, RPC, timer or recovery work.
+    func accountCoverageDiagnostic(connectionID: UUID) -> V2GatewayCoverageDiagnostics.Recovery {
+        let captured = context(connectionID)
+        let key = RecoveryKey(connection: connectionID, kind: .userSync,
+            id: captured?.handle.identity.userID.rawValue ?? "")
+        let demand = realtimeRecoveryDemands[key]
+        let confirmation = realtimeCoverageConfirmation?(key.kind, key.id)
+        return .init(current: captured != nil, generation: scopeGenerations[key], demand: demand != nil,
+            attempts: demand?.attempts,
+            placement: realtimeRecoveryDemands.scheduling(for: key).map { String(describing: $0.placement) },
+            installed: installedScopes.contains(key),
+            interestAcquired: demand.map { interestIsAcquired(key, demand: $0) }
+                ?? (accountInterestAcquisitions[connectionID] != nil),
+            currentCoverage: confirmation != nil,
+            validCoverage: confirmation.map { $0.deadline > .now && realtimeCoverageValidation?(key.kind, key.id, $0) == true } ?? false,
+            retainedReady: retainedConfirmations[key] != nil, pendingRecovering: pendingRecoveryStates[key] != nil,
+            actualJob: recoveryJobIDs[key] != nil, outbound: outboundRecoveryTickets[key] != nil,
+            requiredHead: recoveryHeadRequirements[key], retainedHead: scopeRetentionReceipts[key]?.highWatermark)
     }
 
     func schedulingOwnershipSnapshot() -> (scheduler: Int, wake: Int) {
@@ -1151,7 +1182,12 @@ actor V2RealtimeRecoveryCoordinator {
                 // Retain independently merged H, but obtain fresh authority.
                 retry.hintOnly = false; retry.notificationValidity = nil; retry.version = UUID()
             }
-            retry.nextAttempt = max(retry.nextAttempt, .now + .milliseconds(100))
+            // Persistent write refusal must not turn thousands of retained
+            // scopes into a fixed 10 Hz recovery loop. The existing indexed
+            // deadline heap owns retries; there is no sleeping task per scope.
+            retry.attempts = min(7, retry.attempts + 1)
+            let delay = min(5_000, 100 * (1 << (retry.attempts - 1)))
+            retry.nextAttempt = max(retry.nextAttempt, .now + .milliseconds(delay))
             setRecoveryDemand(key, retry)
         }
         if realtimeRecoveryDemands[key] != nil { queueRecoveryScope(key) }
@@ -1834,7 +1870,15 @@ actor V2RealtimeRecoveryCoordinator {
         confirms: @escaping @Sendable (V2RealtimeTopic, V2RealtimeCoverageConfirmation) -> Bool) async {
         for (topic, confirmation) in confirmations where confirms(topic, confirmation) {
             for connection in connectionsWithInterest(in: topic) {
-                queueScopeRetention(.init(connection: connection, kind: topic.kind, id: topic.id),
+                let key = RecoveryKey(connection: connection, kind: topic.kind, id: topic.id)
+                if var demand = realtimeRecoveryDemands[key], !isRecoveryOwned(key),
+                   realtimeRecoveryDemands.scheduling(for: key) == nil, scopeIsCurrent(key, demand) {
+                    // A fresh authoritative callback wakes coverage waiters
+                    // immediately, independent of a previous failed handoff.
+                    demand.nextAttempt = .now; demand.attempts = 0
+                    setRecoveryDemand(key, demand)
+                }
+                queueScopeRetention(key,
                     highWatermark: confirmation.highWatermark, schedule: false)
             }
         }

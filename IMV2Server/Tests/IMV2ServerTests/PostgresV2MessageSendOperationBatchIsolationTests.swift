@@ -47,11 +47,15 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             let replay = try valid("original"), before = try valid("before"), after = try valid("after")
             try await withRoomActivation(database: database, roomID: operationRoom) { token in
+                let batcher = V2DurableSendOperationOwnerBatcher(fixtureStore: store,
+                    connectionCapacity: 1, capacityProfile: profile, now: { now },
+                    configuration: .init(), maximumRetainedBytes: 4_194_304)
                 let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                     now: { now }, sendOperations: store,
+                    sendOperationOwnerBatcher: batcher,
                     directSendPreparation: policies.fixtureSendPreparation(store: store, now: { now }))
-                #expect(throws: V2ActorContractError.invalidConfiguration("message policy preparation required")) {
+                #expect(throws: V2ActorContractError.invalidConfiguration("message send preparation and scheduler required")) {
                     try V2RoomMessagingExecutor(token: token, capacityProfile: profile,
                         limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64, now: { now }, sendOperations: store)
                 }
@@ -84,6 +88,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     fingerprint: invalid.fingerprint, domainFingerprint: invalid.command.fingerprint)
                 #expect(try await store.recover(recovery, token: token) == .unresolved)
                 #expect(try await executor.executeSendOperationBatch(batch) == results)
+                await batcher.shutdown()
             }
             #expect(try await count("im_v2.messages", on: sql) == 3)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 3)
@@ -176,13 +181,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "must reject third member",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             try await withRoomActivation(database: database, roomID: directRoom) { token in
+                let batcher = V2DurableSendOperationOwnerBatcher(fixtureStore: store,
+                    connectionCapacity: 1, capacityProfile: profile, now: { now },
+                    configuration: .init(), maximumRetainedBytes: 4_194_304)
                 let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: profile, limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
                     now: { now }, sendOperations: store,
+                    sendOperationOwnerBatcher: batcher,
                     directSendPreparation: policies.fixtureSendPreparation(store: store, now: { now }))
                 await #expect(throws: V2RoomWriteStoreError.corruptPersistenceState) {
                     _ = try await executor.executeSendOperationBatch([command])
                 }
+                await batcher.shutdown()
             }
             #expect(try await count("im_v2.messages", on: sql) == 0)
             #expect(try await count("im_v2.message_send_completions", on: sql) == 0)
@@ -207,13 +217,18 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "valid",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
             try await withRoomActivation(database: database, roomID: roomID) { token in
+                let batcher = V2DurableSendOperationOwnerBatcher(fixtureStore: store,
+                    connectionCapacity: 1, capacityProfile: try .init(id: "wrong-deployment-profile", limits: profile.limits), now: { now },
+                    configuration: .init(), maximumRetainedBytes: 4_194_304)
                 let executor = try V2RoomMessagingExecutor(token: token,
                     capacityProfile: .init(id: "wrong-deployment-profile", limits: profile.limits),
                     limits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64, now: { now }, sendOperations: store,
+                    sendOperationOwnerBatcher: batcher,
                     directSendPreparation: policies.fixtureSendPreparation(store: store, now: { now }))
                 await #expect(throws: V2RoomWriteStoreError.capacityProfileMismatch) {
                     _ = try await executor.executeSendOperationBatch([command, command])
                 }
+                await batcher.shutdown()
             }
             let stages = metrics.sendOperationBatchMetricsSnapshot().stages
             #expect(stages.values.allSatisfy { $0.inFlight == 0 })

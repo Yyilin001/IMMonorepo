@@ -161,6 +161,8 @@ public struct V2RoomSQLContinuationSnapshot: Equatable, Sendable {
 /// Counters for the durable sendOperation path, independent of scalar append batching.
 public enum V2PolicyMemoryEvent: String, CaseIterable, Sendable {
     case snapshotProbeHit = "snapshot_probe_hit", snapshotProbeMiss = "snapshot_probe_miss"
+    case nodeSnapshotEviction = "node_snapshot_eviction", ownerSnapshotEviction = "owner_snapshot_eviction"
+    case snapshotReleaseReset = "snapshot_release_reset"
 }
 
 public struct V2SendOperationBatchMetricsSnapshot: Equatable, Sendable {

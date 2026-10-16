@@ -8,6 +8,9 @@ import IMV2Core
 import Synchronization
 
 actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
+    // Bound inline codec work by the already prepared model cost and received
+    // reply bytes. This only selects execution; wire admission limits are unchanged.
+    private static let maximumInlineMessageCodecBytes = 16_384
     package func writePlacement(_ request: V2PlacementRaftWire, on host: V2ActorHostIdentity,
         deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
         guard request.isBounded else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
@@ -419,6 +422,8 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     public func tryInvokeCached(_ token: V2RoomActivationToken, request: V2RoomRequest,
                                 principal: V2RoomClientPrincipal,
                                 deadline: ContinuousClock.Instant) async throws -> V2CachedRoomCallResult {
+        V2SendPathTrace.current?.mark("peer_cached_enter")
+        defer { V2SendPathTrace.current?.mark("peer_cached_return") }
         guard request.permitsCachedCall, request.roomID == token.roomID else { return .cacheMiss }
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
         guard !suspendedHosts.contains(token.host), descriptors[token.host] != nil,
@@ -431,6 +436,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             let reply = try await exchange(.invoke(token: token, request: request), on: token.host,
                 principal: principal.actorPrincipal, deadline: deadline, roomToken: token,
                 requireCachedReference: true)
+            V2SendPathTrace.current?.mark("peer_cached_resumed")
             switch reply {
             case .result(let result): return .response(result)
             case .failure(let failure): throw failure
@@ -705,6 +711,10 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let sendTrace: V2SendPathTrace?
         if case .invoke(_, .messaging(.sendOperation(_))) = request { sendTrace = V2SendPathTrace.current }
         else { sendTrace = nil }
+        let inlineMessageCodec: Bool
+        if case .invoke(_, .messaging(.sendOperation(let command))) = request {
+            inlineMessageCodec = command.estimatedRetainedBytes <= Self.maximumInlineMessageCodecBytes
+        } else { inlineMessageCodec = false }
         sendTrace?.mark("rpc_exchange_enter")
         defer { sendTrace?.mark("rpc_exchange_return") }
         let permittedSuspendedCleanup = permitsPinnedCleanup(request, host: host)
@@ -797,7 +807,17 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         if isLocal {
             remotePacket = nil
         } else {
-            do { remotePacket = try await signRequest(call, mac: live.mac, maximumBytes: requestBytes) }
+            do {
+                sendTrace?.mark("rpc_signing_dispatch")
+                if inlineMessageCodec {
+                    sendTrace?.mark("rpc_request_codec_inline")
+                    remotePacket = try signRequest(call, mac: live.mac, maximumBytes: requestBytes)
+                } else {
+                    sendTrace?.mark("rpc_request_codec_offloaded")
+                    remotePacket = try await signRequestOffloaded(call, mac: live.mac, maximumBytes: requestBytes)
+                }
+                sendTrace?.mark("rpc_signing_resumed")
+            }
             catch { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         }
         guard accepting, descriptorGenerations[host] == generation,
@@ -880,7 +900,16 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         sendTrace?.mark("rpc_transport_return")
         do {
-            let response = try await verifyReply(transportReply, for: call, mac: live.mac, maximumBytes: replyBytes)
+            sendTrace?.mark("rpc_reply_verification_dispatch")
+            let response: V2ActorRPCResponse
+            if inlineMessageCodec, transportReply.codecBytes <= Self.maximumInlineMessageCodecBytes {
+                sendTrace?.mark("rpc_reply_codec_inline")
+                response = try verifyReply(transportReply, for: call, mac: live.mac, maximumBytes: replyBytes)
+            } else {
+                sendTrace?.mark("rpc_reply_codec_offloaded")
+                response = try await verifyReplyOffloaded(transportReply, for: call, mac: live.mac, maximumBytes: replyBytes)
+            }
+            sendTrace?.mark("rpc_reply_verification_resumed")
             // 节点替换不会使已分发调用的正确签名响应失效。
             // 旧令牌不能授权新激活，但调用方必须收到实际结果。
             if case .failure(let failure) = response {
@@ -901,13 +930,27 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
     }
 
-    @concurrent private nonisolated func signRequest(_ call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?,
+    @concurrent private nonisolated func signRequestOffloaded(_ call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?,
         maximumBytes: Int) async throws -> V2ActorSignedPacket {
+        try signRequest(call, mac: mac, maximumBytes: maximumBytes)
+    }
+    private nonisolated func signRequest(_ call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?,
+        maximumBytes: Int) throws -> V2ActorSignedPacket {
+        let trace = V2SendPathTrace.current
+        trace?.mark("rpc_signing_enter")
+        defer { trace?.mark("rpc_signing_return") }
         if let mac { return try mac.seal(call, reply: false, maximumBytes: maximumBytes) }
         return try signer.sign(call, maximumBytes: maximumBytes)
     }
-    @concurrent private nonisolated func verifyReply(_ reply: TransportReply,
+    @concurrent private nonisolated func verifyReplyOffloaded(_ reply: TransportReply,
         for call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?, maximumBytes: Int) async throws -> V2ActorRPCResponse {
+        try verifyReply(reply, for: call, mac: mac, maximumBytes: maximumBytes)
+    }
+    private nonisolated func verifyReply(_ reply: TransportReply,
+        for call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?, maximumBytes: Int) throws -> V2ActorRPCResponse {
+        let trace = V2SendPathTrace.current
+        trace?.mark("rpc_reply_verification_enter")
+        defer { trace?.mark("rpc_reply_verification_return") }
         switch reply {
         case .signed(let packet):
             if let mac {
@@ -1616,6 +1659,12 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private enum TransportReply: Sendable {
         case signed(V2ActorSignedPacket)
         case local(V2ActorLocalPayload<V2ActorAuthenticatedReply>)
+        var codecBytes: Int {
+            switch self {
+            case .signed(let packet): packet.body.count
+            case .local(let payload): payload.byteCount
+            }
+        }
     }
 
     private struct HandshakeWaiter {

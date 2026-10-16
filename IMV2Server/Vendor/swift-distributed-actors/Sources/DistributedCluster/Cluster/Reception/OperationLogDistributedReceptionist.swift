@@ -1030,9 +1030,12 @@ extension OpLogDistributedReceptionist {
     func pruneClusterMember(removedNode: Cluster.Node) {
         self.log.trace("Pruning cluster member: \(removedNode)")
         let terminatedReceptionistID = ActorID._receptionist(on: removedNode, for: .distributedActors)
-        let equalityHackPeer = try! Self.resolve(id: terminatedReceptionistID, using: actorSystem)  // try!-safe because we know the address is correct and remote
-
-        guard self.peerReceptionistReplayers.removeValue(forKey: equalityHackPeer) != nil else {
+        // A late membership event can arrive after the system has removed its
+        // managed actors. Removing an existing peer must not resolve a new actor
+        // through that already-shut-down system just to obtain an equality key.
+        guard let peer = self.peerReceptionistReplayers.keys.first(where: { $0.id == terminatedReceptionistID }),
+            self.peerReceptionistReplayers.removeValue(forKey: peer) != nil
+        else {
             // we already removed it, so no need to keep scanning for it.
             // this could be because we received a receptionist termination before a node down or vice versa.
             //

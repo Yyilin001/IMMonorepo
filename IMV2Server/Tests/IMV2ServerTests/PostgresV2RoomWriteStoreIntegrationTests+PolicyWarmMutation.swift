@@ -57,10 +57,12 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let sendDatabase = try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 2, reservedRenewalConnections: 0,
                     maximumQueued: 32, maximumWait: .seconds(10)), sessionTimeouts: .default)
+            // Session readiness precedes fixed workers retaining the write pool.
+            try await V2PostgresSessionReadiness.verify(database: sendDatabase, timeouts: .default)
             let initializationReader = try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 1, reservedRenewalConnections: 0,
                     maximumQueued: 32, maximumWait: .seconds(10)))
-            let resources = try V2RoomServerOwnerResources(database: initializationReader, sendDatabase: sendDatabase, writes: writes,
+            let resources = try V2RoomServerOwnerResources(database: initializationReader, initializationDatabase: initializationReader, sendDatabase: sendDatabase, writes: writes,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: owner),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: owner),
                 invitationSecretIssuer: .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -87,19 +89,28 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 do {
                     var tokens: [V2RoomActivationToken] = []
                     for room in rooms {
+                        stage = "initial activation \(tokens.count + 1)"
                         guard case .ready(let token) = try await host.activate(roomID: room,
                             owner: .init(shardID: "room-b", epoch: 0), deadline: .now + .seconds(10)) else {
                             throw V2RoomCallFailure.notAccepted(.notReady)
                         }
                         tokens.append(token)
-                        let response = try await warmMutationColdSendWithHeldWrites(reader: initializationReader, writer: sendDatabase) {
+                        stage = "initial send \(tokens.count)"
+                        let send: @Sendable () async throws -> V2RoomResponse = {
                             try await host.invoke(token: token,
                                 request: warmMutationRequest(room: room, text: "before change"), deadline: .now + .seconds(10))
                         }
+                        let response: V2RoomResponse
+                        if tokens.count == 1 {
+                            // Fixed write workers start on the first send and retain
+                            // their connections. Occupy the budget before they start.
+                            response = try await warmMutationColdSendWithHeldWrites(
+                                reader: initializationReader, writer: sendDatabase, send: send)
+                        } else { response = try await send() }
                         try warmMutationAccepted(response)
                     }
                     #expect(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState]?.count == 2)
-                    try await V2PostgresSessionReadiness.verify(database: sendDatabase, timeouts: .default)
+                    stage = "initial policy projection"
                     let initialProfileEvents = try await ownerSQL.raw("""
                         SELECT count(*)::bigint AS value FROM im_v2.user_state_event_outbox
                         WHERE source_room_id=\(bind: rooms[0].uuidValue!) AND user_id=\(bind: memberTwoUUID)
@@ -196,7 +207,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     // room registration and owner SQL remain absent.
                     let policySample = try #require(coldMetrics.sendOperationBatchMetricsSnapshot().stages[.policyOwnerState])
                     #expect(policySample.count == 6 && policySample.inFlight == 0)
-                    #expect(sendDatabase.loanMetricsSnapshot().classes[.ordinary]?.inFlight == 0)
+                    #expect(resources.sendOperationMetrics.sendOperationBatchMetricsSnapshot().inFlightBatches == 0)
+                    #expect(sendDatabase.loanMetricsSnapshot().classes[.ordinary]?.queued == 0)
                     #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[0].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 2)
                     #expect(try await ownerSQL.raw("SELECT count(*)::bigint AS value FROM im_v2.messages WHERE room_id=\(bind: rooms[1].uuidValue!)").first(decoding: WarmMutationCount.self)?.value == 3)
                     for (isOwner, table) in renamed {
@@ -277,6 +289,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     let proof = try #require(drained.proof)
                     try await placement.retireAfterDrain(proof, shards: ["room-b"])
                     await resources.shutdownDurableSendOperations()
+                    #expect(sendDatabase.loanMetricsSnapshot().classes.values.allSatisfy {
+                        $0.inFlight == 0 && $0.queued == 0
+                    })
                     try await policies.shutdown(); await owners.shutdown()
                 } catch {
                     Issue.record("Warm policy scenario failed during \(stage)")
@@ -320,9 +335,9 @@ private func warmMutationColdSendWithHeldWrites(reader: V2EventLoopBalancedDatab
         // Activation has already installed the room state. Cold policy loading
         // must finish while write slots are occupied; persistence alone queues.
         try await warmMutationObserve {
-            writer.loanMetricsSnapshot().classes[.ordinary]?.queued == 1
+            (writer.loanMetricsSnapshot().classes[.ordinary]?.queued ?? 0) > 0
         }
-        #expect(reader.loanMetricsSnapshot().classes[.activation]?.granted ?? 0 > 0)
+        #expect(reader.loanMetricsSnapshot().classes[.ordinary]?.granted ?? 0 > 0)
         #expect(reader.loanMetricsSnapshot().observations[.roomSendInitialization]?.actualHeldCount ?? 0 == before)
         #expect(writer.loanMetricsSnapshot().classes[.ordinary]?.inFlight == 2)
         #expect(writer.loanMetricsSnapshot().observations[.roomSendInitialization]?.actualHeldCount ?? 0 == 0)

@@ -95,7 +95,7 @@ struct V2RoomSubscriptionEventLoopOwnershipTests {
             try await f.baseline(authority)
             let old = try #require(await authority.capturePermits(roomID: f.room).first)
             let account = try #require(await authority.captureOnlinePermits(roomID: f.room).first)
-            await authority.removeRoomInterest(connectionID: f.connection, lifecycle: f.lifecycle, roomID: f.room)
+            await authority.removeRoomInterest(connectionID: f.connection, lifecycle: f.lifecycle, roomID: f.room, scopeGeneration: 1)
             #expect(try await loop.submit { authority.enqueueIfCurrent(old, enqueue: {}) }.get() == false)
             #expect(try await loop.submit { authority.enqueueIfCurrent(account, enqueue: {}) }.get())
             #expect(await authority.registerRoomInterest(connectionID: f.connection, lifecycle: f.lifecycle,

@@ -1,6 +1,7 @@
 import Crypto
 import Foundation
 import IMV2ActorContracts
+import Synchronization
 
 public struct V2ActorAuthenticationLimits: Sendable {
     public let maximumRequestBytes: Int
@@ -66,16 +67,31 @@ final class V2ActorLocalCapability: Sendable {
 /// 宿主签发的会话随机数提供重放保护，无须信任远程墙上时钟，
 /// 也无须保留每次历史尝试。随机数过期后即失效，
 /// 即使其重放窗口已从内存移除也不会重新有效。
-public actor V2ActorSessionAuthenticator {
+public final class V2ActorSessionAuthenticator: Sendable {
     private let host: V2ActorHostIdentity
     private let trust: V2ActorTrustStore
     private let limits: V2ActorAuthenticationLimits
     private let now: @Sendable () -> ContinuousClock.Instant
     private let localIssuer = UUID()
-    private var sessions: [UUID: Session] = [:]
-    private var helloSessions: [HelloKey: UUID] = [:]
-    private var serviceCounts: [V2ActorServiceID: Int] = [:]
-    private var nextExpiry: ContinuousClock.Instant?
+    private struct Catalog: Sendable {
+        var sessions: [UUID: Session] = [:]
+        var helloSessions: [HelloKey: UUID] = [:]
+        var serviceCounts: [V2ActorServiceID: Int] = [:]
+        var nextExpiry: ContinuousClock.Instant?
+
+        mutating func prune(at instant: ContinuousClock.Instant) {
+            guard let nextExpiry, nextExpiry <= instant else { return }
+            for (id, session) in sessions where session.expires <= instant {
+                sessions.removeValue(forKey: id)
+                helloSessions.removeValue(forKey: session.key)
+                let remaining = serviceCounts[session.key.serviceID, default: 1] - 1
+                if remaining == 0 { serviceCounts.removeValue(forKey: session.key.serviceID) }
+                else { serviceCounts[session.key.serviceID] = remaining }
+            }
+            self.nextExpiry = sessions.values.map(\.expires).min()
+        }
+    }
+    private let catalog = Mutex(Catalog())
 
     public init(host: V2ActorHostIdentity, trust: V2ActorTrustStore,
                 limits: V2ActorAuthenticationLimits,
@@ -109,28 +125,45 @@ public actor V2ActorSessionAuthenticator {
         guard hello.recipient == host else { throw V2ActorAuthenticationError.wrongRecipient }
         guard !peer.permissions.isEmpty else { throw V2ActorAuthenticationError.forbidden }
         let instant = now()
-        prune(at: instant)
         let key = HelloKey(serviceID: peer.serviceID, incarnation: hello.callerIncarnation, handshake: hello.handshakeID)
         let transcript = try V2ActorProtobuf.encode(hello)
         let helloDigest = Data(SHA256.hash(data: transcript))
-        if let id = helloSessions[key], let session = sessions[id] {
-            guard session.helloDigest == helloDigest else { throw V2ActorAuthenticationError.invalidRequest }
-            return try grant(session, id: id, at: instant)
-        }
-        guard sessions.count < limits.maximumSessions,
-              serviceCounts[peer.serviceID, default: 0] < limits.maximumSessionsPerService
-        else { throw V2ActorAuthenticationError.overloaded }
+        if let existing = try catalog.withLock({ value -> V2ActorSessionGrant? in
+            value.prune(at: instant)
+            if let id = value.helloSessions[key], let session = value.sessions[id] {
+                guard session.helloDigest == helloDigest else { throw V2ActorAuthenticationError.invalidRequest }
+                return try grant(session, id: id, at: instant)
+            }
+            guard value.sessions.count < limits.maximumSessions,
+                  value.serviceCounts[peer.serviceID, default: 0] < limits.maximumSessionsPerService else {
+                throw V2ActorAuthenticationError.overloaded
+            }
+            return nil
+        }) { return existing }
+        // Cryptography never holds the catalog or replay lock. A concurrent
+        // hello may win; recheck its exact transcript and both quotas below.
         let id = UUID()
         let agreement = hello.agreementKey.map { _ in Curve25519.KeyAgreement.PrivateKey() }
         let mac = try agreement.map { try V2ActorSessionMAC(privateKey: $0, peerKey: hello.agreementKey!,
             transcript: transcript, sessionID: id, client: peer.serviceID,
             server: trust.configuredHostServiceID(for: host.hostID)) }
         let session = Session(key: key, helloDigest: helloDigest, agreementKey: agreement?.publicKey.rawRepresentation, mac: mac, expires: instant + limits.sessionLifetime.duration, window: limits.replayWindow)
-        sessions[id] = session
-        helloSessions[key] = id
-        serviceCounts[peer.serviceID, default: 0] += 1
-        nextExpiry = min(nextExpiry ?? session.expires, session.expires)
-        return try grant(session, id: id, at: instant)
+        return try catalog.withLock { value in
+            value.prune(at: instant)
+            if let existingID = value.helloSessions[key], let existing = value.sessions[existingID] {
+                guard existing.helloDigest == helloDigest else { throw V2ActorAuthenticationError.invalidRequest }
+                return try grant(existing, id: existingID, at: instant)
+            }
+            guard value.sessions.count < limits.maximumSessions,
+                  value.serviceCounts[peer.serviceID, default: 0] < limits.maximumSessionsPerService else {
+                throw V2ActorAuthenticationError.overloaded
+            }
+            value.sessions[id] = session
+            value.helloSessions[key] = id
+            value.serviceCounts[peer.serviceID, default: 0] += 1
+            value.nextExpiry = min(value.nextExpiry ?? session.expires, session.expires)
+            return try grant(session, id: id, at: instant)
+        }
     }
 
     public func accept(_ packet: V2ActorSignedPacket) throws -> V2ActorVerifiedCall {
@@ -138,9 +171,11 @@ public actor V2ActorSessionAuthenticator {
         let receivedAt = now()
         let call: V2ActorAuthenticatedCall
         let peer: V2ActorTrustedService
+        let session: Session?
         if packet.signature.count == 32 {
             let id = try V2ActorSessionMAC.packetSessionID(packet)
-            guard let session = sessions[id], session.expires > receivedAt, let mac = session.mac else {
+            session = catalog.withLock { $0.sessions[id] }
+            guard let session, session.expires > receivedAt, let mac = session.mac else {
                 throw V2ActorAuthenticationError.sessionExpired
             }
             call = try mac.open(packet, as: V2ActorAuthenticatedCall.self, reply: false, maximumBytes: limits.maximumRequestBytes)
@@ -148,9 +183,10 @@ public actor V2ActorSessionAuthenticator {
             peer = try trust.configuredService(packet.signerID)
         } else {
             (call, peer) = try trust.verify(packet, as: V2ActorAuthenticatedCall.self, maximumBytes: limits.maximumRequestBytes)
-            guard sessions[call.sessionID]?.mac == nil else { throw V2ActorAuthenticationError.invalidSignature }
+            session = catalog.withLock { $0.sessions[call.sessionID] }
+            guard session?.mac == nil else { throw V2ActorAuthenticationError.invalidSignature }
         }
-        var verified = try acceptVerified(call, peer: peer, receivedAt: receivedAt)
+        var verified = try acceptVerified(call, peer: peer, session: session, receivedAt: receivedAt)
         verified.authenticationEnteredAt = enteredAt
         verified.authenticationReturnedAt = .now
         return verified
@@ -170,19 +206,19 @@ public actor V2ActorSessionAuthenticator {
         guard payload.byteCount > 0, payload.byteCount <= limits.maximumRequestBytes else {
             throw V2ActorAuthenticationError.oversized
         }
-        var verified = try acceptVerified(call, peer: capability.peer, receivedAt: receivedAt)
+        let session = catalog.withLock { $0.sessions[call.sessionID] }
+        var verified = try acceptVerified(call, peer: capability.peer, session: session, receivedAt: receivedAt)
         verified.authenticationEnteredAt = enteredAt
         verified.authenticationReturnedAt = .now
         return verified
     }
 
-    private func acceptVerified(_ call: V2ActorAuthenticatedCall, peer: V2ActorTrustedService,
+    private func acceptVerified(_ call: V2ActorAuthenticatedCall, peer: V2ActorTrustedService, session: Session?,
                                 receivedAt: ContinuousClock.Instant) throws -> V2ActorVerifiedCall {
         guard call.version == V2ActorSessionHello.protocolVersion else { throw V2ActorAuthenticationError.unsupportedVersion }
         guard call.serviceID == peer.serviceID else { throw V2ActorAuthenticationError.forbidden }
         guard call.recipient == host else { throw V2ActorAuthenticationError.wrongRecipient }
-        prune(at: receivedAt)
-        guard let session = sessions[call.sessionID], session.expires > receivedAt,
+        guard let session, session.expires > receivedAt,
               session.key.serviceID == peer.serviceID,
               session.key.incarnation == call.callerIncarnation
         else { throw V2ActorAuthenticationError.sessionExpired }
@@ -192,8 +228,8 @@ public actor V2ActorSessionAuthenticator {
     }
 
     public func sessionCount() -> Int {
-        prune(at: now())
-        return sessions.count
+        let instant = now()
+        return catalog.withLock { value in value.prune(at: instant); return value.sessions.count }
     }
 
     private func authorize(_ call: V2ActorAuthenticatedCall, peer: V2ActorTrustedService) throws {
@@ -313,55 +349,48 @@ public actor V2ActorSessionAuthenticator {
                      remainingLifetime: try .init(milliseconds), agreementKey: session.agreementKey)
     }
 
-    private func prune(at instant: ContinuousClock.Instant) {
-        guard let nextExpiry, nextExpiry <= instant else { return }
-        for (id, session) in sessions where session.expires <= instant {
-            sessions.removeValue(forKey: id)
-            helloSessions.removeValue(forKey: session.key)
-            let remaining = serviceCounts[session.key.serviceID, default: 1] - 1
-            if remaining == 0 { serviceCounts.removeValue(forKey: session.key.serviceID) }
-            else { serviceCounts[session.key.serviceID] = remaining }
-        }
-        self.nextExpiry = sessions.values.map(\.expires).min()
-    }
-
-    private struct HelloKey: Hashable {
+    private struct HelloKey: Hashable, Sendable {
         let serviceID: V2ActorServiceID
         let incarnation: UUID
         let handshake: UUID
     }
 
-    private final class Session {
+    private final class Session: Sendable {
         let key: HelloKey
         let helloDigest: Data
         let expires: ContinuousClock.Instant
         let agreementKey: Data?
         let mac: V2ActorSessionMAC?
-        var highest: UInt64 = 0
-        var slots: [(sequence: UInt64, attemptID: UUID)?]
-        var attempts: [UUID: UInt64] = [:]
+        private struct Replay: Sendable {
+            var highest: UInt64 = 0
+            var slots: [(sequence: UInt64, attemptID: UUID)?]
+            var attempts: [UUID: UInt64] = [:]
+        }
+        private let replay: Mutex<Replay>
 
         init(key: HelloKey, helloDigest: Data, agreementKey: Data?, mac: V2ActorSessionMAC?, expires: ContinuousClock.Instant, window: Int) {
             self.key = key
             self.helloDigest = helloDigest
             self.agreementKey = agreementKey; self.mac = mac
             self.expires = expires
-            self.slots = Array(repeating: nil, count: window)
+            replay = Mutex(Replay(slots: Array(repeating: nil, count: window)))
         }
 
         func accept(sequence: UInt64, attemptID: UUID) throws {
-            let window = UInt64(slots.count)
-            let lowerBound = highest >= window ? highest - window + 1 : 1
-            guard sequence > 0, sequence >= lowerBound else { throw V2ActorAuthenticationError.replay }
-            if let previous = attempts[attemptID], previous >= lowerBound { throw V2ActorAuthenticationError.replay }
-            let index = Int(sequence % window)
-            if slots[index]?.sequence == sequence { throw V2ActorAuthenticationError.replay }
-            if let old = slots[index], attempts[old.attemptID] == old.sequence {
-                attempts.removeValue(forKey: old.attemptID)
+            try replay.withLock { value in
+                let window = UInt64(value.slots.count)
+                let lowerBound = value.highest >= window ? value.highest - window + 1 : 1
+                guard sequence > 0, sequence >= lowerBound else { throw V2ActorAuthenticationError.replay }
+                if let previous = value.attempts[attemptID], previous >= lowerBound { throw V2ActorAuthenticationError.replay }
+                let index = Int(sequence % window)
+                if value.slots[index]?.sequence == sequence { throw V2ActorAuthenticationError.replay }
+                if let old = value.slots[index], value.attempts[old.attemptID] == old.sequence {
+                    value.attempts.removeValue(forKey: old.attemptID)
+                }
+                value.highest = max(value.highest, sequence)
+                value.slots[index] = (sequence, attemptID)
+                value.attempts[attemptID] = sequence
             }
-            highest = max(highest, sequence)
-            slots[index] = (sequence, attemptID)
-            attempts[attemptID] = sequence
         }
     }
 }

@@ -181,6 +181,8 @@ actor V2GatewayRealtimeInbound {
     private var clusterSystem: ClusterSystem?
     private var lifecycleWorker: Task<Void, Never>?
     private var peerAvailability: [Cluster.Node: Bool] = [:]
+    package private(set) var deliveryPeerJoinRequestCount: UInt64 = 0
+    private var deliveryPeerJoinRetryAt: [Cluster.Node: ContinuousClock.Instant] = [:]
     private var lifecycleRevision: UInt64 = 0
     private struct DeliveryPeer {
         let session: V2RoomDeliverySession
@@ -244,6 +246,7 @@ actor V2GatewayRealtimeInbound {
     }
     func clusterChanged(_ change: V2RealtimePeerLifecycleChange) async {
         peerAvailability = change.available
+        for node in change.available.keys { deliveryPeerJoinRetryAt.removeValue(forKey: node) }
         if change.invalidatesOpening { lifecycleRevision &+= 1 }
         let localUnavailable = clusterSystem.map { change.available[$0.cluster.node] == false } ?? false
         let failed = deliveryPeers.values.filter { localUnavailable || change.available[$0.node] == false }
@@ -259,7 +262,7 @@ actor V2GatewayRealtimeInbound {
             _ = await roomSubscriptionHandler?.applyDeliverySession(.init(session: peer.session, kind: .retire, sequence: 2),
                 authenticatedServiceID: peer.serviceID)
         }
-        deliveryPeers.removeAll(); sessions.removeAll()
+        deliveryPeers.removeAll(); sessions.removeAll(); deliveryPeerJoinRetryAt.removeAll()
         await lifecycleWorker?.value; lifecycleWorker = nil
     }
     func openSession(_ packet: V2ActorSignedPacket) throws -> V2ActorSignedPacket {
@@ -358,18 +361,23 @@ actor V2GatewayRealtimeInbound {
         }
         let revision = lifecycleRevision
         if call.pulse.kind == .open {
-            // Membership is a failure signal, never room authorization. Wait
-            // only on establishment, not on ordinary message/control calls.
-            system.cluster.join(host: call.sourceNode.endpoint.host, port: call.sourceNode.endpoint.port)
-            let member = try await system.cluster.waitFor(call.sourceNode, atLeast: .joining, within: .seconds(2))
-            guard accepting, member.status < .down, member.reachability == .reachable,
-                  peerAvailability[call.sourceNode] != false, peerAvailability[system.cluster.node] != false,
-                  revision == lifecycleRevision else { throw V2ActorAuthenticationError.overloaded }
             if let old = deliveryPeers[call.pulse.session.host],
                old.node != call.sourceNode { throw V2ActorAuthenticationError.wrongRecipient }
             guard deliveryPeers[call.pulse.session.host] != nil || deliveryPeers.count < 128 else {
                 throw V2ActorAuthenticationError.overloaded
             }
+            // Native events establish exact-incarnation liveness. An unknown
+            // peer must not occupy the entire remote-call budget waiting for
+            // gossip; reject this open without installing any authorization.
+            guard peerAvailability[call.sourceNode] == true,
+                  peerAvailability[system.cluster.node] != false else {
+                if peerAvailability[call.sourceNode] == nil,
+                   peerAvailability[system.cluster.node] != false {
+                    requestDeliveryPeerJoin(call.sourceNode, system: system)
+                }
+                return try deliverySessionReply(.resetRequired, call: call, session: session)
+            }
+            deliveryPeerJoinRetryAt.removeValue(forKey: call.sourceNode)
         }
         var result = await handler.applyDeliverySession(call.pulse, authenticatedServiceID: peer.serviceID.rawValue)
         if call.pulse.kind == .open, revision != lifecycleRevision || !accepting {
@@ -384,8 +392,27 @@ actor V2GatewayRealtimeInbound {
         if call.pulse.kind == .retire, deliveryPeers[call.pulse.session.host]?.session == call.pulse.session {
             deliveryPeers.removeValue(forKey: call.pulse.session.host)
         }
-        return try sessionReply(RoomDeliverySessionReply(recipient: identity, sessionID: call.sessionID,
+        return try deliverySessionReply(result, call: call, session: session)
+    }
+
+    private func deliverySessionReply(_ result: V2RoomDeliverySessionResult, call: RoomDeliverySessionCall,
+                                      session: Session) throws -> V2ActorSignedPacket {
+        try sessionReply(RoomDeliverySessionReply(recipient: identity, sessionID: call.sessionID,
             sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: 16_384)
+    }
+
+    private func requestDeliveryPeerJoin(_ node: Cluster.Node, system: ClusterSystem) {
+        let now = ContinuousClock.now
+        if let retryAt = deliveryPeerJoinRetryAt[node], retryAt > now { return }
+        // Bounded establishment state, not a growing per-room or per-request
+        // table. Expired attempts are reclaimed lazily on the cold path.
+        if deliveryPeerJoinRetryAt.count >= 128 {
+            deliveryPeerJoinRetryAt = deliveryPeerJoinRetryAt.filter { $0.value > now }
+        }
+        guard deliveryPeerJoinRetryAt[node] != nil || deliveryPeerJoinRetryAt.count < 128 else { return }
+        deliveryPeerJoinRetryAt[node] = now + .seconds(1)
+        deliveryPeerJoinRequestCount &+= 1
+        system.cluster.join(host: node.endpoint.host, port: node.endpoint.port)
     }
     func deliverRoomSubscription(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
@@ -843,11 +870,6 @@ func validateRoomSubscriptionReceipt(_ result: V2RoomSubscriptionDeliveryResult,
     if case .appliedThrough(let sequence) = result, sequence != delivery.deliverySequence {
         throw V2ActorAuthenticationError.wrongRecipient
     }
-}
-
-func roomSubscriptionBatchFences(_ batch: V2RoomSubscriptionDeliveryBatch) -> [V2RoomSubscriptionFence] {
-    var seen: Set<V2RoomSubscriptionFence> = []
-    return batch.deliveries.compactMap { seen.insert($0.fence).inserted ? $0.fence : nil }
 }
 
 @discardableResult

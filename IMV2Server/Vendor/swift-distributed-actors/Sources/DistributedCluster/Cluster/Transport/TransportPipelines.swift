@@ -36,22 +36,13 @@ private final class InitiatingHandshakeHandler: ChannelInboundHandler, Removable
     private let handshakeOffer: Wire.HandshakeOffer
     private let cluster: ClusterShell.Ref
     private var responseTimeout: Scheduled<Void>?
+    private var started = false
     private var finished = false
 
     init(log: Logger, handshakeOffer: Wire.HandshakeOffer, cluster: ClusterShell.Ref) {
         self.log = log
         self.handshakeOffer = handshakeOffer
         self.cluster = cluster
-    }
-
-    func handlerAdded(context: ChannelHandlerContext) {
-        // ClientBootstrap's connect timeout ends at TCP establishment. A peer
-        // can close or stall before sending the Cluster handshake response;
-        // without this bound subsequent joins reuse a stuck in-flight offer.
-        responseTimeout = context.eventLoop.scheduleTask(in: .seconds(10)) {
-            self.fail(context: context, error: HandshakeError.responseTimedOut)
-            context.close(promise: nil)
-        }
     }
 
     func handlerRemoved(context: ChannelHandlerContext) {
@@ -61,6 +52,15 @@ private final class InitiatingHandshakeHandler: ChannelInboundHandler, Removable
     }
 
     func channelActive(context: ChannelHandlerContext) {
+        started = true
+        // Happy Eyeballs creates handlers for multiple candidate sockets. Only
+        // an established socket owns a protocol handshake; closing a losing,
+        // inactive candidate must not fail the other candidate's handshake.
+        // ClientBootstrap reports failure if every TCP candidate fails.
+        responseTimeout = context.eventLoop.scheduleTask(in: .seconds(10)) {
+            self.fail(context: context, error: HandshakeError.responseTimedOut)
+            context.close(promise: nil)
+        }
         self.initiateHandshake(context: context)
     }
 
@@ -80,7 +80,7 @@ private final class InitiatingHandshakeHandler: ChannelInboundHandler, Removable
     }
 
     private func fail(context: ChannelHandlerContext, error: Error) {
-        guard !finished else { return }
+        guard started, !finished else { return }
         finished = true
         responseTimeout?.cancel()
         responseTimeout = nil

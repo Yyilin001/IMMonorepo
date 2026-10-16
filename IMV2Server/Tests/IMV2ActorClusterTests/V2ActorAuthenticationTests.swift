@@ -8,6 +8,88 @@ import Testing
 
 @Suite("Signed actor sessions bind authority and reject replay")
 struct V2ActorAuthenticationTests {
+    @Test("concurrent copies of a signed, MAC or local call dispatch exactly once", arguments: ["signed", "mac", "local", "mixed"])
+    func concurrentReplayIsAtomic(mode: String) async throws {
+        let fixture = try Fixture(), generation = UUID()
+        let agreement = Curve25519.KeyAgreement.PrivateKey()
+        let hello = V2ActorSessionHello(serviceID: fixture.client.serviceID, callerIncarnation: UUID(),
+            recipient: fixture.token.host, handshakeID: UUID(),
+            agreementKey: mode == "mac" || mode == "mixed" ? agreement.publicKey.rawRepresentation : nil)
+        let helloPacket = try fixture.client.sign(hello, maximumBytes: 10_000)
+        let grant: V2ActorSessionGrant
+        let capability: V2ActorLocalCapability?
+        if mode == "local" || mode == "mixed" {
+            (grant, capability) = try fixture.auth.openLocalSession(helloPacket, generation: generation)
+        } else {
+            grant = try fixture.auth.openSession(helloPacket); capability = nil
+        }
+        let call = try fixture.call(grant: grant)
+        let packet: V2ActorSignedPacket
+        if mode == "mac" || mode == "mixed" {
+            let mac = try V2ActorSessionMAC(privateKey: agreement, peerKey: #require(grant.agreementKey),
+                transcript: V2ActorProtobuf.encode(hello), sessionID: grant.sessionID,
+                client: fixture.client.serviceID, server: fixture.hostSigner.serviceID)
+            packet = try mac.seal(call, reply: false, maximumBytes: 10_000)
+        } else { packet = try fixture.client.sign(call, maximumBytes: 10_000) }
+        let local = try V2ActorLocalPayload(call)
+        let accepted = try await withThrowingTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for index in 0..<128 {
+                group.addTask {
+                    do {
+                        if let capability, mode != "mixed" || index % 2 == 0 {
+                            _ = try fixture.auth.acceptLocal(local, capability: capability, generation: generation)
+                        } else { _ = try fixture.auth.accept(packet) }
+                        return true
+                    } catch V2ActorAuthenticationError.replay { return false }
+                }
+            }
+            var count = 0
+            for try await value in group { if value { count += 1 } }
+            return count
+        }
+        #expect(accepted == 1)
+        #expect(fixture.auth.sessionCount() == 1)
+    }
+
+    @Test("concurrent key exchange preserves hello identity and exact session quotas",
+          arguments: ["same_hello", "per_service", "global"])
+    func concurrentSessionOpening(mode: String) async throws {
+        let clock = TestClock()
+        let fixture = try Fixture(limits: .init(maximumSessions: 4,
+            maximumSessionsPerService: mode == "per_service" ? 2 : 4,
+            sessionLifetimeMilliseconds: 1_000), clock: clock)
+        let incarnation = UUID(), handshake = UUID(), agreement = Curve25519.KeyAgreement.PrivateKey()
+        let packets = try (0..<64).map { index in
+            let signer = mode == "global" && index % 2 == 1 ? fixture.worker : fixture.client
+            let hello = V2ActorSessionHello(serviceID: signer.serviceID, callerIncarnation: incarnation,
+                recipient: fixture.token.host, handshakeID: mode == "same_hello" ? handshake : UUID(),
+                agreementKey: agreement.publicKey.rawRepresentation)
+            return try signer.sign(hello, maximumBytes: 10_000)
+        }
+        let grants = try await withThrowingTaskGroup(of: V2ActorSessionGrant?.self,
+            returning: [V2ActorSessionGrant].self) { group in
+            for packet in packets {
+                group.addTask {
+                    do { return try fixture.auth.openSession(packet) }
+                    catch V2ActorAuthenticationError.overloaded { return nil }
+                }
+            }
+            var values: [V2ActorSessionGrant] = []
+            for try await grant in group { if let grant { values.append(grant) } }
+            return values
+        }
+        let expected = mode == "same_hello" ? 1 : mode == "per_service" ? 2 : 4
+        #expect(fixture.auth.sessionCount() == expected)
+        #expect(Set(grants.map(\.sessionID)).count == expected)
+        #expect(grants.count == (mode == "same_hello" ? 64 : expected))
+        if mode == "same_hello" { #expect(Set(grants.compactMap(\.agreementKey)).count == 1) }
+        clock.advance(.seconds(2))
+        #expect(fixture.auth.sessionCount() == 0)
+        let fresh = try fixture.auth.openSession(packets[0])
+        #expect(!grants.contains { $0.sessionID == fresh.sessionID })
+        #expect(fixture.auth.sessionCount() == 1)
+    }
+
     @Test func macDomainsPreserveWireBinding() {
         #expect(V2ActorAuthenticatedCall.macDomain == Data(String(reflecting: V2ActorAuthenticatedCall.self).utf8))
         #expect(V2ActorAuthenticatedReply.macDomain == Data(String(reflecting: V2ActorAuthenticatedReply.self).utf8))
@@ -63,15 +145,15 @@ struct V2ActorAuthenticationTests {
                 remainingBudget: .init(5_000), principal: principal,
                 request: .forwardPair(token: fixture.token, pair: pair)), maximumBytes: 10_000)
         }
-        await failure(.forbidden) { _ = try await fixture.auth.accept(packet(pair, principal: .user(fixture.user), sequence: 1)) }
+        await failure(.forbidden) { _ = try fixture.auth.accept(packet(pair, principal: .user(fixture.user), sequence: 1)) }
         let valid = try packet(pair, principal: .service, sequence: 2)
         if allowed {
-            #expect(try await fixture.auth.accept(valid).call.request == .forwardPair(token: fixture.token, pair: pair))
-            await failure(.replay) { _ = try await fixture.auth.accept(valid) }
+            #expect(try fixture.auth.accept(valid).call.request == .forwardPair(token: fixture.token, pair: pair))
+            await failure(.replay) { _ = try fixture.auth.accept(valid) }
             let wrongTarget = V2ActorForwardPairWire(actorUserID: pair.actorUserID, operationID: pair.operationID,
                 source: pair.source, targetRoomID: .init(uuid: UUID()))
-            await failure(.wrongRecipient) { _ = try await fixture.auth.accept(packet(wrongTarget, principal: .service, sequence: 3)) }
-        } else { await failure(.forbidden) { _ = try await fixture.auth.accept(valid) } }
+            await failure(.wrongRecipient) { _ = try fixture.auth.accept(packet(wrongTarget, principal: .service, sequence: 3)) }
+        } else { await failure(.forbidden) { _ = try fixture.auth.accept(valid) } }
     }
     @Test("room policy endpoint pins stable host and preserves exact physical alias")
     func roomPolicyEndpointLocator() throws {
@@ -103,10 +185,10 @@ struct V2ActorAuthenticationTests {
                 sessionID: grant.sessionID, sequence: sequence, attemptID: UUID(), traceID: UUID(),
                 remainingBudget: try .init(5_000), principal: principal, request: request)
         }
-        await failure(.forbidden) { _ = try await fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000)) }
+        await failure(.forbidden) { _ = try fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000)) }
         let packet = try fixture.client.sign(call(.service, sequence: 2), maximumBytes: 10_000)
-        if allowed { #expect(try await fixture.auth.accept(packet).call.request == request) }
-        else { await failure(.forbidden) { _ = try await fixture.auth.accept(packet) } }
+        if allowed { #expect(try fixture.auth.accept(packet).call.request == request) }
+        else { await failure(.forbidden) { _ = try fixture.auth.accept(packet) } }
     }
     @Test("policy registration permission cannot subscribe another host")
     func versionedPolicySubscriberIdentity() async throws {
@@ -116,7 +198,7 @@ struct V2ActorAuthenticationTests {
         let call = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
             recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 1, attemptID: UUID(), traceID: UUID(),
             remainingBudget: try .init(5_000), principal: .service, request: request)
-        await failure(.forbidden) { _ = try await fixture.auth.accept(fixture.client.sign(call, maximumBytes: 10_000)) }
+        await failure(.forbidden) { _ = try fixture.auth.accept(fixture.client.sign(call, maximumBytes: 10_000)) }
     }
 
     @Test("policy registration requires independent service authority", arguments: [false, true])
@@ -133,20 +215,20 @@ struct V2ActorAuthenticationTests {
                 remainingBudget: try .init(5_000), principal: principal, request: .policySnapshots(claim))
         }
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000))
         }
         let packet = try fixture.client.sign(call(.service, sequence: 2), maximumBytes: 10_000)
         if allowed {
-            #expect(try await fixture.auth.accept(packet).call.request == .policySnapshots(claim))
-            await failure(.replay) { _ = try await fixture.auth.accept(packet) }
+            #expect(try fixture.auth.accept(packet).call.request == .policySnapshots(claim))
+            await failure(.replay) { _ = try fixture.auth.accept(packet) }
             let activation = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
                 recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 3, attemptID: UUID(), traceID: UUID(),
                 remainingBudget: try .init(5_000), principal: .service,
                 request: .activate(roomID: fixture.token.roomID, owner: fixture.token.owner))
             await failure(.forbidden) {
-                _ = try await fixture.auth.accept(fixture.client.sign(activation, maximumBytes: 10_000))
+                _ = try fixture.auth.accept(fixture.client.sign(activation, maximumBytes: 10_000))
             }
-        } else { await failure(.forbidden) { _ = try await fixture.auth.accept(packet) } }
+        } else { await failure(.forbidden) { _ = try fixture.auth.accept(packet) } }
     }
 
     @Test("policy mutation requires independent service authority", arguments: [false, true])
@@ -161,20 +243,20 @@ struct V2ActorAuthenticationTests {
                 remainingBudget: try .init(5_000), principal: principal, request: .mutatePolicy(request))
         }
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(call(.user(fixture.user), sequence: 1), maximumBytes: 10_000))
         }
         let packet = try fixture.client.sign(call(.service, sequence: 2), maximumBytes: 10_000)
         if allowed {
-            #expect(try await fixture.auth.accept(packet).call.request == .mutatePolicy(request))
-            await failure(.replay) { _ = try await fixture.auth.accept(packet) }
+            #expect(try fixture.auth.accept(packet).call.request == .mutatePolicy(request))
+            await failure(.replay) { _ = try fixture.auth.accept(packet) }
             let activation = V2ActorAuthenticatedCall(serviceID: grant.serviceID, callerIncarnation: grant.callerIncarnation,
                 recipient: fixture.token.host, sessionID: grant.sessionID, sequence: 3, attemptID: UUID(), traceID: UUID(),
                 remainingBudget: try .init(5_000), principal: .service,
                 request: .activate(roomID: fixture.token.roomID, owner: fixture.token.owner))
             await failure(.forbidden) {
-                _ = try await fixture.auth.accept(fixture.client.sign(activation, maximumBytes: 10_000))
+                _ = try fixture.auth.accept(fixture.client.sign(activation, maximumBytes: 10_000))
             }
-        } else { await failure(.forbidden) { _ = try await fixture.auth.accept(packet) } }
+        } else { await failure(.forbidden) { _ = try fixture.auth.accept(packet) } }
         let receipt = try V2PolicyMutationReceiptWire(scope: request.scope, operationKey: request.operationKey,
             fingerprint: request.fingerprint, receipt: .disable(.init(kind: .disabled, disabledAt: Date())), replayed: false)
         #expect(receipt.matches(request))
@@ -228,16 +310,16 @@ struct V2ActorAuthenticationTests {
         let grant = try await fixture.open()
         let call = try fixture.call(grant: grant)
         let packet = try fixture.client.sign(call, maximumBytes: fixture.limits.maximumRequestBytes)
-        let verified = try await fixture.auth.accept(packet)
+        let verified = try fixture.auth.accept(packet)
         #expect(verified.call == call)
         var tampered = packet.body
         tampered[tampered.startIndex] ^= 1
         await failure(.invalidSignature) {
-            _ = try await fixture.auth.accept(.init(signerID: packet.signerID, body: tampered, signature: packet.signature))
+            _ = try fixture.auth.accept(.init(signerID: packet.signerID, body: tampered, signature: packet.signature))
         }
         let wrongUser = try fixture.call(grant: grant, sequence: 2, principal: .user(UserID(uuid: UUID())))
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(wrongUser, maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(wrongUser, maximumBytes: 10_000))
         }
     }
 
@@ -257,27 +339,27 @@ struct V2ActorAuthenticationTests {
                 gatewayDescriptor: target)))
         }
         let subscribe = request(descriptor())
-        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
+        _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
             request: subscribe), maximumBytes: 16_384))
         #expect(subscribe.replayPolicy == .noAutomaticRetry && !subscribe.hasStableOperationID)
         for target in [descriptor(service: "other"), descriptor(node: "other"), descriptor(incarnation: UUID())] {
             await failure(.forbidden) {
-                _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
+                _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
                     sequence: 2, request: request(target)), maximumBytes: 16_384))
             }
         }
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2,
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2,
                 request: request(descriptor(), user: UserID(uuid: UUID()))), maximumBytes: 16_384))
         }
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2,
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2,
                 principal: .service, request: subscribe), maximumBytes: 16_384))
         }
         let fence = V2RoomSubscriptionFence(activation: fixture.token, subscriptionID: UUID(), generation: 1, baselineSequence: 5)
         let activation = V2RoomRequest.roomSubscription(.activate(.init(roomID: fixture.token.roomID,
             actorUserID: fixture.user, gatewayDescriptor: descriptor(), fence: fence)))
-        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2,
+        _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2,
             request: activation), maximumBytes: 16_384))
         let otherToken = V2RoomActivationToken(roomID: fixture.token.roomID, owner: fixture.token.owner,
             activationEpoch: try .init(2), host: fixture.token.host)
@@ -285,27 +367,27 @@ struct V2ActorAuthenticationTests {
         await failure(.wrongRecipient) {
             let wrong = V2RoomRequest.roomSubscription(.activate(.init(roomID: fixture.token.roomID,
                 actorUserID: fixture.user, gatewayDescriptor: descriptor(), fence: otherFence)))
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 3,
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 3,
                 request: wrong), maximumBytes: 16_384))
         }
         let reset = V2RoomRequest.roomSubscription(.reset(.init(roomID: fixture.token.roomID,
             actorUserID: fixture.user, gatewayDescriptor: descriptor(), expectedFence: fence)))
-        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 3,
+        _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 3,
             request: reset), maximumBytes: 16_384))
         await failure(.wrongRecipient) {
             let wrongReset = V2RoomRequest.roomSubscription(.reset(.init(roomID: fixture.token.roomID,
                 actorUserID: fixture.user, gatewayDescriptor: descriptor(), expectedFence: otherFence)))
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
                 request: wrongReset), maximumBytes: 16_384))
         }
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
                 principal: .service, request: reset), maximumBytes: 16_384))
         }
         #expect(try V2ActorProtobuf.decode(V2RoomRequest.self, from: V2ActorProtobuf.encode(reset)) == reset)
         let unsubscribe = V2RoomRequest.roomSubscription(.unsubscribe(.init(roomID: fixture.token.roomID,
             actorUserID: fixture.user, gatewayDescriptor: descriptor(), memberRevision: 0)))
-        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
+        _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4,
             request: unsubscribe), maximumBytes: 16_384))
         let response = V2RoomResponse.roomSubscription(.granted(.init(fence: fence, memberRevision: 0,
             userBaselineSequence: 7, deliverySession: .init(host: fixture.token.host, gateway: descriptor().identity, generation: 1))))
@@ -342,17 +424,17 @@ struct V2ActorAuthenticationTests {
         let attempt = UUID()
         for sequence: UInt64 in [1, 3, 2] {
             let call = try fixture.call(grant: grant, sequence: sequence, attempt: sequence == 2 ? attempt : UUID())
-            _ = try await fixture.auth.accept(fixture.client.sign(call, maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(call, maximumBytes: 10_000))
         }
         await failure(.replay) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 1), maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 1), maximumBytes: 10_000))
         }
         await failure(.replay) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4, attempt: attempt), maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 4, attempt: attempt), maximumBytes: 10_000))
         }
-        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 9), maximumBytes: 10_000))
+        _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 9), maximumBytes: 10_000))
         await failure(.replay) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2), maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 2), maximumBytes: 10_000))
         }
     }
 
@@ -362,23 +444,23 @@ struct V2ActorAuthenticationTests {
         let fixture = try Fixture(limits: .init(sessionLifetimeMilliseconds: 1_000), clock: clock)
         let old = try await fixture.open()
         clock.advance(.seconds(2))
-        #expect(await fixture.auth.sessionCount() == 0)
+        #expect(fixture.auth.sessionCount() == 0)
         await failure(.sessionExpired) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: old), maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: old), maximumBytes: 10_000))
         }
         let new = try await fixture.open()
         #expect(new.sessionID != old.sessionID)
-        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: new), maximumBytes: 10_000))
+        _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: new), maximumBytes: 10_000))
     }
 
     @Test("session admission is finite and retrying a hello does not allocate another session")
     func sessionCapacity() async throws {
         let fixture = try Fixture(limits: .init(maximumSessions: 2, maximumSessionsPerService: 1))
         let hello = fixture.hello()
-        let first = try await fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 10_000))
-        let same = try await fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 10_000))
+        let first = try fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 10_000))
+        let same = try fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 10_000))
         #expect(first.sessionID == same.sessionID)
-        #expect(await fixture.auth.sessionCount() == 1)
+        #expect(fixture.auth.sessionCount() == 1)
         await failure(.overloaded) { _ = try await fixture.open() }
     }
 
@@ -393,12 +475,12 @@ struct V2ActorAuthenticationTests {
         )))
         let rejected = try fixture.call(grant: grant, principal: .service, request: safety)
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(rejected, maximumBytes: 10_000))
+            _ = try fixture.auth.accept(fixture.client.sign(rejected, maximumBytes: 10_000))
         }
         let workerHello = fixture.hello(serviceID: fixture.worker.serviceID)
-        let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(workerHello, maximumBytes: 10_000))
+        let workerGrant = try fixture.auth.openSession(fixture.worker.sign(workerHello, maximumBytes: 10_000))
         let accepted = try fixture.call(grant: workerGrant, principal: .service, request: safety)
-        _ = try await fixture.auth.accept(fixture.worker.sign(accepted, maximumBytes: 10_000))
+        _ = try fixture.auth.accept(fixture.worker.sign(accepted, maximumBytes: 10_000))
     }
 
     @Test("maintenance requires its own service permission and never a user principal")
@@ -410,16 +492,16 @@ struct V2ActorAuthenticationTests {
         #expect(!request.hasStableOperationID)
         let userGrant = try await fixture.open()
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(
+            _ = try fixture.auth.accept(fixture.client.sign(
                 fixture.call(grant: userGrant, principal: .service, request: request), maximumBytes: 10_000))
         }
-        let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(
+        let workerGrant = try fixture.auth.openSession(fixture.worker.sign(
             fixture.hello(serviceID: fixture.worker.serviceID), maximumBytes: 10_000))
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.worker.sign(
+            _ = try fixture.auth.accept(fixture.worker.sign(
                 fixture.call(grant: workerGrant, principal: .user(fixture.user), request: request), maximumBytes: 10_000))
         }
-        _ = try await fixture.auth.accept(fixture.worker.sign(
+        _ = try fixture.auth.accept(fixture.worker.sign(
             fixture.call(grant: workerGrant, sequence: 2, principal: .service, request: request), maximumBytes: 10_000))
     }
 
@@ -440,7 +522,7 @@ struct V2ActorAuthenticationTests {
             try fixture.trust.verifyReply(good, for: otherAttempt, maximumBytes: 10_000)
         }
         let hello = fixture.hello()
-        let session = try await fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 10_000))
+        let session = try fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 10_000))
         let signedGrant = try fixture.hostSigner.sign(session, maximumBytes: 10_000)
         #expect(try fixture.trust.verifySessionGrant(signedGrant, for: hello, maximumBytes: 10_000) == session)
     }
@@ -449,7 +531,7 @@ struct V2ActorAuthenticationTests {
     func invitationCoordinatorPermission() async throws {
         let fixture = try Fixture(workerPermissions: [.roomCoordination])
         let userGrant = try await fixture.open()
-        let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(
+        let workerGrant = try fixture.auth.openSession(fixture.worker.sign(
             fixture.hello(serviceID: fixture.worker.serviceID), maximumBytes: 10_000))
         let createdAt = Date(), milliseconds = UInt64(Date().timeIntervalSince1970 * 1_000)
         let operation = GroupInviteOperationID(uuid: UUID())
@@ -465,10 +547,10 @@ struct V2ActorAuthenticationTests {
             .administration(.groupInvitationSubmit(.init(command: command))),
             .administration(.groupInvitationRecover(.init(intent: intent, action: .query)))]
         for (index, request) in requests.enumerated() {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
                 sequence: UInt64(index + 1), principal: .user(fixture.user), request: request), maximumBytes: 10_000))
             await failure(.forbidden) {
-                _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+                _ = try fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
                     sequence: UInt64(index + 1), principal: .service, request: request), maximumBytes: 10_000))
             }
         }
@@ -480,11 +562,11 @@ struct V2ActorAuthenticationTests {
         let metadata = V2RoomRequest.invitationQuery(.preflightCreation(creation))
         for principal in [V2ActorCallPrincipal.user(fixture.user), .service] {
             await failure(.forbidden) {
-                _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
+                _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
                     sequence: 4, principal: principal, request: metadata), maximumBytes: 10_000))
             }
         }
-        _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+        _ = try fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
             sequence: 4, principal: .service, request: metadata), maximumBytes: 10_000))
     }
 
@@ -498,21 +580,21 @@ struct V2ActorAuthenticationTests {
             targetShardID: "target", targetEpoch: 0)))
         let userGrant = try await fixture.open()
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: userGrant,
                 principal: .user(fixture.user), request: request), maximumBytes: 10_000))
         }
-        let workerGrant = try await fixture.auth.openSession(fixture.worker.sign(
+        let workerGrant = try fixture.auth.openSession(fixture.worker.sign(
             fixture.hello(serviceID: fixture.worker.serviceID), maximumBytes: 10_000))
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+            _ = try fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
                 principal: .user(fixture.user), request: request), maximumBytes: 10_000))
         }
-        _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+        _ = try fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
             sequence: 2, principal: .service, request: request), maximumBytes: 10_000))
         let pair = V2RoomRequest.forward(.sameOwnerPair(.init(actorUserID: fixture.user,
             operationID: .init(uuid: UUID()), source: source, targetRoomID: fixture.token.roomID)))
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
+            _ = try fixture.auth.accept(fixture.worker.sign(fixture.call(grant: workerGrant,
                 sequence: 3, principal: .service, request: pair), maximumBytes: 10_000))
         }
     }
@@ -523,7 +605,7 @@ struct V2ActorAuthenticationTests {
         let grant = try await fixture.open()
         let query = try V2ActorReadReceiptReadersQueryWire(roomID: fixture.token.roomID,
             messageID: .init(uuid: UUID()), actorUserID: fixture.user, cursor: nil, pageSize: 10)
-        _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
+        _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant,
             request: .receiptQuery(.readerCandidates(query))), maximumBytes: 10_000))
     }
 
@@ -533,15 +615,15 @@ struct V2ActorAuthenticationTests {
         let otherHost = V2ActorHostIdentity(hostID: fixture.token.host.hostID, incarnationID: UUID())
         let wrong = fixture.hello(recipient: otherHost)
         await failure(.wrongRecipient) {
-            _ = try await fixture.auth.openSession(fixture.client.sign(wrong, maximumBytes: 10_000))
+            _ = try fixture.auth.openSession(fixture.client.sign(wrong, maximumBytes: 10_000))
         }
         let future = V2ActorSessionHello(version: 2, serviceID: fixture.client.serviceID,
                                          callerIncarnation: UUID(), recipient: fixture.token.host, handshakeID: UUID())
         await failure(.unsupportedVersion) {
-            _ = try await fixture.auth.openSession(fixture.client.sign(future, maximumBytes: 10_000))
+            _ = try fixture.auth.openSession(fixture.client.sign(future, maximumBytes: 10_000))
         }
         await failure(.oversized) {
-            _ = try await fixture.auth.accept(.init(signerID: fixture.client.serviceID,
+            _ = try fixture.auth.accept(.init(signerID: fixture.client.serviceID,
                 body: Data(repeating: 0, count: fixture.limits.maximumRequestBytes + 1), signature: Data()))
         }
         #expect(throws: V2ActorAuthenticationError.oversized) {
@@ -559,40 +641,40 @@ struct V2ActorAuthenticationTests {
         var tampered = helloPacket.body
         tampered[tampered.startIndex] ^= 1
         await failure(.invalidSignature) {
-            _ = try await fixture.auth.openLocalSession(.init(signerID: helloPacket.signerID,
+            _ = try fixture.auth.openLocalSession(.init(signerID: helloPacket.signerID,
                 body: tampered, signature: helloPacket.signature), generation: generation)
         }
-        let (grant, capability) = try await fixture.auth.openLocalSession(
+        let (grant, capability) = try fixture.auth.openLocalSession(
             helloPacket, generation: generation)
         let first = try fixture.call(grant: grant)
         let otherIssuer = V2ActorSessionAuthenticator(host: fixture.token.host,
             trust: fixture.trust, limits: fixture.limits, now: { clock.now })
         await failure(.wrongRecipient) {
-            _ = try await otherIssuer.acceptLocal(V2ActorLocalPayload(first),
+            _ = try otherIssuer.acceptLocal(V2ActorLocalPayload(first),
                 capability: capability, generation: generation)
         }
-        #expect(try await fixture.auth.acceptLocal(V2ActorLocalPayload(first), capability: capability,
+        #expect(try fixture.auth.acceptLocal(V2ActorLocalPayload(first), capability: capability,
                                                    generation: generation).call == first)
         await failure(.replay) {
-            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(first), capability: capability,
+            _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(first), capability: capability,
                                                    generation: generation)
         }
         await failure(.forbidden) {
-            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(grant: grant,
+            _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(grant: grant,
                 sequence: 2, principal: .user(UserID(uuid: UUID())))),
                 capability: capability, generation: generation)
         }
         await failure(.wrongRecipient) {
-            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+            _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
                 grant: grant, sequence: 2)),
                                                    capability: capability, generation: UUID())
         }
-        _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+        _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
             grant: grant, sequence: 2)),
                                                capability: capability, generation: generation)
         clock.advance(.seconds(2))
         await failure(.sessionExpired) {
-            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+            _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
                 grant: grant, sequence: 3)),
                                                    capability: capability, generation: generation)
         }
@@ -604,7 +686,7 @@ struct V2ActorAuthenticationTests {
         let fixture = try Fixture(limits: limits)
         let generation = UUID()
         let hello = fixture.hello()
-        let (grant, capability) = try await fixture.auth.openLocalSession(
+        let (grant, capability) = try fixture.auth.openLocalSession(
             fixture.client.sign(hello, maximumBytes: limits.maximumRequestBytes),
             generation: generation)
         let large = try V2RoomRequest.messaging(.sendOperation(try .init(command: try .init(
@@ -612,12 +694,12 @@ struct V2ActorAuthenticationTests {
             clientMessageID: .init(uuid: UUID()), text: String(repeating: "x", count: 4_096),
             media: [], mentions: [], entities: [], replyTo: nil, limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
         await failure(.oversized) {
-            _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
+            _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(try fixture.call(
                 grant: grant, request: large)),
                                                    capability: capability, generation: generation)
         }
         let call = try fixture.call(grant: grant)
-        _ = try await fixture.auth.acceptLocal(V2ActorLocalPayload(call),
+        _ = try fixture.auth.acceptLocal(V2ActorLocalPayload(call),
                                                capability: capability, generation: generation)
         let reply = V2ActorAuthenticatedReply(call: call, response: .acknowledged)
         #expect(try fixture.trust.verifyLocalReply(V2ActorLocalPayload(reply), for: call,
@@ -648,28 +730,28 @@ struct V2ActorAuthenticationTests {
                 principal: call.principal, request: call.request)
         }
         await failure(.unsupportedVersion) {
-            _ = try await fixture.auth.accept(fixture.client.sign(changed(version: 2),
+            _ = try fixture.auth.accept(fixture.client.sign(changed(version: 2),
                 maximumBytes: 65_536))
         }
         await failure(.wrongRecipient) {
-            _ = try await fixture.auth.accept(fixture.client.sign(changed(recipient:
+            _ = try fixture.auth.accept(fixture.client.sign(changed(recipient:
                 .init(hostID: call.recipient.hostID, incarnationID: UUID())), maximumBytes: 65_536))
         }
         await failure(.sessionExpired) {
-            _ = try await fixture.auth.accept(fixture.client.sign(changed(caller: UUID()),
+            _ = try fixture.auth.accept(fixture.client.sign(changed(caller: UUID()),
                 maximumBytes: 65_536))
         }
         let packet = try fixture.client.sign(call, maximumBytes: 65_536)
-        #expect(try await fixture.auth.accept(packet).call == call)
-        await failure(.replay) { _ = try await fixture.auth.accept(packet) }
+        #expect(try fixture.auth.accept(packet).call == call)
+        await failure(.replay) { _ = try fixture.auth.accept(packet) }
         let forbidden = try fixture.call(grant: grant, sequence: 2, principal: .service)
         await failure(.forbidden) {
-            _ = try await fixture.auth.accept(fixture.client.sign(forbidden,
+            _ = try fixture.auth.accept(fixture.client.sign(forbidden,
                 maximumBytes: 65_536))
         }
         clock.advance(.milliseconds(1_001))
         await failure(.sessionExpired) {
-            _ = try await fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 3),
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: grant, sequence: 3),
                 maximumBytes: 65_536))
         }
     }
@@ -681,8 +763,8 @@ struct V2ActorAuthenticationTests {
         let agreement = Curve25519.KeyAgreement.PrivateKey()
         let hello = V2ActorSessionHello(serviceID: fixture.client.serviceID, callerIncarnation: UUID(),
             recipient: fixture.token.host, handshakeID: UUID(), agreementKey: agreement.publicKey.rawRepresentation)
-        let grant = try await fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 16_384))
-        let repeated = try await fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 16_384))
+        let grant = try fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 16_384))
+        let repeated = try fixture.auth.openSession(fixture.client.sign(hello, maximumBytes: 16_384))
         #expect(repeated.sessionID == grant.sessionID && repeated.agreementKey == grant.agreementKey)
         let mac = try V2ActorSessionMAC(privateKey: agreement, peerKey: #require(grant.agreementKey),
             transcript: V2ActorProtobuf.encode(hello), sessionID: grant.sessionID,
@@ -692,24 +774,24 @@ struct V2ActorAuthenticationTests {
         #expect(packet.signature.count == 32)
         var changed = packet.body; changed[changed.count - 1] ^= 1
         await failure(.invalidSignature) {
-            _ = try await fixture.auth.accept(.init(signerID: packet.signerID, body: changed, signature: packet.signature))
+            _ = try fixture.auth.accept(.init(signerID: packet.signerID, body: changed, signature: packet.signature))
         }
-        await failure(.invalidSignature) { _ = try await fixture.auth.accept(fixture.client.sign(call, maximumBytes: 65_536)) }
+        await failure(.invalidSignature) { _ = try fixture.auth.accept(fixture.client.sign(call, maximumBytes: 65_536)) }
         await failure(.wrongRecipient) {
-            _ = try await fixture.auth.accept(.init(signerID: fixture.worker.serviceID, body: packet.body, signature: packet.signature))
+            _ = try fixture.auth.accept(.init(signerID: fixture.worker.serviceID, body: packet.body, signature: packet.signature))
         }
-        let verified = try await fixture.auth.accept(packet)
+        let verified = try fixture.auth.accept(packet)
         #expect(verified.call == call)
-        await failure(.replay) { _ = try await fixture.auth.accept(packet) }
+        await failure(.replay) { _ = try fixture.auth.accept(packet) }
         let reply = V2ActorAuthenticatedReply(call: call, response: .acknowledged)
         let response = try #require(verified.sessionMAC).seal(reply, reply: true, maximumBytes: 65_536)
         let decoded = try mac.open(response, as: V2ActorAuthenticatedReply.self, reply: true, maximumBytes: 65_536)
         #expect(try fixture.trust.verifyReplyBinding(decoded, for: call) == .acknowledged)
         #expect(throws: (any Error).self) { try mac.open(response, as: V2ActorAuthenticatedReply.self, reply: false, maximumBytes: 65_536) }
         let forbidden = try fixture.call(grant: grant, sequence: 2, principal: .service)
-        await failure(.forbidden) { _ = try await fixture.auth.accept(mac.seal(forbidden, reply: false, maximumBytes: 65_536)) }
+        await failure(.forbidden) { _ = try fixture.auth.accept(mac.seal(forbidden, reply: false, maximumBytes: 65_536)) }
         clock.advance(.milliseconds(1_001))
-        await failure(.sessionExpired) { _ = try await fixture.auth.accept(mac.seal(fixture.call(grant: grant, sequence: 3), reply: false, maximumBytes: 65_536)) }
+        await failure(.sessionExpired) { _ = try fixture.auth.accept(mac.seal(fixture.call(grant: grant, sequence: 3), reply: false, maximumBytes: 65_536)) }
     }
 
     private func failure(_ expected: V2ActorAuthenticationError, _ action: () async throws -> Void) async {
@@ -756,7 +838,7 @@ struct V2ActorAuthenticationTests {
         }
 
         func open() async throws -> V2ActorSessionGrant {
-            try await auth.openSession(client.sign(hello(), maximumBytes: limits.maximumRequestBytes))
+            try auth.openSession(client.sign(hello(), maximumBytes: limits.maximumRequestBytes))
         }
 
         func call(grant: V2ActorSessionGrant, sequence: UInt64 = 1, attempt: UUID = UUID(),

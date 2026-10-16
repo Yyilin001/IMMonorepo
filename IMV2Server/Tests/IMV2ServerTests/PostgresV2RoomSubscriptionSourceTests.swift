@@ -10,6 +10,58 @@ import IMV2ServerApplication
 
 @Suite("Committed room subscription source", .serialized)
 struct PostgresV2RoomSubscriptionSourceTests {
+    @Test("snapshot and log page each issue one statement with no transaction controls",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func committedCutsUseOneStatement() async throws {
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
+            let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
+            let (activation, lifetime) = try await activations.activate(room)
+            try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room.uuidValue!),'source','standard')").run()
+            try await sql.raw("INSERT INTO \(unsafeRaw: schema).room_memberships(room_id,user_id,joined_revision) VALUES(\(bind: room.uuidValue!),\(bind: user.uuidValue!),0)").run()
+            let observations = V2DatabaseLoanObservationRegistry()
+            let loan = observations.make(source: .query, at: .now)
+            loan.granted(at: .now); loan.driverEntered()
+            defer { loan.finish() }
+            let observed = v2ObserveBorrowedDatabase(database, observation: loan)
+            let source = try PostgresV2RoomSubscriptionSource(database: observed,
+                activation: activation, lifetime: lifetime, schema: schema)
+            let snapshot = try await source.snapshot(roomID: room, owner: activation.owner, trackedUserIDs: [user])
+            #expect(snapshot.members.first?.authorized == true)
+            #expect(observations.snapshot()[.query]?.sqlPhases[.other]?.count == 1)
+            let page = try await source.read(roomID: room, owner: activation.owner,
+                afterRoomSequence: 0, trackedUserIDs: [user], limit: 64)
+            #expect(page.highWatermark == 0 && page.records.isEmpty)
+            #expect(observations.snapshot()[.query]?.sqlPhases[.other]?.count == 2)
+            #expect(observations.snapshot()[.query]?.sqlPhases[.transactionControl]?.count == 0)
+            try await sql.raw("UPDATE \(unsafeRaw: schema).rooms SET owner_epoch=owner_epoch+1 WHERE room_id=\(bind: room.uuidValue!)").run()
+            await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                try await source.snapshot(roomID: room, owner: activation.owner, trackedUserIDs: [user])
+            }
+            #expect(observations.snapshot()[.query]?.sqlPhases[.other]?.count == 3)
+        }
+    }
+
+    @Test("single-statement loan deadline closes and joins the actual query",
+          .enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
+    func statementDeadlineSettlesPhysicalQuery() async throws {
+        try await withSubscriptionSourceDatabase { database, sql, schema, activations in
+            let room = RoomID(uuid: UUID())
+            let (activation, lifetime) = try await activations.activate(room)
+            try await sql.raw("INSERT INTO \(unsafeRaw: schema).rooms(room_id,room_shard_id,capacity_profile_id) VALUES(\(bind: room.uuidValue!),'source','standard')").run()
+            let source = try PostgresV2RoomSubscriptionSource(database: database,
+                activation: activation, lifetime: lifetime, schema: schema)
+            await #expect(throws: V2RoomCallFailure.notAccepted(.deadlineExceeded)) {
+                try await V2RoomSQLDeadline.withDeadline(.now + .milliseconds(50)) {
+                    try await source.withReadConnection { sql in
+                        try await sql.raw("SELECT pg_sleep(10)").run()
+                    }
+                }
+            }
+            let snapshot = try await source.snapshot(roomID: room, owner: activation.owner, trackedUserIDs: [])
+            #expect(snapshot.highWatermark == 0)
+        }
+    }
+
     @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_POSTGRES_TEST_DATABASE_IS_DISPOSABLE"] == "1"))
     func largeGroupSnapshotIncludesEveryTrackedOnlineMember() async throws {
         try await withSubscriptionSourceDatabase { database, sql, schema, activations in
@@ -35,7 +87,7 @@ struct PostgresV2RoomSubscriptionSourceTests {
             let source = try PostgresV2RoomSubscriptionSource(database: database, activation: activation, lifetime: lifetime, schema: schema)
             let cut = SubscriptionReadGate(), resume = SubscriptionReadGate()
             let reader = Task {
-                try await source.withOwnedCut { tx in
+                try await source.withReadConnection { tx in
                     await cut.signal(); await resume.wait()
                     // The read cut can finish its SQL, but its native pin
                     // must reject publication after Host withdrawal.

@@ -1,4 +1,5 @@
 import Foundation
+import HashTreeCollections
 import IMV2Core
 import IMV2ActorContracts
 import IMV2ServerContracts
@@ -12,10 +13,9 @@ public struct V2RealtimeJournalRecipient: Equatable, Sendable {
     /// Wire interestGeneration binds the confirmed partition revision,
     /// not an individual topic generation. Exact topic generations are retained.
     public let interestGeneration: Int64
-    public let interests: [V2RealtimeTopicKey: Int64]
-    public var topics: Set<V2RealtimeTopicKey> { Set(interests.keys) }
+    public let interests: TreeDictionary<V2RealtimeTopicKey, Int64>
     public init(token: V2RealtimeShardToken, session: V2RealtimeShardSession,
-                interestGeneration: Int64, interests: [V2RealtimeTopicKey: Int64],
+                interestGeneration: Int64, interests: TreeDictionary<V2RealtimeTopicKey, Int64>,
                 deadline: ContinuousClock.Instant = .now + .seconds(30)) {
         self.token = token; self.session = session; self.deadline = deadline
         self.interestGeneration = interestGeneration; self.interests = interests
@@ -91,55 +91,6 @@ public actor V2RealtimeJournalFanout {
         operations += 1
         defer { operationFinished() }
         return try await fanout(sourceID: sourceID, lease: lease, control: nil, heads: heads, through: nil)
-    }
-
-    /// Best-effort online H delivery for one exact current Gateway binding.
-    /// Success proves this RPC merged the heads, but never advances a journal,
-    /// user ACK or source dirty-row revision. The caller owns latest-H retries.
-    public func applyOnlineHeads(sourceID: String, lease: V2RealtimePartitionLease,
-                                 recipient: V2RealtimeJournalRecipient,
-                                 heads: [V2RealtimeRoomHeadChange]) async throws -> Bool {
-        guard !closed, (operations < 16), heads.count <= 128,
-              heads.allSatisfy({ $0.partitionID == lease.partitionID }), recipient.deadline > .now else {
-            throw V2RealtimeJournalError.authorityLost
-        }
-        operations += 1
-        defer { operationFinished() }
-        let identity = try await sourceIdentity(sourceID)
-        let source = V2RealtimeJournalSource(sourceID: sourceID, incarnationID: identity.databaseIncarnation,
-                                            partitionID: lease.partitionID)
-        return await deliver(source: source, lease: lease, recipient: recipient,
-                             control: nil, heads: heads, through: nil)
-    }
-
-    /// Delivery-only entrypoint. The source responsibility already lives in SQL;
-    /// this result may advance only this consumer's exact CAS checkpoint.
-    public func applyConsumer(sourceID: String, lease: V2RealtimePartitionLease,
-                              batch: V2RealtimeJournalConsumerBatch,
-                              recipient: V2RealtimeJournalRecipient) async throws -> Int64 {
-        guard !closed, (operations < 16), recipient.deadline > .now,
-              batch.registration.key.gateway == recipient.session.gateway.identity,
-              batch.registration.key.sessionID == recipient.session.sessionID,
-              batch.registration.key.sessionRevision == recipient.interestGeneration,
-              batch.registration.sessionGeneration == recipient.session.sessionGeneration,
-              batch.registration.routingEpoch == recipient.token.epoch,
-              batch.registration.routingToken == recipient.token.leaseToken,
-              batch.registration.partitionID == recipient.token.partitionID,
-              batch.journal.entries.allSatisfy({ $0.topicKind == "roomEvents" || $0.topicKind == "userSync" }) else {
-            throw V2RealtimeJournalError.authorityLost
-        }
-        operations += 1
-        defer { operationFinished() }
-        let identity = try await sourceIdentity(sourceID)
-        let source = V2RealtimeJournalSource(sourceID: sourceID, incarnationID: identity.databaseIncarnation, partitionID: lease.partitionID)
-        let through = min(batch.offeredThrough,
-            batch.journal.requiresSnapshot ? batch.journal.publishedThrough :
-                (batch.journal.entries.last?.sequence ?? batch.journal.publishedThrough))
-        let applied = await deliver(source: source, lease: lease, recipient: recipient,
-            control: batch.journal, heads: batch.heads, through: through)
-        guard applied else { throw V2RealtimeJournalError.authorityLost }
-        let lane = key(source: source, lease: lease, recipient: recipient)
-        return max(batch.controlCursor, checkpoints[lane] ?? through)
     }
 
     private func fanout(sourceID: String, lease: V2RealtimePartitionLease, control: V2RealtimeJournalBatch?,
@@ -219,7 +170,7 @@ public actor V2RealtimeJournalFanout {
                 if checkpoints[lane, default: 0] < through {
                     let entries = try control.entries.filter { $0.sequence > checkpoints[lane, default: 0] }.compactMap { entry -> V2RealtimeJournalProjectionEntry? in
                         let kind: V2RealtimeTopicKind = entry.topicKind == "userSync" ? .userSync : .roomEvents
-                        guard recipient.topics.contains(.init(kind: kind, id: entry.topicID)) else { return nil }
+                        guard recipient.interests[.init(kind: kind, id: entry.topicID)] != nil else { return nil }
                         guard let uuid = UUID(uuidString: entry.topicID) else { throw V2RealtimeJournalError.corruptPersistenceState }
                         if kind == .userSync {
                             guard let version = entry.userControlVersion, version > 0 else { throw V2RealtimeJournalError.corruptPersistenceState }
@@ -239,7 +190,7 @@ public actor V2RealtimeJournalFanout {
                 if checkpoints[lane] == nil {
                     try await establishCold(lane: lane, source: source, fence: fence, recipient: recipient, minimumCut: 0)
                 }
-                let filtered = try heads.filter { recipient.topics.contains($0.topic) }.map { head -> V2RealtimeJournalRoomHead in
+                let filtered = try heads.filter { recipient.interests[$0.topic] != nil }.map { head -> V2RealtimeJournalRoomHead in
                     guard head.roomSequence >= 0, head.ownerEpoch >= 0, head.roomControlVersion >= 0 else { throw V2RealtimeJournalError.corruptPersistenceState }
                     return .init(roomID: RoomID(uuid: head.roomID), highWatermark: UInt64(head.roomSequence),
                                  ownerEpoch: UInt64(head.ownerEpoch), controlVersion: UInt64(head.roomControlVersion))

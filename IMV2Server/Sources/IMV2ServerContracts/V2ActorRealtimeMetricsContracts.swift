@@ -24,21 +24,6 @@ public enum V2ActorRealtimeRouteQueryKind: String, CaseIterable, Sendable {
     case roomTyping = "room_typing"
 }
 
-/// One admitted route-store call remains active until that actual call returns.
-/// Duration includes acquisition and decoding, not just database execution.
-public struct V2ActorRealtimeRouteQuerySnapshot: Sendable {
-    public var active: Int = 0
-    public var started: UInt64 = 0
-    public var succeeded: UInt64 = 0
-    public var failed: UInt64 = 0
-    public var capacityRejected: UInt64 = 0
-    /// Successful queries whose actual returned route array was empty.
-    public var empty: UInt64 = 0
-    public var totalMilliseconds: Double = 0
-    public var maxMilliseconds: Double = 0
-    public init() {}
-}
-
 public enum V2ActorRealtimeSessionRotationReason: String, CaseIterable, Sendable {
     case tokenChange = "token_change", failure, expiry
 }
@@ -126,9 +111,6 @@ public struct V2ActorRealtimeMetricsSnapshot: Sendable {
     public var serviceQualified = 0
     public var serviceQualificationRemainingSeconds: Double = 0
     public var partitionControlFailedTicks: UInt64 = 0
-    public var routeQueries = Dictionary(uniqueKeysWithValues: V2ActorRealtimeRouteQueryKind.allCases.map {
-        ($0, V2ActorRealtimeRouteQuerySnapshot())
-    })
     public var sessionRotations: [V2ActorRealtimeSessionRotationReason: UInt64] = [:]
     public var activationSettlements: [V2ActorRealtimeActivationResult: UInt64] = [:]
     public var headReads: [V2ActorRealtimeRouteQueryKind: V2ActorRealtimeHeadReadSnapshot] = [:]

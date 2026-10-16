@@ -40,7 +40,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
                 policyOwners: remote, locator: try .init(hostID: hostID, shardID: "room-a"), maximumRooms: 4)
             let writes = PostgresV2RoomWriteStore(database: database, contentReviewMode: .disabled)
-            let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
+            let resources = try V2RoomServerOwnerResources(database: database, initializationDatabase: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: SuccessfulProjectionDelivery(), capacityProfile: profile,

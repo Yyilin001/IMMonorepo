@@ -73,25 +73,6 @@ CREATE TABLE IF NOT EXISTS im_v2.realtime_device_control_versions (
  user_id uuid NOT NULL, device_id uuid NOT NULL, latest_change_version bigint NOT NULL CHECK(latest_change_version>0),
  PRIMARY KEY(user_id,device_id)
 );
-CREATE TABLE IF NOT EXISTS im_v2.realtime_journal_consumers (
- partition_id integer NOT NULL REFERENCES im_v2.realtime_journal_partitions,
- gateway_incarnation uuid NOT NULL, gateway_node text NOT NULL, gateway_service text NOT NULL,
- session_id uuid NOT NULL, session_generation bigint NOT NULL DEFAULT 1 CHECK(session_generation>0), session_revision bigint NOT NULL CHECK(session_revision>0),
- routing_epoch bigint NOT NULL CHECK(routing_epoch>0), routing_token uuid NOT NULL,
- coverage_expires_at timestamptz NOT NULL CHECK(isfinite(coverage_expires_at)),
- room_ids uuid[] NOT NULL, user_ids uuid[] NOT NULL,
- control_cursor bigint NOT NULL DEFAULT 0 CHECK(control_cursor>=0),
- offered_through bigint NOT NULL DEFAULT 0 CHECK(offered_through>=control_cursor),
- PRIMARY KEY(partition_id,gateway_incarnation)
-);
-CREATE INDEX IF NOT EXISTS realtime_journal_consumers_pending_idx ON im_v2.realtime_journal_consumers(partition_id,gateway_incarnation) WHERE offered_through>control_cursor;
-CREATE TABLE IF NOT EXISTS im_v2.realtime_journal_consumer_heads (
- partition_id integer NOT NULL, gateway_incarnation uuid NOT NULL, room_id uuid NOT NULL,
- room_sequence bigint NOT NULL CHECK(room_sequence>=0), owner_epoch bigint NOT NULL CHECK(owner_epoch>=0),
- room_control_version bigint NOT NULL CHECK(room_control_version>=0), revision bigint NOT NULL CHECK(revision>0),
- PRIMARY KEY(partition_id,gateway_incarnation,room_id),
- FOREIGN KEY(partition_id,gateway_incarnation) REFERENCES im_v2.realtime_journal_consumers ON DELETE CASCADE
-);
 -- Low byte of FNV-1a is sufficient modulo 256; lengths remain big endian.
 CREATE OR REPLACE FUNCTION im_v2.realtime_topic_partition(kind text,id text) RETURNS integer LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 DECLARE bytes bytea := decode('01','hex'); value text; encoded bytea; h integer := 37; i integer;

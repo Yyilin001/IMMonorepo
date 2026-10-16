@@ -7,6 +7,113 @@ import IMV2ServerContracts
 @testable import IMV2ServerApplication
 
 struct V2RoomSubscriptionOwnerTests {
+    @Test("fresh authorization joins the predecessor delivery before replacing its pump binding", arguments: [false, true])
+    func resetActivationJoinsPreviousDelivery(rejectOldReceipt: Bool) async throws {
+        let room = RoomID(uuid: UUID()), alice = UserID(uuid: UUID()), bob = UserID(uuid: UUID())
+        let owner = try V2RoomDataOwner(shardID: "source", epoch: 0)
+        let token = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
+        let source = SubscriptionOwnerSource(room: room, owner: owner, alice: alice, bob: bob)
+        let service = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room, owner: owner,
+            activation: token, deadline: .now + .seconds(5), trackedUserIDs: [alice])
+        let gateway = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "realtime", incarnationID: UUID())
+        let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]), address: "127.0.0.1", port: 8443)
+        let held = HeldActivationDelivery(rejectFirst: rejectOldReceipt)
+        let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1, send: { delivery, _, _ in await held.send(delivery) })
+        let settled = Mutex(false)
+        var replacement: Task<Bool, any Error>?
+        await pump.start()
+        do {
+            let first = try await service.subscribe(gateway: gateway, userID: alice, token: token, deadline: .now + .seconds(5))
+            #expect(try await service.activate(to: pump, descriptor: descriptor, userID: alice, fence: first.fence,
+                token: token, deadline: .now + .seconds(5)))
+            let deadline = ContinuousClock.now + .seconds(5)
+            while !(await held.started), ContinuousClock.now < deadline { await Task.yield() }
+            try #require(await held.started)
+            let next = try await service.resetGrant(gateway: gateway, userID: alice, expectedFence: first.fence,
+                token: token, deadline: deadline)
+            #expect(next.fence != first.fence)
+            let task = Task {
+                defer { settled.withLock { $0 = true } }
+                return try await service.activate(to: pump, descriptor: descriptor, userID: alice, fence: next.fence,
+                    token: token, deadline: deadline)
+            }
+            replacement = task
+            // The predecessor RPC is explicitly held; no replacement may
+            // complete until that actual call settles.
+            try await Task.sleep(for: .milliseconds(50))
+            #expect(!settled.withLock { $0 })
+            #expect(await pump.snapshot().actualCalls == 1)
+            await held.release()
+            #expect(try await task.value)
+            while !(await held.fences.contains(next.fence)), ContinuousClock.now < deadline { await Task.yield() }
+            #expect(await held.fences.contains(next.fence))
+            try await service.close(); await pump.close()
+        } catch {
+            await held.release()
+            _ = await replacement?.result
+            try? await service.close(); await pump.close()
+            throw error
+        }
+    }
+
+    @Test("repeated activation retains its in-flight delivery binding and still checks the authorization cut")
+    func repeatedActivationWhileDeliveryIsInFlight() async throws {
+        let room = RoomID(uuid: UUID()), alice = UserID(uuid: UUID()), bob = UserID(uuid: UUID())
+        let owner = try V2RoomDataOwner(shardID: "source", epoch: 0)
+        let activation = try roomSubscriptionFixtureActivation(roomID: room, ownerEpoch: 0)
+        let source = SubscriptionOwnerSource(room: room, owner: owner, alice: alice, bob: bob)
+        let service = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room, owner: owner,
+            activation: activation, deadline: .now + .seconds(3), trackedUserIDs: [alice])
+        let gateway = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "realtime", incarnationID: UUID())
+        let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]),
+            address: "127.0.0.1", port: 8443)
+        let grant = try await service.subscribe(gateway: gateway, userID: alice, token: activation, deadline: .now + .seconds(3))
+        let held = HeldActivationDelivery()
+        let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1, send: { delivery, _, _ in
+            await held.send(delivery)
+        })
+        await pump.start()
+        do {
+            #expect(try await service.activate(to: pump, descriptor: descriptor, userID: alice,
+                fence: grant.fence, token: activation, deadline: .now + .seconds(3)))
+            let deadline = ContinuousClock.now + .seconds(3)
+            while !(await held.started), ContinuousClock.now < deadline { await Task.yield() }
+            try #require(await held.started)
+            let before = await source.snapshotCount
+            #expect(try await service.activate(to: pump, descriptor: descriptor, userID: alice,
+                fence: grant.fence, token: activation, deadline: .now + .seconds(3)))
+            #expect(await source.snapshotCount == before + 1)
+            #expect(await pump.snapshot().actualCalls == 1)
+            await source.setControlVersion(1)
+            await #expect(throws: V2RoomSubscriptionOwnerError.catchUpRequired) {
+                try await service.activate(to: pump, descriptor: descriptor, userID: alice,
+                    fence: grant.fence, token: activation, deadline: .now + .seconds(3))
+            }
+            await held.release()
+            try await service.close(); await pump.close()
+        } catch {
+            await held.release()
+            try? await service.close(); await pump.close()
+            throw error
+        }
+    }
+    private actor HeldActivationDelivery {
+        var started = false
+        var fences: [V2RoomSubscriptionFence] = []
+        private var rejectFirst: Bool
+        private var released = false
+        private var waiter: CheckedContinuation<Void, Never>?
+        init(rejectFirst: Bool = false) { self.rejectFirst = rejectFirst }
+        func send(_ delivery: V2RoomSubscriptionDelivery) async -> V2RoomSubscriptionDeliveryResult {
+            let reject = rejectFirst; rejectFirst = false
+            fences.append(delivery.fence)
+            started = true
+            if !released { await withCheckedContinuation { waiter = $0 } }
+            return reject ? .stale : .appliedThrough(delivery.deliverySequence)
+        }
+        func release() { released = true; waiter?.resume(); waiter = nil }
+    }
+
     @Test("replacement Owner advertises committed head even when the old Owner never consumed its commit notification")
     func lostCommitNotificationRestoresFromDurableHead() async throws {
         let room = RoomID(uuid: UUID()), alice = UserID(uuid: UUID()), bob = UserID(uuid: UUID())

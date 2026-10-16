@@ -16,13 +16,18 @@ The copied production source differs from upstream only in:
   acknowledgements, zero missed heartbeats, complete final cursor/coverage
   proof. It used the original TTL/pool budget and production controller;
   this is functional evidence, not capacity or all network-fault acceptance.
+- `Cluster/Reception/OperationLogDistributedReceptionist.swift`: pruning removes
+  the retained peer by ActorID without resolving through a shut-down actor system.
+  `V2ReceptionistShutdownTests` covers late and repeated pruning after shutdown.
 - `ClusterSystemSettings.swift`: adds a validated, finite `ClusterInboundFrameLimit`
   and `maximumInboundFrameBytes` setting (16 MiB default).
 - `Cluster/Transport/TransportPipelines.swift`: installs the same bounded reader
   and close-on-error handler in accepting and initiating pipelines, after TLS
   and protocol magic and before handshake/deserialization. Its initiating
   handshake handler also reports channel close/error and a ten-second missing
-  response timeout exactly once.
+  response timeout exactly once after TCP activation. Inactive Happy Eyeballs
+  candidates neither start that watchdog nor report a protocol failure when
+  discarded; ClientBootstrap owns the aggregate resolution/connect failure.
 - `Cluster/Transport/BoundedInboundFraming.swift`: new four-byte big-endian
   decoder. It rejects an over-limit declared length as soon as the header is
   complete, caps NIO's cumulation buffer at payload limit plus four bytes,

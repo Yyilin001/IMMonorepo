@@ -1,10 +1,11 @@
 import Foundation
+import HashTreeCollections
 import IMV2ActorContracts
 import IMV2ServerContracts
 import Synchronization
 
 /// Gateway-owned desired state. One actual control worker per partition, with
-/// independent global control admission. Callers are cancellable waiters only.
+/// transport-owned peer/global control admission. Callers are cancellable waiters only.
 public actor V2RealtimeInterestCoordinator {
     public enum Failure: Error { case closed, missingOwner, stale, exhausted, recovering }
     public typealias Heads = @Sendable ([V2RealtimeTopic]) async throws -> [V2RealtimeTopic: V2RealtimeRecoveryHeadOutcome]
@@ -12,6 +13,34 @@ public actor V2RealtimeInterestCoordinator {
     private struct Fence: Sendable {
         let token: V2RealtimeShardToken; let sessionID: UUID; let generation: Int64
         let owner: V2RoomDataOwner; let highWatermark: UInt64; let deadline: ContinuousClock.Instant; let ready: Bool
+    }
+    /// Topic authorization is immutable across a same-session renewal. Only
+    /// the acknowledged partition session deadline changes; no scope scan is
+    /// needed while holding the read-side mutex.
+    private struct FenceState: Sendable {
+        private struct SessionDeadline: Sendable {
+            let token: V2RealtimeShardToken
+            let sessionID: UUID
+            let deadline: ContinuousClock.Instant
+        }
+        private var topics: [V2RealtimeTopicKey: Fence] = [:]
+        private var sessions: [Int: SessionDeadline] = [:]
+        subscript(key: V2RealtimeTopicKey) -> Fence? {
+            get {
+                guard let fence = topics[key] else { return nil }
+                guard let session = sessions[fence.token.partitionID] else { return fence }
+                guard session.token == fence.token, session.sessionID == fence.sessionID else { return nil }
+                return Fence(token: fence.token, sessionID: fence.sessionID, generation: fence.generation,
+                    owner: fence.owner, highWatermark: fence.highWatermark, deadline: session.deadline, ready: fence.ready)
+            }
+            set { topics[key] = newValue }
+        }
+        mutating func renew(token: V2RealtimeShardToken, sessionID: UUID, deadline: ContinuousClock.Instant) {
+            sessions[token.partitionID] = .init(token: token, sessionID: sessionID, deadline: deadline)
+        }
+        mutating func removeValue(forKey key: V2RealtimeTopicKey) { topics.removeValue(forKey: key) }
+        mutating func invalidateSession(partitionID: Int) { sessions.removeValue(forKey: partitionID) }
+        mutating func removeAll() { topics.removeAll(); sessions.removeAll() }
     }
     private struct Entry: Sendable {
         var topic: V2RealtimeTopic
@@ -24,11 +53,12 @@ public actor V2RealtimeInterestCoordinator {
         var descriptorDeadline: ContinuousClock.Instant = .now
         var session: V2RealtimeShardSession
         var revision: Int64 = 0
-        var installed: [V2RealtimeTopicKey: Int64] = [:]
+        var installed: TreeDictionary<V2RealtimeTopicKey, Int64> = [:]
         var sessionDeadline: ContinuousClock.Instant = .now
         var lastHeadCheck: ContinuousClock.Instant = .now
         var snapshot = true
-        var pendingRecovery: Set<V2RealtimeTopicKey> = []
+        var pendingRecovery = V2RealtimeKeyQueue<V2RealtimeTopicKey>()
+        var dirty = V2RealtimeKeyQueue<V2RealtimeTopicKey>()
         var retryRecovery: Set<V2RealtimeTopicKey> = []
         var recoveryWorker: Task<Void, Never>?
         var renewalWorker: Task<Void, Never>?
@@ -47,12 +77,12 @@ public actor V2RealtimeInterestCoordinator {
     private let coverageReady: @Sendable ([V2RealtimeTopic: V2RealtimeCoverageConfirmation]) async -> Void
     private let coverageLost: @Sendable (Set<V2RealtimeTopic>, ContinuousClock.Instant) async -> Void
     private let metrics: V2ActorRealtimeMetrics?
-    private nonisolated let fences = Mutex<[V2RealtimeTopicKey: Fence]>([:])
+    private nonisolated let fences = Mutex(FenceState())
     public struct JournalCoverage: Sendable {
         public let token: V2RealtimeShardToken
         public let sessionID: UUID
         public let revision: Int64
-        public let interests: [V2RealtimeTopicKey: Int64]
+        public let interests: TreeDictionary<V2RealtimeTopicKey, Int64>
         public let deadline: ContinuousClock.Instant
     }
     public struct JournalInterestProof: Sendable {
@@ -131,11 +161,11 @@ public actor V2RealtimeInterestCoordinator {
     private var partitions: [Int: Partition] = [:]
     private var keysByPartition: [Int: Set<V2RealtimeTopicKey>] = [:]
     private var waiters: [UUID: Waiter] = [:]
+    private var waitersByTopic: [V2RealtimeTopicKey: Set<UUID>] = [:]
+    private var waitersByPartition: [Int: Set<UUID>] = [:]
     private var recoveries = 0
     private var recoveryQueue: [Int] = []
     private var recoveryQueued: Set<Int> = []
-    private var controls = 0
-    private var controlWaiters: [CheckedContinuation<Void, any Error>] = []
     private var periodic: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
     private var closed = false
@@ -195,15 +225,13 @@ public actor V2RealtimeInterestCoordinator {
     public struct Pressure: Sendable {
         public let desiredInterests: Int
         public let partitions: Int
-        public let controlInFlight: Int
-        public let controlQueued: Int
         public let activationWaiters: Int
         public let recoveryInFlight: Int
         public let recoveryQueued: Int
     }
     public func pressureSnapshot() -> Pressure {
-        .init(desiredInterests: entries.values.filter(\.active).count, partitions: partitions.count,
-              controlInFlight: controls, controlQueued: controlWaiters.count, activationWaiters: waiters.count,
+        .init(desiredInterests: entries.count, partitions: partitions.count,
+              activationWaiters: waiters.count,
               recoveryInFlight: recoveries, recoveryQueued: recoveryQueued.count)
     }
     public func start() async throws {
@@ -237,13 +265,18 @@ public actor V2RealtimeInterestCoordinator {
             keysByPartition[partitionID, default: []].insert(key)
             if changed { withdrawJournalCoverage(partitionID) }
             enqueue(partitionID)
+            if changed { partitions[partitionID]?.dirty.insert(key) }
         }
-        finishWaiters() // Replaced owners cannot leave old-generation callers suspended.
+        finishWaiters(keys: Set(selected.keys)) // Only affected topic lifecycles can settle.
         if ready(selected) { return }
         let id = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 waiters[id] = .init(desired: selected, continuation: continuation)
+                for key in selected.keys {
+                    waitersByTopic[key, default: []].insert(id)
+                    waitersByPartition[key.partitionID(), default: []].insert(id)
+                }
             }
         } onCancel: { Task { await self.cancelWaiter(id) } }
         try Task.checkCancellation()
@@ -258,10 +291,21 @@ public actor V2RealtimeInterestCoordinator {
         }
     }
     private func cancelWaiter(_ id: UUID) {
-        if let waiter = waiters.removeValue(forKey: id) {
+        if let waiter = removeWaiter(id) {
             metrics?.activationSettled(.cancelled)
             waiter.continuation.resume(throwing: CancellationError())
         }
+    }
+    private func removeWaiter(_ id: UUID) -> Waiter? {
+        guard let waiter = waiters.removeValue(forKey: id) else { return nil }
+        for key in waiter.desired.keys {
+            waitersByTopic[key]?.remove(id)
+            if waitersByTopic[key]?.isEmpty == true { waitersByTopic.removeValue(forKey: key) }
+            let partition = key.partitionID()
+            waitersByPartition[partition]?.remove(id)
+            if waitersByPartition[partition]?.isEmpty == true { waitersByPartition.removeValue(forKey: partition) }
+        }
+        return waiter
     }
     private func ready(_ selected: [V2RealtimeTopicKey: Int64]) -> Bool {
         selected.allSatisfy { key, generation in
@@ -269,20 +313,25 @@ public actor V2RealtimeInterestCoordinator {
             return fences.withLock { $0[key].map { $0.ready && $0.deadline > .now } ?? false }
         }
     }
-    private func finishWaiters(partition: Int? = nil, failure: (any Error)? = nil) {
-        for (id, waiter) in waiters {
+    private func finishWaiters(partition: Int? = nil, keys: Set<V2RealtimeTopicKey>? = nil, failure: (any Error)? = nil) {
+        let candidates: Set<UUID>
+        if let keys { candidates = keys.reduce(into: []) { $0.formUnion(waitersByTopic[$1] ?? []) } }
+        else if let partition { candidates = waitersByPartition[partition] ?? [] }
+        else { candidates = Set(waiters.keys) } // Only shutdown examines every waiter.
+        for id in candidates {
+            guard let waiter = waiters[id] else { continue }
             let superseded = waiter.desired.contains { key, generation in
                 guard let entry = entries[key] else { return true }
                 return !entry.active || entry.generation != generation
             }
             if superseded {
-                waiters.removeValue(forKey: id); metrics?.activationSettled(.stale)
+                _ = removeWaiter(id); metrics?.activationSettled(.stale)
                 waiter.continuation.resume(throwing: Failure.stale)
             } else if ready(waiter.desired) {
-                waiters.removeValue(forKey: id); metrics?.activationSettled(.ready)
+                _ = removeWaiter(id); metrics?.activationSettled(.ready)
                 waiter.continuation.resume()
             } else if let failure, partition == nil || waiter.desired.keys.contains(where: { $0.partitionID() == partition }) {
-                waiters.removeValue(forKey: id)
+                _ = removeWaiter(id)
                 let result: V2ActorRealtimeActivationResult
                 if let value = failure as? Failure {
                     switch value { case .stale: result = .stale; case .closed: result = .closed; default: result = .failed }
@@ -304,13 +353,11 @@ public actor V2RealtimeInterestCoordinator {
         partitions[partitionID]?.retryRecovery.remove(key)
         if keysByPartition[partitionID]?.isEmpty == true { keysByPartition.removeValue(forKey: partitionID) }
         metrics?.interests(delta: -1); fences.withLock { $0.removeValue(forKey: key) }
-        for (waiterID, waiter) in waiters where waiter.desired[key] != nil {
-            waiters.removeValue(forKey: waiterID); metrics?.activationSettled(.stale)
-            waiter.continuation.resume(throwing: Failure.stale)
-        }
+        finishWaiters(keys: [key])
         // installed holds the old generation until the actual remove/upsert
         // control settles; desired indexes retain only current active scopes.
         enqueue(partitionID)
+        partitions[partitionID]?.dirty.insert(key)
     }
     private func enqueue(_ id: Int) {
         guard !closed else { return }
@@ -320,23 +367,6 @@ public actor V2RealtimeInterestCoordinator {
             try? await Task.sleep(for: .milliseconds(2))
             await self.drive(id, partition: partition)
         } }
-    }
-    private func control(_ descriptor: V2RealtimeShardDescriptor, _ request: V2RealtimeShardControlRequest) async throws -> V2RealtimeShardControlReply {
-        guard !closed else { throw Failure.closed }
-        if controls == 4 {
-            guard controlWaiters.count < 256 else { throw Failure.exhausted }
-            try await withCheckedThrowingContinuation { controlWaiters.append($0) }
-        } else { controls += 1 }
-        defer {
-            controls -= 1
-            if !controlWaiters.isEmpty {
-                let next = controlWaiters.removeFirst()
-                if closed { next.resume(throwing: Failure.closed) }
-                else { controls += 1; next.resume() }
-            }
-        }
-        guard !closed else { throw Failure.closed }
-        return try await transport.control(descriptor, request: request)
     }
     private func request(_ partition: Partition, mutation: V2RealtimeShardMutation) throws -> V2RealtimeShardControlRequest {
         guard let route = partition.descriptor, partition.revision < Int64.max else { throw Failure.stale }
@@ -361,7 +391,7 @@ public actor V2RealtimeInterestCoordinator {
         while response == nil {
             guard !closed else { throw Failure.closed }
             do {
-                let reply = try await control(route, request)
+                let reply = try await transport.control(route, request: request)
                 if reply.status == .overloaded { throw V2RealtimePublicationBackpressure.receiverQueue }
                 if reply.status == .notInstalled { throw Failure.recovering }
                 response = reply
@@ -377,9 +407,37 @@ public actor V2RealtimeInterestCoordinator {
         switch reply.status {
         case .applied:
             guard reply.remainingSessionMilliseconds > 0 else { throw Failure.stale }
+            let wasAvailable = partition.sessionDeadline > .now
             partition.sessionDeadline = max(partition.sessionDeadline,
                 min(partition.descriptorDeadline, start + .milliseconds(reply.remainingSessionMilliseconds)))
-            if !renewal { partition.pending = nil }; return reply
+            let resumed = fences.withLock { state -> [V2RealtimeTopic: V2RealtimeCoverageConfirmation] in
+                state.renew(token: request.token, sessionID: request.session.sessionID, deadline: partition.sessionDeadline)
+                // A caller can park while an in-flight renewal crosses the
+                // previous local deadline. Publish first, then signal that
+                // unavailable -> available edge. Timely renewals remain O(1)
+                // and never scan topics or repeat their SQL head barrier.
+                guard !wasAvailable, partition.sessionDeadline > .now else { return [:] }
+                var ready: [V2RealtimeTopic: V2RealtimeCoverageConfirmation] = [:]
+                for key in keysByPartition[request.token.partitionID] ?? [] {
+                    guard let entry = entries[key], entry.active, entry.ready,
+                          let fence = state[key], fence.ready,
+                          fence.token == request.token, fence.sessionID == request.session.sessionID,
+                          fence.generation == entry.generation else { continue }
+                    ready[entry.topic] = .init(token: fence.token, sessionID: fence.sessionID,
+                        interestGeneration: fence.generation, highWatermark: fence.highWatermark,
+                        deadline: fence.deadline)
+                }
+                return ready
+            }
+            if !renewal { partition.pending = nil }
+            if !resumed.isEmpty {
+                await coverageReady(resumed)
+                guard !closed, partitions[route.token.partitionID] === partition,
+                      partition.descriptor?.token == route.token, partition.session == request.session else {
+                    throw Failure.stale
+                }
+            }
+            return reply
         case .retiredEpoch, .retiredIncarnation:
             await transport.invalidate(route); throw Failure.stale
         case .notInstalled: throw Failure.recovering
@@ -393,11 +451,11 @@ public actor V2RealtimeInterestCoordinator {
             return V2RealtimeShardInterest(key: key, interestGeneration: entry.generation)
         }.sorted { V2RealtimeShardFingerprint.key($0.key) < V2RealtimeShardFingerprint.key($1.key) }
     }
-    private func pendingFences(_ id: Int, partition: Partition) {
+    private func pendingFences(_ id: Int, partition: Partition, keys: Set<V2RealtimeTopicKey>? = nil) {
         withdrawJournalCoverage(id)
         guard let route = partition.descriptor else { return }
         fences.withLock { state in
-            for key in keysByPartition[id] ?? [] {
+            for key in keys ?? keysByPartition[id] ?? [] {
                 guard let entry = entries[key], entry.active else { continue }
                 if let old = state[key], old.token == route.token, old.sessionID == partition.session.sessionID,
                    old.generation == entry.generation, old.owner == entry.topic.owner, old.deadline > .now { continue }
@@ -431,8 +489,7 @@ public actor V2RealtimeInterestCoordinator {
             }
             guard let route = partition.descriptor, partition.sessionDeadline > .now else { continue }
             var selected: [V2RealtimeTopicKey: Entry] = [:]
-            for key in partition.pendingRecovery.sorted(by: { V2RealtimeShardFingerprint.key($0) < V2RealtimeShardFingerprint.key($1) }).prefix(128) {
-                partition.pendingRecovery.remove(key)
+            while selected.count < 128, let key = partition.pendingRecovery.popFirst() {
                 if let entry = entries[key], entry.active, partition.installed[key] == entry.generation { selected[key] = entry }
             }
             guard !selected.isEmpty else { continue }
@@ -484,10 +541,7 @@ public actor V2RealtimeInterestCoordinator {
         // Keep desired interests installed, but don't hold a caller's recovery
         // slot across repeated local head failures. Only its exact failed topics
         // settle; unrelated confirmed topics and sessions remain intact.
-        for (id, waiter) in waiters where waiter.desired.contains(where: { failed[$0.key] == $0.value }) {
-            waiters.removeValue(forKey: id); metrics?.activationSettled(.failed)
-            waiter.continuation.resume(throwing: Failure.recovering)
-        }
+        finishWaiters(keys: Set(failed.keys), failure: Failure.recovering)
         if !lost.isEmpty { metrics?.coverageLost(); await coverageLost(lost, cutoff) }
     }
     private func recover(_ id: Int, partition: Partition, token: V2RealtimeShardToken,
@@ -544,7 +598,7 @@ public actor V2RealtimeInterestCoordinator {
             // A failure callback may itself have exhausted the original budget.
             await retryRecovery(id, partition: partition, token: token, session: session, selected: selected)
         }
-        finishWaiters()
+        finishWaiters(keys: Set(selected.keys))
     }
 
     private func enqueueRenewal(_ id: Int, partition: Partition) {
@@ -574,13 +628,6 @@ public actor V2RealtimeInterestCoordinator {
             _ = try await send(request, partition: partition)
             guard !closed, partitions[id] === partition, partition.session == session,
                   partition.descriptor?.token == request.token else { return }
-            fences.withLock { state in
-                for key in keysByPartition[id] ?? [] {
-                    guard let prior = state[key], prior.token == request.token, prior.sessionID == session.sessionID else { continue }
-                    state[key] = .init(token: prior.token, sessionID: prior.sessionID, generation: prior.generation,
-                        owner: prior.owner, highWatermark: prior.highWatermark, deadline: partition.sessionDeadline, ready: prior.ready)
-                }
-            }
             retainJournalCoverage(id, partition: partition)
         } catch {
             // Keep original deadlines on unknown/temporary failure. The normal
@@ -618,24 +665,25 @@ public actor V2RealtimeInterestCoordinator {
                             partition.revision = reply.appliedRevision
                         } else { guard reply.appliedRevision == next.baseRevision else { throw Failure.recovering } }
                     }
-                    partition.installed = Dictionary(uniqueKeysWithValues: interests.map { ($0.key, $0.interestGeneration) })
+                    partition.installed = TreeDictionary(uniqueKeysWithValues: interests.map { ($0.key, $0.interestGeneration) })
                     partition.snapshot = false
                     retainJournalCoverage(id, partition: partition)
                     queueRecovery(id, partition: partition)
                 }
                 var changes: [V2RealtimeShardInterestChange] = []
-                let current = desired(id)
-                let wanted = Dictionary(uniqueKeysWithValues: current.map { ($0.key, $0.interestGeneration) })
-                for interest in current where partition.installed[interest.key] != interest.interestGeneration {
-                    changes.append(.upsert(interest)); if changes.count == 128 { break }
-                }
-                if changes.count < 128 {
-                    for (key, generation) in partition.installed where wanted[key] == nil {
-                        changes.append(.remove(key: key, generation: generation)); if changes.count == 128 { break }
+                // Drain only changed keys. A concurrent change during send inserts a
+                // fresh ticket, so it cannot be erased by this batch's completion.
+                while changes.count < 128, let key = partition.dirty.popFirst() {
+                    if let entry = entries[key], entry.active {
+                        if partition.installed[key] != entry.generation {
+                            changes.append(.upsert(.init(key: key, interestGeneration: entry.generation)))
+                        }
+                    } else if let generation = partition.installed[key] {
+                        changes.append(.remove(key: key, generation: generation))
                     }
                 }
                 if !changes.isEmpty {
-                    pendingFences(id, partition: partition)
+                    pendingFences(id, partition: partition, keys: Set(changes.compactMap { if case .upsert(let value) = $0 { value.key } else { nil } }))
                     let next = try request(partition, mutation: .delta(changes))
                     let reply = try await send(next, partition: partition)
                     guard reply.appliedRevision == next.nextRevision else { throw Failure.recovering }
@@ -673,11 +721,11 @@ public actor V2RealtimeInterestCoordinator {
             entry.generation = firstGeneration + Int64(offset); entry.ready = false; entries[key] = entry
         }
         partition.session = .init(gateway: descriptor, sessionID: UUID(), sessionGeneration: partition.session.sessionGeneration + 1)
-        partition.revision = 0; partition.installed.removeAll(); partition.snapshot = true; partition.pending = nil
-        partition.pendingRecovery.removeAll(); partition.retryRecovery.removeAll()
+        partition.revision = 0; partition.installed = [:]; partition.snapshot = true; partition.pending = nil
+        partition.pendingRecovery.removeAll(); partition.retryRecovery.removeAll(); partition.dirty.removeAll()
         metrics?.sessionRotation(reason)
         // A successor session cannot satisfy a caller waiting on its predecessor.
-        finishWaiters()
+        finishWaiters(partition: id)
     }
     private func lose(_ id: Int, partition: Partition) async {
         withdrawJournalCoverage(id)
@@ -687,7 +735,10 @@ public actor V2RealtimeInterestCoordinator {
             if entry.ready { lost.insert(entry.topic) }
             entry.ready = false; entries[key] = entry
         }
-        fences.withLock { state in for key in keysByPartition[id] ?? [] { state.removeValue(forKey: key) } }
+        fences.withLock { state in
+            state.invalidateSession(partitionID: id)
+            for key in keysByPartition[id] ?? [] { state.removeValue(forKey: key) }
+        }
         if !lost.isEmpty { metrics?.coverageLost(); await coverageLost(lost, .now) }
     }
     private func runPeriodic() async {
@@ -727,7 +778,7 @@ public actor V2RealtimeInterestCoordinator {
             } ?? false
             if recheckHeads || (!journalCurrent && partition.lastHeadCheck + .seconds(30) <= .now) { queueRecovery(id, partition: partition) }
             else if !partition.pendingRecovery.isEmpty { queueRecovery(id, partition: partition, keys: []) }
-            enqueue(id)
+            if partition.snapshot || !partition.dirty.isEmpty || partition.descriptorDeadline <= .now + .seconds(10) { enqueue(id) }
         }
     }
     public func shutdown() async {
@@ -738,7 +789,6 @@ public actor V2RealtimeInterestCoordinator {
         }
         for id in journalPartitions { journalObserver.withLock { $0?.callback }?(.invalidated(partitionID: id)) }
         recoveryQueue.removeAll(); recoveryQueued.removeAll()
-        let queued = controlWaiters; controlWaiters.removeAll(); for waiter in queued { waiter.resume(throwing: Failure.closed) }
         finishWaiters(failure: Failure.closed)
         let task = Task { await self.drain() }; shutdownTask = task; await task.value
     }
@@ -759,7 +809,7 @@ public actor V2RealtimeInterestCoordinator {
             }
             if let close = try? request(partition, mutation: .close) { _ = try? await transport.control(route, request: close) }
         }
-        metrics?.interests(delta: -entries.values.filter(\.active).count)
+        metrics?.interests(delta: -entries.count)
         partitions.removeAll(); entries.removeAll(); keysByPartition.removeAll()
     }
 }

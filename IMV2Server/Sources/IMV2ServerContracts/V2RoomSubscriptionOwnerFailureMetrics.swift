@@ -5,6 +5,7 @@ import Synchronization
 public final class V2RoomSubscriptionOwnerFailureMetrics: Sendable {
     public enum Reason: String, CaseIterable, Sendable {
         case busy, catchUpRequired, overloaded, pumpBindRefused
+        case pumpBindingActive, pumpBindingCapacity, pumpBindingInProgress
         case subscribeTerminalPending, subscribeControlCutMismatch, subscribeLogGap
     }
     public static let shared = V2RoomSubscriptionOwnerFailureMetrics()

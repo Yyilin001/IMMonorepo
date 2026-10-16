@@ -13,15 +13,28 @@ struct V2PresencePublicationGatewayHandler:V2GatewayCommandHandler,V2PreparedGro
         try await handle(envelope:envelope,identity:identity,originatingConnectionID:connectionID)
     }
     func handle(envelope:IMV2Envelope,identity:V2AuthenticatedConnection,originatingConnectionID:UUID?) async throws -> IMV2Envelope {
-        if let response = await registry.handleDeviceRoomProgress(envelope, connectionID: connectionID, identity: identity) {
-            return response
+        // Route locally before crossing the shared registry actor. Ordinary
+        // sends must not queue there just to discover that neither control applies.
+        switch envelope.body {
+        case .deviceRoomProgressReport:
+            if let response = await registry.handleDeviceRoomProgress(envelope, connectionID: connectionID, identity: identity) {
+                return response
+            }
+        case .groupEventSubscribe, .groupEventUnsubscribe:
+            if let response = await registry.handleRoomSubscriptionCommand(envelope, connectionID: connectionID, identity: identity) {
+                return response
+            }
+        case .presencePublicationControl(let input):
+            return await handlePresencePublication(input, identity: identity)
+        default: break
         }
-        if let response = await registry.handleRoomSubscriptionCommand(envelope, connectionID: connectionID, identity: identity) {
-            return response
-        }
-        guard case .presencePublicationControl(let input)=envelope.body else {
-            return try await delegate.handle(envelope:envelope,identity:identity,originatingConnectionID:originatingConnectionID)
-        }
+        return try await delegate.handle(envelope:envelope,identity:identity,originatingConnectionID:originatingConnectionID)
+    }
+    // Keep the control-only response/error state out of every ordinary send's
+    // suspended frame; Release allocation samples showed this wrapper retaining it.
+    @inline(never)
+    private func handlePresencePublication(_ input: IMV2PresencePublicationControl,
+                                          identity: V2AuthenticatedConnection) async -> IMV2Envelope {
         let mode:V2PresencePublicationMode
         switch input.mode {case .suppressed:mode = .suppressed;case .allowWhenAuthorized:mode = .allowWhenAuthorized;default:return failure("INVALID_ARGUMENT",retryable:false)}
         do {

@@ -12,6 +12,7 @@ import Foundation
 import Synchronization
 import IMV2Compression
 import IMV2Core
+import IMV2LoadGeneratorSupport
 import IMV2Server
 import IMV2ServerInfrastructure
 import IMV2ToolHTTP
@@ -486,7 +487,7 @@ private struct LoadScenario: Decodable, Sendable {
               (scenario.maximumSteadyStateQueuedMessages ?? 0) >= 0,
               (scenario.maximumSteadyStateQueuedMessages ?? 0) <= (scenario.maximumQueuedMessagesPerConnection ?? 0) * 5_000,
               !scenario.personas.isEmpty,
-              !scenario.phases.isEmpty
+              !scenario.phases.isEmpty, Set(scenario.phases.map(\.name)).count == scenario.phases.count
         else { throw LoadError.invalidScenario("missing required scenario fields") }
         let share = scenario.personas.reduce(0) { $0 + $1.share }
         guard abs(share - 1) < 0.000_001,
@@ -591,6 +592,13 @@ private struct RecoveryBatchStats {
     var latency = LatencyHistogram()
 }
 
+private struct MessageSendCohortReport: Encodable {
+    let messagesSent: Int
+    let messagesAcknowledged: Int
+    let messageLatency: Percentiles
+    let messageEndToEndLatency: Percentiles
+}
+
 private final class LoadStatistics: @unchecked Sendable {
     struct State {
         var attempted = 0
@@ -671,6 +679,28 @@ private final class LoadStatistics: @unchecked Sendable {
 
     private let lock = NIOLock()
     private var state = State()
+    // Only accessed under the existing statistics lock. Reference storage avoids
+    // copying two large histograms out of the dictionary on every observation.
+    private final class MessageCohort {
+        var sent = 0
+        var acknowledged = 0
+        var latency = LatencyHistogram()
+        var endToEnd = LatencyHistogram()
+    }
+    private var cohortWindows = V2LoadMessageCohortWindows()
+    private var cohorts: [String: MessageCohort] = [:]
+    func registerMessageCohort(name: String, start: NIODeadline, end: NIODeadline) throws {
+        try lock.withLock {
+            try cohortWindows.register(name: name, start: start.uptimeNanoseconds, end: end.uptimeNanoseconds)
+            cohorts[name] = MessageCohort()
+        }
+    }
+    func messageSendCohorts() -> [String: MessageSendCohortReport] {
+        lock.withLock {
+            cohorts.mapValues { .init(messagesSent: $0.sent, messagesAcknowledged: $0.acknowledged,
+                messageLatency: $0.latency.percentiles, messageEndToEndLatency: $0.endToEnd.percentiles) }
+        }
+    }
 
     func recordAttempt() { lock.withLock { state.attempted += 1 } }
     func recordFailure(_ error: Error) {
@@ -757,12 +787,22 @@ private final class LoadStatistics: @unchecked Sendable {
             state.messageSendPayloadLimitMaximum = max(state.messageSendPayloadLimitMaximum ?? payloadLimit, payloadLimit)
         }
     }
-    func recordMessageSent() { lock.withLock { state.messagesSent += 1 } }
-    func recordMessageAcknowledged(milliseconds: Double, endToEndMilliseconds: Double) {
+    func recordMessageSent(scheduledAt: NIODeadline) {
+        lock.withLock {
+            state.messagesSent += 1
+            if let name = cohortWindows.cohort(scheduledAt: scheduledAt.uptimeNanoseconds) { cohorts[name]?.sent += 1 }
+        }
+    }
+    func recordMessageAcknowledged(milliseconds: Double, endToEndMilliseconds: Double, scheduledAt: NIODeadline) {
         lock.withLock {
             state.messagesAcknowledged += 1
             state.messageLatency.record(milliseconds)
             state.messageEndToEndLatency.record(endToEndMilliseconds)
+            if let name = cohortWindows.cohort(scheduledAt: scheduledAt.uptimeNanoseconds), let cohort = cohorts[name] {
+                cohort.acknowledged += 1
+                cohort.latency.record(milliseconds)
+                cohort.endToEnd.record(endToEndMilliseconds)
+            }
         }
     }
     func recordMessageSkipped() { lock.withLock { state.messagesSkipped += 1 } }
@@ -1408,7 +1448,7 @@ private struct LoadRun: Sendable {
         eventLoopLagMetrics.stop()
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, messageSendCohorts: statistics.messageSendCohorts(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -1653,6 +1693,8 @@ private struct LoadRun: Sendable {
             let phaseStartedAtUnixMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
             let started = statistics.snapshot()
             let phaseStarted = NIODeadline.now()
+            try statistics.registerMessageCohort(name: phase.name, start: phaseStarted,
+                end: phaseStarted + .seconds(Int64(phase.durationSeconds)))
             var completedTicks = 0
             var messageCarry = 0.0
             var roundRobinSendIndex = 0
@@ -2184,13 +2226,41 @@ private struct RequestedScopeCoverageSnapshot: Encodable, Sendable {
     let highWatermark: UInt64?
     let appliedCursor: UInt64
     let passed: Bool
+    let reason: String?
+    let observedAtUnixMilliseconds: Int64?
+    let lastReadyAtUnixMilliseconds: Int64?
+    let lastReadyGeneration: UInt64?
+}
+private struct IgnoredCoverageFrameSnapshot: Encodable, Sendable {
+    let rejection: String
+    let scope: Int
+    let scopeID: String
+    let generation: UInt64
+    let revision: UInt64
+    let state: Int
+    let reason: Int
+    let observedAtUnixMilliseconds: Int64
+}
+private struct ServerRoomProgressSnapshot: Encodable, Sendable {
+    let ready: Bool
+    let generation: UInt64
+    let highWatermark: UInt64
+    let appliedRoomSequence: UInt64
+    let observedAtUnixMilliseconds: Int64
 }
 private struct ConnectionCoverageSnapshot: Encodable, Sendable {
     let connectionIndex: Int
     let physicalConnectionID: UUID
+    let localSourcePort: Int?
+    let remoteGatewayPort: Int?
+    let lastHeartbeatRequestID: UInt64?
+    let lastHeartbeatClientTimeMilliseconds: UInt64?
     let wireVersion: UInt32
     let requestedScopes: [RequestedScopeCoverageSnapshot]
     let ignoredCoverageFrames: Int
+    let ignoredCoverageReasons: [String: Int]
+    let lastIgnoredCoverageFrame: IgnoredCoverageFrameSnapshot?
+    let lastServerRoomProgress: ServerRoomProgressSnapshot?
     let heartbeatSent: Int
     let heartbeatAcknowledged: Int
     let heartbeatMissed: Int
@@ -2209,6 +2279,10 @@ private struct ObservedScopeCoverage {
     let revision: UInt64
     let state: String
     let highWatermark: UInt64
+    let reason: String
+    let observedAtUnixMilliseconds: Int64
+    let lastReadyAtUnixMilliseconds: Int64?
+    let lastReadyGeneration: UInt64?
 }
 
 /// Immutable worklog; ownership moves from old event loop to slot to authenticated handler.
@@ -2538,7 +2612,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "0970cf49d46c532e082d2bddb34c646ae2cc1305b139931f9cdbda38a0044f6f"
+    static let algorithmSourceSHA256 = "309423f2efa3376ff283508896315f6eb4185e0b30e484985ded33269d0af7ce"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     static let maximumMessageWireAttempts = 5
@@ -2634,6 +2708,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var nextSyncToken = ""
     // Bound to this actual handler/physical channel, never transferred on reconnect.
     private let physicalConnectionID = UUID()
+    private var localSourcePort: Int?
+    private var remoteGatewayPort: Int?
+    private var lastHeartbeatRequestID: UInt64?
+    private var lastHeartbeatClientTimeMilliseconds: UInt64?
     private var checkpointHeartbeatSent = 0
     private var checkpointHeartbeatAcknowledged = 0
     private var checkpointHeartbeatMissed = 0
@@ -2643,6 +2721,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var observedCoverage: [String: ObservedScopeCoverage] = [:]
     private var coverageRevisions: [String: UInt64] = [:]
     private var ignoredCoverageFrames = 0
+    // Bounded passive witnesses only. They never authorize a scope or trigger recovery.
+    private var ignoredCoverageReasons: [String: Int] = [:]
+    private var lastIgnoredCoverageFrame: IgnoredCoverageFrameSnapshot?
+    private var lastServerRoomProgress: ServerRoomProgressSnapshot?
     private enum SyncActionKind { case pull, acknowledgement(hasMore: Bool) }
     private final class SyncAttempt {
         let id = UUID()
@@ -2663,6 +2745,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var syncInFlight = false
     private var syncRequested = false
     private var roomEventCursors: [String: UInt64] = [:]
+    private var roomEventAcceptedSequences: [String: V2LoadRoomAcceptedSequences] = [:]
     private let isRestoredRecovery: Bool
     private var restoredRecoveryTargets: [String: UInt64] = [:]
     private var roomEventAnnouncedHighWatermarks: [String: UInt64] = [:]
@@ -2770,6 +2853,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     func channelActive(context: ChannelHandlerContext) {
+        localSourcePort = context.channel.localAddress?.port
+        remoteGatewayPort = context.channel.remoteAddress?.port
         do {
             var hello = IMV2Envelope()
             hello.requestID = 1
@@ -2914,7 +2999,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                               !event.projectionKind.isEmpty,
                               !event.payload.isEmpty
                         else { break }
-                        cursor = event.roomSequence
+                        cursor = drainAcceptedRoomSequences(roomID: hint.roomID, through: event.roomSequence)
                         statistics.recordRoomEventLivePayloadApplied()
                     }
                     roomEventCursors[hint.roomID] = cursor
@@ -2936,7 +3021,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                    !hint.sourceEventID.isEmpty,
                    !hint.projectionKind.isEmpty,
                    !hint.eventPayload.isEmpty {
-                    roomEventCursors[hint.roomID] = hint.roomSequence
+                    roomEventCursors[hint.roomID] = drainAcceptedRoomSequences(roomID: hint.roomID, through: hint.roomSequence)
                     statistics.recordRoomEventLivePayloadApplied()
                     cancelRoomEventRecoveryGraceIfCaughtUp(roomID: hint.roomID)
                     return
@@ -3175,7 +3260,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 if page.nextRoomSequence <= currentCursor {
                     statistics.recordRoomEventStalePageReceived()
                 } else {
-                    roomEventCursors[roomID] = page.nextRoomSequence
+                    roomEventCursors[roomID] = drainAcceptedRoomSequences(roomID: roomID, through: page.nextRoomSequence)
                 }
                 statistics.recordRoomEventPage(
                     milliseconds: (NIODeadline.now() - sent).millisecondsDouble,
@@ -3208,9 +3293,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     if restoredRecoveryTargets[roomID] == nil { restoredRecoveryTargets[roomID] = subscription.highWatermark }
                 }
                 if roomLogInitialCursor == .tail && !isRestoredRecovery {
-                    roomEventCursors[roomID] = max(
+                    roomEventCursors[roomID] = drainAcceptedRoomSequences(roomID: roomID, through: max(
                         roomEventCursors[roomID, default: 0], subscription.highWatermark
-                    )
+                    ))
                 }
                 // A subscription reply can trail a newer hint or accepted ACK.
                 // Its snapshot coalesces with this handler's current scope; it
@@ -3406,39 +3491,50 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     }
 
     private func observeCoverage(_ value: IMV2RealtimeCoverage) {
-        guard benchmarkWireVersion >= 46, value.scopeGeneration > 0 else { ignoredCoverageFrames += 1; return }
+        func reject(_ reason: String) {
+            ignoredCoverageFrames += 1
+            ignoredCoverageReasons[reason, default: 0] += 1
+            lastIgnoredCoverageFrame = .init(rejection: reason, scope: value.scope.rawValue,
+                scopeID: value.scopeID, generation: value.scopeGeneration, revision: value.revision,
+                state: value.state.rawValue, reason: value.reason.rawValue,
+                observedAtUnixMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000))
+        }
+        guard benchmarkWireVersion >= 46, value.scopeGeneration > 0 else { reject("unsupported_version_or_generation"); return }
         let scope: String
         let expectedID: String
         switch value.scope {
         case .account where requestedAccountCoverage:
             scope = "account"; expectedID = credential.userID
         case .room:
-            guard let requestedRoomCoverageID else { ignoredCoverageFrames += 1; return }
+            guard let requestedRoomCoverageID else { reject("room_not_requested"); return }
             scope = "room"; expectedID = requestedRoomCoverageID
-        default: ignoredCoverageFrames += 1; return
+        default: reject("scope_not_requested"); return
         }
         guard UUID(uuidString: value.scopeID) != nil,
-              UUID(uuidString: value.scopeID) == UUID(uuidString: expectedID),
-              value.revision > (coverageRevisions[scope] ?? 0),
-              value.scopeGeneration >= (observedCoverage[scope]?.generation ?? 0) else {
-            ignoredCoverageFrames += 1; return
-        }
+              UUID(uuidString: value.scopeID) == UUID(uuidString: expectedID) else { reject("scope_id_mismatch"); return }
+        guard value.revision > (coverageRevisions[scope] ?? 0) else { reject("stale_revision"); return }
+        guard value.scopeGeneration >= (observedCoverage[scope]?.generation ?? 0) else { reject("stale_generation"); return }
         let state: String
         switch value.state {
         case .ready: state = "ready"
         case .recovering: state = "recovering"
         case .ended: state = "ended"
-        default: ignoredCoverageFrames += 1; return
+        default: reject("unknown_state"); return
         }
         if let prior = observedCoverage[scope], prior.state == "ended",
            prior.generation == value.scopeGeneration, state != "ended" {
-            ignoredCoverageFrames += 1; return
+            reject("ended_generation"); return
         }
         // Independent scope writes may cross awaits and arrive out of global
         // revision order. Only this scope's revision/generation orders its proof.
         coverageRevisions[scope] = value.revision
+        let wall = Int64(Date().timeIntervalSince1970 * 1_000)
+        let prior = observedCoverage[scope]
         observedCoverage[scope] = .init(generation: value.scopeGeneration, revision: value.revision,
-            state: state, highWatermark: value.highWatermark)
+            state: state, highWatermark: value.highWatermark, reason: String(describing: value.reason),
+            observedAtUnixMilliseconds: wall,
+            lastReadyAtUnixMilliseconds: state == "ready" ? wall : prior?.lastReadyAtUnixMilliseconds,
+            lastReadyGeneration: state == "ready" ? value.scopeGeneration : prior?.lastReadyGeneration)
     }
     private func coverageSnapshot(at wall: Int64) -> ConnectionCoverageSnapshot {
         var scopes: [RequestedScopeCoverageSnapshot] = []
@@ -3447,7 +3543,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             return .init(scope: scope, scopeID: id, scopeGeneration: observed?.generation,
                 revision: observed?.revision, state: observed?.state ?? "missing",
                 highWatermark: observed?.highWatermark, appliedCursor: cursor,
-                passed: observed.map { $0.state == "ready" && cursor >= $0.highWatermark } ?? false)
+                passed: observed.map { $0.state == "ready" && cursor >= $0.highWatermark } ?? false,
+                reason: observed?.reason, observedAtUnixMilliseconds: observed?.observedAtUnixMilliseconds,
+                lastReadyAtUnixMilliseconds: observed?.lastReadyAtUnixMilliseconds,
+                lastReadyGeneration: observed?.lastReadyGeneration)
         }
         if requestedAccountCoverage { scopes.append(snapshot("account", id: credential.userID, cursor: accountAppliedCursor)) }
         if let room = requestedRoomCoverageID {
@@ -3455,7 +3554,12 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         }
         // No coverage is inherited from old handlers, including planned reconnect.
         return .init(connectionIndex: connectionIndex, physicalConnectionID: physicalConnectionID,
+            localSourcePort: localSourcePort, remoteGatewayPort: remoteGatewayPort,
+            lastHeartbeatRequestID: lastHeartbeatRequestID,
+            lastHeartbeatClientTimeMilliseconds: lastHeartbeatClientTimeMilliseconds,
             wireVersion: benchmarkWireVersion, requestedScopes: scopes, ignoredCoverageFrames: ignoredCoverageFrames,
+            ignoredCoverageReasons: ignoredCoverageReasons, lastIgnoredCoverageFrame: lastIgnoredCoverageFrame,
+            lastServerRoomProgress: lastServerRoomProgress,
             heartbeatSent: checkpointHeartbeatSent, heartbeatAcknowledged: checkpointHeartbeatAcknowledged,
             heartbeatMissed: checkpointHeartbeatMissed,
             snapshotAtUnixMilliseconds: wall,
@@ -3491,6 +3595,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             statistics.recordRoomProgressState(accepted: false, recovery: false); return
         }
         for value in values {
+            if let room = activeRoomLogRoomID, requestedRoomCoverageID == room,
+               UUID(uuidString: value.roomID) == UUID(uuidString: room) {
+                // Observe the server's claim before the existing acceptance checks.
+                // In particular, Ready here cannot replace a missing coverage frame.
+                lastServerRoomProgress = .init(ready: value.ready, generation: value.scopeGeneration,
+                    highWatermark: value.highWatermark, appliedRoomSequence: value.appliedRoomSequence,
+                    observedAtUnixMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000))
+            }
             guard roomLogReads, roomLogReadTrigger == .availabilityHint,
                   let room = activeRoomLogRoomID, requestedRoomCoverageID == room,
                   let coverage = observedCoverage["room"], coverage.state == "ready",
@@ -3507,6 +3619,15 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 context: context, recordMetadataGap: false)
         }
     }
+    private func drainAcceptedRoomSequences(roomID: String, through cursor: UInt64) -> UInt64 {
+        guard var known = roomEventAcceptedSequences[roomID] else { return cursor }
+        let progress = known.applied(through: cursor)
+        if known.pendingCount == 0 { roomEventAcceptedSequences.removeValue(forKey: roomID) }
+        else { roomEventAcceptedSequences[roomID] = known }
+        for _ in 0..<progress.appliedAcceptedCount { statistics.recordRoomEventLocalEchoApplied() }
+        return progress.cursor
+    }
+
     private func acceptRoomRecoveryTarget(roomID: String, highWatermark: UInt64,
         context: ChannelHandlerContext, recordMetadataGap: Bool) throws {
         roomEventAnnouncedHighWatermarks[roomID] = max(roomEventAnnouncedHighWatermarks[roomID, default: 0], highWatermark)
@@ -3538,6 +3659,8 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
             statistics.recordRoomProgressReport()
         }
         heartbeatRequestID = requestID
+        lastHeartbeatRequestID = requestID
+        lastHeartbeatClientTimeMilliseconds = heartbeat.heartbeat.clientTimeMs
         pendingRequests[requestID] = .heartbeat(sent: .now())
         checkpointHeartbeatSent += 1
         statistics.recordHeartbeatSent()
@@ -3697,7 +3820,10 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         request.groupEventSubscribe.roomID = roomID
         pendingRequests[requestID] = .roomEventSubscribe(roomID: roomID)
         try write(request, frameVersion: UInt8(benchmarkWireVersion), context: context)
-        if requestedRoomCoverageID != roomID { observedCoverage.removeValue(forKey: "room") }
+        if requestedRoomCoverageID != roomID {
+            observedCoverage.removeValue(forKey: "room")
+            lastServerRoomProgress = nil
+        }
         requestedRoomCoverageID = roomID
     }
 
@@ -3753,7 +3879,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let sent = NIODeadline.now()
         let operation = try MessageOperation(command: command, sent: sent, scheduledAt: scheduledAt ?? sent)
         messageOperations[operationID] = operation; messageRequestIDs.insert(operationID)
-        statistics.recordMessageSent()
+        statistics.recordMessageSent(scheduledAt: operation.scheduledAt)
         try emitMessageAttempt(operationID: operationID, action: .submit, context: context)
     }
 
@@ -3808,21 +3934,22 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 try finishMessage(operationID, failure: nil, drain: false, context: context)
                 let acknowledgedAt = NIODeadline.now()
                 statistics.recordMessageAcknowledged(milliseconds: (acknowledgedAt - operation.sent).millisecondsDouble,
-                    endToEndMilliseconds: (acknowledgedAt - operation.scheduledAt).millisecondsDouble)
+                    endToEndMilliseconds: (acknowledgedAt - operation.scheduledAt).millisecondsDouble, scheduledAt: operation.scheduledAt)
                 statistics.recordMessageTransportEvent("ACCEPTED")
                 if operation.restoredAfterReconnect { statistics.recordMessageTransportEvent("RECOVERED_AFTER_RECONNECT") }
                 let roomID = operation.command.command.roomID.rawValue
                 if roomLogReads {
                     let cursor = roomEventCursors[roomID, default: 0]
-                    if cursor < .max, accepted.roomSequence == cursor + 1 {
-                        roomEventCursors[roomID] = accepted.roomSequence
-                        statistics.recordRoomEventLocalEchoApplied()
-                        cancelRoomEventRecoveryGraceIfCaughtUp(roomID: roomID)
-                    } else if accepted.roomSequence > cursor {
-                        // An ACK confirms only this locally known message. It
-                        // neither proves a delivery gap nor announces a recovery
-                        // target. Let realtime delivery/progress and reconnect
-                        // recovery detect missing predecessors independently.
+                    var known = roomEventAcceptedSequences[roomID] ?? .init()
+                    let progress = try known.accepted(accepted.roomSequence, after: cursor)
+                    if known.pendingCount == 0 { roomEventAcceptedSequences.removeValue(forKey: roomID) }
+                    else { roomEventAcceptedSequences[roomID] = known }
+                    roomEventCursors[roomID] = progress.cursor
+                    for _ in 0..<progress.appliedAcceptedCount { statistics.recordRoomEventLocalEchoApplied() }
+                    cancelRoomEventRecoveryGraceIfCaughtUp(roomID: roomID)
+                    if accepted.roomSequence > cursor, cursor < .max, accepted.roomSequence > cursor + 1 {
+                        // Retain this validated receipt until its predecessors
+                        // arrive. Unknown peer sequences still need recovery.
                         statistics.recordRoomEventLocalEchoGapDetected()
                     }
                 }
@@ -4615,6 +4742,7 @@ private struct LoadReport: Encodable {
     let scenarioSchedulerTicksPerSecond: Int?
     let scenarioSendDispatch: String?
     let maximumQueuedScenarioMessagesPerConnection: Int?
+    let messageSendCohorts: [String: MessageSendCohortReport]
     let scenarioPhases: [ScenarioPhaseReport]
     let scenarioDrain: ScenarioDrainReport?
     let roomCursorSnapshots: [RoomCursorSnapshot]
@@ -4625,7 +4753,7 @@ private struct LoadReport: Encodable {
     let terminalError: String?
     let recoveryBurst: RecoveryBurstReport?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], connectionCoverageSnapshots: [ConnectionCoverageSnapshot], recoveryBurst: RecoveryBurstReport?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, messageSendCohorts: [String: MessageSendCohortReport], scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], connectionCoverageSnapshots: [ConnectionCoverageSnapshot], recoveryBurst: RecoveryBurstReport?) {
         self.recoveryBurst = recoveryBurst
         self.connectionCoverageSnapshots = connectionCoverageSnapshots
         let requiresCoverageProof = configuration.benchmarkWireVersion >= 46
@@ -4757,6 +4885,7 @@ private struct LoadReport: Encodable {
         maximumQueuedScenarioMessagesPerConnection = configuration.scenario.map {
             _ in configuration.maximumQueuedScenarioMessagesPerConnection
         }
+        self.messageSendCohorts = messageSendCohorts
         self.scenarioPhases = scenarioPhases
         self.scenarioDrain = scenarioDrain
         self.roomCursorSnapshots = roomCursorSnapshots
@@ -4948,6 +5077,10 @@ private struct ScenarioDrainReport: Encodable {
 /// 它避免了在长达数小时的测试中保留数百万个样本。
 /// 超过十秒的值共享一个溢出桶；`maximum` 仍记录它们真实的最大值。
 private struct LatencyHistogram: Sendable {
+    struct Bucket: Encodable {
+        let lowerBoundMilliseconds: Int
+        let count: Int
+    }
     private static let maximumBucketMilliseconds = 10_000
     private var buckets = Array(repeating: 0, count: maximumBucketMilliseconds + 1)
     private(set) var count = 0
@@ -4992,6 +5125,15 @@ private struct LatencyHistogram: Sendable {
         .init(histogram: self)
     }
 
+    /// Export the already-recorded counts only when building a report. Sparse
+    /// buckets let independent generators merge their actual distributions;
+    /// no additional per-request measurement or retained samples are needed.
+    var nonemptyBuckets: [Bucket] {
+        buckets.enumerated().compactMap { index, samples in
+            samples == 0 ? nil : Bucket(lowerBoundMilliseconds: index, count: samples)
+        }
+    }
+
     func percentile(_ target: Double) -> Double {
         guard count > 0 else { return 0 }
         let rank = min(count, max(1, Int((Double(count) * target).rounded(.up))))
@@ -5010,6 +5152,7 @@ private struct Percentiles: Encodable {
     let p95: Double
     let p99: Double
     let maximum: Double
+    let histogramBuckets: [LatencyHistogram.Bucket]
 
     init(histogram: LatencyHistogram) {
         count = histogram.count
@@ -5017,6 +5160,7 @@ private struct Percentiles: Encodable {
         p95 = histogram.percentile(0.95)
         p99 = histogram.percentile(0.99)
         maximum = (histogram.maximum * 100).rounded() / 100
+        histogramBuckets = histogram.nonemptyBuckets
     }
 }
 

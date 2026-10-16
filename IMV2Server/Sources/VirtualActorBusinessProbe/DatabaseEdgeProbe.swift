@@ -107,7 +107,8 @@ enum DatabaseEdgeProbe {
                         strangerMessagePolicy: try .init(maximumMessagesPerWindow: 1000, window: 86_400),
                         contentReviewMode: .disabled)
                         .usingControlDatabase(control).usingPolicyAuthorizations(authorizations)
-                    owners["room-\(slot)"] = try .init(database: database, sendDatabase: sendDatabase, writes: writes,
+                    owners["room-\(slot)"] = try .init(database: database, initializationDatabase: database,
+                        sendDatabase: sendDatabase, writes: writes,
                         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
                         invitationSecretIssuer: try invitationSecretIssuer(),

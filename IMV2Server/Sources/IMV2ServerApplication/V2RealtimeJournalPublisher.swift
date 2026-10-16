@@ -5,10 +5,8 @@ import IMV2ActorContracts
 public struct V2RealtimeJournalPublisherSource: Sendable {
     public let id: String
     public let store: any V2RealtimeChangeJournalStore
-    public let consumerStore: (any V2RealtimeJournalConsumerStore)?
-    public init(id: String, store: any V2RealtimeChangeJournalStore,
-                consumerStore: (any V2RealtimeJournalConsumerStore)? = nil) {
-        self.id = id; self.store = store; self.consumerStore = consumerStore
+    public init(id: String, store: any V2RealtimeChangeJournalStore) {
+        self.id = id; self.store = store
     }
 }
 
@@ -159,11 +157,7 @@ public actor V2RealtimeJournalPublisher {
                   let identity = routed.values.first?.identity, let token = claimTokens[source.id] else { continue }
             let pending: Set<Int>
             do {
-                var discovered = Set(try await source.store.pendingPartitions(partitionIDs: Array(routed.keys), limit: 256))
-                if let consumers = source.consumerStore {
-                    discovered.formUnion(try await consumers.pendingConsumerPartitions(partitionIDs: Array(routed.keys), limit: 256))
-                }
-                pending = discovered
+                pending = Set(try await source.store.pendingPartitions(partitionIDs: Array(routed.keys), limit: 256))
             }
             catch { continue }
             guard !isClosed else { break }

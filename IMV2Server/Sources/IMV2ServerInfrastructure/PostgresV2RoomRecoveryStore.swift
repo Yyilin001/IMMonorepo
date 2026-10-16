@@ -207,3 +207,80 @@ private struct RecoveryPairStateRow: Decodable {
         case head, trimmed, readThrough = "read_through", ownSequence = "own_sequence"
     }
 }
+
+extension PostgresV2RoomRecoveryStore {
+    /// Membership, physical ownership and topology use one statement snapshot.
+    /// The left join emits the generation even for an empty directory page.
+    package func roomsWithTopology(actorUserID: UserID, after: RoomID?, limit: Int,
+                                   controlSchema: String, physicalStoreShardIDs: Set<String>) async throws
+        -> (slice: V2UserRoomDirectorySlice, generation: UUID) {
+        guard limit > 0, limit <= 100, let actor = actorUserID.uuidValue,
+              after == nil || after?.uuidValue != nil,
+              controlSchema.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) != nil,
+              !physicalStoreShardIDs.isEmpty,
+              let sql = database as? any SQLDatabase else { throw V2RoomRecoveryReadError.invalidRequest }
+        let predicate: SQLQueryString = if let after { "member.room_id > \(bind: after.uuidValue!)" } else { "TRUE" }
+        let rows = try await sql.raw("""
+            WITH topology AS MATERIALIZED (
+                SELECT generation FROM \(unsafeRaw: controlSchema).room_recovery_topology WHERE singleton = true
+            ), candidates AS MATERIALIZED (
+                SELECT member.room_id, member.joined_revision
+                FROM \(unsafeRaw: schema).room_memberships AS member
+                WHERE member.user_id = \(bind: actor) AND member.left_revision IS NULL AND \(predicate)
+                ORDER BY member.room_id LIMIT \(bind: limit + 1)
+            )
+            SELECT topology.generation, candidate.room_id, candidate.joined_revision,
+                   room.room_kind, room.owner_epoch, room.membership_revision,
+                   route.room_shard_id, route.route_epoch
+            FROM topology
+            LEFT JOIN candidates AS candidate ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT room_kind, owner_epoch, membership_revision
+                FROM \(unsafeRaw: schema).rooms WHERE room_id = candidate.room_id LIMIT 1
+            ) AS room ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT room_shard_id, route_epoch FROM \(unsafeRaw: controlSchema).room_owner_routes
+                WHERE room_id = candidate.room_id LIMIT 1
+            ) AS route ON TRUE
+            ORDER BY candidate.room_id
+            """).all(decoding: DirectorySnapshotRow.self)
+        guard let generation = rows.first?.generation else { throw V2RoomRecoveryReadError.corruptPersistence }
+        let candidates = rows.filter { $0.roomID != nil }
+        let scanned = Array(candidates.prefix(limit))
+        var seen: Set<UUID> = [], entries: [V2UserRoomDirectoryEntry] = []
+        for row in scanned {
+            guard row.generation == generation, let roomID = row.roomID,
+                  seen.insert(roomID).inserted, let joined = row.joinedRevision else {
+                throw V2RoomRecoveryReadError.corruptPersistence
+            }
+            guard let kind = row.roomKind, let epoch = row.ownerEpoch, let revision = row.membershipRevision else { continue }
+            guard let kind = V2RoomKind(rawValue: kind), epoch >= 0, joined >= 0 else {
+                throw V2RoomRecoveryReadError.corruptPersistence
+            }
+            guard joined <= revision else { continue }
+            guard let shard = row.roomShardID, let routeEpoch = row.routeEpoch else { throw V2RoomShardRouteError.roomNotFound }
+            let route = try V2RoomShardRoute(shardID: shard, epoch: routeEpoch)
+            guard physicalStoreShardIDs.contains(route.shardID) else { continue }
+            guard UInt64(route.epoch) == UInt64(epoch) else { throw V2RoomRecoveryReadError.topologyChanged }
+            entries.append(try .init(roomID: .init(uuid: roomID), roomKind: kind,
+                viewerMembershipRevision: UInt64(joined), ownerEpoch: UInt64(epoch)))
+        }
+        return (.init(entries: entries, scannedThrough: scanned.last?.roomID.map { .init(uuid: $0) },
+                      hasMore: candidates.count > limit), generation)
+    }
+}
+private struct DirectorySnapshotRow: Decodable {
+    let generation: UUID
+    let roomID: UUID?
+    let joinedRevision: Int64?
+    let roomKind: String?
+    let ownerEpoch: Int64?
+    let membershipRevision: Int64?
+    let roomShardID: String?
+    let routeEpoch: Int64?
+    enum CodingKeys: String, CodingKey {
+        case generation, roomID = "room_id", joinedRevision = "joined_revision", roomKind = "room_kind"
+        case ownerEpoch = "owner_epoch", membershipRevision = "membership_revision"
+        case roomShardID = "room_shard_id", routeEpoch = "route_epoch"
+    }
+}

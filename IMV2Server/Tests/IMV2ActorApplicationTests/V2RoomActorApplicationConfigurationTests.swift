@@ -89,6 +89,13 @@ struct V2RoomActorApplicationConfigurationTests {
         }
         let prepared = try load(object)
         #expect(prepared.policyPlacement?.partitionCount == 16)
+        var larger = object
+        var largerPeers = peers
+        largerPeers[0]["maximumRooms"] = 20_834
+        larger["peers"] = largerPeers
+        let largerConfiguration = try load(larger)
+        #expect(largerConfiguration.runtime.maximumActiveRooms == 20_834)
+        #expect(largerConfiguration.discovery.peers.first?.maximumRooms == 20_834)
         do {
             _ = try await V2RoomActorApplication.start(configuration: prepared, ownerRouter: UnusedPolicyStartupRouter(), roomDatabases: [:])
             Issue.record("Policy placement started without its authorization services")

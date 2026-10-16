@@ -215,6 +215,7 @@ public func v2RenderPrometheusRuntimePressureMetrics(
     if let send = snapshot.gatewayMessageSend {
         let gauges: [(String, Int)] = [
             ("in_flight_requests", send.inFlightRequests),
+            ("maximum_in_flight_requests", send.maximumInFlightRequests),
             ("reserved_bytes", send.reservedBytes),
             ("peak_in_flight_requests_lifetime", send.peakInFlightRequests),
             ("peak_reserved_bytes_lifetime", send.peakReservedBytes),
@@ -426,6 +427,39 @@ public func v2RenderPrometheusRuntimePressureMetrics(
                 "im_v2_database_loan_granted_total{class=\"\(label)\"} \(value.granted)",
                 "im_v2_database_loan_rejected_total{class=\"\(label)\"} \(value.rejected)",
             ])
+        }
+    }
+    if let pools = snapshot.databaseLoans?.pools, !pools.isEmpty {
+        for (name, type, help) in [
+            ("in_flight", "gauge", "Physical loans by configured pool role; not driver utilization."),
+            ("queued", "gauge", "Queued physical loans by configured pool role."),
+            ("rejected_total", "counter", "Physical loan rejection by configured pool role and fixed reason.")
+        ] {
+            lines.append("# HELP im_v2_database_pool_loan_\(name) \(help)")
+            lines.append("# TYPE im_v2_database_pool_loan_\(name) \(type)")
+        }
+        for pool in pools {
+            for (label, value) in [("ordinary", pool.ordinary), ("activation", pool.activation), ("sync", pool.sync), ("renewal", pool.renewal)] {
+                let labels = "pool=\"\(pool.poolClass.rawValue)\",class=\"\(label)\""
+                lines.append("im_v2_database_pool_loan_in_flight{\(labels)} \(value.inFlight)")
+                lines.append("im_v2_database_pool_loan_queued{\(labels)} \(value.queued)")
+                for reason in V2DatabaseLoanRejectionReason.allCases {
+                    lines.append("im_v2_database_pool_loan_rejected_total{\(labels),reason=\"\(reason.rawValue)\"} \(value.rejections[reason, default: 0])")
+                }
+            }
+        }
+    }
+    if let initialization = snapshot.registryRecovery?.accountInitialization {
+        for (name, value) in [("accounts", initialization.accounts), ("ready_accounts", initialization.readyAccounts),
+                              ("active_steps", initialization.active), ("queued_accounts", initialization.queued),
+                              ("deferred_accounts", initialization.deferred)] {
+            lines.append("# TYPE im_v2_account_initialization_\(name) gauge")
+            lines.append("im_v2_account_initialization_\(name) \(value)")
+        }
+        for (name, value) in [("completed_total", initialization.completed), ("retries_total", initialization.retries),
+                              ("failures_total", initialization.failures)] {
+            lines.append("# TYPE im_v2_account_initialization_\(name) counter")
+            lines.append("im_v2_account_initialization_\(name) \(value)")
         }
     }
     if let observations = snapshot.databaseLoans?.observations {

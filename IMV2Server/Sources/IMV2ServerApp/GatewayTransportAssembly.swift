@@ -56,7 +56,8 @@ enum GatewayTransportAssembly {
             authenticationTimeoutMilliseconds: configuration.authenticationTimeoutMilliseconds,
             idleTimeoutMilliseconds: configuration.idleTimeoutMilliseconds,
             transportMetrics: transportMetrics,
-            eventLoopLagMetrics: gatewayEventLoopLagMetrics
+            eventLoopLagMetrics: gatewayEventLoopLagMetrics,
+            eventLoopThreads: configuration.tcpEventLoopThreads
         )
     }
 }

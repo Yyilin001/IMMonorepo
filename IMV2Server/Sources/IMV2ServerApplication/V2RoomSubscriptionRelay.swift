@@ -41,10 +41,12 @@ public actor V2RoomSubscriptionRelay {
         public let applied: UInt64
         public let invalidated: Bool
         public let isUnreferenced: Bool
+        public let transmissionStarted: Bool
         public init(fence: V2RoomSubscriptionFence, issued: UInt64, applied: UInt64,
-                    invalidated: Bool, isUnreferenced: Bool = false) {
+                    invalidated: Bool, transmissionStarted: Bool, isUnreferenced: Bool = false) {
             self.fence = fence; self.issued = issued; self.applied = applied
             self.invalidated = invalidated; self.isUnreferenced = isUnreferenced
+            self.transmissionStarted = transmissionStarted
         }
     }
     public typealias ObserveAuthorization = @Sendable (AuthorizationProgress, V2GatewayRealtimeIdentity) -> Void
@@ -77,6 +79,9 @@ public actor V2RoomSubscriptionRelay {
         var latestHighWatermark: UInt64 = 0
         var needsBaseline = false
         var controlInvalidated = false
+        // Monotonic across fence resets: an earlier baseline may still
+        // authorize this room at the Gateway until denial/new installation.
+        var transmissionStarted = false
     }
     private let roomID: RoomID
     private let ownerEpoch: Int64
@@ -454,6 +459,17 @@ public actor V2RoomSubscriptionRelay {
                         && subscription.authorizationOutbox.isEmpty && subscription.messageOutbox.isEmpty))
     }
 
+    /// Preparation of a brand-new room grant is not a transport attempt. The
+    /// authorization pump calls this before handing a prefix to its sender.
+    package func authorizationTransmissionStarted(gateway: V2GatewayRealtimeIdentity,
+                                                  fence: V2RoomSubscriptionFence) {
+        guard var subscription = subscriptions[gateway], subscription.fence == fence,
+              !subscription.transmissionStarted else { return }
+        subscription.transmissionStarted = true
+        subscriptions[gateway] = subscription
+        reportAuthorization(subscription)
+    }
+
     package func acknowledge(gateway: V2GatewayRealtimeIdentity, fence: V2RoomSubscriptionFence,
                              through sequence: UInt64, lane: V2RoomSubscriptionLane) throws {
         guard var subscription = subscriptions[gateway], subscription.fence == fence else { throw V2RoomSubscriptionRelayError.stale }
@@ -557,7 +573,8 @@ public actor V2RoomSubscriptionRelay {
         observeAuthorization(.init(fence: subscription.fence,
             issued: subscription.latestAuthoritySequence,
             applied: subscription.authorizationOutbox.first.map { $0.authorizationSequence - 1 } ?? subscription.latestAuthoritySequence,
-            invalidated: invalidated, isUnreferenced: subscription.members.isEmpty
+            invalidated: invalidated, transmissionStarted: subscription.transmissionStarted,
+            isUnreferenced: subscription.members.isEmpty
                 && subscription.authorizationOutbox.isEmpty && subscription.messageOutbox.isEmpty
                 && subscription.deferredHighWatermark == nil), subscription.gateway)
     }
@@ -619,7 +636,8 @@ public actor V2RoomSubscriptionRelay {
             var subscription = Subscription(gateway: gateway, fence: .init(activation: activation, subscriptionID: id,
                 generation: generation, baselineSequence: roomSequence),
                 members: Dictionary(uniqueKeysWithValues: members.map { ($0.userID, $0.memberRevision) }),
-                latestHighWatermark: max(previous.latestHighWatermark, roomSequence))
+                latestHighWatermark: max(previous.latestHighWatermark, roomSequence),
+                transmissionStarted: previous.transmissionStarted)
             let pageSize = V2RoomSubscriptionPayload.maximumBaselinePageMembers
             if members.count <= pageSize {
                 append(.baseline(members: members), to: &subscription)

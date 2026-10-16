@@ -9,22 +9,29 @@ import IMV2ServerInfrastructure
 enum GatewayRoomRecoveryDirectory {
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        topology: GatewayDatabaseTopology
+        topology: GatewayDatabaseTopology,
+        initialization: Bool = false
     ) throws -> V2UserRoomDirectoryService {
         // 恢复扫描使用不经缓存的控制面路由，避免过期归属缓存参与校验。
-        let recoveryRouter = V2PostgresRoomShardRouter(database: topology.syncControlDatabase)
+        let controlDatabase = initialization ? topology.initializationControlDatabase : topology.syncControlDatabase
+        let recoveryRouter = V2PostgresRoomShardRouter(database: controlDatabase)
         let storageGroups = Dictionary(grouping: configuration.roomShardStorage) {
             $0.databaseURL + "\u{0}" + $0.schema
         }
         var stores: [any V2UserRoomDirectoryReading] = []
         var storageIdentities: [String] = []
+        var atomicStores: [Int: PostgresV2RoomRecoveryTopology.AtomicStore] = [:]
         for key in storageGroups.keys.sorted() {
             guard let group = storageGroups[key], let first = group.first,
-                  let owner = topology.databaseForRole(for: .sync, url: first.databaseURL) else {
+                  let owner = initialization ? topology.initializationDatabase(for: first.databaseURL)
+                    : topology.databaseForRole(for: .sync, url: first.databaseURL) else {
                 throw V2RoomRecoveryReadError.corruptPersistence
             }
             let shardIDs = Set(group.map(\.shardID))
             let store = try PostgresV2RoomRecoveryStore(database: owner, schema: first.schema)
+            if first.databaseURL == configuration.databaseURL {
+                atomicStores[stores.count] = .init(store: store, shardIDs: shardIDs)
+            }
             stores.append(try V2OwnerValidatedRoomDirectoryStore(
                 underlying: store, router: recoveryRouter, physicalStoreShardIDs: shardIDs))
             // 部署指纹同时包含别名与物理身份；连接材料只参与哈希，不对外返回。
@@ -35,12 +42,12 @@ enum GatewayRoomRecoveryDirectory {
             }
         }
         let recoveryTopology = try PostgresV2RoomRecoveryTopology(
-            database: topology.syncControlDatabase,
+            database: controlDatabase,
             stores: stores,
-            orderedStoreIdentities: storageIdentities
+            orderedStoreIdentities: storageIdentities, atomicStores: atomicStores
         )
         return V2UserRoomDirectoryService(
-            topologySource: recoveryTopology,
+            snapshotSource: recoveryTopology,
             cursorCodec: try .init(key: Data(configuration.accessTokenKey
                 .digest("im-v2-room-recovery-cursor-root-v1").utf8))
         )

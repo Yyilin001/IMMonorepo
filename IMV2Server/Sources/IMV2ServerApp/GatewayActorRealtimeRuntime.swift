@@ -311,8 +311,8 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
                 var value = await metrics.actorRealtimeMetricsSnapshot()
                 value.transport = await shardHandle.metricsSnapshot()
                 let pressure = await coordinator.pressureSnapshot()
-                value.subscriptionControlActive = pressure.controlInFlight
-                value.subscriptionControlQueued = pressure.controlQueued
+                value.subscriptionControlActive = value.transport?.controlActive ?? 0
+                value.subscriptionControlQueued = value.transport?.controlQueued ?? 0
                 value.recoveryActive = pressure.recoveryInFlight
                 value.recoveryQueued = pressure.recoveryQueued
                 value.activationWaiters = pressure.activationWaiters

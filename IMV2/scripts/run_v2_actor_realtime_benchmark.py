@@ -65,6 +65,9 @@ class LoaderFailureReportDrain:
 ROOT = Path(__file__).resolve().parents[2]
 NODES = 6
 PARTS = 12
+DEFAULT_LOADER_LOCAL_PORT_BASE = 25_000
+LOADER_LOCAL_PORT_SPAN = 10_000
+LOADER_LOCAL_PORT_COUNT = ((PARTS + NODES - 1) // NODES) * LOADER_LOCAL_PORT_SPAN
 
 def current_candidate_wire_version():
     source = (ROOT / 'IMV2Server/Sources/IMV2ServerGateway/Generated/IMV2ProtocolVersion.swift').read_text()
@@ -250,10 +253,15 @@ def gateway_env(args, kind, database, index, actors, manifest):
         IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(actor/f'{kind}.json'),
         IM_V2_IDLE_TIMEOUT_MS='600000', IM_V2_LOG_LEVEL='notice' if app_canary_enabled(args) else 'warning')
     if kind == 'candidate':
+        tcp_loops = getattr(args, 'candidate_tcp_event_loop_threads', None)
+        if tcp_loops is not None: values['IM_V2_TCP_EVENT_LOOP_THREADS'] = str(tcp_loops)
+        else: values.pop('IM_V2_TCP_EVENT_LOOP_THREADS', None)
         if getattr(args, 'candidate_heartbeat_diagnostics', False):
             values['IM_V2_GATEWAY_HEARTBEAT_DIAGNOSTICS'] = 'true'
+        if getattr(args, 'candidate_coverage_diagnostics', False):
+            values['IM_V2_GATEWAY_COVERAGE_DIAGNOSTICS'] = 'true'
         values['IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PER_CONNECTION'] = str(getattr(args, 'candidate_message_send_inflight_per_connection', 4))
-        values['IM_V2_SEND_PATH_TRACE_MODE'] = getattr(args, 'candidate_send_path_trace_mode', 'sampled')
+        values['IM_V2_SEND_PATH_TRACE_MODE'] = getattr(args, 'candidate_send_path_trace_mode', 'off')
         if getattr(args, 'candidate_actor_binary_invocations', 'enabled') != 'enabled':
             raise ValueError('candidate Actor transport requires binary invocations')
         values['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'] = 'true'
@@ -329,6 +337,7 @@ def prepare(args, manifest):
     actors = args.output_dir/'actors6'
     command = ['python3',str(ROOT/'IMV2/scripts/prepare_v2_room_actor_configuration.py'),
                '--output-dir',str(actors),'--shards',manifest['shardID'],'--user-buckets',manifest['userBucket'],
+               '--maximum-rooms-per-host',str(max(10000, (manifest['rooms'] * 5 + NODES * 4 - 1) // (NODES * 4))),
                '--caller',f'account=localhost:{args.actor_port+NODES}']
     if getattr(args, 'actor_partition_canary', None) is not None:
         command += ['--caller', f'partition-inspector=localhost:{args.actor_port+NODES+4}']
@@ -467,6 +476,39 @@ def room_notification_loss_constraints(args, manifest):
         raise ValueError('notification loss requires an owned candidate-only small fixture and no other fault')
 
 
+def merge_latency_histograms(snapshots):
+    """Merge sample counts, never shard percentiles; preserve the 1ms uncertainty."""
+    if not snapshots or any('histogramBuckets' not in sample for sample in snapshots):
+        return None
+    merged = {}
+    for sample in snapshots:
+        seen = set()
+        count = 0
+        for bucket in sample['histogramBuckets']:
+            lower, samples = bucket['lowerBoundMilliseconds'], bucket['count']
+            if (type(lower) is not int or not 0 <= lower <= 10000
+                    or type(samples) is not int or samples <= 0 or lower in seen):
+                raise ValueError('invalid bounded latency histogram')
+            seen.add(lower)
+            count += samples
+            merged[lower] = merged.get(lower, 0) + samples
+        if count != sample['count']:
+            raise ValueError('latency histogram sample count mismatch')
+    total = sum(merged.values())
+    def percentile(percent):
+        rank, cumulative = (total * percent + 99) // 100, 0
+        for lower, samples in sorted(merged.items()):
+            cumulative += samples
+            if cumulative >= rank:
+                return lower
+        return 0
+    p99 = percentile(99)
+    return dict(count=total, p50=percentile(50), p95=percentile(95), p99=p99,
+        p99UpperBoundExclusiveMilliseconds=p99 + 1 if total and p99 < 10000 else None,
+        bucketWidthMilliseconds=1, overflowLowerBoundMilliseconds=10000,
+        maximum=max(sample['maximum'] for sample in snapshots))
+
+
 def summarize(reports, codes, requested, reconnect_canary=False, measurement_phase='rate-5000', online_only=False):
     fields = ('authenticated','peakActive','failed','workloadFailed','messagesSent','messagesAcknowledged',
               'scenarioMessageQueueOverflowed','scenarioMessageQueueAbandoned','queuedScenarioMessagesAtEnd',
@@ -507,6 +549,28 @@ def summarize(reports, codes, requested, reconnect_canary=False, measurement_pha
 
     result['measurementPhase'] = measurement_phase
     phases = [p for r in reports for p in r.get('scenarioPhases',[]) if p.get('name')==measurement_phase]
+    # An absent/partial distribution cannot prove a global percentile. The
+    # original quality gates below remain independent of latency reporting.
+    result['measurementWindowLatency'] = {kind: merge_latency_histograms([p.get(kind, {}) for p in phases])
+        if len(phases) == PARTS else None for kind in ('messageLatency', 'messageEndToEndLatency',
+            'heartbeatLatency', 'syncPullLatency', 'roomEventPullLatency', 'readReceiptLatency')}
+    result['measurementLatency'] = dict(result['measurementWindowLatency'])
+    # Messages belong to their original scheduled phase, including queued work
+    # and ACKs arriving during subsequent phases/drain. Never silently substitute
+    # completion-window percentiles for an absent or incomplete send cohort.
+    cohorts = [r.get('messageSendCohorts', {}).get(measurement_phase) for r in reports]
+    complete = (len(reports) == PARTS and len(phases) == PARTS and all(
+        c is not None and type(c.get('messagesSent')) is int and c['messagesSent'] >= 0
+        and type(c.get('messagesAcknowledged')) is int
+        and c['messagesAcknowledged'] == c['messagesSent']
+        and all(c.get(kind, {}).get('count') == c['messagesSent']
+                for kind in ('messageLatency', 'messageEndToEndLatency')) for c in cohorts))
+    result['measurementMessageCohort'] = dict(complete=complete,
+        messagesSent=sum(c.get('messagesSent', 0) for c in cohorts if c),
+        messagesAcknowledged=sum(c.get('messagesAcknowledged', 0) for c in cohorts if c),
+        attribution='original_scheduled_phase')
+    for kind in ('messageLatency', 'messageEndToEndLatency'):
+        result['measurementLatency'][kind] = merge_latency_histograms([c.get(kind, {}) for c in cohorts]) if complete else None
     result['acknowledgedMessagesPerSecond'] = sum(p['messagesAcknowledged']/p['observedDurationSeconds'] for p in phases if p['observedDurationSeconds']>0)
     # Reconnects may make authenticated cumulative counts exceed the population.
     result['capacityCompleted'] = len(reports)==PARTS and not any(codes) and result['peakActive']==requested and all(not r.get('terminalError') for r in reports)
@@ -776,6 +840,7 @@ def postgres_statement_category_case(column):
         f"   WHEN {column} ~* '{pattern}' THEN '{category}'"
         for pattern, category in postgres_admission_statement_categories())
     return rf"""CASE
+   WHEN {column} ~* '^[[:space:]]*/\*[[:space:]]*imv2_plain_direct_append[[:space:]]*\*/[[:space:]]*WITH([[:space:]]|$)' THEN 'message_append'
 {admission_cases}
    WHEN {operation} AND {column} ~* '(shard_admission_pools|room_admission)' THEN 'admission_credit'
    WHEN {operation} AND {column} ~* 'realtime_partition_leases' THEN 'realtime_partition_control'
@@ -791,6 +856,9 @@ def postgres_statement_category_case(column):
 
 def postgres_statement_category_probe_sql():
     samples = [
+        ('plain_direct_append', '/* imv2_plain_direct_append */ WITH input AS (SELECT 1)', 'message_append'),
+        ('embedded_append_marker', "SELECT '/* imv2_plain_direct_append */'", 'other'),
+        ('wrong_append_marker_operation', '/* imv2_plain_direct_append */ SELECT 1', 'other'),
         ('fast_update', '/* imv2_admission_fast_update */ UPDATE im_v2.shard_admission_pools AS pool SET command_window_used=pool.command_window_used+1 RETURNING pool.lease_id', 'admission_fast_update'),
         ('lock_select', '/* imv2_admission_lock_select */ WITH input AS MATERIALIZED (SELECT 1) SELECT pool.room_shard_id FROM im_v2.shard_admission_pools pool FOR NO KEY UPDATE OF pool', 'admission_lock_select'),
         ('gate_update', '/* imv2_admission_gate_update */ WITH input AS MATERIALIZED (SELECT 1), applied AS (UPDATE im_v2.shard_admission_pools SET command_window_used=1 RETURNING lease_id) SELECT * FROM applied', 'admission_gate_update'),
@@ -854,10 +922,11 @@ WITH activity_snapshot AS MATERIALIZED (
 )
 SELECT json_build_object(
  'activity', (SELECT coalesce(json_agg(a), '[]'::json) FROM (
-   SELECT state, wait_event_type, count(*) AS backends
+   SELECT state, wait_event_type, wait_event, query_category, count(*) AS backends
    FROM activity_snapshot
    WHERE datname = current_database() AND pid <> pg_backend_pid()
-   GROUP BY state, wait_event_type ORDER BY state, wait_event_type) a),
+   GROUP BY state, wait_event_type, wait_event, query_category
+   ORDER BY state, wait_event_type, wait_event, query_category) a),
  'locks', (SELECT coalesce(json_agg(l), '[]'::json) FROM (
    SELECT lock.locktype, lock.nspname AS schema, lock.relname AS relation,
           lock.mode, lock.granted, count(*) AS locks
@@ -905,6 +974,27 @@ SELECT json_build_object(
 """
 
 
+def postgres_sampler_failure_category(returncode, stderr):
+    """Closed diagnostic labels only; never retain hosts, SQL, or credentials."""
+    message = stderr.lower()
+    patterns = (
+        ('timeout expired', 'connection_timeout'),
+        ('connection refused', 'connection_refused'),
+        ('too many clients', 'connection_capacity'),
+        ('remaining connection slots', 'connection_capacity'),
+        ('authentication failed', 'authentication'),
+        ('server closed the connection', 'connection_closed'),
+        ('connection reset', 'connection_closed'),
+        ('could not receive data', 'connection_closed'),
+        ('statement timeout', 'statement_timeout'),
+        ('lock timeout', 'lock_timeout'),
+    )
+    for pattern, category in patterns:
+        if pattern in message:
+            return category
+    return 'connection_error' if returncode == 2 else 'statement_error'
+
+
 def sample_owned_postgres(args, database):
     """Only sample this runner's cluster; never retain SQL text or client inputs."""
     sampled_at = time.time()
@@ -913,7 +1003,7 @@ def sample_owned_postgres(args, database):
                        PGAPPNAME='imv2_benchmark_metrics', PGOPTIONS='-c statement_timeout=1500')
     statement = postgres_hotspot_sample_sql()
     sample = dict(time=sampled_at, postmasterPID=args.owned_postgres_pid,
-                  samplerVersion='pg-hotspot-v2', queryCategoryVersion='admission-entry-v3',
+                  samplerVersion='pg-hotspot-v3', queryCategoryVersion='message-append-v4',
                   walScope='owned_cluster', statisticsScope='current_database')
     statistics_started = time.monotonic()
     try:
@@ -922,10 +1012,12 @@ def sample_owned_postgres(args, database):
                                 env=environment, capture_output=True, text=True, timeout=3)
         if result.returncode:
             sample['statisticsError'] = f'psql exit {result.returncode}'
+            sample['statisticsFailureCategory'] = postgres_sampler_failure_category(result.returncode, result.stderr)
         else:
             sample.update(json.loads(result.stdout))
     except Exception as error:
         sample['statisticsError'] = type(error).__name__
+        sample['statisticsFailureCategory'] = 'sampler_deadline' if isinstance(error, subprocess.TimeoutExpired) else 'sampler_error'
     sample['statisticsElapsedSeconds'] = time.monotonic() - statistics_started
     sample['blockerAnalysis'] = analyze_postgres_blockers(sample)
     try:
@@ -1066,23 +1158,18 @@ def realtime_topic_partition(room_id):
 
 
 def trim_owned_app_journal(args, database):
-    """Retention fault on the run-owned DB, preserving every consumer cursor."""
+    """Retention fault on the run-owned journal; clients must prove recovery independently."""
     if not re.fullmatch(r'imv2_va_actor_(candidate|baseline)_[0-9a-f]{12}', database):
         raise RuntimeError('app_journal_trim_database_not_owned')
     sql = """
     BEGIN;
-    LOCK TABLE im_v2.realtime_journal_partitions, im_v2.realtime_journal_consumers
-      IN SHARE ROW EXCLUSIVE MODE;
-    CREATE TEMP TABLE app_trim_consumers_before ON COMMIT DROP AS
-      SELECT to_jsonb(c) AS row_value FROM im_v2.realtime_journal_consumers c;
+    LOCK TABLE im_v2.realtime_journal_partitions IN SHARE ROW EXCLUSIVE MODE;
     CREATE TEMP TABLE app_trim_result ON COMMIT DROP AS
     WITH locked AS MATERIALIZED (
       SELECT partition_id, published_through, trimmed_through
       FROM im_v2.realtime_journal_partitions FOR UPDATE
     ), cuts AS (
-      SELECT p.partition_id, least(p.published_through,
-        coalesce((SELECT min(c.control_cursor) FROM im_v2.realtime_journal_consumers c
-                  WHERE c.partition_id=p.partition_id),p.published_through)) AS cut
+      SELECT p.partition_id, p.published_through AS cut
       FROM locked p
     ), advanced AS (
       UPDATE im_v2.realtime_journal_partitions p SET trimmed_through=c.cut
@@ -1095,14 +1182,7 @@ def trim_owned_app_journal(args, database):
     ) SELECT (SELECT count(*) FROM advanced) AS advanced_partitions,
       (SELECT count(*) FROM removed) AS removed_entries;
     SELECT json_build_object('advancedPartitions',r.advanced_partitions,
-      'removedEntries',r.removed_entries,
-      'consumerCursorRowsChecked',(SELECT count(*) FROM app_trim_consumers_before),
-      'consumerCursorsPreserved',NOT EXISTS (
-        (SELECT row_value FROM app_trim_consumers_before
-         EXCEPT ALL SELECT to_jsonb(c) FROM im_v2.realtime_journal_consumers c)
-        UNION ALL
-        (SELECT to_jsonb(c) FROM im_v2.realtime_journal_consumers c
-         EXCEPT ALL SELECT row_value FROM app_trim_consumers_before)))
+      'removedEntries',r.removed_entries)
     FROM app_trim_result r;
     COMMIT;
     """
@@ -1116,11 +1196,6 @@ def trim_owned_app_journal(args, database):
     evidence = json.loads(completed.stdout.strip())
     if evidence.get('advancedPartitions',0)<=0 or evidence.get('removedEntries',0)<=0:
         raise RuntimeError('app_journal_trim_no_history_removed')
-    checked = evidence.get('consumerCursorRowsChecked')
-    if type(checked) is not int or checked < 0:
-        raise RuntimeError('app_journal_trim_no_consumer_cursors_checked')
-    if evidence.get('consumerCursorsPreserved') is not True:
-        raise RuntimeError('app_journal_trim_consumer_cursors_changed')
     return evidence
 
 
@@ -1854,6 +1929,45 @@ def planned_reconnect_fact_proof(args, database, expected_acknowledged, *, initi
         expected_acknowledged, fresh_fixture=fresh)
 
 
+def count_workload_tcp_tuples(text, gateway_port, *, system,
+                             local_port_base=DEFAULT_LOADER_LOCAL_PORT_BASE):
+    if system not in ('Linux', 'Darwin'):
+        raise ValueError('unsupported TCP inspection platform: ' + system)
+    count = 0
+    for line in text.splitlines():
+        columns = line.split()
+        try:
+            if system == 'Linux':
+                if len(columns) < 4 or not columns[0].rstrip(':').isdigit():
+                    continue
+                local = int(columns[1].rsplit(':', 1)[1], 16)
+                remote = int(columns[2].rsplit(':', 1)[1], 16)
+            elif system == 'Darwin':
+                if len(columns) < 6 or not columns[0].startswith('tcp'):
+                    continue
+                local = int(columns[3].rsplit('.', 1)[1])
+                remote = int(columns[4].rsplit('.', 1)[1])
+        except (ValueError, IndexError):
+            continue
+        if (local_port_base <= local < local_port_base + LOADER_LOCAL_PORT_COUNT
+                and gateway_port <= remote < gateway_port + NODES):
+            count += 1
+    return count
+
+
+def workload_tcp_tuple_count(gateway_port, local_port_base):
+    system = platform.system()
+    if system == 'Linux':
+        return sum(count_workload_tcp_tuples(Path('/proc/net/' + name).read_text(),
+                   gateway_port, system=system, local_port_base=local_port_base)
+                   for name in ('tcp', 'tcp6'))
+    if system == 'Darwin':
+        text = subprocess.check_output(['netstat', '-an', '-p', 'tcp'], text=True)
+        return count_workload_tcp_tuples(text, gateway_port, system=system,
+                                        local_port_base=local_port_base)
+    raise ValueError('unsupported TCP inspection platform: ' + system)
+
+
 def run_revision(args, kind, actors, counts, manifest):
     directory = args.output_dir/kind
     directory.mkdir(mode=0o700)
@@ -1861,15 +1975,7 @@ def run_revision(args, kind, actors, counts, manifest):
     # Observe only this workload's source range and Gateway destination ports.
     origin=time.monotonic()
     while True:
-        lingering=0
-        for line in subprocess.check_output(['netstat','-an','-p','tcp'],text=True).splitlines():
-            columns=line.split()
-            if len(columns)<6 or not columns[0].startswith('tcp'):continue
-            try:
-                local=int(columns[3].rsplit('.',1)[1]);remote=int(columns[4].rsplit('.',1)[1])
-            except (ValueError,IndexError):continue
-            if 25000<=local<=44999 and args.gateway_port<=remote<args.gateway_port+NODES:
-                lingering+=1
+        lingering=workload_tcp_tuple_count(args.gateway_port, args.loader_local_port_base)
         if not lingering:break
         if time.monotonic()-origin>60:raise TimeoutError('previous owned workload TCP tuples have not retired')
         time.sleep(1)
@@ -2110,7 +2216,8 @@ def run_revision(args, kind, actors, counts, manifest):
                 command += ['--online-only', '1']
             if not partition_canary:
                 at = command.index('--hold-seconds')
-                command[at:at] = ['--local-port-base', str(25000+(i//NODES)*10000)]
+                command[at:at] = ['--local-port-base', str(
+                    args.loader_local_port_base + (i // NODES) * LOADER_LOCAL_PORT_SPAN)]
             if args.loader_excluded_local_ports:
                 command += ['--exclude-local-ports', args.loader_excluded_local_ports]
             if args.planned_reconnect_inflight_canary:
@@ -2416,16 +2523,26 @@ def main():
     parser.add_argument('--loader-binary',required=True,type=Path,help='one Release binary used for both revisions')
     parser.add_argument('--nats-binary',type=Path,default=Path('/opt/homebrew/bin/nats-server'))
     parser.add_argument('--kind',choices=('baseline','candidate','both'),default='both')
+    parser.add_argument('--pg-shared-buffers-mib', type=int,
+                        help='explicit owned PostgreSQL shared buffer size in MiB; omit to keep initdb default')
+    parser.add_argument('--pg-track-wal-io-timing', action='store_true',
+                        help='opt-in owned PostgreSQL WAL I/O timing diagnostic; commit durability stays unchanged')
+    parser.add_argument('--pg-wal-sync-method', choices=('fdatasync', 'open_datasync'),
+                        help='explicit owned PostgreSQL durable WAL sync method; omit to keep the platform default')
     parser.add_argument('--candidate-event-loop-threads', type=int, choices=(1, 2, 3, 4), default=4,
                         help='candidate message EventLoops (default: 4); non-message pools keep one loop')
+    parser.add_argument('--candidate-tcp-event-loop-threads', type=int,
+                        help='candidate TCP I/O threads per Gateway; omitted keeps the NIO core-count default')
     parser.add_argument('--candidate-actor-binary-invocations', choices=('enabled',), default='enabled',
                         help='Actor Protobuf transport requires binary distributed invocation framing')
     parser.add_argument('--candidate-message-write-prepared-queries', choices=('enabled', 'disabled'), default='enabled',
                         help='candidate bounded per-connection message SQL shape cache')
-    parser.add_argument('--candidate-send-path-trace-mode', choices=('sampled', 'all'), default='sampled',
-                        help='candidate detailed diagnostics: stable 1/64 operation sample or all slow requests')
+    parser.add_argument('--candidate-send-path-trace-mode', choices=('off', 'sampled', 'all'), default='off',
+                        help='candidate detailed diagnostics (default: off); opt in to a stable 1/64 sample or all slow requests')
     parser.add_argument('--candidate-heartbeat-diagnostics', action='store_true',
                         help='opt-in server heartbeat spans on a stable 1/64 of connections; diagnostic run, not a capacity comparison')
+    parser.add_argument('--candidate-coverage-diagnostics', action='store_true',
+                        help='opt-in bounded account coverage wait witnesses correlated by TCP source port; diagnostic run only')
     parser.add_argument('--candidate-message-send-inflight-per-connection', type=int, choices=range(1, 33), default=4,
                         help='candidate per-TCP business send window; loader uses the same window (default: 4)')
     parser.add_argument('--candidate-message-write-connections', type=int, default=8,
@@ -2441,6 +2558,8 @@ def main():
     parser.add_argument('--scenario',type=Path,default=ROOT/'IMV2/load-scenarios/high-active-50000-uuid-ab-5000.json')
     parser.add_argument('--preclose-recovery-witness',action='store_true',help='candidate scaled diagnostic: bounded pre-close checkpoints and one read-only DB witness; never changes quality')
     parser.add_argument('--loader-excluded-local-ports', default='', help='comma-separated occupied source ports to skip within fixed loader ranges')
+    parser.add_argument('--loader-local-port-base', type=int, default=DEFAULT_LOADER_LOCAL_PORT_BASE,
+                        help='explicit source-port range base; choose a range disjoint from automatic and service ports')
     parser.add_argument('--online-only', action='store_true', help='candidate diagnostic: authentication and heartbeats only; no rooms, sends, pulls or reconnects')
     parser.add_argument('--measurement-phase',help='exact measured scenario phase; inferred when there is one message phase')
     parser.add_argument('--pg-user',default=os.environ.get('USER',''))
@@ -2477,6 +2596,17 @@ def main():
     parser.add_argument('--app-tls-key', type=Path)
     parser.add_argument('--planned-reconnect-inflight-canary', action='store_true', help='explicit lost-ACK injection; requires small canary <=500 users; never capacity mode')
     args=parser.parse_args()
+    if args.candidate_tcp_event_loop_threads is not None and not 1 <= args.candidate_tcp_event_loop_threads <= 256:
+        parser.error('candidate TCP EventLoop threads must be 1...256')
+    if args.pg_wal_sync_method is not None and args.shared_postgres:
+        parser.error('WAL sync method override requires an owned PostgreSQL cluster')
+    if args.pg_track_wal_io_timing and args.shared_postgres:
+        parser.error('WAL I/O timing override requires an owned PostgreSQL cluster')
+    if args.pg_shared_buffers_mib is not None:
+        if not 16 <= args.pg_shared_buffers_mib <= 16384:
+            parser.error('owned PostgreSQL shared buffers must be 16...16384 MiB')
+        if args.shared_postgres:
+            parser.error('shared buffers override requires an owned PostgreSQL cluster')
     if args.candidate_message_write_connections % args.candidate_event_loop_threads != 0:
         parser.error('message connections must divide evenly across candidate EventLoops')
     if not 1 <= args.candidate_message_write_connections <= 247:
@@ -2488,6 +2618,8 @@ def main():
     for name in ('fixture','output_dir','baseline_checkout','baseline_binary','candidate_binary','loader_binary','baseline_account_binary','candidate_account_binary','scenario','nats_binary'):
         if getattr(args,name) is not None:
             setattr(args,name,getattr(args,name).resolve())
+    if not 1_024 <= args.loader_local_port_base <= 65_536 - LOADER_LOCAL_PORT_COUNT:
+        parser.error('loader source-port ranges must fit in unprivileged TCP ports')
     for name in ('app_xctestrun','app_derived_data','app_trusted_ca','app_tls_certificate','app_tls_key'):
         if getattr(args,name) is not None: setattr(args,name,getattr(args,name).resolve())
     candidate_message_write_socket(args)
@@ -2573,6 +2705,9 @@ def main():
     evidence=dict(fixtureManifestSHA256=sha(args.fixture/'manifest.json'),fixture=manifest,
                   scenarioSHA256=sha(args.scenario),measurementPhase=args.measurement_phase,platform=platform.platform(),cpuCount=os.cpu_count(),
                   fdLimitBefore=soft,fdLimit=hard,nodes=NODES,loaderPartitions=0 if app_canary_enabled(args) else PARTS,
+                  ownedPostgresSharedBuffersMiB=args.pg_shared_buffers_mib,
+                  ownedPostgresWALIOTimeDiagnostic=args.pg_track_wal_io_timing,
+                  ownedPostgresWALSyncMethod=args.pg_wal_sync_method,
                   baselineBinarySHA256=sha(args.baseline_binary) if args.kind != 'candidate' else None,candidateBinarySHA256=sha(args.candidate_binary),
                   candidatePlacementBinarySHA256=sha(candidate_placement_binary(args)) if args.kind != 'baseline' else None,
                   loaderBinarySHA256=sha(args.loader_binary),loaderContract=loader_contract,
@@ -2584,6 +2719,7 @@ def main():
                   candidateMessageWritePipelineDepth=args.candidate_message_write_pipeline_depth,
                   candidateMessageWriteDatabaseTransport=args.candidate_message_write_transport,
                   candidateEventLoopThreads=args.candidate_event_loop_threads,
+                  candidateTCPEventLoopThreads=args.candidate_tcp_event_loop_threads,
                   candidateDBTaskExecutor='event_loop',
                   candidateSendPathTraceMode=args.candidate_send_path_trace_mode,
                   candidateHeartbeatDiagnostics=args.candidate_heartbeat_diagnostics,
@@ -2593,7 +2729,9 @@ def main():
                   messageTransport='tcp',messageRecoveryTransport='tcp_query',
                   accountHTTPConnectionsPerHostSoftLimit=256,scenarioStartBarrier=not app_canary_enabled(args),
                   explicitLocalSourcePorts=not app_canary_enabled(args) and args.actor_partition_canary is None,
-                  localSourcePortRange=[25000,44999] if not app_canary_enabled(args) and args.actor_partition_canary is None else None,
+                  localSourcePortRange=[args.loader_local_port_base,
+                      args.loader_local_port_base + LOADER_LOCAL_PORT_COUNT - 1]
+                      if not app_canary_enabled(args) and args.actor_partition_canary is None else None,
                   candidateWorkingDiffSHA256=hashlib.sha256(subprocess.check_output(['git','-C',str(ROOT),'diff','--binary','HEAD'])).hexdigest(),
                   candidateSourceFilesSHA256={str(p.relative_to(ROOT)):sha(p) for p in sorted((ROOT/'IMV2Server/Sources').rglob('*')) if p.is_file()},
                   baselineAccountBinarySHA256=sha(args.baseline_account_binary) if args.kind != 'candidate' else None,
@@ -2631,7 +2769,10 @@ def main():
             socket.parent.mkdir(mode=0o700)
         socket_directory = str(socket.parent).replace("'", "''") if socket is not None else ''
         (pg_directory/'postgresql.auto.conf').write_text("listen_addresses = '127.0.0.1'\n"
-                     +f"port = {args.pg_port}\nmax_connections = 320\nunix_socket_directories = '{socket_directory}'\n")
+                     +f"port = {args.pg_port}\nmax_connections = 320\nunix_socket_directories = '{socket_directory}'\n"
+                     +(f"shared_buffers = '{args.pg_shared_buffers_mib}MB'\n" if args.pg_shared_buffers_mib is not None else '')
+                     +("track_wal_io_timing = on\n" if args.pg_track_wal_io_timing else '')
+                     +(f"wal_sync_method = '{args.pg_wal_sync_method}'\n" if args.pg_wal_sync_method is not None else ''))
         run_command([str(args.pg_bin_directory/'pg_ctl'),'-D',str(pg_directory),'-l',
                      str(args.output_dir/'postgres.log'),'-w','start'],args.output_dir/'postgres-start.log')
         pg_started=True
@@ -2642,6 +2783,13 @@ def main():
         if ceiling<320:raise ValueError('shared PG max_connections below 320; use the default owned cluster')
     results = {}
     try:
+        settings = subprocess.check_output(['psql', '-X', '-At', '-d', 'postgres', '-c',
+            "SELECT json_object_agg(name,json_build_object('setting',setting,'unit',unit,'source',source)) "
+            "FROM pg_settings WHERE name IN ('shared_buffers','wal_buffers','max_connections',"
+            "'synchronous_commit','fsync','full_page_writes','track_wal_io_timing',"
+            "'wal_sync_method','commit_delay','commit_siblings')"],
+            env=dict(os.environ, PGHOST=args.pg_host, PGPORT=str(args.pg_port), PGUSER=args.pg_user), text=True)
+        private_json(args.output_dir/'postgres-settings.json', json.loads(settings))
         results={kind:run_revision(args,kind,actors,counts,manifest) for kind in (('baseline','candidate') if args.kind=='both' else (args.kind,))}
         if args.kind=='both':
             baseline=results['baseline']['acknowledgedMessagesPerSecond']

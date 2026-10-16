@@ -13,6 +13,8 @@ import Logging
 struct GatewayDatabaseTopology {
     let physicalDatabaseURLs: [String]
     private let databasesByRole: [V2PostgresWorkloadPoolBudget.Role: [String: any Database]]
+    private let initializationDatabasesByURL: [String: V2EventLoopBalancedDatabase]
+    let initializationControlDatabase: any Database
     let database: any Database
     let syncControlDatabase: any Database
     let deliveryDatabase: any Database
@@ -32,17 +34,20 @@ struct GatewayDatabaseTopology {
         return databasesByRole[role]?[url] ?? databasesByRole[.foreground]?[url]
     }
 
+    func initializationDatabase(for url: String) -> (any Database)? { initializationDatabasesByURL[url] }
+
     /// Counts each actual composed pool once; facades share the same gates.
     /// Physical addresses and schemas never enter the exported snapshot.
     private var physicalLoanDatabases: [V2EventLoopBalancedDatabase] {
         var seen = Set<ObjectIdentifier>()
-        let workloads = V2PostgresWorkloadPoolBudget.Role.allCases.flatMap { role -> [V2EventLoopBalancedDatabase] in
+        let rolePools = V2PostgresWorkloadPoolBudget.Role.allCases.flatMap { role -> [V2EventLoopBalancedDatabase] in
             (databasesByRole[role] ?? [:]).values.compactMap { database -> V2EventLoopBalancedDatabase? in
                 guard let balanced = database as? V2EventLoopBalancedDatabase,
                       seen.insert(ObjectIdentifier(balanced)).inserted else { return nil }
                 return balanced
             }
         }
+        let workloads = rolePools + initializationDatabasesByURL.values.filter { seen.insert(ObjectIdentifier($0)).inserted }
         if let control = directSendControlPool.database as? V2EventLoopBalancedDatabase,
            seen.insert(ObjectIdentifier(control)).inserted { return workloads + [control] }
         return workloads
@@ -61,6 +66,10 @@ struct GatewayDatabaseTopology {
                 let rejected = aggregate.rejected.addingReportingOverflow(value.rejected)
                 aggregate.granted = granted.overflow ? .max : granted.partialValue
                 aggregate.rejected = rejected.overflow ? .max : rejected.partialValue
+                for (reason, count) in value.rejections {
+                    let sum = aggregate.rejections[reason, default: 0].addingReportingOverflow(count)
+                    aggregate.rejections[reason] = sum.overflow ? .max : sum.partialValue
+                }
                 total.classes[loanClass] = aggregate
             }
             for source in V2DatabaseLoanSource.allCases {
@@ -73,6 +82,35 @@ struct GatewayDatabaseTopology {
 
     /// Call only after workers and actors have stopped issuing renewal/cleanup
     /// work. Closing the gates rejects pending loans and awaits actual borrowers.
+    func loanMetricsByPool() -> [V2DatabasePoolLoanMetrics] {
+        var pools: [(V2DatabasePoolMetricClass, [V2EventLoopBalancedDatabase])] =
+            V2PostgresWorkloadPoolBudget.Role.allCases.map { role in
+                (GatewayPoolMetricsTopology.metricClass(for: role),
+                 (databasesByRole[role] ?? [:]).values.compactMap { $0 as? V2EventLoopBalancedDatabase })
+            }
+        pools.append((.initialization, Array(initializationDatabasesByURL.values)))
+        pools.append((.directSendControl, [directSendControlPool.database]))
+        return pools.compactMap { kind, databases in
+            guard !databases.isEmpty else { return nil }
+            var classes: [V2PhysicalDatabaseLoanClass: V2DatabaseLoanClassMetrics] = [:]
+            let snapshots = databases.map { $0.loanMetricsSnapshot() }
+            for loanClass in V2PhysicalDatabaseLoanClass.allCases {
+                var inFlight = 0, queued = 0, granted: UInt64 = 0, rejected: UInt64 = 0
+                var reasons: [V2DatabaseLoanRejectionReason: UInt64] = [:]
+                for snapshot in snapshots {
+                    let value = snapshot.classes[loanClass, default: .init()]
+                    inFlight += value.inFlight; queued += value.queued
+                    granted += value.granted; rejected += value.rejected
+                    for (reason, count) in value.rejections { reasons[reason, default: 0] += count }
+                }
+                classes[loanClass] = .init(inFlight: inFlight, queued: queued, granted: granted,
+                    rejected: rejected, rejections: reasons)
+            }
+            return .init(poolClass: kind, ordinary: classes[.ordinary]!, activation: classes[.activation]!,
+                         sync: classes[.sync]!, renewal: classes[.renewal]!)
+        }
+    }
+
     func shutdownLoans() async {
         for database in physicalLoanDatabases { await database.shutdownLoans() }
     }
@@ -161,6 +199,28 @@ struct GatewayDatabaseTopology {
                 }
                 databasesByRole[role, default: [:]][url] = eventLoopPool.database
             }
+        }
+        var initializationDatabases: [String: V2EventLoopBalancedDatabase] = [:]
+        let initializationResources = workloads.initialization
+        let initializationLoops = Array(initializationResources.eventLoopGroup.makeIterator())
+        for (index, url) in physicalDatabaseURLs.enumerated() {
+            let identifier = DatabaseID(string: "gateway-initialization-pool-\(index)")
+            initializationResources.databases.use(try postgresDatabaseConfiguration(url: url,
+                policy: configuration.databasePolicy, applicationName: applicationName,
+                maximumConnectionsPerEventLoop: configuration.initializationConnectionsPerEventLoop), as: identifier)
+            let pool = try V2EventLoopDatabasePool(databases: initializationResources.databases, logger: logger,
+                identifier: identifier, eventLoops: initializationLoops,
+                loanPolicy: .init(maximumConnections: configuration.initializationConnectionsPerEventLoop,
+                    reservedRenewalConnections: 0, maximumQueued: configuration.interactiveReadDatabaseWorkMaximumQueued,
+                    maximumWait: .milliseconds(configuration.databasePolicy.poolTimeoutMilliseconds)))
+            for database in pool.eventLoopDatabases {
+                try await V2PostgresSessionReadiness.verify(database: database, policy: configuration.databasePolicy,
+                    applicationName: applicationName)
+            }
+            initializationDatabases[url] = pool.database
+        }
+        guard let initializationControlDatabase = initializationDatabases[configuration.databaseURL] else {
+            throw V2RoomWriteStoreError.corruptPersistenceState
         }
         func databaseForRole(
             for role: V2PostgresWorkloadPoolBudget.Role,
@@ -285,6 +345,8 @@ struct GatewayDatabaseTopology {
         return .init(
             physicalDatabaseURLs: physicalDatabaseURLs,
             databasesByRole: databasesByRole,
+            initializationDatabasesByURL: initializationDatabases,
+            initializationControlDatabase: initializationControlDatabase,
             database: database,
             syncControlDatabase: syncControlDatabase,
             deliveryDatabase: deliveryDatabase,

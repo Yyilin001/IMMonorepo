@@ -193,7 +193,7 @@ enum VirtualActorBusinessProbe {
             databases: [resources.database(.init(string: "message-write"))],
             loanPolicy: .init(maximumConnections: 1, reservedRenewalConnections: 0,
                 maximumQueued: 32, maximumWait: .seconds(5)))
-        let owner = try V2RoomServerOwnerResources(database: database, sendDatabase: sendDatabase, writes: writes,
+        let owner = try V2RoomServerOwnerResources(database: database, initializationDatabase: database, sendDatabase: sendDatabase, writes: writes,
             membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
             invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
             invitationSecretIssuer: try invitationSecretIssuer(),

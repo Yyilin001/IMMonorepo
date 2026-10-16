@@ -42,6 +42,7 @@ public final class V2SendPathTrace: Sendable {
         func emit(_ snapshot: Snapshot) { callback(snapshot) }
     }
     private static let sink = Mutex<SinkBox?>(nil)
+    private static let sinkEnabled = Atomic<Bool>(false)
     @TaskLocal public static var current: V2SendPathTrace?
     private let segment: String
     private let collection: Collection
@@ -51,12 +52,17 @@ public final class V2SendPathTrace: Sendable {
     private let state = Mutex(State())
 
     public static func installSink(_ value: Sink?, collection: Collection = .all) {
-        sink.withLock { $0 = value.map { SinkBox($0, collection: collection) } }
+        sink.withLock {
+            $0 = value.map { SinkBox($0, collection: collection) }
+            sinkEnabled.store($0 != nil, ordering: .releasing)
+        }
     }
     public static func shouldCollect(operations: [String]) -> Bool {
-        sink.withLock { $0?.collection.includes(operations) ?? false }
+        guard enabled else { return false }
+        let collection = sink.withLock { $0?.collection }
+        return collection?.includes(operations) ?? false
     }
-    public static var enabled: Bool { sink.withLock { $0 != nil } }
+    public static var enabled: Bool { sinkEnabled.load(ordering: .acquiring) }
     public init(operations: [String], segment: String) {
         self.segment = segment
         collection = Self.sink.withLock { $0?.collection ?? .all }

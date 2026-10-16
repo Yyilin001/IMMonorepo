@@ -524,7 +524,7 @@ private func cancelMaintenanceHost(database: any Database,
         maximumCommandsPerTurn: 1, maximumConcurrentReservations: 2)
     let budget = V2RoomCommandBudget(configuration: configuration)
     let writes = PostgresV2RoomWriteStore(database: database, strangerMessagePolicy: try .init(maximumMessagesPerWindow: 3, window: 86_400), contentReviewMode: contentReviewMode)
-    let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
+    let resources = try V2RoomServerOwnerResources(database: database, initializationDatabase: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),

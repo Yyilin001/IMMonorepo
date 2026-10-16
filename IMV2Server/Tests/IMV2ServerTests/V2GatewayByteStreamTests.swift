@@ -13,6 +13,28 @@ import Testing
 @testable import IMV2ServerGateway
 
 struct V2GatewayByteStreamTests {
+    @Test("small concurrent requests share a process count budget and rejected calls own no bytes", arguments: [1, 64])
+    func processRequestCountAdmissionIsAtomic(maximum: Int) async {
+        let budget = V2GatewayMessageSendBudget(maximumBytes: 1_048_576, maximumRequests: maximum)
+        let accepted = await withTaskGroup(of: Bool.self, returning: Int.self) { group in
+            for _ in 0..<128 { group.addTask { budget.reserve(1) } }
+            var count = 0
+            for await result in group { if result { count += 1 } }
+            return count
+        }
+        #expect(accepted == maximum)
+        let held = budget.metricsSnapshot()
+        #expect(held.inFlightRequests == maximum && held.reservedBytes == maximum)
+        #expect(held.peakInFlightRequests == maximum && held.maximumInFlightRequests == maximum)
+        #expect(held.rejections[.processCount] == UInt64(128 - maximum))
+        #expect(held.rejections[.processBytes] == 0)
+        for _ in 0..<accepted { budget.release(1) }
+        #expect(budget.reserve(1))
+        budget.release(1)
+        let released = budget.metricsSnapshot()
+        #expect(released.inFlightRequests == 0 && released.reservedBytes == 0)
+    }
+
     @Test("TCP admission reasons retain actual send ownership through completion and cancellation",
           arguments: V2GatewayMessageSendRejectionReason.allCases, [false, true])
     func concurrentMessageSendDoesNotBlockHeartbeat(
@@ -34,7 +56,8 @@ struct V2GatewayByteStreamTests {
         send.protocolVersion = UInt32(version)
         send.messageSendOperation = try V2MessageSendOperationWireCodec.encode(command: operation)
         let payloadBytes = try V2ServerProtobufFrameCodec.encode(send, frameVersion: version).payload.count
-        let budget = V2GatewayMessageSendBudget(maximumBytes: reason == .processBytes ? payloadBytes + 1 : 4_194_304)
+        let budget = V2GatewayMessageSendBudget(maximumBytes: reason == .processBytes ? payloadBytes + 1 : 4_194_304,
+            maximumRequests: reason == .processCount ? 1 : 1_024)
         let stream = V2GatewayByteStream(
             frameLimits: limits,
             session: .init(limits: try .init(maximumInFlightRequests: 4),
@@ -65,9 +88,10 @@ struct V2GatewayByteStreamTests {
             await Task.yield()
         }
         #expect(await slow.started)
-        let active = await budget.metricsSnapshot()
+        let active = budget.metricsSnapshot()
         #expect(active.inFlightRequests == 1 && active.reservedBytes == payloadBytes)
         #expect(active.peakInFlightRequests == 1 && active.peakReservedBytes == payloadBytes)
+        #expect(active.maximumInFlightRequests == (reason == .processCount ? 1 : 1_024))
         var second = send
         second.requestID = 5
         _ = try await stream.receiveFrames(encoded(second, version: version),
@@ -76,7 +100,7 @@ struct V2GatewayByteStreamTests {
         let busy = try V2ServerProtobufFrameCodec.decode(rejected)
         #expect(busy.requestID == 5 && busy.error.code == "SERVER_BUSY")
         #expect(busy.error.retryable && busy.error.retryAfterSeconds == 1)
-        let rejectedMetrics = await budget.metricsSnapshot()
+        let rejectedMetrics = budget.metricsSnapshot()
         for classification in V2GatewayMessageSendRejectionReason.allCases {
             #expect(rejectedMetrics.rejections[classification] == (classification == reason ? 1 : 0))
         }
@@ -93,7 +117,7 @@ struct V2GatewayByteStreamTests {
                 await Task.yield()
             }
             #expect(await slow.cancelled)
-            let cancelling = await budget.metricsSnapshot()
+            let cancelling = budget.metricsSnapshot()
             #expect(cancelling.inFlightRequests == 1 && cancelling.reservedBytes == payloadBytes)
             await slow.release()
             try await closing.value
@@ -101,13 +125,13 @@ struct V2GatewayByteStreamTests {
         } else {
             await slow.release()
             for _ in 0..<10_000 {
-                if await budget.inFlightBytes() == 0 { break }
+                if budget.inFlightBytes() == 0 { break }
                 await Task.yield()
             }
             #expect(await recorder.count == 2)
             try await stream.finish()
         }
-        let settled = await budget.metricsSnapshot()
+        let settled = budget.metricsSnapshot()
         #expect(settled.inFlightRequests == 0 && settled.reservedBytes == 0)
         #expect(settled.peakInFlightRequests == 1 && settled.peakReservedBytes == payloadBytes)
     }
@@ -154,7 +178,7 @@ struct V2GatewayByteStreamTests {
             try #require(await writes.count == Int(id - 2))
         }
         // 两个业务已经完成，写回调仍挂起：句柄和预算必须保留。
-        let held = await budget.metricsSnapshot()
+        let held = budget.metricsSnapshot()
         #expect(held.inFlightRequests == 2 && held.reservedBytes > 0)
         #expect(held.rejections[.connectionCount] == 0)
         send.requestID = 5
@@ -170,18 +194,18 @@ struct V2GatewayByteStreamTests {
                 await Task.yield()
             }
             #expect(await writes.cancelled == 2)
-            #expect(await budget.metricsSnapshot().inFlightRequests == 2)
+            #expect(budget.metricsSnapshot().inFlightRequests == 2)
             await writes.release()
             try await closing.value
         } else {
             await writes.release()
             for _ in 0..<10_000 {
-                if await budget.inFlightBytes() == 0 { break }
+                if budget.inFlightBytes() == 0 { break }
                 await Task.yield()
             }
             try await stream.finish()
         }
-        let settled = await budget.metricsSnapshot()
+        let settled = budget.metricsSnapshot()
         #expect(settled.inFlightRequests == 0 && settled.reservedBytes == 0)
     }
 

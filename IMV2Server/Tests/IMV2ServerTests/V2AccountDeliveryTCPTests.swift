@@ -29,8 +29,8 @@ struct V2AccountDeliveryTCPTests {
                 let source = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime, schema: schema)
                 let recovery = try PostgresV2RoomRecoveryStore(database: database, schema: schema)
                 let topology = try PostgresV2RoomRecoveryTopology(database: database, schema: schema,
-                    stores: [recovery], orderedStoreIdentities: [schema])
-                let directory = V2UserRoomDirectoryService(topologySource: topology,
+                    stores: [recovery], orderedStoreIdentities: [schema], atomicStores: [:])
+                let directory = V2UserRoomDirectoryService(snapshotSource: topology,
                     cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
                 let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 71, count: 32))
                 let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room, owner: dataOwner,

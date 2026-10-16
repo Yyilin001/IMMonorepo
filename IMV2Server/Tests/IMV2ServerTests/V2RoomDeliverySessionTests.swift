@@ -94,7 +94,107 @@ struct V2RoomDeliverySessionTests {
         await host.close()
     }
 
-    @Test("queued control starts one deadline; application ACK cancels it")
+    @Test("Gateway-only retirement opens one successor and late repairs cannot retire it")
+    func unilateralRetirementRequiresExactSuccessor() async throws {
+        let (token, gateway, _) = try fixture()
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let pulses = Mutex<[V2RoomDeliverySessionPulse]>([])
+        let host = V2RoomDeliverySessionHost()
+        await host.configure(send: { pulse, _, _ in
+            pulses.withLock { $0.append(pulse) }
+            return authority.applyDeliverySession(pulse, serviceID: "owner")
+        }, hostReady: { true })
+        let old = try await host.retain(activation: token, gateway: gateway)
+        _ = authority.applyDeliverySession(.init(session: old, kind: .retire, sequence: 2), serviceID: "owner")
+        #expect(try await host.retain(activation: token, gateway: gateway) == old)
+        let successors = try await withThrowingTaskGroup(of: V2RoomDeliverySession.self) { group in
+            for _ in 0..<32 {
+                group.addTask { try await host.retain(activation: token, gateway: gateway, replacing: old) }
+            }
+            var values: [V2RoomDeliverySession] = []
+            for try await session in group { values.append(session) }
+            return values
+        }
+        let fresh = try #require(successors.first)
+        #expect(fresh.generation > old.generation)
+        #expect(Set(successors) == [fresh])
+        #expect(try await host.retain(activation: token, gateway: gateway, replacing: old) == fresh)
+        #expect(authority.sessionGate(fresh, serviceID: "owner")?.isReady() == true)
+        #expect(pulses.withLock { $0.filter { $0.kind == .open }.count } == 2)
+        await host.close()
+        await authority.shutdown()
+    }
+
+    @Test("reset carries the exact session through Protobuf and rejects another Gateway")
+    func resetSessionBoundary() throws {
+        let (token, gateway, user) = try fixture()
+        let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+        let session = V2RoomDeliverySession(host: token.host, gateway: gateway.identity, generation: 1)
+        let command = V2RoomSubscriptionCommand.reset(.init(roomID: token.roomID, actorUserID: user,
+            gatewayDescriptor: gateway, expectedFence: fence, replacingDeliverySession: session))
+        try command.validate()
+        #expect(try V2ActorProtobuf.decode(V2RoomSubscriptionCommand.self,
+            from: V2ActorProtobuf.encode(command)) == command)
+        let wrong = V2RoomDeliverySession(host: token.host,
+            gateway: .init(nodeID: "other", serviceID: "other", incarnationID: UUID()), generation: 1)
+        #expect(throws: (any Error).self) {
+            try V2RoomSubscriptionCommand.reset(.init(roomID: token.roomID, actorUserID: user,
+                gatewayDescriptor: gateway, expectedFence: fence, replacingDeliverySession: wrong)).validate()
+        }
+    }
+
+    @Test("an unactivated room cannot retire the shared session before any control transmission")
+    func unsentBaselineDoesNotRetireOtherRooms() async throws {
+        let (token, gateway, user) = try fixture()
+        let sibling = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: token.owner,
+            activationEpoch: token.activationEpoch, host: token.host)
+        let pulses = Mutex<[V2RoomDeliverySessionPulse]>([])
+        let host = V2RoomDeliverySessionHost(controlAckTimeout: .milliseconds(30))
+        await host.configure(send: { pulse, _, _ in pulses.withLock { $0.append(pulse) }; return .accepted }, hostReady: { true })
+        let session = try await host.retain(activation: sibling, gateway: gateway)
+        _ = try await host.retain(activation: token, gateway: gateway)
+        let relay = try V2RoomSubscriptionRelay(activation: token, baselineSequence: 0,
+            members: [.init(userID: user, memberRevision: 0)],
+            observeAuthorization: { host.observeAuthorization($0, gateway: $1) })
+        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1, operation: .subscribe(gateway: gateway.identity,
+            userID: user, memberRevision: 0, subscriptionID: UUID(), generation: 1)))
+        // The client may abandon a grant before activate/pump binding. No
+        // authorization from this new room has reached the Gateway yet.
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(pulses.withLock { $0.filter { $0.kind == .retire }.count } == 0)
+        #expect(try await host.retain(activation: sibling, gateway: gateway) == session)
+        #expect(await host.activeControlDeadlines() == 0)
+        await host.close()
+    }
+
+    @Test("a room reset retains revocation deadlines after an earlier baseline was exposed")
+    func exposedRoomResetKeepsDeadline() async throws {
+        let (token, gateway, user) = try fixture()
+        let pulses = Mutex<[V2RoomDeliverySessionPulse]>([])
+        let host = V2RoomDeliverySessionHost(controlAckTimeout: .milliseconds(100))
+        await host.configure(send: { pulse, _, _ in pulses.withLock { $0.append(pulse) }; return .accepted }, hostReady: { true })
+        let session = try await host.retain(activation: token, gateway: gateway)
+        let relay = try V2RoomSubscriptionRelay(activation: token, baselineSequence: 0,
+            members: [.init(userID: user, memberRevision: 0)],
+            observeAuthorization: { host.observeAuthorization($0, gateway: $1) })
+        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1, operation: .subscribe(gateway: gateway.identity,
+            userID: user, memberRevision: 0, subscriptionID: UUID(), generation: 1)))
+        let first = try #require(await relay.pending(for: gateway.identity, lane: .authorization).first)
+        await relay.authorizationTransmissionStarted(gateway: gateway.identity, fence: first.fence)
+        try await relay.acknowledge(gateway: gateway.identity, fence: first.fence,
+            through: first.deliverySequence, lane: .authorization)
+        // The old fence may still authorize the Gateway while a replacement
+        // has not been dispatched. Reset must not erase that responsibility.
+        try await relay.offer(.init(ownerEpoch: 0, inputSequence: 2,
+            operation: .reset(gateway: gateway.identity, subscriptionID: UUID(), generation: 2)))
+        let deadline = ContinuousClock.now + .seconds(2)
+        while !pulses.withLock({ $0.contains { $0.kind == .retire && $0.session == session } }),
+              ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(1)) }
+        #expect(pulses.withLock { $0.contains { $0.kind == .retire && $0.session == session } })
+        await host.close()
+    }
+
+    @Test("transmitted control starts one deadline; application ACK cancels it")
     func queuedControlOwnsCancellableDeadline() async throws {
         let (token, gateway, user) = try fixture()
         let pulses = Mutex<[V2RoomDeliverySessionPulse]>([])
@@ -106,11 +206,12 @@ struct V2RoomDeliverySessionTests {
             observeAuthorization: { host.observeAuthorization($0, gateway: $1) })
         try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1, operation: .subscribe(gateway: gateway.identity,
             userID: user, memberRevision: 0, subscriptionID: UUID(), generation: 1)))
+        let control = try #require(await relay.pending(for: gateway.identity, lane: .authorization).first)
+        await relay.authorizationTransmissionStarted(gateway: gateway.identity, fence: control.fence)
         let limit = ContinuousClock.now + .seconds(2)
         while await host.activeControlDeadlines() != 1 {
             try #require(ContinuousClock.now < limit); try await Task.sleep(for: .milliseconds(1))
         }
-        let control = try #require(await relay.pending(for: gateway.identity, lane: .authorization).first)
         try await relay.acknowledge(gateway: gateway.identity, fence: control.fence,
             through: control.deliverySequence, lane: .authorization)
         while await host.activeControlDeadlines() != 0 {
@@ -118,6 +219,46 @@ struct V2RoomDeliverySessionTests {
         }
         try await Task.sleep(for: .milliseconds(180))
         #expect(pulses.withLock { $0.count } == 1)
+        await host.close()
+    }
+
+    @Test("only a still-pending exact control may retire a shared session",
+          arguments: ["superseded_fence", "acknowledged_prefix", "released_room", "previous_session", "current_pending"])
+    func lateControlFailureKeepsUnrelatedRooms(mode: String) async throws {
+        let (token, gateway, user) = try fixture()
+        let sibling = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: token.owner,
+            activationEpoch: token.activationEpoch, host: token.host)
+        let pulses = Mutex<[V2RoomDeliverySessionPulse]>([])
+        let host = V2RoomDeliverySessionHost()
+        await host.configure(send: { pulse, _, _ in pulses.withLock { $0.append(pulse) }; return .accepted }, hostReady: { true })
+        _ = try await host.retain(activation: token, gateway: gateway)
+        _ = try await host.retain(activation: sibling, gateway: gateway)
+        let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+        let control = V2RoomSubscriptionDelivery(fence: fence, deliverySequence: 1, authorizationSequence: 1,
+            payload: .baseline(members: [.init(userID: user, memberRevision: 0)]))
+        host.observeAuthorization(.init(fence: fence, issued: 1, applied: 0, invalidated: false, transmissionStarted: true), gateway: gateway.identity)
+        switch mode {
+        case "superseded_fence":
+            let fresh = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 2, baselineSequence: 0)
+            host.observeAuthorization(.init(fence: fresh, issued: 1, applied: 0, invalidated: false, transmissionStarted: true), gateway: gateway.identity)
+        case "acknowledged_prefix":
+            // Another control is pending on this fence; the failed prefix itself is already applied.
+            host.observeAuthorization(.init(fence: fence, issued: 2, applied: 1, invalidated: false, transmissionStarted: true), gateway: gateway.identity)
+        case "released_room": await host.release(activation: token, gateway: gateway.identity)
+        case "previous_session": await host.controlFailed(host: token.host, gateway: gateway.identity)
+        default: break
+        }
+        let before = try await host.retain(activation: sibling, gateway: gateway)
+        let retirements = pulses.withLock { $0.filter { $0.kind == .retire }.count }
+        await host.controlDeliveryFailed([control], gateway: gateway.identity)
+        let after = try await host.retain(activation: sibling, gateway: gateway)
+        if mode == "current_pending" {
+            #expect(after.generation > before.generation)
+            #expect(pulses.withLock { $0.filter { $0.kind == .retire }.count } == retirements + 1)
+        } else {
+            #expect(after == before)
+            #expect(pulses.withLock { $0.filter { $0.kind == .retire }.count } == retirements)
+        }
         await host.close()
     }
 
@@ -134,9 +275,10 @@ struct V2RoomDeliverySessionTests {
         try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1, operation: .subscribe(gateway: gateway.identity,
             userID: user, memberRevision: 0, subscriptionID: UUID(), generation: 1)))
         let control = try #require(await relay.pending(for: gateway.identity, lane: .authorization).first)
+        await relay.authorizationTransmissionStarted(gateway: gateway.identity, fence: control.fence)
         let limit = ContinuousClock.now + .seconds(2)
         while !pulses.withLock({ $0.contains { $0.kind == .retire && $0.session == old } }) {
-            host.observeAuthorization(.init(fence: control.fence, issued: 1, applied: 0, invalidated: false), gateway: gateway.identity)
+            host.observeAuthorization(.init(fence: control.fence, issued: 1, applied: 0, invalidated: false, transmissionStarted: true), gateway: gateway.identity)
             try #require(ContinuousClock.now < limit); try await Task.sleep(for: .milliseconds(5))
         }
         let fresh = try await host.retain(activation: token, gateway: gateway)
@@ -163,6 +305,8 @@ struct V2RoomDeliverySessionTests {
             observeAuthorization: { host.observeAuthorization($0, gateway: $1) })
         try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1, operation: .subscribe(gateway: gateway.identity,
             userID: user, memberRevision: 0, subscriptionID: UUID(), generation: 1)))
+        let control = try #require(await relay.pending(for: gateway.identity, lane: .authorization).first)
+        await relay.authorizationTransmissionStarted(gateway: gateway.identity, fence: control.fence)
         await gate.waitUntilEntered()
         let closing = Task { await host.close(); closed.withLock { $0 = true } }
         try await Task.sleep(for: .milliseconds(20))

@@ -54,24 +54,6 @@ class ReportCoverageTests(unittest.TestCase):
             self.assertEqual(result['status'], 'no_complete_slow_request_partitions')
             self.assertIsNone(result['wait']['p95Milliseconds'])
 
-    def test_route_query_latency_excludes_admission_rejection_and_active_queries(self):
-        prefix = 'im_v2_actor_realtime_route_query_'
-        label = '{kind="user_presence"}'
-        def sample(total, completed, started, rejected):
-            return hotspots.prometheus('\n'.join([
-                f'{prefix}duration_milliseconds_sum{label} {total}',
-                f'{prefix}duration_milliseconds_count{label} {completed}',
-                f'{prefix}started_total{label} {started}',
-                f'{prefix}capacity_rejected_total{label} {rejected}',
-                f'{prefix}active{label} 4']))
-        result = hotspots.counter_summary([(2, sample(120, 4, 8, 12))], (1, sample(20, 2, 2, 1)))
-        self.assertEqual(result[prefix + 'duration_milliseconds_sum' + label]['meanMilliseconds'], 50)
-        self.assertEqual(result[prefix + 'capacity_rejected_total' + label]['delta'], 11)
-        self.assertEqual(result[prefix + 'active' + label]['last'], 4)
-        missing = sample(20, 2, 2, 1)
-        missing.pop(prefix + 'duration_milliseconds_count' + label)
-        result = hotspots.counter_summary([(2, sample(120, 4, 8, 12))], (1, missing))
-        self.assertIsNone(result[prefix + 'duration_milliseconds_sum' + label]['meanMilliseconds'])
 
     def test_actual_loan_sources_and_sql_phases_keep_independent_populations(self):
         prefix = 'im_v2_database_loan_observation_'
@@ -130,7 +112,7 @@ class ReportCoverageTests(unittest.TestCase):
     def test_admission_subclasses_and_historical_category_remain_distinct(self):
         categories = ['admission_credit', 'admission_fast_update',
                       'admission_lock_select', 'admission_gate_update']
-        row = dict(time=2, samplerVersion='pg-hotspot-v2', blocked_total=4,
+        row = dict(time=2, samplerVersion='pg-hotspot-v3', blocked_total=4,
                    blocked=[dict(query_category=category, requested_locks=[],
                                  blockers=[dict(query_category=category, held_locks=[
                                      dict(category='admission_credit', locks=1)])])

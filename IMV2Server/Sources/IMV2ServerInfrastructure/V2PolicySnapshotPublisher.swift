@@ -16,7 +16,9 @@ package actor V2PolicySnapshotPublisher {
         }
     }
     package typealias Send = @Sendable (V2PolicySnapshotUpdateWire, V2PolicySnapshotSubscriberWire) async throws -> Void
-    private struct Entry {
+    // Only this actor accesses entries. Registration mutates a few scopes; it
+    // must not copy all of a recipient's scopes or pending updates per call.
+    private final class Entry {
         let target: V2PolicySnapshotSubscriberWire
         let session: V2PolicyControlSessionWire
         var scopes: [String: UInt64] = [:]
@@ -27,10 +29,18 @@ package actor V2PolicySnapshotPublisher {
         var ready = false
         var retired = false
         var flight: Task<Void, any Error>?
+        init(target: V2PolicySnapshotSubscriberWire, session: V2PolicyControlSessionWire,
+             scopes: [String: UInt64] = [:], releasedThrough: UInt64 = 0,
+             pending: [String: V2PolicyFactsSnapshot] = [:], blockedChanges: Int = 0) {
+            self.target = target; self.session = session; self.scopes = scopes
+            self.releasedThrough = releasedThrough; self.pending = pending
+            self.blockedChanges = blockedChanges
+        }
     }
     private let targets: Set<Target>
     private let identity: V2ActorHostIdentity
     private let cache: V2NodePolicyStateCache
+    private let maximumScopesPerRecipient: Int
     private let send: Send
     private let validateRecipient: @Sendable (V2PolicySnapshotSubscriberWire) async throws -> Void
     private var subscribers: [String: Set<V2ActorHostIdentity>] = [:]
@@ -46,9 +56,12 @@ package actor V2PolicySnapshotPublisher {
     private var changingScopes: [String: Int] = [:]
 
     package init(targets: [Target], identity: V2ActorHostIdentity, cache: V2NodePolicyStateCache,
+                 maximumScopesPerRecipient: Int = 65_536,
                  validateRecipient: @escaping @Sendable (V2PolicySnapshotSubscriberWire) async throws -> Void,
                  send: @escaping Send) {
+        precondition(maximumScopesPerRecipient > 0)
         self.targets = Set(targets); self.identity = identity; self.cache = cache; self.send = send
+        self.maximumScopesPerRecipient = maximumScopesPerRecipient
         self.validateRecipient = validateRecipient
     }
     package func start(qualified: @escaping @Sendable () async -> Bool) throws {
@@ -80,11 +93,11 @@ package actor V2PolicySnapshotPublisher {
             }
         }
         if entries[target.host] == nil || entries[target.host]?.retired == true { try replaceGeneration(target: target) }
-        guard var entry = entries[target.host], entry.target == target else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
+        guard let entry = entries[target.host], entry.target == target else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
         guard scopes.allSatisfy({ scope in
             let current = entry.scopes[scope.key]
             return current == interestRevision || (interestRevision > entry.releasedThrough && (current ?? 0) < interestRevision)
-        }), entry.scopes.count + scopes.filter({ entry.scopes[$0.key] == nil }).count <= 65_536 else {
+        }), entry.scopes.count + scopes.filter({ entry.scopes[$0.key] == nil }).count <= maximumScopesPerRecipient else {
             throw V2PolicyAuthorizationLifecycleError.ownerChanged
         }
         for scope in scopes {
@@ -92,7 +105,6 @@ package actor V2PolicySnapshotPublisher {
             if entry.scopes[scope.key] == nil { entry.blockedChanges += changingScopes[scope.key] ?? 0 }
             entry.scopes[scope.key] = interestRevision
         }
-        entries[target.host] = entry
         return entry.session
     }
     package func confirmRegistration(_ session: V2PolicyControlSessionWire, scopes: [V2PolicyAuthorizationScope]? = nil, interestRevision: UInt64? = nil) async throws {
@@ -114,7 +126,7 @@ package actor V2PolicySnapshotPublisher {
             throw V2PolicyAuthorizationLifecycleError.invalidTarget
         }
         let host = request.subscriber.host
-        guard var entry = entries[host] else { return }
+        guard let entry = entries[host] else { return }
         guard entry.target == request.subscriber else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
         let selected: [String]
         switch request.payload {
@@ -131,7 +143,6 @@ package actor V2PolicySnapshotPublisher {
             subscribers[scope]?.remove(host)
             if subscribers[scope]?.isEmpty == true { subscribers.removeValue(forKey: scope) }
         }
-        entries[host] = entry
         if case .reset(_, let generation) = request.payload, generation == entry.session.generation {
             await retire(host: host, session: entry.session)
         }
@@ -175,8 +186,8 @@ package actor V2PolicySnapshotPublisher {
         for host in subscribers[snapshot.scope.key] ?? [] {
             guard let old = entries[host] else { continue }
             if old.retired, old.flight == nil { try replaceGeneration(target: old.target) }
-            guard var entry = entries[host] else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
-            guard entry.pending.count < 65_536 || entry.pending[snapshot.scope.key] != nil else {
+            guard let entry = entries[host] else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
+            guard entry.pending.count < maximumScopesPerRecipient || entry.pending[snapshot.scope.key] != nil else {
                 await retire(host: host, session: entry.session)
                 throw V2RoomCallFailure.notAccepted(.overloaded)
             }
@@ -187,7 +198,7 @@ package actor V2PolicySnapshotPublisher {
             if entry.pending[snapshot.scope.key].map({ $0.version <= snapshot.version }) ?? true {
                 entry.pending[snapshot.scope.key] = snapshot
             }
-            entries[host] = entry; hosts.append(host)
+            hosts.append(host)
         }
         // Register control responsibility before awaiting the local cache.
         // Even a delayed cache Actor cannot let heartbeats mask this change.
@@ -239,8 +250,8 @@ package actor V2PolicySnapshotPublisher {
         guard let entry = entries[host], entry.session == session, entry.sequence < UInt64.max else {
             throw V2PolicyAuthorizationLifecycleError.ownerChanged
         }
-        entries[host]?.sequence += 1
-        return entry.sequence + 1
+        entry.sequence += 1
+        return entry.sequence
     }
     private func perform(_ request: V2PolicySnapshotUpdateWire, target: V2PolicySnapshotSubscriberWire) async throws {
         if calls >= 8 { await withCheckedContinuation { callWaiters.append($0) } }
@@ -264,11 +275,14 @@ package actor V2PolicySnapshotPublisher {
     }
     private func pulse(qualified: Bool) async {
         guard !closed, !closing else { return }
-        let peers = entries.filter { $0.value.ready && $0.value.flight == nil && $0.value.pending.isEmpty && $0.value.blockedChanges == 0 }
+        let peers = entries.compactMap { host, entry -> V2PolicyControlSessionWire? in
+            guard entry.ready, entry.flight == nil, entry.pending.isEmpty, entry.blockedChanges == 0 else { return nil }
+            return entry.session
+        }
         await withTaskGroup(of: Void.self) { group in
             var pending = peers.makeIterator()
-            func admit(_ item: (key: V2ActorHostIdentity, value: Entry)) {
-                group.addTask { await self.pulse(host: item.key, session: item.value.session, qualified: qualified) }
+            func admit(_ session: V2PolicyControlSessionWire) {
+                group.addTask { await self.pulse(host: session.recipient, session: session, qualified: qualified) }
             }
             for _ in 0..<8 { if let entry = pending.next() { admit(entry) } }
             for await _ in group {
@@ -298,9 +312,9 @@ package actor V2PolicySnapshotPublisher {
         for task in Array(roots.values) { _ = await task.result }
         await worker?.value
         await withTaskGroup(of: Void.self) { group in
-            var pending = Array(entries.values).makeIterator()
-            func admit(_ entry: Entry) {
-                group.addTask { await self.retire(host: entry.session.recipient, session: entry.session) }
+            var pending = entries.values.map(\.session).makeIterator()
+            func admit(_ session: V2PolicyControlSessionWire) {
+                group.addTask { await self.retire(host: session.recipient, session: session) }
             }
             for _ in 0..<8 { if let entry = pending.next() { admit(entry) } }
             for await _ in group { if let entry = pending.next() { admit(entry) } }

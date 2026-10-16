@@ -140,7 +140,6 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         if let identity, pinnedHosts[identity.hostID] != signingID {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
-        let runtime = try V2RoomRuntimeConfiguration(batchWaitMilliseconds: batchWaitMilliseconds)
         var peers: [V2RoomDiscoveryPeer] = []
         var seenHosts = Set<V2ActorHostID>()
         for peer in document.peers {
@@ -156,14 +155,21 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
                 port: peer.port, accessibleShardIDs: shards, maximumRooms: peer.maximumRooms))
         }
         let allowed: Set<String>
+        let roomCapacity: Int
         if let identity {
             guard let own = document.peers.first(where: { $0.hostID == identity.hostID.uuidValue }),
-                  own.address == document.address, own.port == document.port,
-                  own.maximumRooms >= runtime.maximumActiveRooms else {
+                  own.address == document.address, own.port == document.port else {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
             allowed = Set(own.shardIDs)
-        } else { allowed = [] }
+            roomCapacity = own.maximumRooms
+        } else {
+            allowed = []
+            roomCapacity = 10_000 // Callers do not instantiate a room Host.
+        }
+        // Discovery and the local admission gate use the same capacity.
+        let runtime = try V2RoomRuntimeConfiguration(maximumActiveRooms: roomCapacity,
+            batchWaitMilliseconds: batchWaitMilliseconds)
         guard Set(document.peers.flatMap(\.shardIDs)) == configuredShardIDs else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }

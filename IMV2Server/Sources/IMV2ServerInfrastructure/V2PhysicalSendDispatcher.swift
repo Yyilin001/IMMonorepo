@@ -20,7 +20,12 @@ package final class V2PhysicalSendDispatcher: Sendable {
         let trace: V2SendPathTrace?
         let continuation: CheckedContinuation<V2ScheduledSendOutcome, any Error>
     }
-    private enum Read: Sendable { case turn(Pending), wait, closed }
+    private struct Selection: Sendable {
+        let pending: Pending
+        let idleSince: ContinuousClock.Instant?
+        let readySince: ContinuousClock.Instant?
+    }
+    private enum Read: Sendable { case turn(Selection), wait, closed }
     private enum WorkerPhase { case acquiring, idle, executing }
     private final class Worker {
         let root = V2SendDispatchRoot()
@@ -28,7 +33,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
         var connectionClosed = false
         var idleSince: ContinuousClock.Instant?
         var readySince: ContinuousClock.Instant?
-        var readers: [UUID: CheckedContinuation<Pending?, Never>] = [:]
+        var readers: [UUID: CheckedContinuation<Selection?, Never>] = [:]
         var executingTurns = 0
         var busySince: ContinuousClock.Instant?
     }
@@ -49,7 +54,9 @@ package final class V2PhysicalSendDispatcher: Sendable {
         let (result, effects) = try state.withLock { value in
             let result = try body(value)
             let effects = value.effects
-            value.effects.removeAll(keepingCapacity: true)
+            // Transfer the buffer to the caller. Keeping its capacity here
+            // would allocate a replacement while the copied buffer is retained.
+            value.effects = []
             return (result, effects)
         }
         for effect in effects { effect() }
@@ -88,7 +95,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
             $0.active.count, $0.occupiedRooms.count, $0.closed, $0.drainWaiters.count) }
     }
     private func flushIfCurrent(_ generation: UUID) { update { $0.flushIfCurrent(generation) } }
-    private func nextTurn(workerID: UUID, laneID: UUID) async -> Pending? {
+    private func nextTurn(workerID: UUID, laneID: UUID) async -> Selection? {
         // Accumulated work stays on the connection task's running stack. A
         // continuation is needed only when there is no executable room.
         switch update({ $0.take(workerID) }) {
@@ -108,18 +115,13 @@ package final class V2PhysicalSendDispatcher: Sendable {
     }
     private func runLane(workerID: UUID, laneID: UUID, executor: V2OwnerConnectionExecutor,
         execute: @escaping V2ScheduledSendExecution) async -> Bool {
-        while let pending = await nextTurn(workerID: workerID, laneID: laneID) {
+        while let selection = await nextTurn(workerID: workerID, laneID: laneID) {
+            let pending = selection.pending
             let timeline = V2OwnerConnectionTimeline()
             timeline.configure(self.preparationStore.scheduledSendMetrics)
             let selectedAt = ContinuousClock.now
-            let intervals = self.update { value -> (ContinuousClock.Instant?, ContinuousClock.Instant?) in
-                guard let worker = value.workers[workerID] else { return (nil, nil) }
-                let result = (worker.idleSince, worker.readySince)
-                worker.idleSince = nil; worker.readySince = nil
-                return result
-            }
-            if let idle = intervals.0 { timeline.record(.ownerWorkerIdle, from: idle, to: selectedAt) }
-            if let ready = intervals.1 { timeline.record(.ownerWorkerDispatchGap, from: ready, to: selectedAt) }
+            if let idle = selection.idleSince { timeline.record(.ownerWorkerIdle, from: idle, to: selectedAt) }
+            if let ready = selection.readySince { timeline.record(.ownerWorkerDispatchGap, from: ready, to: selectedAt) }
             timeline.mark("driver_entered", at: selectedAt)
             timeline.record(.ownerReadyWait, from: pending.enqueuedAt, to: selectedAt)
             timeline.attach(trace: pending.trace, enqueuedAt: pending.enqueuedAt)
@@ -317,7 +319,11 @@ package final class V2PhysicalSendDispatcher: Sendable {
             batchesStarted = Self.add(batchesStarted, 1)
             commandsSubmitted = Self.add(commandsSubmitted, UInt64(pending.items))
             largestBatch = max(largestBatch, pending.items)
-            return .turn(pending)
+            // Claim timing with the turn so another pipeline lane cannot take
+            // this worker's observation before the selected lane resumes.
+            let selection = Selection(pending: pending, idleSince: worker.idleSince, readySince: worker.readySince)
+            worker.idleSince = nil; worker.readySince = nil
+            return .turn(selection)
         }
         private func wakeReaders() {
             let now = ContinuousClock.now
@@ -330,7 +336,7 @@ package final class V2PhysicalSendDispatcher: Sendable {
             // an executing connection. Otherwise dictionary iteration can pin
             // a room behind another SQL while a physical connection sits idle.
             dispatch: while !readyRooms.isEmpty {
-                var selected: (id: UUID, worker: Worker, lane: UUID, reader: CheckedContinuation<Pending?, Never>)?
+                var selected: (id: UUID, worker: Worker, lane: UUID, reader: CheckedContinuation<Selection?, Never>)?
                 for (id, worker) in workers {
                     guard let (lane, reader) = worker.readers.first else { continue }
                     if selected == nil || worker.executingTurns < selected!.worker.executingTurns {

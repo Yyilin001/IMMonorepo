@@ -93,6 +93,25 @@ struct GatewayJournalSourceCatalogTests {
                 session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: CatalogRecoveryAuthenticator(),
                     capabilityProfile: "base", commandAdmission: CatalogRecoveryAdmission()),
                 handler: CatalogRecoveryCommandHandler(), connectionID: otherConnection, registry: registry)
+            var newUser = UserID(uuid: UUID())
+            while V2RealtimeTopicKey(kind: .userSync, id: newUser.rawValue).partitionID() != partition { newUser = UserID(uuid: UUID()) }
+            let newDevice = DeviceID(uuid: UUID()), newConnection = UUID()
+            let newTopic = V2RealtimeTopic(kind: .userSync, id: newUser.rawValue, owner: topic.owner)
+            let newStream = V2GatewayByteStream(frameLimits: frameLimits,
+                session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: CatalogRecoveryAuthenticator(),
+                    capabilityProfile: "base", commandAdmission: CatalogRecoveryAdmission()),
+                handler: CatalogRecoveryCommandHandler(), connectionID: newConnection, registry: registry)
+            let sameUserConnection = UUID(), sameUserDevice = DeviceID(uuid: UUID())
+            let sameUserStream = V2GatewayByteStream(frameLimits: frameLimits,
+                session: .init(limits: try .init(maximumInFlightRequests: 1), authenticator: CatalogRecoveryAuthenticator(),
+                    capabilityProfile: "base", commandAdmission: CatalogRecoveryAdmission()),
+                handler: CatalogRecoveryCommandHandler(), connectionID: sameUserConnection, registry: registry)
+            func selectedReads() -> UInt64 {
+                let line = GatewayJournalRecoveryCoordinator.prometheus().split(separator: "\n").first {
+                    $0.hasPrefix("im_v2_gateway_journal_recovery_total{reason=\"selectedConnections\"}")
+                }
+                return line.flatMap { UInt64($0.split(separator: " ").last ?? "0") } ?? 0
+            }
             do {
                 try #require(await registry.register(stream, connectionID: connection,
                     identity: .init(userID: user, deviceID: device, capabilityProfile: "base"), publicationSuppressed: true))
@@ -116,7 +135,46 @@ struct GatewayJournalSourceCatalogTests {
                 #expect(binding.fence.routingLeaseToken == routingLease.token)
                 #expect(binding.fence.sourceLeaseToken == publisher.token)
                 #expect(binding.fence.sessionID == coverage.sessionID)
+                #expect(GatewayJournalRuntime.confirmsControlProgress(coverage, sources: [source], coordinator: coordinator, receiver: receiver))
                 #expect(receiver.authenticationBinding(userID: user)?.controlVersion == 1)
+                // A new lifecycle in the same routing session reads only itself.
+                // Unpublished DB state on an unrelated existing user must stay untouched.
+                try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_control_versions SET version=2,session_control_version=2 WHERE topic_kind='userSync' AND topic_id=\(bind: otherUser.rawValue)::uuid::text").run()
+                try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_control_versions(topic_kind,topic_id,version,session_control_version) VALUES('userSync',\(bind: newUser.rawValue)::uuid::text,1,1)").run()
+                try #require(await registry.register(newStream, connectionID: newConnection,
+                    identity: .init(userID: newUser, deviceID: newDevice, capabilityProfile: "base"), publicationSuppressed: true))
+                try await coordinator.activate(newTopic)
+                let updatedCoverage = try #require(coordinator.journalCoverage(partitionID: partition))
+                #expect(!GatewayJournalRuntime.confirmsControlProgress(coverage, sources: [source], coordinator: coordinator, receiver: receiver))
+                #expect(!GatewayJournalRuntime.confirmsControlProgress(updatedCoverage, sources: [source], coordinator: coordinator, receiver: receiver))
+                try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
+                #expect(receiver.authenticationBinding(userID: newUser)?.controlVersion == 1)
+                #expect(GatewayJournalRuntime.confirmsControlProgress(updatedCoverage, sources: [source], coordinator: coordinator, receiver: receiver))
+                #expect(receiver.authenticationBinding(userID: otherUser)?.controlVersion == 1)
+                await coordinator.deactivate(newTopic)
+                await registry.unregister(connectionID: newConnection); try await newStream.finish()
+                let removalDeadline = ContinuousClock.now + .seconds(2)
+                while coordinator.journalCoverage(partitionID: partition) == nil, ContinuousClock.now < removalDeadline { await Task.yield() }
+                try #require(coordinator.journalCoverage(partitionID: partition) != nil)
+                // Refresh the same-session baseline after removal before testing control changes.
+                try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
+                // A second device of an already-online user changes only the
+                // local lifecycle revision, not the routing subscription revision.
+                let readsBefore = selectedReads()
+                try #require(await registry.register(sameUserStream, connectionID: sameUserConnection,
+                    identity: .init(userID: user, deviceID: sameUserDevice, capabilityProfile: "base"), publicationSuppressed: true))
+                try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
+                #expect(selectedReads() == readsBefore + 1)
+                #expect(receiver.authenticationBinding(userID: otherUser)?.controlVersion == 1)
+                await registry.unregister(connectionID: sameUserConnection); try await sameUserStream.finish()
+                let removalReads = selectedReads()
+                try await GatewayJournalAuthorityAssembly.refresh(catalog: catalog, coordinator: coordinator,
+                    registry: registry, receiver: receiver, source: source, gatewayIdentity: gateway, recovery: recovery)
+                #expect(selectedReads() == removalReads)
+                let currentBinding = try #require(receiver.bindingSnapshot(source: source))
                 try await sql.raw("UPDATE \(unsafeRaw: schema).realtime_control_versions SET version=2,session_control_version=2 WHERE topic_kind='userSync' AND topic_id=\(bind: user.rawValue)::uuid::text").run()
                 // Newer committed state not yet represented by a published control
                 // must not make a selective repair read or advance an unrelated user.
@@ -125,7 +183,7 @@ struct GatewayJournalSourceCatalogTests {
                 try await sql.raw("INSERT INTO \(unsafeRaw: schema).realtime_change_outbox(partition_id,topic_kind,topic_id,change_kind,user_control_version) VALUES(\(bind: partition),'userSync',\(bind: user.rawValue)::uuid::text,'userControl',2)").run()
                 let published = try await entry.store.publishPending(lease: publisher, limit: 128)
                 #expect(published.publishedThrough == 1)
-                #expect(receiver.applyJournalProjection(.init(source: source, fence: binding.fence,
+                #expect(receiver.applyJournalProjection(.init(source: source, fence: currentBinding.fence,
                     payload: .changes(fromExclusive: 0, throughInclusive: 1, entries: [
                         .init(sequence: 1, change: .userControlInvalidation(userID: user, controlVersion: 2, deviceID: nil, membershipRoomID: nil))])),
                     authenticatedServiceID: host.serviceID) == .snapshotRequired)
@@ -169,11 +227,15 @@ struct GatewayJournalSourceCatalogTests {
                 await coordinator.deactivate(topic)
                 #expect(receiver.bindingSnapshot(source: source) == nil)
                 await coordinator.shutdown(); await service.shutdown()
+                await registry.unregister(connectionID: newConnection); try? await newStream.finish()
+                await registry.unregister(connectionID: sameUserConnection); try? await sameUserStream.finish()
                 await registry.unregister(connectionID: otherConnection); try await otherStream.finish()
                 await registry.unregister(connectionID: connection); try await stream.finish()
                 await recovery.close(); receiver.shutdown(); await registry.shutdownRealtimeRecovery()
             } catch {
                 await coordinator.shutdown(); await service.shutdown()
+                await registry.unregister(connectionID: newConnection); try? await newStream.finish()
+                await registry.unregister(connectionID: sameUserConnection); try? await sameUserStream.finish()
                 await registry.unregister(connectionID: otherConnection); try? await otherStream.finish()
                 await registry.unregister(connectionID: connection); try? await stream.finish()
                 await recovery.close(); receiver.shutdown(); await registry.shutdownRealtimeRecovery()

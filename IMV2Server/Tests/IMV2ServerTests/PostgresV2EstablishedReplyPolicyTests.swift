@@ -41,7 +41,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let sendDatabase = try V2EventLoopBalancedDatabase(databases: [owner],
                 loanPolicy: .init(maximumConnections: 2, reservedRenewalConnections: 0,
                     maximumQueued: 32, maximumWait: .seconds(10)), sessionTimeouts: .default)
-            let resources = try V2RoomServerOwnerResources(database: owner, sendDatabase: sendDatabase, writes: writes,
+            let resources = try V2RoomServerOwnerResources(database: owner, initializationDatabase: owner, sendDatabase: sendDatabase, writes: writes,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: owner),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: owner),
                 invitationSecretIssuer: .init(rawKey: Data(repeating: 0x73, count: 32)),

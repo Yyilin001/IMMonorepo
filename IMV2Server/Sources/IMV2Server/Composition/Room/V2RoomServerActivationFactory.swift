@@ -13,8 +13,8 @@ import IMV2Core
 public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsReading {
     let sendDatabase: any Database
     let database: any Database
-    /// Only restoration initialization uses the lifecycle sublimit. Business
-    /// handlers retain `database`, and both facades share the same physical gate.
+    /// Restoration uses the physical owner's initialization pool. Business
+    /// handlers retain the foreground database and its separate connection budget.
     let activationInitializationDatabase: any Database
     private(set) var writes: PostgresV2RoomWriteStore
     let mutations: PostgresV2MessageMutationOperationStore
@@ -48,7 +48,8 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         return copy
     }
 
-    public init(database: any Database, sendDatabase: any Database, writes: PostgresV2RoomWriteStore,
+    public init(database: any Database, initializationDatabase: any Database,
+                sendDatabase: any Database, writes: PostgresV2RoomWriteStore,
                 membershipIdentities: any V2MembershipIdentitySnapshotValidating,
                 invitationIdentities: any V2GroupInvitationIdentityReading,
                 invitationSecretIssuer: V2GroupInviteSecretIssuer,
@@ -77,8 +78,8 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         self.durableSendSchedulingConfiguration = durableSendSchedulingConfiguration
         self.database = database
         self.sendDatabase = sendDatabase
-        self.activationInitializationDatabase = (database as? V2EventLoopBalancedDatabase)?
-            .usingLoanClass(.activation) ?? database
+        self.activationInitializationDatabase = (initializationDatabase as? V2EventLoopBalancedDatabase)?
+            .usingObservationSource(.lifecycle) ?? initializationDatabase
         self.mutations = .init(database:database,contentReviewMode:contentReviewMode,identities:membershipIdentities,committedMessageObserver:facts)
         self.writes = writes
         self.identities = membershipIdentities
@@ -151,10 +152,17 @@ private final class V2RoomDurableOwnerHolder: Sendable {
     }
 }
 
+/// Freeze each logical owner's configured value once. Activations retain this
+/// reference instead of storing the large resource bundle in every room actor.
+private final class V2RoomServerOwnerResourceReference: Sendable {
+    let value: V2RoomServerOwnerResources
+    init(_ value: V2RoomServerOwnerResources) { self.value = value }
+}
+
 /// Server 持有具体的领域处理器；Runtime 负责调度与生命周期，
 /// Cluster 负责认证与传输。后两者都不导入 Server。
 public struct V2RoomServerActivationFactory: Sendable {
-    private let owners: [String: V2RoomServerOwnerResources]
+    private let owners: [String: V2RoomServerOwnerResourceReference]
     private let deliverySessions = V2RoomDeliverySessionHost()
     private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
@@ -164,22 +172,27 @@ public struct V2RoomServerActivationFactory: Sendable {
         await deliverySessions.configure(send: sendPulse, hostReady: hostReady, invalidations: invalidations)
         let sessions = deliverySessions
         var seen: Set<UUID> = []
-        for resource in owners.values where seen.insert(resource.durableOwner.id).inserted {
+        for reference in owners.values where seen.insert(reference.value.durableOwner.id).inserted {
+            let resource = reference.value
             try await resource.subscriptionHost.configure(sendBatch: { batch, shard, gateway in
                 do {
                     let result = try await sendBatch(batch, shard, gateway)
                     if batch.deliveries.contains(where: { $0.payload.isAuthorizationControl }),
                        result.receipts.contains(where: { receipt in
                            if case .appliedThrough = receipt.result { return false }; return true
-                       }), let host = batch.deliveries.first?.fence.activation.host {
-                        await sessions.controlFailed(host: host, gateway: gateway.identity)
+                       }) {
+                        let rejected = Set(result.receipts.compactMap { receipt -> V2RoomSubscriptionFence? in
+                            if case .appliedThrough = receipt.result { return nil }; return receipt.fence
+                        })
+                        await sessions.controlDeliveryFailed(batch.deliveries.filter {
+                            $0.payload.isAuthorizationControl && rejected.contains($0.fence)
+                        }, gateway: gateway.identity)
                     }
                     return result
                 }
                 catch {
-                    if batch.deliveries.contains(where: { $0.payload.isAuthorizationControl }) {
-                        if let host = batch.deliveries.first?.fence.activation.host { await sessions.controlFailed(host: host, gateway: gateway.identity) }
-                    }
+                    let controls = batch.deliveries.filter { $0.payload.isAuthorizationControl }
+                    if !controls.isEmpty { await sessions.controlDeliveryFailed(controls, gateway: gateway.identity) }
                     throw error
                 }
             }, maximumCalls: maximumCalls)
@@ -193,8 +206,8 @@ public struct V2RoomServerActivationFactory: Sendable {
     public func shutdownRoomSubscriptionDelivery() async {
         await deliverySessions.close()
         var seen: Set<UUID> = []
-        for resource in owners.values where seen.insert(resource.durableOwner.id).inserted {
-            await resource.shutdownRoomSubscriptionDelivery()
+        for reference in owners.values where seen.insert(reference.value.durableOwner.id).inserted {
+            await reference.value.shutdownRoomSubscriptionDelivery()
         }
     }
 
@@ -223,7 +236,7 @@ public struct V2RoomServerActivationFactory: Sendable {
                     writes: resources.writes, clock: now,
                     committedMessageObserver: resources.committedMessageObserver,
                     sendOperationMetrics: resources.sendOperationMetrics,
-                    initializationDatabase: resources.database)
+                    initializationDatabase: resources.activationInitializationDatabase)
                 let batcher = try V2DurableSendOperationOwnerBatcher(store: store,
                     capacityProfile: resources.capacity, now: now,
                     configuration: resources.durableSendSchedulingConfiguration,
@@ -239,7 +252,7 @@ public struct V2RoomServerActivationFactory: Sendable {
                 return .init(store: store, batcher: batcher, directPreparation: directPreparation)
             }
         }
-        self.owners = owners
+        self.owners = owners.mapValues(V2RoomServerOwnerResourceReference.init)
         self.safetyActorUserID = safetyActorUserID
         self.now = now
     }
@@ -247,12 +260,12 @@ public struct V2RoomServerActivationFactory: Sendable {
     /// Recorders are aggregated at the Gateway. Physical lease aliases select
     /// one existing owner recorder, so each actual lifecycle SQL is counted once.
     public var sqlContinuationMetricsByOwner: [String: V2SendOperationBatchMetrics] {
-        owners.mapValues(\.sendOperationMetrics)
+        owners.mapValues { $0.value.sendOperationMetrics }
     }
 
     public func runtimeFactory() -> V2RoomActivationFactory<V2RoomRequest, V2RoomResponse> {
         .init(recoveryBatch: { items in
-            guard let first = items.first, let resources = owners[first.token.owner.shardID],
+            guard let first = items.first, let resources = owners[first.token.owner.shardID]?.value,
                   items.allSatisfy({ $0.token.owner == first.token.owner && $0.query.kind == .state }) else {
                 return .rolledBack(.invalidRequest)
             }
@@ -288,7 +301,7 @@ public struct V2RoomServerActivationFactory: Sendable {
             } catch { return v2RoomDomainCompletion(error) }
         }, pureRoomLogPull: { token, request, deadline in
             guard case .roomLog(.pull(let query)) = request,
-                  query.roomID == token.roomID, let resources = owners[token.owner.shardID] else {
+                  query.roomID == token.roomID, let resources = owners[token.owner.shardID]?.value else {
                 return .rolledBack(.invalidRequest)
             }
             do {
@@ -306,7 +319,7 @@ public struct V2RoomServerActivationFactory: Sendable {
         }) { token in
             let instance = V2RoomServerActivation(token: token, resources: owners[token.owner.shardID],
                 safetyActorUserID: safetyActorUserID, now: now, deliverySessions: deliverySessions)
-            let recorder = owners[token.owner.shardID]?.sendOperationMetrics
+            let recorder = owners[token.owner.shardID]?.value.sendOperationMetrics
             return .init(restore: { context in
                 try await V2RoomSQLContinuationObservation.$metrics.withValue(recorder) {
                     try await instance.restore(context: context)
@@ -327,7 +340,7 @@ public struct V2RoomServerActivationFactory: Sendable {
 /// 每项操作都在自身激活围栏下读取当前事实。
 private actor V2RoomServerActivation {
     private let token: V2RoomActivationToken
-    private let resources: V2RoomServerOwnerResources?
+    private let ownerResources: V2RoomServerOwnerResourceReference?
     private let safetyActorUserID: UserID?
     private let now: @Sendable () -> Date
     private let deliverySessions: V2RoomDeliverySessionHost
@@ -339,11 +352,11 @@ private actor V2RoomServerActivation {
     private var handlers: Handlers?
     private var closed = false
 
-    init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResources?,
+    init(token: V2RoomActivationToken, resources: V2RoomServerOwnerResourceReference?,
          safetyActorUserID: UserID?, now: @escaping @Sendable () -> Date, deliverySessions: V2RoomDeliverySessionHost) {
         self.token = token
         self.deliverySessions = deliverySessions
-        self.resources = resources
+        self.ownerResources = resources
         self.safetyActorUserID = safetyActorUserID
         self.now = now
     }
@@ -352,7 +365,7 @@ private actor V2RoomServerActivation {
         guard context.token == token else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
         try await context.validate()
         let deadline = context.deadline
-        guard !closed, handlers == nil, let resources else {
+        guard !closed, handlers == nil, let resources = ownerResources?.value else {
             throw V2RoomCallFailure.notAccepted(.unavailable)
         }
         guard ContinuousClock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
@@ -386,7 +399,7 @@ private actor V2RoomServerActivation {
     func execute(_ turn: V2RoomTurn<V2RoomRequest>) async -> V2RoomTransactionCompletion<[V2RoomResponse]> {
         V2SendPathTrace.current?.mark("turn_executor_enter")
         defer { V2SendPathTrace.current?.mark("turn_executor_return") }
-        guard !closed, let handlers, let resources else { return .rolledBack(.notReady) }
+        guard !closed, let handlers, let resources = ownerResources?.value else { return .rolledBack(.notReady) }
         guard turn.context.token == token, !turn.items.isEmpty,
               turn.items.allSatisfy({ $0.request.roomID == token.roomID }),
               zip(turn.items, turn.items.dropFirst()).allSatisfy({ pair in pair.0.ordinal < pair.1.ordinal }) else {
@@ -525,7 +538,8 @@ private actor V2RoomServerActivation {
                     catch { await releaseUnreferencedSession(value.gatewayDescriptor.identity); throw error }
                     return .roomSubscription(.granted(.init(fence: grant.fence, memberRevision: grant.memberRevision, userBaselineSequence: grant.baselineSequence, deliverySession: session)))
                 case .reset(let value):
-                    let session = try await deliverySessions.retain(activation: token, gateway: value.gatewayDescriptor)
+                    let session = try await deliverySessions.retain(activation: token, gateway: value.gatewayDescriptor,
+                        replacing: value.replacingDeliverySession)
                     sessionGateways.insert(value.gatewayDescriptor.identity)
                     let grant: V2RoomSubscriptionOwner.Grant
                     do { grant = try await owner.resetGrant(gateway: value.gatewayDescriptor.identity, userID: value.actorUserID, expectedFence: value.expectedFence, token: token, deadline: callDeadline) }
@@ -660,8 +674,8 @@ private actor V2RoomServerActivation {
 
     func invalidate(_ reservation: V2RoomReservation) async {
         guard reservation.token == token, !closed else { return }
-        await resources?.writes.invalidateActorHints(token: token)
-        await resources?.durableOwner.current?.store.invalidateSendState(token: token)
+        await ownerResources?.value.writes.invalidateActorHints(token: token)
+        await ownerResources?.value.durableOwner.current?.store.invalidateSendState(token: token)
     }
 
     func close() async {
@@ -671,13 +685,13 @@ private actor V2RoomServerActivation {
         sessionGateways.removeAll()
         if restoringSubscription { await withCheckedContinuation { subscriptionRestoreWaiters.append($0) } }
         if let subscriptionOwner { try? await subscriptionOwner.close() }
-        await resources?.subscriptionHost.unregister(token: token)
+        await ownerResources?.value.subscriptionHost.unregister(token: token)
         subscriptionOwner = nil
         handlers = nil
         lifetime = nil
-        await resources?.durableOwner.current?.store.invalidateSendState(token: token)
-        await resources?.writes.closeActorState(token: token)
-        await resources?.policyAuthorizations?.retire(token: token)
+        await ownerResources?.value.durableOwner.current?.store.invalidateSendState(token: token)
+        await ownerResources?.value.writes.closeActorState(token: token)
+        await ownerResources?.value.policyAuthorizations?.retire(token: token)
     }
 
     private struct Handlers: Sendable {
@@ -865,8 +879,12 @@ package actor V2RoomSubscriptionHost {
     }
     private func consume() async {
         guard !closed else { return }
-        let work = pending.withLock { value -> Pending in
-            let work = value; value.rooms.removeAll(keepingCapacity: true); value.deliveryRooms.removeAll(keepingCapacity: true); return work
+        // Transfer only pending work. Holding Pending across awaits would share
+        // registeredRooms and copy the whole registration set on the next insert.
+        let work = pending.withLock { value in
+            let work = (rooms: value.rooms, deliveryRooms: value.deliveryRooms)
+            value.rooms = []; value.deliveryRooms = []
+            return work
         }
         for room in work.deliveryRooms { if let entry = entries[room] { await entry.owner.signalDelivery() } }
         for room in work.rooms {
@@ -954,9 +972,4 @@ package func v2RoomSubscriptionFailure(for error: any Error) throws -> V2RoomSub
         }
     }
     return .unavailable
-}
-
-private func v2SubscriptionRemainingMilliseconds(until deadline: ContinuousClock.Instant, now: ContinuousClock.Instant = .now) -> Int64 {
-    let duration = now.duration(to: deadline).components
-    return max(0, duration.seconds * 1000 + duration.attoseconds / 1_000_000_000_000_000)
 }

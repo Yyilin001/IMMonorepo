@@ -1,6 +1,5 @@
 import FluentKit
 import IMV2ActorContracts
-import SQLKit
 
 /// Created by the activation restoration boundary; never from client input.
 package struct V2RoomSendInitialization: Sendable {
@@ -9,10 +8,11 @@ package struct V2RoomSendInitialization: Sendable {
     let directState: V2DirectRoomSendAcceptanceMemory.State?
 }
 
-/// Host owns activation validation; this transaction reads consistent business state.
+/// Host owns activation validation. One SELECT reads the complete committed
+/// business state in a statement snapshot, without a separate transaction.
 package func v2RestoreRoomSendInitialization(database: any Database, token: V2RoomActivationToken) async throws -> V2RoomSendInitialization {
-    try await v2WithRoomScopedTransaction(database: database) { transaction in
-        guard let sql = transaction as? any SQLDatabase else { throw V2SchemaReadinessError.unsupportedDatabase }
+    try await v2WithRoomSnapshotConnection(database: database,
+        deadline: V2RoomSQLDeadline.boundedTransactionDeadline()) { sql in
         return try await V2DirectRoomSendAcceptanceMemory.readInitialization(sql: sql, token: token)
     }
 }

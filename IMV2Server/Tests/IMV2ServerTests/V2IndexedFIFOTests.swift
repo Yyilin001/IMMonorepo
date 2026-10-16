@@ -1,4 +1,4 @@
-@testable import IMV2ServerInfrastructure
+@testable import IMV2ServerApplication
 import Testing
 
 @Suite("indexed room FIFO")

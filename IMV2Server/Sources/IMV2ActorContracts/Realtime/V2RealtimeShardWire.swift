@@ -157,10 +157,10 @@ public struct V2RealtimeShardDiscoveryPeer: Hashable, Sendable {
     }
 }
 
-/// Fixed counters only: no node, topic, token or SQL labels. There is no RPC
-/// waiting queue; active calls include any shared handshake wait they own.
+/// Fixed counters only: no node, topic, token or SQL labels. Control waits in
+/// one bounded sender queue; active calls include their shared handshake wait.
 public enum V2RealtimeRPCAdmissionLane: String, CaseIterable, Sendable { case control, publish }
-public enum V2RealtimeRPCAdmissionRejection: String, CaseIterable, Sendable { case stopped, global, peer }
+public enum V2RealtimeRPCAdmissionRejection: String, CaseIterable, Sendable { case stopped, global, peer, queueFull, queueTimeout }
 
 public struct V2RealtimeShardTransportMetricsSnapshot: Sendable {
     public let cacheHits: UInt64
@@ -176,6 +176,9 @@ public struct V2RealtimeShardTransportMetricsSnapshot: Sendable {
     public let controlStarted: UInt64
     public let controlSettled: UInt64
     public let controlActive: Int
+    public let controlQueued: Int
+    public let controlQueueSeconds: Double
+    public let controlQueueSettled: UInt64
     public let publishStarted: UInt64
     public let publishSettled: UInt64
     public let publishActive: Int
@@ -188,12 +191,14 @@ public struct V2RealtimeShardTransportMetricsSnapshot: Sendable {
                 publishStarted: UInt64, publishSettled: UInt64, publishActive: Int,
                 rpcRejected: UInt64, pendingHandshakes: Int,
                 capacityRejections: [V2RealtimeRPCAdmissionLane: [V2RealtimeRPCAdmissionRejection: UInt64]] = [:],
-                backgroundReceptionistLookups: UInt64 = 0, foregroundReceptionistLookups: UInt64 = 0) {
+                backgroundReceptionistLookups: UInt64 = 0, foregroundReceptionistLookups: UInt64 = 0,
+                controlQueued: Int = 0, controlQueueSeconds: Double = 0, controlQueueSettled: UInt64 = 0) {
         self.cacheHits = cacheHits; self.cacheMisses = cacheMisses; self.cacheInvalidations = cacheInvalidations
         self.backgroundReceptionistLookups = backgroundReceptionistLookups; self.foregroundReceptionistLookups = foregroundReceptionistLookups
         self.discoveryPasses = discoveryPasses; self.discoveryActive = discoveryActive
         self.cachedPartitions = cachedPartitions; self.reachableNodes = reachableNodes
         self.controlStarted = controlStarted; self.controlSettled = controlSettled; self.controlActive = controlActive
+        self.controlQueued = controlQueued; self.controlQueueSeconds = controlQueueSeconds; self.controlQueueSettled = controlQueueSettled
         self.publishStarted = publishStarted; self.publishSettled = publishSettled; self.publishActive = publishActive
         self.capacityRejections = capacityRejections
         self.rpcRejected = rpcRejected; self.pendingHandshakes = pendingHandshakes

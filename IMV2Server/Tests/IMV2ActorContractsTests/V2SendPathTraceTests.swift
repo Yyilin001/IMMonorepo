@@ -5,6 +5,18 @@ import Testing
 
 @Suite(.serialized)
 struct V2SendPathTraceTests {
+    @Test("Disabling tracing removes collection and ignores already created traces")
+    func disabledCollection() {
+        let count = Mutex(0)
+        V2SendPathTrace.installSink { _ in count.withLock { $0 += 1 } }
+        let trace = V2SendPathTrace(operations: [], segment: "gateway")
+        #expect(V2SendPathTrace.enabled)
+        V2SendPathTrace.installSink(nil)
+        #expect(!V2SendPathTrace.enabled)
+        #expect(!V2SendPathTrace.shouldCollect(operations: ["03000000-0000-0000-0000-000000000001"]))
+        trace.finish()
+        #expect(count.withLock { $0 } == 0)
+    }
     @Test("handoff boundaries remain zero-duration points after queue normalization")
     func handoffBoundaries() throws {
         let snapshots = Mutex<[V2SendPathTrace.Snapshot]>([])

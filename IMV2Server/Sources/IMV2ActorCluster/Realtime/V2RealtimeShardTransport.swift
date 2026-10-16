@@ -268,7 +268,8 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         try descriptor.validate()
         guard let current = cache[descriptor.token.partitionID], current.descriptor.token == descriptor.token,
               current.expires > .now else { throw V2ActorAuthenticationError.sessionExpired }
-        let result = try await sender.exchange(.control(request), to: descriptor.endpoint)
+        let result = try await sender.exchange(.control(request), to: descriptor.endpoint,
+            admissionDeadline: current.expires)
         guard case .control(let reply) = result else { throw V2ActorAuthenticationError.wrongRecipient }
         if reply.status == .retiredEpoch || reply.status == .retiredIncarnation { retire(descriptor) }
         return reply
@@ -513,7 +514,8 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             reachableNodes: reachableNodeIDs().count,
             controlStarted: counters.0, controlSettled: counters.1, controlActive: counters.2,
             publishStarted: counters.3, publishSettled: counters.4, publishActive: counters.5,
-            rpcRejected: counters.6, pendingHandshakes: counters.7, capacityRejections: counters.8, backgroundReceptionistLookups: lookups.background, foregroundReceptionistLookups: lookups.foreground)
+            rpcRejected: counters.6, pendingHandshakes: counters.7, capacityRejections: counters.8, backgroundReceptionistLookups: lookups.background, foregroundReceptionistLookups: lookups.foreground,
+            controlQueued: counters.9, controlQueueSeconds: counters.10, controlQueueSettled: counters.11)
     }
     public func stop(deadline: ContinuousClock.Instant) async -> Bool {
         stopped = true; serviceQualification.revoke(); worker?.cancel(); poll?.cancel()

@@ -268,6 +268,50 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
     }
 
+    @Test("concurrent cached calls remain tracked through drain and retain their actual replies")
+    func concurrentCachedCallsDrainTogether() async throws {
+        let fixture = try Fixture()
+        let gate = Gate()
+        await fixture.directory.remember(fixture.token)
+        await fixture.transport.configureCached(available: true, gate: gate)
+        let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
+        let calls = Task {
+            try await withThrowingTaskGroup(of: V2RoomResponse.self) { group in
+                for _ in 0..<128 {
+                    group.addTask {
+                        try await fixture.directory.room(fixture.room).call(command,
+                            principal: .user(user), deadline: .now + .seconds(5))
+                    }
+                }
+                var replies = 0
+                for try await reply in group {
+                    #expect(reply == .recovery(.failure(.invalidRequest)))
+                    replies += 1
+                }
+                return replies
+            }
+        }
+        do {
+            try await gate.waitForEntries(128)
+            #expect(await fixture.directory.quiesce(deadline: .now + .milliseconds(20)) == false)
+            await #expect(throws: V2RoomCallFailure.notAccepted(.retired)) {
+                try await fixture.directory.room(fixture.room).call(command,
+                    principal: .user(user), deadline: .now + .seconds(1))
+            }
+            await gate.open()
+            #expect(try await calls.value == 128)
+            #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
+            let metrics = await fixture.directory.callMetricsSnapshot()
+            #expect(metrics.cachedCalls == 128 && metrics.cachedResponses == 128)
+            #expect(await fixture.owners.calls == 0)
+        } catch {
+            await gate.open()
+            calls.cancel()
+            _ = await calls.result
+            throw error
+        }
+    }
+
     @Test("a bounded hot RPC leaves the original deadline available for same-ID recovery")
     func cachedAttemptDeadlineLeavesRecoveryBudget() async throws {
         let fixture = try Fixture(callTimeoutMilliseconds: 50)

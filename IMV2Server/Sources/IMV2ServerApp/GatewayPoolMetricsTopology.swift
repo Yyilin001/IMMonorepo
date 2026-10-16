@@ -34,6 +34,9 @@ enum GatewayPoolMetricsTopology {
             ])
         }
         return .init(pools: workloadPoolTopology.pools + [
+            .init(poolClass: .initialization,
+                  eventLoopHandles: configuredHandleCount,
+                  connectionCeiling: configuredHandleCount * configuration.initializationConnectionsPerEventLoop),
             .init(poolClass: .userStateRoute,
                   eventLoopHandles: configuration.databaseNonMessagePoolEventLoopThreads,
                   connectionCeiling: configuration.databaseNonMessagePoolEventLoopThreads),
@@ -47,7 +50,7 @@ enum GatewayPoolMetricsTopology {
         ])
     }
 
-    private static func metricClass(
+    static func metricClass(
         for role: V2PostgresWorkloadPoolBudget.Role
     ) -> V2DatabasePoolMetricClass {
         switch role {

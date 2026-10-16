@@ -282,9 +282,15 @@ private final class V2GatewayForegroundTransport: Sendable {
 }
 
 private final class V2GatewayNotificationDispatchResult: Sendable {
-    private let value = Mutex(false)
-    func mark() { value.withLock { $0 = true } }
-    var wasDispatched: Bool { value.withLock { $0 } }
+    private struct State: Sendable {
+        var dispatched = false
+        var scopeRejected = false
+    }
+    private let value = Mutex(State())
+    func mark() { value.withLock { $0.dispatched = true } }
+    func rejectScope() { value.withLock { $0.scopeRejected = true } }
+    var wasDispatched: Bool { value.withLock { $0.dispatched } }
+    var scopeWasRejected: Bool { value.withLock { $0.scopeRejected } }
 }
 
 /// A recovery notification with an atomic write-time lifecycle permit.
@@ -340,6 +346,11 @@ public actor V2GatewayByteStream {
     private var coverageRevision: UInt64 = 0
     private var coverageGenerations: [Int: UInt64] = [:]
     private var activeCoverageScopes: [Int: String] = [:]
+    private var diagnosticPeerPort: Int?
+    private var diagnosticAccountWaitingSince: ContinuousClock.Instant?
+    private var diagnosticAccountAdmittedState: String?
+    private var diagnosticAccountScopeRejectedRevision: UInt64?
+
     private struct PendingCoverageTransition {
         var state: IMV2RealtimeCoverage
         let confirms: (@Sendable () -> Bool)?
@@ -365,8 +376,9 @@ public actor V2GatewayByteStream {
     private var roomSubscriptionReportedProgress: (authorization: V2GatewayRoomSubscriptionAuthority.Permit, applied: UInt64)?
     private var roomSubscriptionReady: V2GatewayRoomSubscriptionAuthority.Permit?
     private var roomSubscriptionRecovering: V2GatewayRoomSubscriptionAuthority.Permit?
-    private let roomSubscriptionSignal = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    private var roomSubscriptionWakePending = false
     private var roomSubscriptionWriter: Task<Void, Never>?
+    package var roomSubscriptionWriterCount: Int { roomSubscriptionWriter == nil ? 0 : 1 }
     private nonisolated let roomSubscriptionConnectionRevocation = Mutex<V2CallbackBox<@Sendable () -> Void>?>(nil)
     private let recoveryOutbound = V2GatewayRecoveryOutbound()
 
@@ -581,11 +593,11 @@ public actor V2GatewayByteStream {
                     var hasProcessCapacity = false
                     if messageSendExecutingRequests >= maximumConcurrentMessageSends
                         || messageSendTasks.count >= maximumConcurrentMessageSends * 2 {
-                        await messageSendBudget.recordRejection(.connectionCount)
+                        messageSendBudget.recordRejection(.connectionCount)
                     } else if bytes > maximumConcurrentMessageSendBytes - messageSendReservedBytes {
-                        await messageSendBudget.recordRejection(.connectionBytes)
+                        messageSendBudget.recordRejection(.connectionBytes)
                     } else {
-                        hasProcessCapacity = await messageSendBudget.reserve(bytes)
+                        hasProcessCapacity = messageSendBudget.reserve(bytes)
                     }
                     if !hasProcessCapacity {
                         var busy = IMV2Envelope()
@@ -599,7 +611,7 @@ public actor V2GatewayByteStream {
                     }
                     guard !transportClosed, registeredIdentity != nil,
                           await session.authenticatedIdentity() == registeredIdentity else {
-                        await messageSendBudget.release(bytes)
+                        messageSendBudget.release(bytes)
                         throw V2GatewaySessionError.unsupportedCommand
                     }
                     messageSendReservedBytes += bytes
@@ -626,7 +638,7 @@ public actor V2GatewayByteStream {
                         } catch {
                             closeAfterMessageSendFailure()
                         }
-                        await finishMessageSend(requestID: frame.requestID, bytes: bytes,
+                        finishMessageSend(requestID: frame.requestID, bytes: bytes,
                             hasExecutionSlot: hasExecutionSlot, budget: messageSendBudget)
                         }
                     }
@@ -636,6 +648,7 @@ public actor V2GatewayByteStream {
                 // become optional work for a replacement view of the same room.
                 let authorView = authorPresentationIngress == nil ? nil : authorPresentationView
 
+                let diagnosticRequestID = frame.requestID
                 heartbeatProbe?.mark(.sessionSubmitted)
                 let exchange = try await session.receive(
                     frame,
@@ -645,7 +658,11 @@ public actor V2GatewayByteStream {
                     roomProgress: { [weak self] heartbeat in
                         heartbeatProbe?.mark(.progressEntered)
                         defer { heartbeatProbe?.mark(.progressCompleted) }
-                        return await self?.exchangeRoomProgress(heartbeat) ?? []
+                        let progress = await self?.exchangeRoomProgress(heartbeat, diagnosticRequestID: diagnosticRequestID) ?? []
+                        if V2GatewayCoverageDiagnostics.enabled {
+                            await self?.recordAccountCoverageDiagnostic(heartbeat, requestID: diagnosticRequestID)
+                        }
+                        return progress
                     }
                 )
                 heartbeatProbe?.mark(.sessionReturned)
@@ -790,10 +807,12 @@ public actor V2GatewayByteStream {
         requiredNotificationClose: (@Sendable () async -> Void)? = nil,
         foregroundWriter: V2NIOGatewayForegroundWriter? = nil,
         authorPresentationWriter: (@Sendable (V2AuthorPresentationWrite) async -> Bool)? = nil,
-        roomSubscriptionSocketGate: V2RoomSubscriptionSocketGate? = nil
+        roomSubscriptionSocketGate: V2RoomSubscriptionSocketGate? = nil,
+        diagnosticPeerPort: Int? = nil
     ) -> Bool {
         guard !transportClosed else { return false }
         self.roomSubscriptionSocketGate = roomSubscriptionSocketGate
+        if V2GatewayCoverageDiagnostics.enabled { self.diagnosticPeerPort = diagnosticPeerPort }
         self.deviceRevocationHandler = deviceRevocationHandler
         self.outboundWriter = outboundWriter
         self.requiredNotificationWriter = requiredNotificationWriter
@@ -982,6 +1001,10 @@ public actor V2GatewayByteStream {
         state.connectionEpoch = connectionEpoch
         state.state = ended ? .ended : ready ? .ready : .recovering; state.reason = reason
         let transition = PendingCoverageTransition(state: state, confirms: confirms, scopePermit: scopePermit, onReadyAdmitted: onReadyAdmitted)
+        if V2GatewayCoverageDiagnostics.enabled, scope == .account, !ready {
+            diagnosticAccountWaitingSince = .now
+            diagnosticAccountScopeRejectedRevision = nil
+        }
         if ready, let predecessor = pendingCoverage[kind]?.first,
            predecessor.state.state == .recovering, predecessor.state.scopeGeneration == scopeGeneration {
             pendingCoverage[kind] = [predecessor, transition]
@@ -1022,17 +1045,18 @@ public actor V2GatewayByteStream {
               let bytes = try? V2FrameCodec.encode(frame, limits: frameLimits) else { return false }
         let generation = item.state.scopeGeneration, revision = item.state.revision
         let ready = item.state.state == .ready, confirms = item.confirms, scopePermit = item.scopePermit
+        let dispatched = V2GatewayNotificationDispatchResult()
         let accepted = await writer(connectionFencedNotification(bytes: bytes, permit: { enqueue in
             self.coverageWriteFences.withLock { current in
                 guard current[kind]?.generation == generation, current[kind]?.revision == revision else { return false }
                 if let scopePermit {
                     // The child callback stays synchronous and nonescaping;
                     // no stored closure can retain the socket enqueue operation.
-                    let dispatched = V2GatewayNotificationDispatchResult()
                     let result = scopePermit {
                         guard !ready || confirms?() == true else { return }
                         dispatched.mark(); enqueue()
                     }
+                    if !result { dispatched.rejectScope() }
                     return result && dispatched.wasDispatched
                 }
                 guard !ready || confirms?() == true else { return false }
@@ -1041,14 +1065,26 @@ public actor V2GatewayByteStream {
         }))
         guard pendingCoverage[kind]?.first?.state.revision == revision else { return false }
         if accepted {
+            if V2GatewayCoverageDiagnostics.enabled, kind == IMV2RealtimeCoverage.Scope.account.rawValue {
+                diagnosticAccountAdmittedState = String(describing: item.state.state)
+                if ready {
+                    diagnosticAccountWaitingSince = nil
+                    if let port = diagnosticPeerPort { V2GatewayCoverageDiagnostics.examples.remove(sourcePort: port) }
+                }
+            }
             pendingCoverage[kind]?.removeFirst()
             if let next = pendingCoverage[kind]?.first {
                 coverageWriteFences.withLock { $0[kind] = .init(generation: next.state.scopeGeneration, revision: next.state.revision) }
             } else { pendingCoverage.removeValue(forKey: kind) }
         }
-        else if let scopePermit, !scopePermit({}) {
-            // The scope was cancelled or replaced. Its generation can never
-            // become current again, so it must not keep a retry task alive.
+        else if dispatched.scopeWasRejected {
+            if V2GatewayCoverageDiagnostics.enabled, kind == IMV2RealtimeCoverage.Scope.account.rawValue {
+                diagnosticAccountScopeRejectedRevision = revision
+            }
+            // Only an actual socket-owner permit check proves cancellation.
+            // A busy/nonwritable transport may not evaluate the permit at all;
+            // checking an EventLoop-bound permit on this actor would falsely
+            // reject a live scope and silently discard its retained control.
             pendingCoverage.removeValue(forKey: kind)
         } else if ready, item.confirms?() != true { degradePendingCoverage(kind: kind, revision: revision) }
         if accepted, ready { await item.onReadyAdmitted?() }
@@ -1166,6 +1202,25 @@ public actor V2GatewayByteStream {
         return await writer(connectionFencedNotification(bytes: bytes, permit: enqueueIfCurrent))
     }
 
+    private func recordAccountCoverageDiagnostic(_ heartbeat: IMV2Heartbeat, requestID: UInt64) async {
+        guard !transportClosed, let sourcePort = diagnosticPeerPort,
+              let since = diagnosticAccountWaitingSince, since.duration(to: .now) >= .seconds(10) else { return }
+        let kind = IMV2RealtimeCoverage.Scope.account.rawValue
+        guard let generation = coverageGenerations[kind] else { return }
+        let recovery = await registry.accountCoverageDiagnostic(connectionID: connectionID)
+        // The read crosses actors: an intervening Ready/retirement invalidates
+        // this sample. It never changes scope ownership or schedules a repair.
+        guard !transportClosed, diagnosticAccountWaitingSince == since,
+              coverageGenerations[kind] == generation else { return }
+        V2GatewayCoverageDiagnostics.examples.record(.init(sourcePort: sourcePort, requestID: requestID,
+            clientTimeMilliseconds: heartbeat.clientTimeMs,
+            observedAtUnixMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000), generation: generation,
+            lastAdmittedState: diagnosticAccountAdmittedState,
+            pendingStates: (pendingCoverage[kind] ?? []).map { "\($0.state.state):\($0.state.revision)" },
+            writeInFlight: coverageWritesInFlight.contains(kind), retryOwned: recoveryNotificationRetry != nil,
+            scopeRejectedRevision: diagnosticAccountScopeRejectedRevision, recovery: recovery))
+    }
+
     /// Independent room-local lifecycle. No partition coverage or Journal
     /// witness enters this path; the supplied gate is checked at actual enqueue.
     func beginRoomSubscription(roomID: RoomID, scopeGeneration: UInt64,
@@ -1177,12 +1232,41 @@ public actor V2GatewayByteStream {
             ready: false, reason: .installing, scopePermit: permit)
     }
 
+    private func recordRoomCoverageDiagnostic(_ heartbeat: IMV2Heartbeat, requestID: UInt64,
+        observation: V2GatewayRoomSubscriptionAuthority.ProgressObservation) {
+        let kind = IMV2RealtimeCoverage.Scope.room.rawValue
+        guard !transportClosed, let sourcePort = diagnosticPeerPort,
+              activeCoverageScopes[kind] != nil, let generation = coverageGenerations[kind] else { return }
+        let snapshot = observation.snapshot
+        let ready = snapshot.map { roomSubscriptionReady == $0.authorization } ?? false
+        if ready { V2GatewayCoverageDiagnostics.roomExamples.remove(sourcePort: sourcePort); return }
+        V2GatewayCoverageDiagnostics.roomExamples.record(.init(sourcePort: sourcePort, requestID: requestID,
+            clientTimeMilliseconds: heartbeat.clientTimeMs,
+            observedAtUnixMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+            requestedGeneration: generation, authorityGeneration: snapshot?.authorization.scopeGeneration,
+            absence: observation.absence?.rawValue, highWatermark: snapshot?.highWatermark,
+            socketReady: ready, retainedHead: roomSubscriptionState != nil,
+            headWriterOwned: roomSubscriptionWriter != nil,
+            pendingStates: (pendingCoverage[kind] ?? []).map { "\($0.state.state):\($0.state.revision)" }))
+    }
+
     /// H is trusted local authority state; C is only this device's report.
     /// Actual socket enqueue (G) is deliberately not evidence of local application.
-    func exchangeRoomProgress(_ heartbeat: IMV2Heartbeat) async -> [IMV2GroupEventProgressState] {
+    func exchangeRoomProgress(_ heartbeat: IMV2Heartbeat, diagnosticRequestID: UInt64? = nil) async -> [IMV2GroupEventProgressState] {
         guard !transportClosed, !recoveryOutbound.isRevoked, registeredIdentity != nil,
-              heartbeat.roomProgress.count <= 1,
-              let snapshot = await registry.roomSubscriptionProgressSnapshot(connectionID: connectionID) else { return [] }
+              heartbeat.roomProgress.count <= 1 else { return [] }
+        let observation = await registry.roomSubscriptionProgressObservation(connectionID: connectionID)
+        if V2GatewayCoverageDiagnostics.enabled, let diagnosticRequestID {
+            recordRoomCoverageDiagnostic(heartbeat, requestID: diagnosticRequestID, observation: observation)
+        }
+        guard let snapshot = observation.snapshot else {
+            switch observation.absence {
+            case .authorizationNotReady, .sessionUnavailable:
+                await registry.roomSubscriptionProgressNeedsRepair(connectionID: connectionID)
+            default: break
+            }
+            return []
+        }
         let authorization = snapshot.authorization
         var applied: UInt64 = 0
         if let prior = roomSubscriptionReportedProgress, prior.authorization == authorization { applied = prior.applied }
@@ -1200,6 +1284,12 @@ public actor V2GatewayByteStream {
         result.appliedRoomSequence = applied
         result.ready = roomSubscriptionReady == authorization
         V2RoomSubscriptionHeadDeliveryMetrics.shared.record(result.ready ? .progressReady : .progressSocketNotReady)
+        if !result.ready {
+            // A healthy authority may have superseded an old socket offer.
+            // Demand reoffers its current trusted head; only the actual scoped
+            // socket enqueue can establish Ready, never this heartbeat itself.
+            await registry.roomSubscriptionBaselineInstalled(roomID: authorization.fence.roomID)
+        }
         return [result]
     }
 
@@ -1227,23 +1317,47 @@ public actor V2GatewayByteStream {
                 retainedHead = max(prior.highWatermark, highWatermark)
             } else { retainedHead = highWatermark }
             roomSubscriptionState = .init(authorization: authorization, highWatermark: retainedHead, permit: permit)
-            roomSubscriptionReady = nil; roomSubscriptionRecovering = nil
+            roomSubscriptionReady = nil
+            // Recovering is a socket-scope predecessor, not an authority
+            // credential. A fresh grant still needs its own actual Ready,
+            // but must not put the same live scope back into Recovering.
+            if !hasAdmittedRoomRecovering(for: authorization) { roomSubscriptionRecovering = nil }
         }
         V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headRetained)
+        if let current = roomSubscriptionState,
+           roomSubscriptionReady == current.authorization,
+           hasAdmittedRoomRecovering(for: current.authorization),
+           let submitted = current.submittedHighWatermark, current.highWatermark <= submitted {
+            V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headAlreadySubmitted)
+            return true
+        }
+        // Coalesce offers while the actual writer is suspended. No idle task
+        // or AsyncStream retains the deepest async stack for this connection.
+        roomSubscriptionWakePending = true
         if roomSubscriptionWriter == nil {
-            // One persistent worker per physical socket lifecycle, not one task
-            // per head/event. Closing joins its actual writer responsibility.
             roomSubscriptionWriter = Task {
                 await V2RecoveryNotificationWorkerContext.$connectionID.withValue(connectionID) {
                     await self.consumeRoomSubscriptionHeads()
                 }
             }
         }
-        roomSubscriptionSignal.continuation.yield(())
         return true
     }
+    private func hasAdmittedRoomRecovering(for authorization: V2GatewayRoomSubscriptionAuthority.Permit) -> Bool {
+        guard let admitted = roomSubscriptionRecovering else { return false }
+        return admitted.connectionID == authorization.connectionID && admitted.lifecycle == authorization.lifecycle
+            && admitted.fence.roomID == authorization.fence.roomID
+            && admitted.scopeGeneration == authorization.scopeGeneration
+    }
     func endRoomSubscription(roomID: RoomID, scopeGeneration: UInt64) async {
-        if roomSubscriptionState?.authorization.fence.roomID == roomID {
+        let kind = IMV2RealtimeCoverage.Scope.room.rawValue
+        // Old cleanup can return after a successor subscribed to the same room.
+        // Reject it before changing head/Ready/progress, not just when encoding
+        // the later Ended control. A room ID alone is not a scope identity.
+        guard coverageGenerations[kind] == scopeGeneration,
+              activeCoverageScopes[kind] == roomID.rawValue else { return }
+        if roomSubscriptionState?.authorization.fence.roomID == roomID,
+           roomSubscriptionState?.authorization.scopeGeneration == scopeGeneration {
             roomSubscriptionState = nil; roomSubscriptionReportedProgress = nil
             roomSubscriptionReady = nil; roomSubscriptionRecovering = nil
         }
@@ -1251,7 +1365,9 @@ public actor V2GatewayByteStream {
             ready: false, ended: true, reason: .cancelled)
     }
     private func consumeRoomSubscriptionHeads() async {
-        for await _ in roomSubscriptionSignal.stream {
+        defer { roomSubscriptionWriter = nil }
+        repeat {
+            roomSubscriptionWakePending = false
             while !Task.isCancelled, !transportClosed, !recoveryOutbound.isRevoked,
                   let selected = roomSubscriptionState {
                 let authorization = selected.authorization
@@ -1268,7 +1384,7 @@ public actor V2GatewayByteStream {
                     do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
                     continue
                 }
-                if roomSubscriptionRecovering != authorization {
+                if !hasAdmittedRoomRecovering(for: authorization) {
                     let accepted = await retainRealtimeCoverageRecovering(scope: .room,
                         scopeID: authorization.fence.roomID.rawValue, scopeGeneration: authorization.scopeGeneration,
                         reason: .installing, scopePermit: selected.permit)
@@ -1310,8 +1426,9 @@ public actor V2GatewayByteStream {
                     roomSubscriptionState = latest
                 } else { do { try await Task.sleep(for: .milliseconds(100)) } catch { return } }
             }
-            if Task.isCancelled { return }
-        }
+        } while roomSubscriptionWakePending && !Task.isCancelled && !transportClosed && !recoveryOutbound.isRevoked
+        // The last pending-wake check and handle release share this actor turn.
+        // A fresh offer cannot be lost between deciding to idle and clearing it.
     }
 
     /// 发送一份为进程本地已授权受众编码一次的帧。
@@ -1512,11 +1629,11 @@ public actor V2GatewayByteStream {
         if let close { Task { await close() } }
     }
 
-    private func finishMessageSend(requestID: UInt64, bytes: Int, hasExecutionSlot: Bool, budget: V2GatewayMessageSendBudget) async {
+    private func finishMessageSend(requestID: UInt64, bytes: Int, hasExecutionSlot: Bool, budget: V2GatewayMessageSendBudget) {
         if hasExecutionSlot { messageSendExecutingRequests -= 1 }
         messageSendTasks.removeValue(forKey: requestID)
         messageSendReservedBytes -= bytes
-        await budget.release(bytes)
+        budget.release(bytes)
     }
 
     private func drainMessageSends() async {

@@ -8,6 +8,82 @@ import IMV2ServerContracts
 
 @Suite("Actor realtime in-memory partitions", .timeLimit(.minutes(1)))
 struct V2ActorRealtimeRoutingTests {
+    @Test func incrementalControlPreservesUnchangedIndexAndRejectsPartialBatches() async throws {
+        let host = descriptor("host"), gateway = descriptor("subscriber")
+        let owner = try V2RoomDataOwner(shardID: "rooms", epoch: 1)
+        let first = V2RealtimeTopic(kind: .roomEvents, id: UUID().uuidString, owner: owner)
+        let key = V2RealtimeTopicKey(first)
+        var second = V2RealtimeTopic(kind: .roomEvents, id: UUID().uuidString, owner: owner)
+        while V2RealtimeTopicKey(second).partitionID() != key.partitionID() {
+            second = .init(kind: .roomEvents, id: UUID().uuidString, owner: owner)
+        }
+        let next = V2RealtimeTopicKey(second)
+        let token = V2RealtimeShardToken(partitionID: key.partitionID(), host: host.identity, epoch: 1, leaseToken: UUID())
+        let service = V2RealtimeShardService(maximumInterests: 1, maximumBytes: 4096, send: { _, _ in .accepted })
+        await service.install(token: token, deadline: .now + .seconds(30))
+        let session = V2RealtimeShardSession(gateway: gateway, sessionID: UUID(), sessionGeneration: 1)
+        let interest = V2RealtimeShardInterest(key: key, interestGeneration: 1)
+        let initial = try control(token, session, base: 0, mutation: .snapshotChunk(snapshotID: UUID(), index: 0,
+            total: 1, digest: V2RealtimeShardFingerprint.snapshot([interest]), interests: [interest]))
+        #expect(try await service.control(initial).status == .applied)
+        let invalid = try control(token, session, base: 1, mutation: .delta([
+            .remove(key: key, generation: 1), .upsert(.init(key: next, interestGeneration: 2)),
+            .upsert(.init(key: next, interestGeneration: 3))]))
+        #expect(try await service.control(invalid).status == .requiresSnapshot)
+        #expect(try await service.publish(.init(token: token, topic: first,
+            payload: .roomWake(roomID: try RoomID(first.id), highWatermark: 1))) == .accepted)
+        let overload = try control(token, session, base: 1, mutation: .delta([.upsert(.init(key: next, interestGeneration: 2))]))
+        #expect(try await service.control(overload).status == .overloaded)
+        #expect(try await service.publish(.init(token: token, topic: second,
+            payload: .roomWake(roomID: try RoomID(second.id), highWatermark: 1))) == .noSubscribers)
+        let replace = try control(token, session, base: 1, mutation: .delta([
+            .remove(key: key, generation: 1), .upsert(.init(key: next, interestGeneration: 2))]))
+        #expect(try await service.control(replace).status == .applied)
+        #expect(try await service.control(replace).status == .applied)
+        let stale = try control(token, session, base: 2, mutation: .delta([.remove(key: next, generation: 1)]))
+        #expect(try await service.control(stale).status == .applied)
+        #expect(try await service.publish(.init(token: token, topic: second,
+            payload: .roomWake(roomID: try RoomID(second.id), highWatermark: 1))) == .accepted)
+        #expect(try await service.publish(.init(token: token, topic: first,
+            payload: .roomWake(roomID: try RoomID(first.id), highWatermark: 1))) == .noSubscribers)
+        await service.shutdown()
+    }
+
+    @Test func stableMaintenanceAndNewSubscriptionOnlyRecoverChangedTopics() async throws {
+        let host = descriptor("host"), gateway = descriptor("subscriber"), calls = Mutex<[V2RealtimeTopic]>([])
+        let owner = try V2RoomDataOwner(shardID: "users", epoch: 1)
+        let first = V2RealtimeTopic(kind: .userSync, id: UUID().uuidString, owner: owner)
+        let key = V2RealtimeTopicKey(first)
+        var second = V2RealtimeTopic(kind: .userSync, id: UUID().uuidString, owner: owner)
+        while V2RealtimeTopicKey(second).partitionID() != key.partitionID() {
+            second = .init(kind: .userSync, id: UUID().uuidString, owner: owner)
+        }
+        let token = V2RealtimeShardToken(partitionID: key.partitionID(), host: host.identity, epoch: 1, leaseToken: UUID())
+        let service = V2RealtimeShardService(send: { _, _ in .accepted })
+        await service.install(token: token, deadline: .now + .seconds(90))
+        let transport = RealtimeMemoryTransport(service: service, route: shardDescriptor(token, host))
+        let coordinator = V2RealtimeInterestCoordinator(descriptor: gateway, transport: transport,
+            readHeads: { topics in calls.withLock { $0 += topics }; return Dictionary(uniqueKeysWithValues: topics.map { ($0, .available(0)) }) },
+            recovered: { Set($0.keys) }, coverageLost: { _, _ in })
+        coordinator.configureTrustedJournalRenewal { _ in true }
+        try await coordinator.activate(first)
+        try await coordinator.activate(second)
+        #expect(calls.withLock { $0 } == [first, second])
+        let before = await transport.controls
+        await coordinator.maintainCoverage()
+        await transport.waitForRenewal()
+        #expect(await transport.controls == before + 1) // Session keepalive only.
+        #expect(calls.withLock { $0 } == [first, second])
+        // Exercise the real periodic 30s threshold with a live delivery session.
+        try await Task.sleep(for: .seconds(31))
+        #expect(calls.withLock { $0 } == [first, second])
+        await coordinator.deactivate(first)
+        await transport.waitForControls(3)
+        #expect(coordinator.isReady(second))
+        #expect(!coordinator.isReady(first))
+        await coordinator.shutdown(); await service.shutdown()
+    }
+
     @Test func shardQualificationRevocationCannotResurrectInstalledToken() async throws {
         let host = descriptor("host"), gateway = descriptor("subscriber")
         let qualification = try V2ActorServiceQualification(localNodeID: "host", roster: ["host", "peer"])
@@ -242,6 +318,123 @@ struct V2ActorRealtimeRoutingTests {
         await service.shutdown()
     }
 
+    @Test("a same-session renewal crossing local expiry wakes coverage waiters without rereading heads")
+    func renewalAfterLocalExpirySignalsReadyAgain() async throws {
+        let gateway = descriptor("gap-subscriber"), host = descriptor("gap-host")
+        let topic = V2RealtimeTopic(kind: .userSync, id: UUID().uuidString,
+            owner: try .init(shardID: "gap-users", epoch: 1))
+        let token = V2RealtimeShardToken(partitionID: V2RealtimeTopicKey(topic).partitionID(),
+            host: host.identity, epoch: 1, leaseToken: UUID())
+        let service = V2RealtimeShardService(send: { _, _ in .accepted })
+        await service.install(token: token, deadline: .now + .seconds(30))
+        let transport = RealtimeMemoryTransport(service: service, route: shardDescriptor(token, host))
+        await transport.setSessionDuration(500)
+        let callbacks = Mutex<[V2RealtimeCoverageConfirmation]>([]), reads = Mutex(0), barrier = RealtimeBarrier()
+        let coordinator = V2RealtimeInterestCoordinator(descriptor: gateway, transport: transport,
+            readHeads: { topics in reads.withLock { $0 += 1 }; return Dictionary(uniqueKeysWithValues: topics.map { ($0, .available(17)) }) },
+            recovered: { Set($0.keys) }, coverageReady: { values in
+                if let value = values[topic] { callbacks.withLock { $0.append(value) } }
+            }, coverageLost: { _, _ in })
+        do {
+            try await coordinator.activate(topic)
+            let original = try #require(coordinator.currentConfirmation(kind: topic.kind, id: topic.id))
+            #expect(callbacks.withLock { $0.count } == 1)
+            await transport.setSessionDuration(2_000)
+            await transport.holdNextRenewal(barrier)
+            await coordinator.maintainCoverage()
+            await barrier.waitUntilEntered()
+            try await ContinuousClock().sleep(until: original.deadline + .milliseconds(10))
+            #expect(coordinator.currentConfirmation(kind: topic.kind, id: topic.id) == nil)
+            await barrier.release()
+            let limit = ContinuousClock.now + .seconds(2)
+            while coordinator.currentConfirmation(kind: topic.kind, id: topic.id) == nil,
+                  ContinuousClock.now < limit { try await Task.sleep(for: .milliseconds(1)) }
+            let resumed = try #require(coordinator.currentConfirmation(kind: topic.kind, id: topic.id))
+            let signalled = ContinuousClock.now + .milliseconds(250)
+            while callbacks.withLock({ $0.count }) < 2, ContinuousClock.now < signalled {
+                try await Task.sleep(for: .milliseconds(1))
+            }
+            #expect(callbacks.withLock { $0.count } == 2)
+            #expect(resumed.token == original.token && resumed.sessionID == original.sessionID)
+            #expect(resumed.interestGeneration == original.interestGeneration && resumed.highWatermark == 17)
+            #expect(!coordinator.confirms(topic: topic, confirmation: original))
+            #expect(coordinator.confirms(topic: topic, confirmation: resumed))
+            #expect(reads.withLock { $0 } == 1)
+            // An ordinary timely renewal updates only the shared deadline.
+            let before = resumed.deadline
+            await coordinator.maintainCoverage()
+            let timely = ContinuousClock.now + .seconds(1)
+            while coordinator.currentConfirmation(kind: topic.kind, id: topic.id)?.deadline == before,
+                  ContinuousClock.now < timely { try await Task.sleep(for: .milliseconds(1)) }
+            #expect(callbacks.withLock { $0.count } == 2)
+            #expect(reads.withLock { $0 } == 1)
+        } catch {
+            await barrier.release(); await coordinator.shutdown(); await service.shutdown(); throw error
+        }
+        await coordinator.shutdown(); await service.shutdown()
+    }
+
+    @Test("shared session renewal extends current topic proofs but not captured expired proofs")
+    func partitionDeadlinePreservesTopicBoundaries() async throws {
+        let gateway = descriptor("deadline-subscriber"), host = descriptor("deadline-host")
+        let owner = try V2RoomDataOwner(shardID: "deadline-data", epoch: 1)
+        let first = V2RealtimeTopic(kind: .roomEvents, id: UUID().uuidString, owner: owner)
+        let partitionID = V2RealtimeTopicKey(first).partitionID()
+        var topics = [first]
+        for index in 0..<100_000 where topics.count < 32 {
+            let candidate = V2RealtimeTopic(kind: .roomEvents,
+                id: String(format: "00000000-0000-0000-0000-%012x", index), owner: owner)
+            if V2RealtimeTopicKey(candidate).partitionID() == partitionID { topics.append(candidate) }
+        }
+        try #require(topics.count == 32)
+        let token = V2RealtimeShardToken(partitionID: partitionID, host: host.identity, epoch: 1, leaseToken: UUID())
+        let service = V2RealtimeShardService(send: { _, _ in .accepted })
+        await service.install(token: token, deadline: .now + .seconds(30))
+        let transport = RealtimeMemoryTransport(service: service, route: shardDescriptor(token, host))
+        await transport.setSessionDuration(500)
+        let coordinator = V2RealtimeInterestCoordinator(descriptor: gateway, transport: transport,
+            readHeads: { Dictionary(uniqueKeysWithValues: $0.map { ($0, .available(17)) }) },
+            recovered: { Set($0.keys) }, coverageLost: { _, _ in })
+        try await coordinator.activate(topics)
+        let captured = try topics.map { topic in
+            try #require(coordinator.currentConfirmation(kind: topic.kind, id: topic.id))
+        }
+        await transport.setSessionDuration(1_500)
+        await coordinator.maintainCoverage()
+        await transport.waitForRenewal()
+        let renewalDeadline = ContinuousClock.now + .seconds(1)
+        while coordinator.currentConfirmation(kind: first.kind, id: first.id)?.deadline == captured[0].deadline,
+              ContinuousClock.now < renewalDeadline { await Task.yield() }
+        let renewed = try #require(coordinator.currentConfirmation(kind: first.kind, id: first.id))
+        #expect(renewed.deadline > captured[0].deadline)
+        try await ContinuousClock().sleep(until: captured.map(\.deadline).max()! + .milliseconds(10))
+        for (topic, old) in zip(topics, captured) {
+            let current = try #require(coordinator.currentConfirmation(kind: topic.kind, id: topic.id))
+            #expect(current.interestGeneration == old.interestGeneration)
+            #expect(current.highWatermark == old.highWatermark)
+            #expect(coordinator.isReady(topic))
+            #expect(!coordinator.confirms(topic: topic, confirmation: old))
+            #expect(coordinator.confirms(topic: topic, confirmation: current))
+        }
+        let controlsBeforeRemoval = await transport.mutationCount
+        await coordinator.deactivate(first)
+        #expect(!coordinator.isReady(first))
+        #expect(coordinator.isReady(topics[1]))
+        // The acknowledged remove also keeps the unchanged partition session
+        // alive. Expiry is measured from that latest actual control response.
+        await transport.waitForControls(controlsBeforeRemoval + 1)
+        let removalDeadline = ContinuousClock.now + .seconds(1)
+        while coordinator.currentConfirmation(kind: topics[1].kind, id: topics[1].id)?.deadline == renewed.deadline,
+              ContinuousClock.now < removalDeadline { await Task.yield() }
+        let remaining = try #require(coordinator.currentConfirmation(kind: topics[1].kind, id: topics[1].id))
+        #expect(remaining.deadline > renewed.deadline)
+        try await ContinuousClock().sleep(until: remaining.deadline + .milliseconds(10))
+        #expect(!coordinator.isReady(topics[1]))
+        await coordinator.shutdown()
+        #expect(!coordinator.currentReady(kind: topics[1].kind, id: topics[1].id))
+        await service.shutdown()
+    }
+
     @Test("Ready promises installed coverage and scheduled head recovery, with exact confirmation CAS")
     func readyConfirmationCarriesBarrierAndRevokesOnScopeEnd() async throws {
         let gateway = descriptor("subscriber"), host = descriptor("host")
@@ -260,7 +453,7 @@ struct V2ActorRealtimeRoutingTests {
         let activation = Task { try await coordinator.activate(topic) }
         await scheduled.waitUntilEntered()
         #expect(coordinator.currentConfirmation(kind: topic.kind, id: topic.id) == nil)
-        #expect(await coordinator.pressureSnapshot().controlInFlight == 0)
+        #expect(await transport.activeControls == 0)
         await scheduled.release()
         try await activation.value
         let confirmation = try #require(coordinator.currentConfirmation(kind: topic.kind, id: topic.id))
@@ -416,7 +609,7 @@ struct V2ActorRealtimeRoutingTests {
         await transport.waitForRenewal()
         #expect(await gate.isHeld)
         #expect(await coordinator.pressureSnapshot().recoveryInFlight == 1)
-        #expect(await coordinator.pressureSnapshot().controlInFlight == 0)
+        #expect(await transport.activeControls == 0)
         let stop = Task { await coordinator.shutdown() }
         let until = ContinuousClock.now + .seconds(2)
         while await coordinator.pressureSnapshot().activationWaiters > 0, ContinuousClock.now < until { await Task.yield() }
@@ -572,10 +765,16 @@ private actor RealtimeMemoryTransport: V2RealtimeShardTransport {
     let service: V2RealtimeShardService
     let routes: [Int: V2RealtimeShardDescriptor]
     var controls = 0
+    var activeControls = 0
     private var renewals = 0
     private var mutations = 0
     private var controlObservers: [(Int, CheckedContinuation<Void, Never>)] = []
     private var renewalObservers: [CheckedContinuation<Void, Never>] = []
+    private var sessionDuration: Int64?
+    private var renewalBarrier: RealtimeBarrier?
+    func holdNextRenewal(_ barrier: RealtimeBarrier) { renewalBarrier = barrier }
+    func setSessionDuration(_ milliseconds: Int64) { sessionDuration = milliseconds }
+    var mutationCount: Int { mutations }
     func waitForControls(_ count: Int) async {
         if mutations < count { await withCheckedContinuation { controlObservers.append((count, $0)) } }
     }
@@ -590,14 +789,20 @@ private actor RealtimeMemoryTransport: V2RealtimeShardTransport {
     }
     func control(_ descriptor: V2RealtimeShardDescriptor, request: V2RealtimeShardControlRequest) async throws -> V2RealtimeShardControlReply {
         controls += 1
+        activeControls += 1; defer { activeControls -= 1 }
         let reply = try await service.control(request)
+        if case .renew = request.mutation, let barrier = renewalBarrier {
+            renewalBarrier = nil
+            await barrier.enter()
+        }
         if case .renew = request.mutation {} else { mutations += 1 }
         let ready = controlObservers.filter { $0.0 <= mutations }; controlObservers.removeAll { $0.0 <= mutations }
         for observer in ready { observer.1.resume() }
         if case .renew = request.mutation {
             renewals += 1; let old = renewalObservers; renewalObservers.removeAll(); for observer in old { observer.resume() }
         }
-        return reply
+        return .init(appliedRevision: reply.appliedRevision,
+            remainingSessionMilliseconds: sessionDuration ?? reply.remainingSessionMilliseconds, status: reply.status)
     }
     func publish(_ descriptor: V2RealtimeShardDescriptor, request: V2RealtimeShardPublishRequest) async throws -> V2RealtimeShardPublishReply { try await service.publish(request) }
     func invalidate(_ descriptor: V2RealtimeShardDescriptor) async {}

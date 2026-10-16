@@ -1,4 +1,4 @@
-/// Actor-confined FIFO with constant-time head removal and cancellation by key.
+/// FIFO protected by its owning actor or mutex, with constant-time removal by key.
 /// Traversal borrows values without allocating a snapshot.
 package struct V2IndexedFIFO<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     private struct Node: Sendable {
@@ -9,6 +9,7 @@ package struct V2IndexedFIFO<Key: Hashable & Sendable, Value: Sendable>: Sendabl
     private var nodes: [Key: Node] = [:]
     private var head: Key?
     private var tail: Key?
+    package init() {}
     package var count: Int { nodes.count }
     package var isEmpty: Bool { nodes.isEmpty }
     package var first: Value? { head.flatMap { nodes[$0]?.value } }

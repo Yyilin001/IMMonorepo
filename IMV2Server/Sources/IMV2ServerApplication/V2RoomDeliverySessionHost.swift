@@ -2,6 +2,7 @@ import Foundation
 import IMV2Core
 import IMV2ActorContracts
 import Synchronization
+import Logging
 
 /// Lifecycle-bound Host/Gateway generations. Idle sessions have no heartbeat or
 /// periodic scan. Only pending authorization owns a cancellable deadline task.
@@ -12,7 +13,6 @@ public actor V2RoomDeliverySessionHost {
         let session: V2RoomDeliverySession
         let descriptor: V2GatewayRealtimeDescriptor
         let shard: String
-        var rooms: Set<V2RoomActivationToken>
         var ready = false
         var invalidated = false
         let control: V2RoomDeliveryControlProgress
@@ -35,6 +35,7 @@ public actor V2RoomDeliverySessionHost {
     private var lifecycleWorker: Task<Void, Never>?
     private var closed = false
     private let now: @Sendable () -> ContinuousClock.Instant
+    private let logger = Logger(label: "im.v2.room.delivery.session")
     private let controlAckTimeout: Duration
     public init(now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }, controlAckTimeout: Duration = .seconds(10)) {
         precondition(controlAckTimeout > .zero)
@@ -64,12 +65,25 @@ public actor V2RoomDeliverySessionHost {
             }
         }
     }
-    public func retain(activation: V2RoomActivationToken, gateway: V2GatewayRealtimeDescriptor) async throws -> V2RoomDeliverySession {
+    public func retain(activation: V2RoomActivationToken, gateway: V2GatewayRealtimeDescriptor,
+                       replacing expected: V2RoomDeliverySession? = nil) async throws -> V2RoomDeliverySession {
+        if let expected {
+            try expected.validate()
+            guard expected.host == activation.host, expected.gateway == gateway.identity else {
+                throw V2RoomCallFailure.notAccepted(.invalidRequest)
+            }
+        }
         guard !closed, send != nil, let hostReady, await hostReady() else { throw V2RoomCallFailure.notAccepted(.notReady) }
         guard !closed else { throw V2RoomCallFailure.notAccepted(.retired) }
         let key = Key(host: activation.host, gateway: gateway.identity)
+        // Native reachability can fail on only one side. A signed recovery
+        // request closes the exact stale local generation without another
+        // pulse, heartbeat or database check. Concurrent repairs join open().
+        if let expected, let entry = entries[key], entry.session == expected, entry.ready {
+            peerUnavailable(host: key.host, gateway: key.gateway)
+        }
         if let entry = entries[key] {
-            entries[key]?.rooms.insert(activation); entry.control.retain(activation)
+            entry.control.retain(activation)
             if entry.ready { return entry.session }
             return try await open(key: key, descriptor: gateway, shard: activation.owner.shardID).value
         }
@@ -87,8 +101,7 @@ public actor V2RoomDeliverySessionHost {
         let control = entries[key]?.control ?? V2RoomDeliveryControlProgress(now: now)
         for room in rooms { control.retain(room) }
         controls.withLock { $0[key] = control }
-        entries[key] = Entry(session: session, descriptor: descriptor, shard: shard,
-            rooms: entries[key]?.rooms ?? rooms, control: control)
+        entries[key] = Entry(session: session, descriptor: descriptor, shard: shard, control: control)
         let task = Task {
             do {
                 guard try await send(.init(session: session, kind: .open, sequence: 1), shard, descriptor) == .accepted else {
@@ -107,12 +120,12 @@ public actor V2RoomDeliverySessionHost {
     }
     public func release(activation: V2RoomActivationToken, gateway: V2GatewayRealtimeIdentity) async {
         let key = Key(host: activation.host, gateway: gateway)
-        guard var entry = entries[key] else { return }
-        entry.rooms.remove(activation); entries[key] = entry; entry.control.release(activation)
+        guard let entry = entries[key] else { return }
+        entry.control.release(activation)
         wakes.continuation.yield(())
-        guard entry.rooms.isEmpty else { return }
+        guard !entry.control.hasRooms else { return }
         if let opening = openings[key] { _ = await opening.result }
-        guard let current = entries[key], current.rooms.isEmpty else { return }
+        guard let current = entries[key], !current.control.hasRooms else { return }
         entries.removeValue(forKey: key); controls.withLock { $0.removeValue(forKey: key) }
         let deadline = deadlines.removeValue(forKey: key); deadline?.task.cancel(); await deadline?.task.value
         if let send { _ = try? await send(.init(session: current.session, kind: .retire, sequence: 2), current.shard, current.descriptor) }
@@ -130,6 +143,15 @@ public actor V2RoomDeliverySessionHost {
         peerUnavailable(host: host, gateway: gateway)
         if let send { _ = try? await send(.init(session: entry.session, kind: .retire, sequence: 2), entry.shard, entry.descriptor) }
     }
+    /// A late transport result is not evidence against a replacement baseline
+    /// or session. Only failure of a currently unacknowledged control may close
+    /// the shared session; unrelated rooms must not inherit obsolete failures.
+    public func controlDeliveryFailed(_ deliveries: [V2RoomSubscriptionDelivery], gateway: V2GatewayRealtimeIdentity) async {
+        guard let delivery = deliveries.first(where: { $0.payload.isAuthorizationControl }) else { return }
+        let key = Key(host: delivery.fence.activation.host, gateway: gateway)
+        guard let entry = entries[key], entry.ready, entry.control.hasPendingControl(in: deliveries) else { return }
+        await controlFailed(host: key.host, gateway: gateway)
+    }
     private func reconcileDeadlines() {
         guard !closed else { return }
         for (key, entry) in entries where entry.ready {
@@ -140,10 +162,11 @@ public actor V2RoomDeliverySessionHost {
             deadlines.removeValue(forKey: key)?.task.cancel()
             let delay = max(.zero, now().duration(to: at))
             let id = UUID()
+            let session = entry.session
             let task = Task { [weak self] in
                 do {
                     try await Task.sleep(for: delay)
-                    await self?.deadlineReached(key: key, session: entry.session, at: at)
+                    await self?.deadlineReached(key: key, session: session, at: at)
                 } catch { }
                 await self?.timerFinished(id)
             }
@@ -158,6 +181,12 @@ public actor V2RoomDeliverySessionHost {
         // An ACK can arrive before this task gets its Actor turn. Recheck the
         // actual oldest pending control; duplicates never extend its deadline.
         if let actual = entry.control.deadline(timeout: controlAckTimeout), actual <= now() {
+            let diagnostic = entry.control.diagnostic
+            logger.warning("Room delivery session control deadline reached", metadata: [
+                "control_invalidated": .stringConvertible(diagnostic.invalidated),
+                "pending_controls": .stringConvertible(diagnostic.pending),
+                "oldest_pending_ms": .stringConvertible(diagnostic.oldestPendingMilliseconds)
+            ])
             await controlFailed(host: key.host, gateway: key.gateway)
         } else { reconcileDeadlines() }
     }
@@ -222,6 +251,7 @@ private final class V2RoomDeliveryControlProgress: Sendable {
     private let state = Mutex(State())
     private let now: @Sendable () -> ContinuousClock.Instant
     init(now: @escaping @Sendable () -> ContinuousClock.Instant) { self.now = now }
+    var hasRooms: Bool { state.withLock { !$0.rooms.isEmpty } }
     func retain(_ token: V2RoomActivationToken) { state.withLock { $0.rooms.insert(token) } }
     func release(_ token: V2RoomActivationToken) {
         state.withLock { value in
@@ -249,6 +279,15 @@ private final class V2RoomDeliveryControlProgress: Sendable {
                 } else { value.ignoredFences.remove(old.fence) }
             }
             value.latest[token] = progress
+            // A first grant abandoned before activate has never authorized
+            // the Gateway. It cannot make unrelated rooms lose this session.
+            // Once any prefix was attempted, enqueue-time revocation deadlines
+            // remain mandatory, including across room fence resets.
+            guard progress.transmissionStarted else {
+                value.pending.removeValue(forKey: token)
+                value.compact()
+                return
+            }
             if progress.invalidated { value.invalidated = true }
             if progress.applied == progress.issued { value.pending.removeValue(forKey: token) }
             else if value.pending[token] == nil {
@@ -258,6 +297,26 @@ private final class V2RoomDeliveryControlProgress: Sendable {
                 value.pending[token] = pending; value.queue.append((token, pending.id))
             }
             value.compact()
+        }
+    }
+    func hasPendingControl(in deliveries: [V2RoomSubscriptionDelivery]) -> Bool {
+        state.withLock { value in
+            deliveries.contains { delivery in
+                guard delivery.payload.isAuthorizationControl,
+                      value.rooms.contains(delivery.fence.activation),
+                      !value.ignoredFences.contains(delivery.fence),
+                      let current = value.latest[delivery.fence.activation], current.fence == delivery.fence,
+                      current.transmissionStarted else { return false }
+                return current.applied < delivery.authorizationSequence && delivery.authorizationSequence <= current.issued
+            }
+        }
+    }
+    var diagnostic: (invalidated: Bool, pending: Int, oldestPendingMilliseconds: Int64) {
+        state.withLock { value in
+            let oldest = value.pending.values.map(\.startedAt).min()
+            let elapsed = oldest.map { $0.duration(to: now()).components }
+            let milliseconds = elapsed.map { $0.seconds * 1_000 + $0.attoseconds / 1_000_000_000_000_000 } ?? 0
+            return (value.invalidated, value.pending.count, milliseconds)
         }
     }
     func deadline(timeout: Duration) -> ContinuousClock.Instant? {

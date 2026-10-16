@@ -29,10 +29,13 @@ public struct V2RoomSubscriptionResetCommand: Codable, Equatable, Sendable {
     public let actorUserID: UserID
     public let gatewayDescriptor: V2GatewayRealtimeDescriptor
     public let expectedFence: V2RoomSubscriptionFence
+    /// Present when the Gateway retired the returned session locally. The
+    /// Host must supersede only this exact generation, never a newer one.
+    public let replacingDeliverySession: V2RoomDeliverySession?
     public init(roomID: RoomID, actorUserID: UserID, gatewayDescriptor: V2GatewayRealtimeDescriptor,
-                expectedFence: V2RoomSubscriptionFence) {
+                expectedFence: V2RoomSubscriptionFence, replacingDeliverySession: V2RoomDeliverySession? = nil) {
         self.roomID = roomID; self.actorUserID = actorUserID; self.gatewayDescriptor = gatewayDescriptor
-        self.expectedFence = expectedFence
+        self.expectedFence = expectedFence; self.replacingDeliverySession = replacingDeliverySession
     }
 }
 
@@ -78,6 +81,13 @@ public enum V2RoomSubscriptionCommand: Codable, Equatable, Sendable {
             guard value.expectedFence.roomID == roomID, value.expectedFence.generation > 0,
                   value.expectedFence.baselineSequence <= UInt64(Int64.max) else {
                 throw V2ActorContractError.invalidConfiguration("room subscription reset fence")
+            }
+            if let session = value.replacingDeliverySession {
+                try session.validate()
+                guard session.host == value.expectedFence.activation.host,
+                      session.gateway == gatewayDescriptor.identity else {
+                    throw V2ActorContractError.invalidConfiguration("room subscription reset session")
+                }
             }
         }
         if case .unsubscribe(let value) = self,

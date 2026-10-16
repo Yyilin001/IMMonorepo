@@ -313,6 +313,23 @@ public actor V2RoomSubscriptionOwner {
             let status = try requireStatus(await relay.status(for: descriptor.identity))
             guard status.fence == fence, !status.needsBaseline else { throw V2RoomSubscriptionOwnerError.stale }
             try checkDeadline()
+            // A second member of the same room/Gateway shares this delivery
+            // binding. Rebinding an active prefix would reject valid admission
+            // and reset pump state. Authorization was revalidated above.
+            if activatedFences[descriptor.identity] == fence, deliveryBindings[descriptor.identity] === pump,
+               await pump.retainsBinding(.init(roomID: roomID, gateway: descriptor.identity), relay: relay,
+                    descriptor: descriptor, sourceShardID: owner.shardID) {
+                try checkDeadline()
+                return true
+            }
+            // A fresh grant replaces the previous installation, whose actual
+            // RPC may still own a prefix. Retire it and join that call before
+            // binding; its late receipt must not park the new authorization.
+            if let previous = deliveryBindings.removeValue(forKey: descriptor.identity) {
+                activatedFences.removeValue(forKey: descriptor.identity)
+                await previous.unbindAndJoin(.init(roomID: roomID, gateway: descriptor.identity))
+                try checkDeadline()
+            }
             let bound = await pump.bind(.init(roomID: roomID, gateway: descriptor.identity), relay: relay,
                                         descriptor: descriptor, sourceShardID: owner.shardID)
             if bound {

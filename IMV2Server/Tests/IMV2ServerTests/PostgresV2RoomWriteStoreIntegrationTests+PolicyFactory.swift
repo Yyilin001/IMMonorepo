@@ -224,7 +224,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let writes = PostgresV2RoomWriteStore(database: owner,
                 strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400), contentReviewMode: .disabled)
                 .usingControlDatabase(control)
-            let baseResources = try V2RoomServerOwnerResources(database: owner, sendDatabase: try v2FixtureMessageWriteDatabase(owner, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: owner),
+            let baseResources = try V2RoomServerOwnerResources(database: owner, initializationDatabase: owner, sendDatabase: try v2FixtureMessageWriteDatabase(owner, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: owner),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: owner),
                 invitationSecretIssuer: .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: SuccessfulProjectionDelivery(), capacityProfile: profile,

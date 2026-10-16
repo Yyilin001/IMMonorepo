@@ -227,8 +227,7 @@ interactiveRead 聚合指标的分区，两目的计数之和应与聚合一致�
 额外连接或许可。真实授予、排队取消及原截止时间超时分别计数；等待时间
 包含这些已离队请求，不能只按业务成功数作分母。客户端不能指定purpose。
 
-保留的 `im_v2_actor_realtime_route_query_*` 指标描述旧 route-store 查询门，
-当前分片Actor寻址链不调用该查询门；它的零值不能证明实际SQL未发生。
+旧 route-store 查询门及其 `im_v2_actor_realtime_route_query_*` 指标已经移除。
 热路径验证须观察 `route_lookup`/`realtime_owner_snapshot` 实际SQL Future
 以及ShardTransport缓存miss、前台/后台Receptionist lookup；后台发现仍计数。
 `max` 均为进程生命周期高水位，不能冒充测量窗口内百分位。

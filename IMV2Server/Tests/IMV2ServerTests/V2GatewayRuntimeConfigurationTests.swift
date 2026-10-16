@@ -5,8 +5,45 @@ import IMV2Core
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 import Testing
+import NIOCore
 
 struct V2GatewayRuntimeConfigurationTests {
+    @Test("TCP loop budget is explicit per process and leaves database budgets unchanged")
+    func tcpEventLoopBudget() throws {
+        var values = runtimeValues
+        let defaults = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(defaults.tcpEventLoopThreads == System.coreCount)
+        values["IM_V2_TCP_EVENT_LOOP_THREADS"] = "2"
+        let configured = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(configured.tcpEventLoopThreads == 2)
+        #expect(configured.databasePolicy.eventLoopThreads == defaults.databasePolicy.eventLoopThreads)
+        #expect(configured.databaseWorkloadPoolBudget == defaults.databaseWorkloadPoolBudget)
+        for invalid in ["0", "-1", "257", "invalid"] {
+            values["IM_V2_TCP_EVENT_LOOP_THREADS"] = invalid
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_TCP_EVENT_LOOP_THREADS")) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+            }
+        }
+    }
+
+    @Test("process message request capacity is independent of payload and per-connection limits")
+    func messageSendProcessCountBudget() throws {
+        var values = runtimeValues
+        let defaults = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(defaults.messageSendMaximumInFlightProcess == 1_024)
+        values["IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PROCESS"] = "2"
+        let configured = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        #expect(configured.messageSendMaximumInFlightProcess == 2)
+        #expect(configured.messageSendMaximumInFlightPerConnection == defaults.messageSendMaximumInFlightPerConnection)
+        #expect(configured.messageSendMaximumInFlightBytesProcess == defaults.messageSendMaximumInFlightBytesProcess)
+        for invalid in ["0", "-1", "1048577", "invalid"] {
+            values["IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PROCESS"] = invalid
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PROCESS")) {
+                _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+            }
+        }
+    }
+
     @Test("persistent message workers reject a shared pool and require an explicit write budget")
     func persistentMessageWritePoolRequired() throws {
         var values = runtimeValues
@@ -492,7 +529,7 @@ struct V2GatewayRuntimeConfigurationTests {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         }
         let controlConnections = isolated ? 4 : 8
-        let total = 4 * (8 * physicalStores + 2 + controlConnections)
+        let total = 4 * (12 * physicalStores + 2 + controlConnections)
         values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = String(total - 1)
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
@@ -544,17 +581,17 @@ struct V2GatewayRuntimeConfigurationTests {
         values["IM_V2_INTERACTIVE_READ_DATABASE_WORK_LIMIT"] = "2"
         values["IM_V2_SYNC_DATABASE_WORK_LIMIT"] = "1"
         values["IM_V2_USER_PROJECTION_CONCURRENCY"] = "1"
-        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "19"
+        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "23"
         let configuration = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         #expect(configuration.databasePoolEventLoopCount(for: .messageWrite) == 2)
         #expect(configuration.databasePoolEventLoopCount(for: .foreground) == 1)
         #expect(configuration.databasePoolEventLoopCount(for: .sync) == 1)
         #expect(configuration.databaseNonMessagePoolEventLoopThreads == 1)
-        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "18"
+        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "22"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
         }
-        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "19"
+        values["IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS"] = "23"
         values["IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS"] = "3"
         #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_NON_MESSAGE_POOL_EVENT_LOOP_THREADS")) {
             _ = try V2GatewayRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))

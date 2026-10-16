@@ -9,6 +9,59 @@ import IMV2ServerGateway
 
 @Suite("Shared Journal recovery owner", .timeLimit(.minutes(1)))
 struct GatewayJournalRecoveryCoordinatorTests {
+    @Test func subscriptionRevisionCanReuseBaselineButReplacementSessionCannot() async throws {
+        let baselines = Mutex<[Bool]>([])
+        let owner = GatewayJournalRecoveryCoordinator(isCurrent: { _, _ in true }, execute: { work in
+            baselines.withLock { $0.append(work.baseline != nil) }
+            return .init(cut: work.minimumCut, interestRevision: work.interestRevision,
+                versions: work.controls.versions, controls: work.controls)
+        })
+        let original = work(user: UserID(uuid: UUID()), version: 1)
+        _ = try await owner.run(original)
+        let old = original.batch.fence
+        func request(session: UUID, revision: Int64) -> GatewayJournalRecoveryCoordinator.Work {
+            let fence = V2RealtimeJournalProjectionFence(publisherIncarnationID: old.publisherIncarnationID,
+                sourceLeaseEpoch: old.sourceLeaseEpoch, sourceLeaseToken: old.sourceLeaseToken,
+                sourceLeaseExpiresAt: old.sourceLeaseExpiresAt, routingPartitionEpoch: old.routingPartitionEpoch,
+                routingLeaseToken: old.routingLeaseToken, sessionID: session, interestGeneration: revision,
+                gatewayIncarnationID: old.gatewayIncarnationID)
+            return .init(batch: .init(source: original.batch.source, fence: fence, payload: original.batch.payload),
+                service: original.service, minimumCut: original.minimumCut, interestRevision: 2, controls: original.controls)
+        }
+        _ = try await owner.run(request(session: old.sessionID, revision: old.interestGeneration + 1))
+        _ = try await owner.run(request(session: UUID(), revision: old.interestGeneration + 2))
+        #expect(baselines.withLock { $0 } == [false, true, false])
+        await owner.close()
+    }
+    @Test func latePredecessorCannotReplaceNewGenerationCache() async throws {
+        let harness = RecoveryHarness(), live = Mutex<Int64>(1), calls = Mutex(0)
+        let owner = GatewayJournalRecoveryCoordinator(isCurrent: { work, _ in
+            work.batch.fence.interestGeneration == live.withLock { $0 }
+        }, execute: { work in
+            calls.withLock { $0 += 1 }
+            if work.batch.fence.interestGeneration == 1 { return try await harness.execute(work) }
+            return .init(cut: work.minimumCut, interestRevision: work.interestRevision,
+                versions: work.controls.versions, controls: work.controls)
+        })
+        let original = work(user: UserID(uuid: UUID()), version: 1)
+        let predecessor = Task { try await owner.run(original) }
+        try await wait { await harness.count == 1 }
+        let old = original.batch.fence
+        let fence = V2RealtimeJournalProjectionFence(publisherIncarnationID: old.publisherIncarnationID,
+            sourceLeaseEpoch: old.sourceLeaseEpoch, sourceLeaseToken: old.sourceLeaseToken,
+            sourceLeaseExpiresAt: old.sourceLeaseExpiresAt, routingPartitionEpoch: old.routingPartitionEpoch,
+            routingLeaseToken: old.routingLeaseToken, sessionID: old.sessionID, interestGeneration: 2,
+            gatewayIncarnationID: old.gatewayIncarnationID)
+        let successor = GatewayJournalRecoveryCoordinator.Work(batch: .init(source: original.batch.source,
+            fence: fence, payload: original.batch.payload), service: original.service,
+            minimumCut: original.minimumCut, interestRevision: 2, controls: original.controls)
+        live.withLock { $0 = 2 }
+        _ = try await owner.run(successor)
+        await harness.release(); _ = try await predecessor.value
+        _ = try await owner.run(successor)
+        #expect(calls.withLock { $0 } == 2)
+        await owner.close()
+    }
     @Test("an already applied live checkpoint advances cached proof without a new SQL recovery")
     func advancedLiveCheckpoint() async throws {
         let applied = Mutex<Int64>(1), calls = Mutex(0)

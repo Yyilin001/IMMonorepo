@@ -7,6 +7,15 @@ import Synchronization
 public enum V2PhysicalDatabaseLoanClass: String, CaseIterable, Sendable { case ordinary, sync, activation, renewal }
 public enum V2PhysicalDatabaseLoanFailure: Error, Equatable, Sendable, V2SafeOperationalErrorCodeProviding {
     case invalidPolicy, queueFull, timedOut, cancelled, closed
+    package var rejectionReason: V2DatabaseLoanRejectionReason {
+        switch self {
+        case .invalidPolicy: .invalidPolicy
+        case .queueFull: .queueFull
+        case .timedOut: .timedOut
+        case .cancelled: .cancelled
+        case .closed: .closed
+        }
+    }
     public var safeOperationalErrorCode: V2SafeOperationalErrorCode {
         switch self {
         case .invalidPolicy: .databaseLoanInvalidPolicy
@@ -50,6 +59,7 @@ public struct V2PhysicalDatabaseLoanClassSnapshot: Equatable, Sendable {
     public var queued = 0
     public var granted: UInt64 = 0
     public var rejected: UInt64 = 0
+    public var rejections: [V2DatabaseLoanRejectionReason: UInt64] = [:]
     public init() {}
 }
 public struct V2PhysicalDatabaseLoanMetricsSnapshot: Equatable, Sendable {
@@ -142,6 +152,7 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
         let id: UUID
         let loanClass: V2PhysicalDatabaseLoanClass
         let deadline: ContinuousClock.Instant
+        var order: UInt64 = 0
         let promise: EventLoopPromise<V2PhysicalDatabaseLoanLease>
         let observation: V2DatabaseLoanObservation
         let admissionTiming: AdmissionTiming?
@@ -155,13 +166,38 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
     }
     private struct State: Sendable {
         var metrics = V2PhysicalDatabaseLoanMetricsSnapshot()
-        var queue: [Waiter] = []
+        var queues = Dictionary(uniqueKeysWithValues: V2PhysicalDatabaseLoanClass.allCases.map {
+            ($0, V2IndexedFIFO<UUID, Waiter>())
+        })
+        var queuedClasses: [UUID: V2PhysicalDatabaseLoanClass] = [:]
+        var deadlines = V2IndexedDeadlines<UUID>()
+        var nextOrder: UInt64 = 0
+        mutating func append(_ waiter: Waiter) {
+            var waiter = waiter
+            waiter.order = nextOrder; nextOrder &+= 1
+            queues[waiter.loanClass, default: .init()].append(waiter, key: waiter.id)
+            queuedClasses[waiter.id] = waiter.loanClass
+            deadlines.set(waiter.id, at: waiter.deadline)
+        }
+        mutating func remove(_ id: UUID) -> Waiter? {
+            guard let kind = queuedClasses.removeValue(forKey: id),
+                  let waiter = queues[kind]?.remove(id) else { return nil }
+            deadlines.remove(id)
+            return waiter
+        }
         var nextSync = true
         var closed = false
         var drains: [CheckedContinuation<Void, Never>] = []
     }
     private let observations = V2DatabaseLoanObservationRegistry()
     private let state = Mutex(State())
+    private struct DeadlineTimer: Sendable {
+        var desired: ContinuousClock.Instant?
+        var scheduledAt: ContinuousClock.Instant?
+        var task: Scheduled<Void>?
+        var refreshQueued = false
+    }
+    private let deadlineTimer = Mutex(DeadlineTimer())
     private final class CapacityObserver: Sendable {
         let notify: @Sendable () -> Void
         init(_ notify: @escaping @Sendable () -> Void) { self.notify = notify }
@@ -201,10 +237,10 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
             let immediate = canGrantImmediately(loanClass, value)
             if value.closed { failure = .closed }
             else if selectedDeadline <= .now { failure = .timedOut }
-            else if !immediate && value.queue.count >= policy.maximumQueued { failure = .queueFull }
+            else if !immediate && value.queuedClasses.count >= policy.maximumQueued { failure = .queueFull }
             else { failure = nil }
             if let failure {
-                reject(loanClass, &value)
+                reject(loanClass, failure: failure, &value)
                 return .rejected(failure)
             }
             // Only admitted bounded requests obtain live observation tickets.
@@ -217,7 +253,7 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
                 grant(loanClass, &value)
                 return .granted(waiter, .now)
             }
-            value.queue.append(waiter)
+            value.append(waiter)
             value.metrics.classes[loanClass, default: .init()].queued += 1
             return .queued(waiter)
         }
@@ -227,12 +263,7 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
             observations.rejected(source: source, startedAt: startedAt)
             promise.fail(failure)
         case .queued(let waiter):
-            let duration = ContinuousClock.now.duration(to: waiter.deadline).components
-            let nanoseconds = max(0, Double(duration.seconds) * 1e9 + Double(duration.attoseconds) / 1e9)
-            let scheduled = eventLoop.scheduleTask(in: .nanoseconds(Int64(min(nanoseconds, Double(Int64.max - 1024))))) { [self] in
-                remove(waiter.id, failure: .timedOut)
-            }
-            waiter.promise.futureResult.whenComplete { _ in scheduled.cancel() }
+            _ = waiter // Its deadline is owned by the gate's single indexed timer.
             pump()
         }
         let immediateFailure: V2PhysicalDatabaseLoanFailure?
@@ -273,11 +304,12 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
     }
 
     private func canGrantImmediately(_ loanClass: V2PhysicalDatabaseLoanClass, _ value: State) -> Bool {
-        let queuedCompetitor = value.queue.contains { waiter in
-            if loanClass == .renewal { return waiter.loanClass == .renewal }
-            return waiter.loanClass != .renewal && canGrant(waiter.loanClass, value)
+        let queuedCompetitor = V2PhysicalDatabaseLoanClass.allCases.contains { kind in
+            guard value.metrics.classes[kind, default: .init()].queued > 0 else { return false }
+            if loanClass == .renewal { return kind == .renewal }
+            return kind != .renewal && canGrant(kind, value)
         }
-        return !queuedCompetitor && !value.queue.contains(where: { $0.loanClass == loanClass })
+        return !queuedCompetitor && value.metrics.classes[loanClass, default: .init()].queued == 0
             && canGrant(loanClass, value)
     }
 
@@ -287,15 +319,21 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
         return result
     }
     public func shutdown() async {
+        var refreshTimer = false
         let queued = state.withLock { value in
             value.closed = true
-            let queued = value.queue; value.queue.removeAll()
-            for waiter in queued {
-                value.metrics.classes[waiter.loanClass, default: .init()].queued -= 1
-                reject(waiter.loanClass, &value)
+            var queued: [Waiter] = []
+            for kind in V2PhysicalDatabaseLoanClass.allCases {
+                while let waiter = value.queues[kind]?.removeFirst() {
+                    value.metrics.classes[kind, default: .init()].queued -= 1
+                    reject(kind, failure: .closed, &value); queued.append(waiter)
+                }
             }
+            value.queuedClasses.removeAll(); value.deadlines.removeAll()
+            refreshTimer = setDeadlineTimer(nil)
             return queued
         }
+        if refreshTimer { refreshDeadlineTimer() }
         for waiter in queued { waiter.observation.finish(); waiter.promise.fail(V2PhysicalDatabaseLoanFailure.closed) }
         await withCheckedContinuation { continuation in
             let complete = state.withLock { value in
@@ -332,9 +370,11 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
         let old = value.metrics.classes[loanClass, default: .init()].granted
         value.metrics.classes[loanClass, default: .init()].granted = old == .max ? old : old + 1
     }
-    private func reject(_ loanClass: V2PhysicalDatabaseLoanClass, _ value: inout State) {
+    private func reject(_ loanClass: V2PhysicalDatabaseLoanClass, failure: V2PhysicalDatabaseLoanFailure, _ value: inout State) {
         let old = value.metrics.classes[loanClass, default: .init()].rejected
         value.metrics.classes[loanClass, default: .init()].rejected = old == .max ? old : old + 1
+        let prior = value.metrics.classes[loanClass, default: .init()].rejections[failure.rejectionReason, default: 0]
+        value.metrics.classes[loanClass, default: .init()].rejections[failure.rejectionReason] = prior == .max ? prior : prior + 1
     }
     private func succeed(_ waiter: Waiter, at: ContinuousClock.Instant) {
         waiter.promise.succeed(makeLease(waiter, at: at))
@@ -347,17 +387,19 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
                 grantedAt: at, promiseSubmittedAt: .now, wasQueued: admission.wasQueued,
                 grantedOnEventLoop: eventLoop.inEventLoop)
         }
-        return .init(deadline: waiter.deadline, observation: waiter.observation, timing: timing, completion: { [self] in
-            waiter.observation.finish()
-            release(waiter.loanClass)
+        // The fulfilled Promise owns this lease. Capturing the whole waiter
+        // would keep that Promise in the lease's callback and form a cycle.
+        return .init(deadline: waiter.deadline, observation: waiter.observation, timing: timing,
+                     completion: { [self, observation = waiter.observation, loanClass = waiter.loanClass] in
+            observation.finish()
+            release(loanClass)
         })
     }
     private func remove(_ id: UUID, failure: V2PhysicalDatabaseLoanFailure, recordRejection: Bool = true) {
         let removed = state.withLock { value -> Waiter? in
-            guard let index = value.queue.firstIndex(where: { $0.id == id }) else { return nil }
-            let waiter = value.queue.remove(at: index)
+            guard let waiter = value.remove(id) else { return nil }
             value.metrics.classes[waiter.loanClass, default: .init()].queued -= 1
-            if recordRejection { reject(waiter.loanClass, &value) }
+            if recordRejection { reject(waiter.loanClass, failure: failure, &value) }
             return waiter
         }
         removed?.observation.finish()
@@ -377,40 +419,70 @@ public final class V2PhysicalDatabaseLoanGate: Sendable {
     }
     private func pump() {
         var grants: [(Waiter, ContinuousClock.Instant)] = [], expired: [Waiter] = [], drains: [CheckedContinuation<Void, Never>] = []
+        var refreshTimer = false
         state.withLock { value in
-            // Expiry is independent of capacity and of the preferred purpose.
-            var live: [Waiter] = []
-            for waiter in value.queue {
-                if waiter.deadline <= .now {
-                    value.metrics.classes[waiter.loanClass, default: .init()].queued -= 1
-                    reject(waiter.loanClass, &value); expired.append(waiter)
-                } else { live.append(waiter) }
+            // The indexed heap visits only due work. Each class has its own
+            // FIFO head, so neither capacity return nor admission scans waiters.
+            let cut = ContinuousClock.now
+            while let id = value.deadlines.popDue(at: cut), let waiter = value.remove(id) {
+                value.metrics.classes[waiter.loanClass, default: .init()].queued -= 1
+                reject(waiter.loanClass, failure: .timedOut, &value); expired.append(waiter)
             }
-            value.queue = live
             while !value.closed {
-                // Renewal retains its existing separate capacity. General and
-                // Sync share the original ordinary capacity, alternating only
-                // when both have eligible heads. A capped activation head cannot
-                // obstruct an ordinary head; each class retains FIFO.
-                let renewal = value.queue.firstIndex { $0.loanClass == .renewal && canGrant(.renewal, value) }
-                let sync = value.queue.firstIndex { $0.loanClass == .sync && canGrant(.sync, value) }
-                let general = value.queue.firstIndex {
-                    $0.loanClass != .sync && $0.loanClass != .renewal && canGrant($0.loanClass, value)
+                func head(_ kind: V2PhysicalDatabaseLoanClass) -> Waiter? {
+                    guard canGrant(kind, value) else { return nil }
+                    return value.queues[kind]?.first
                 }
+                let renewal = head(.renewal), sync = head(.sync)
+                let general = [head(.ordinary), head(.activation)].compactMap { $0 }.min { $0.order < $1.order }
                 let family = value.nextSync ? (sync ?? general) : (general ?? sync)
-                let index: Int?
-                if policy.lendsIdleRenewalConnections, let renewal { index = renewal }
-                else if let renewal, let family { index = min(renewal, family) }
-                else { index = renewal ?? family }
-                guard let index else { break }
-                let waiter = value.queue.remove(at: index)
+                let selected: Waiter?
+                if policy.lendsIdleRenewalConnections, let renewal { selected = renewal }
+                else if let renewal, let family { selected = renewal.order < family.order ? renewal : family }
+                else { selected = renewal ?? family }
+                guard let selected, let waiter = value.remove(selected.id) else { break }
                 value.metrics.classes[waiter.loanClass, default: .init()].queued -= 1
                 grant(waiter.loanClass, &value); grants.append((waiter, .now))
             }
+            refreshTimer = setDeadlineTimer(value.closed ? nil : value.deadlines.firstDeadline)
             if value.closed, totalInFlight(value) == 0 { drains = value.drains; value.drains.removeAll() }
         }
+        if refreshTimer { refreshDeadlineTimer() }
         for waiter in expired { waiter.observation.finish(); waiter.promise.fail(V2PhysicalDatabaseLoanFailure.timedOut) }
         for (waiter, at) in grants { succeed(waiter, at: at) }
         for continuation in drains { continuation.resume() }
     }
+    /// Only one actual timer per pool, refreshed on its EventLoop. Changing the
+    /// earliest waiter does not create one timer or callback per queued request.
+    // Called under state: desired timers follow the same order as queue edits.
+    private func setDeadlineTimer(_ deadline: ContinuousClock.Instant?) -> Bool {
+        deadlineTimer.withLock { timer in
+            timer.desired = deadline
+            guard !timer.refreshQueued, timer.scheduledAt != deadline else { return false }
+            timer.refreshQueued = true
+            return true
+        }
+    }
+    private func refreshDeadlineTimer() {
+        eventLoop.execute { [self] in
+            deadlineTimer.withLock { timer in
+                timer.refreshQueued = false
+                guard timer.scheduledAt != timer.desired else { return }
+                timer.task?.cancel(); timer.task = nil
+                timer.scheduledAt = timer.desired
+                guard let at = timer.desired else { return }
+                let duration = ContinuousClock.now.duration(to: at).components
+                let ns = max(0, Double(duration.seconds) * 1e9 + Double(duration.attoseconds) / 1e9)
+                timer.task = eventLoop.scheduleTask(in: .nanoseconds(Int64(min(ns, Double(Int64.max - 1024))))) { [self] in
+                    let current = deadlineTimer.withLock { timer in
+                        guard timer.scheduledAt == at else { return false }
+                        timer.scheduledAt = nil; timer.task = nil
+                        return true
+                    }
+                    if current { pump() }
+                }
+            }
+        }
+    }
+
 }

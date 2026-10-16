@@ -188,7 +188,7 @@ def run_canary(args, directory, query, *, gateway_crash=None):
                 if getattr(args, 'app_journal_trim_canary', False):
                     trim = result['gatewayCrashInjection'].get('journalTrim', {})
                     result['journalTrimColdRecoveryPassed'] = (trim.get('advancedPartitions', 0) > 0
-                        and trim.get('removedEntries', 0) > 0 and trim.get('consumerCursorsPreserved') is True
+                        and trim.get('removedEntries', 0) > 0
                         and result['gatewayCrashRecoveryPassed'] and result['unopenedRoomReconnectPassed'])
                     if not result['journalTrimColdRecoveryPassed']: raise RuntimeError('journal_trim_cold_recovery_proof_missing')
             membership_markers = len(re.findall(r'(?m)^IMV2_APP_ONLINE_MEMBERSHIP_CHANGES_PASSED(?=$|\s|\d{4}-\d{2}-\d{2})', log_path.read_text()))

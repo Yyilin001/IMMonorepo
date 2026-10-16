@@ -20,8 +20,10 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             // generation contract. Seed the current creation invariant here.
             try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1").run()
             try await sql.raw("UPDATE im_v2.room_memberships SET joined_revision = 1").run()
-            // Exercise production lifecycle facades against actual PostgreSQL,
-            // while observing a single shared physical admission gate.
+            // Restoration must use its own budget rather than the foreground gate.
+            let initializationDatabase = try V2EventLoopBalancedDatabase(databases: [database], loanPolicy: .init(
+                maximumConnections: 1, reservedRenewalConnections: 0,
+                maximumQueued: 16, maximumWait: .seconds(5)))
             let database = try V2EventLoopBalancedDatabase(databases: [database], loanPolicy: .init(
                 maximumConnections: 11, reservedRenewalConnections: 2,
                 maximumQueued: 16, maximumWait: .seconds(5)))
@@ -34,7 +36,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
                 timeout: .seconds(1)))
             let sendDatabase = try v2FixtureMessageWriteDatabase(database, capacity: 1)
-            let ownerResources = try V2RoomServerOwnerResources(database: database, sendDatabase: sendDatabase, writes: writes,
+            let ownerResources = try V2RoomServerOwnerResources(database: database, initializationDatabase: initializationDatabase, sendDatabase: sendDatabase, writes: writes,
                 membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
@@ -58,7 +60,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             do {
                 guard case .ready(let token) = try await first.activate(roomID: roomID, owner: owner,
                     deadline: .now + .seconds(10)) else { throw V2RoomCallFailure.notAccepted(.notReady) }
-                #expect(database.loanMetricsSnapshot().classes[.activation]?.granted == 1)
+                #expect(initializationDatabase.loanMetricsSnapshot().classes[.ordinary]?.granted == 1)
+                #expect(database.loanMetricsSnapshot().classes[.activation]?.granted == 0)
                 #expect(database.loanMetricsSnapshot().classes[.ordinary]?.granted == 0)
                 let staleDataOwner = try V2RoomDataOwner(shardID: "room-a", epoch: 1)
                 let staleToken = V2RoomActivationToken(roomID: roomID, owner: staleDataOwner,
@@ -140,15 +143,21 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect(await successor.stop(deadline: .now + .seconds(10)).completed)
                 await ownerResources.shutdownDurableSendOperations()
                 let loans = database.loanMetricsSnapshot()
-                #expect((loans.classes[.activation]?.granted ?? 0) == 2)
+                #expect((loans.classes[.activation]?.granted ?? 0) == 0)
                 #expect((loans.classes[.ordinary]?.granted ?? 0) > 0)
                 #expect(loans.classes.values.allSatisfy { $0.inFlight == 0 && $0.queued == 0 })
-                for source in [V2DatabaseLoanSource.groupEventSubscribe, .roomRecovery, .lifecycle] {
+                for source in [V2DatabaseLoanSource.groupEventSubscribe, .roomRecovery] {
                     let observed = try #require(loans.observations[source])
                     #expect(observed.actualHeldCount > 0)
                     #expect((observed.stages[.sql]?.count ?? 0) > 0)
                     #expect(observed.stages.values.allSatisfy { $0.active == 0 })
                 }
+                let initializationLoans = initializationDatabase.loanMetricsSnapshot()
+                #expect(initializationLoans.classes[.ordinary]?.granted == 2)
+                #expect(initializationLoans.classes.values.allSatisfy { $0.inFlight == 0 && $0.queued == 0 })
+                let restoration = try #require(initializationLoans.observations[.lifecycle])
+                #expect(restoration.sqlPhases[.other]?.count == 2)
+                #expect(restoration.sqlPhases[.transactionControl]?.count == 0)
                 let messageLoans = sendDatabase.loanMetricsSnapshot()
                 #expect(messageLoans.classes.values.allSatisfy { $0.inFlight == 0 && $0.queued == 0 })
                 let messageWork = try #require(messageLoans.observations[.durableOwner])
@@ -159,11 +168,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 #expect((sqlContinuations[.scalarFenceRooms]?.settledToResumedCount ?? 0) > 0)
                 #expect(sqlContinuations.values.allSatisfy { $0.settledNotResumed == 0 && $0.resumedNotDispatched == 0 })
                 await database.shutdownLoans()
+                await initializationDatabase.shutdownLoans()
             } catch {
                 _ = await first.stop(deadline: .now + .seconds(10))
                 _ = await next?.stop(deadline: .now + .seconds(10))
                 await ownerResources.shutdownDurableSendOperations()
                 await database.shutdownLoans()
+                await initializationDatabase.shutdownLoans()
                 throw error
             }
             }
@@ -208,7 +219,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1,
                 timeout: .seconds(1)))
             let resources = try V2RoomServerOwnerResources(
-                database: ownerDatabase, sendDatabase: try v2FixtureMessageWriteDatabase(ownerDatabase, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
+                database: ownerDatabase, initializationDatabase: ownerDatabase, sendDatabase: try v2FixtureMessageWriteDatabase(ownerDatabase, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: control),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: control),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: ActorFactoryProjectionDelivery(), capacityProfile: forwardImportTestProfile(),

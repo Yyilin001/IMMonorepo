@@ -235,7 +235,7 @@ public actor V2RoomClusterNode {
 
     public func readiness() async -> Bool {
         guard system != nil, inbound != nil, endpoint != nil, discoveryBeacon != nil else { return false }
-        return await host.snapshot().accepting
+        return await host.isAcceptingRequests
     }
 
     public func drain(deadline: ContinuousClock.Instant) async -> V2RoomActivationDrainResult {

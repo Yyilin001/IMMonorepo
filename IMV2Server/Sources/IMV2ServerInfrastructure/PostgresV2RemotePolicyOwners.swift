@@ -33,7 +33,7 @@ package struct PostgresV2RemotePolicyOwners: Sendable {
     }
 
     package func cachedSnapshots(scopes: [V2PolicyAuthorizationScope]) async throws -> [V2PolicyFactsSnapshot]? {
-        if let stateCache { return try await stateCache.cachedSnapshots(scopes: scopes, requestedAt: .now) }
+        if let stateCache { return try stateCache.cachedSnapshots(scopes: scopes, requestedAt: .now) }
         if let localOwners, scopes.allSatisfy({ localOwners.acceptsScope($0.key) }) {
             return try await localOwners.cachedSnapshots(scopes: scopes)
         }

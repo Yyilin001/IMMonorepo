@@ -13,6 +13,7 @@ public enum V2RoomFailureReason: String, Codable, Sendable {
     case authorityLost
     case unavailable
     case overloaded
+    case roomCapacityExhausted
     case deadlineExceeded
     case cancelled
     case notFound
@@ -59,7 +60,7 @@ extension V2RoomCallFailure {
             switch reason {
             case .staleActivation, .notReady, .retired, .authorityLost, .unavailable:
                 .refreshLocation
-            case .overloaded, .deadlineExceeded, .cancelled, .notFound, .forbidden,
+            case .overloaded, .roomCapacityExhausted, .deadlineExceeded, .cancelled, .notFound, .forbidden,
                  .invalidRequest, .unsupportedVersion, .idempotencyConflict:
                 .returnFailure
             }

@@ -41,6 +41,12 @@ actor GatewayJournalRecoveryCoordinator {
         let session: UUID
         let revision: Int64
         let gateway: UUID
+        func sameAuthority(as other: Key) -> Bool {
+            source == other.source && service == other.service && publisher == other.publisher
+                && sourceEpoch == other.sourceEpoch && sourceToken == other.sourceToken
+                && routingEpoch == other.routingEpoch && routingToken == other.routingToken
+                && session == other.session && gateway == other.gateway
+        }
         init(source: V2RealtimeJournalSource, service: String, fence: V2RealtimeJournalProjectionFence) {
             self.source = source; self.service = service; publisher = fence.publisherIncarnationID
             sourceEpoch = fence.sourceLeaseEpoch; sourceToken = fence.sourceLeaseToken
@@ -52,6 +58,7 @@ actor GatewayJournalRecoveryCoordinator {
         let cut: Int64
         let interestRevision: UInt64
         let versions: [UserID: UInt64]
+        var interests: Set<V2GatewayJournalUserControlInterest> = []
         /// Local device state was read, or the checked interest selection proved
         /// the changed device has no local socket. A new lifecycle cannot reuse it.
         var devices: Set<V2RealtimeJournalDeviceKey> = []
@@ -59,7 +66,7 @@ actor GatewayJournalRecoveryCoordinator {
         let controls: V2GatewayJournalRecoveryControls
         func satisfies(_ work: Work, requireCut: Bool = true) -> Bool {
             (!requireCut || cut >= work.minimumCut) && interestRevision >= work.interestRevision
-                && work.controls.versions.allSatisfy { versions[$0.key, default: 0] >= $0.value }
+                && work.controls.versions.allSatisfy { max(versions[$0.key, default: 0], controls.versions[$0.key, default: 0]) >= $0.value }
                 && work.controls.devices.isSubset(of: devices)
                 && work.controls.membershipVersions.allSatisfy { controls.membershipVersions[$0.key, default: 0] >= $0.value }
                 && work.controls.membershipRooms.allSatisfy { $0.value.isSubset(of: controls.membershipRooms[$0.key] ?? []) }
@@ -127,7 +134,7 @@ actor GatewayJournalRecoveryCoordinator {
                 // with installed floors. No new DB snapshot is needed merely
                 // because the cached recovery finished at an earlier checkpoint.
                 let advanced = Proof(cut: max(proof.cut, work.minimumCut), interestRevision: proof.interestRevision,
-                    versions: proof.versions, devices: proof.devices, controls: proof.controls)
+                    versions: proof.versions, interests: proof.interests, devices: proof.devices, controls: proof.controls)
                 completed[work.batch.source] = (key, advanced)
                 Self.record(.cacheHit); return advanced
             }
@@ -182,8 +189,7 @@ actor GatewayJournalRecoveryCoordinator {
             guard actual[key] == nil, let value = pending[key] else { continue }
             if value.waiters.isEmpty { pending.removeValue(forKey: key); continue }
             var work = value.work
-            if let (installedKey, proof) = completed[key.source], installedKey == key,
-               proof.interestRevision == work.interestRevision {
+            if let (installedKey, proof) = completed[key.source], installedKey.sameAuthority(as: key) {
                 work.baseline = proof
             }
             Self.record(.executed)
@@ -204,7 +210,18 @@ actor GatewayJournalRecoveryCoordinator {
         actual.removeValue(forKey: key)
         guard var value = pending.removeValue(forKey: key) else { return }
         if case .success(let proof) = result, !closed {
-            if completed[key.source] != nil || completed.count < maximumSources { completed[key.source] = (key, proof) }
+            // A late predecessor may settle its callers, but cannot replace a
+            // newer installed baseline. Validate the actual completed cut rather
+            // than stronger requirements that arrived while this pass awaited SQL.
+            var cachedWork = value.work
+            cachedWork.minimumCut = proof.cut; cachedWork.interestRevision = proof.interestRevision
+            let predecessor = completed[key.source].map {
+                $0.0.sameAuthority(as: key) && $0.1.interestRevision > proof.interestRevision
+            } ?? false
+            if !predecessor, isCurrent(cachedWork, proof),
+               completed[key.source] != nil || completed.count < maximumSources {
+                completed[key.source] = (key, proof)
+            }
             var remaining: [Waiter] = []
             for waiter in value.waiters {
                 if proof.satisfies(waiter.work) {

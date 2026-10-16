@@ -232,8 +232,8 @@ actor V2RealtimeShardSender {
         rejected &+= 1; capacityRejections[lane, default: [:]][reason, default: 0] &+= 1
     }
     private var rejected: UInt64 = 0
-    func metrics() -> (UInt64, UInt64, Int, UInt64, UInt64, Int, UInt64, Int, [V2RealtimeRPCAdmissionLane: [V2RealtimeRPCAdmissionRejection: UInt64]]) {
-        (controlStarted, controlSettled, activeControl, publishStarted, publishSettled, activePublish, rejected, openings.count, capacityRejections)
+    func metrics() -> (UInt64, UInt64, Int, UInt64, UInt64, Int, UInt64, Int, [V2RealtimeRPCAdmissionLane: [V2RealtimeRPCAdmissionRejection: UInt64]], Int, Double, UInt64) {
+        (controlStarted, controlSettled, activeControl, publishStarted, publishSettled, activePublish, rejected, openings.count, capacityRejections, waitingControls.count, controlQueueSeconds, controlQueueSettled)
     }
     private final class ReferenceAdmission {
         let target: V2GatewayRealtimeDescriptor
@@ -254,12 +254,14 @@ actor V2RealtimeShardSender {
         guard admissions[target.identity.nodeID] != nil || admissions.count < limits.maximumPeers else { throw V2ActorAuthenticationError.overloaded }
         admissions[target.identity.nodeID] = ReferenceAdmission(target, observation: observation)
         sessions = sessions.filter { $0.key.identity.nodeID != target.identity.nodeID || $0.key == target }
+        admitWaitingControls()
     }
     /// Only this exact reference may suspend the current admission. Retiring an
     /// older incarnation must never overwrite its successor's soft gate.
     func beginRetirement(_ identity: V2GatewayRealtimeIdentity, reference: Data) -> Bool {
         if let current = admissions[identity.nodeID], current.target.identity == identity,
            current.target.endpointReference == reference { current.suspended = true }
+        admitWaitingControls()
         guard peerControlActive[identity, default: 0] == 0, peerPublishActive[identity, default: 0] == 0,
               !openings.keys.contains(where: { $0.identity == identity && $0.endpointReference == reference }) else { return false }
         sessions = sessions.filter { $0.key.identity != identity || $0.key.endpointReference != reference }
@@ -270,7 +272,98 @@ actor V2RealtimeShardSender {
     }
     private var activeControl = 0
     private var activePublish = 0
-    func exchange(_ operation: ShardOperation, to target: V2GatewayRealtimeDescriptor) async throws -> ShardResult {
+    private struct WaitingControl {
+        let id: UUID
+        let admission: ReferenceAdmission
+        let started: ContinuousClock.Instant
+        let deadline: ContinuousClock.Instant
+        let continuation: CheckedContinuation<Void, any Error>
+    }
+    // At most one bounded queue for the sender's real control capacity. A busy
+    // peer cannot block eligible peers behind it, and waiting owns no RPC slot.
+    private var waitingControls: [WaitingControl] = []
+    private var controlQueueTimer: Task<Void, Never>?
+    private var controlQueueDeadline: ContinuousClock.Instant?
+    private var controlQueueSeconds: Double = 0
+    private var controlQueueSettled: UInt64 = 0
+
+    private func grantControl(_ peer: V2GatewayRealtimeIdentity) {
+        active += 1; activeControl += 1; controlStarted &+= 1
+        peerControlActive[peer, default: 0] += 1
+    }
+    private func reserveControl(_ admission: ReferenceAdmission, deadline: ContinuousClock.Instant?) async throws {
+        try Task.checkCancellation()
+        guard admits(admission) else { throw V2ActorAuthenticationError.sessionExpired }
+        let started = ContinuousClock.now
+        let until = min(deadline ?? started + limits.callTimeout, started + limits.callTimeout)
+        guard until > started else {
+            reject(.control, .queueTimeout); throw V2ActorAuthenticationError.overloaded
+        }
+        admitWaitingControls()
+        let peer = admission.target.identity
+        if activeControl < 4, peerControlActive[peer, default: 0] < 2 {
+            grantControl(peer); return
+        }
+        guard waitingControls.count < 256 else {
+            reject(.control, .queueFull); throw V2ActorAuthenticationError.overloaded
+        }
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                guard !Task.isCancelled else { continuation.resume(throwing: CancellationError()); return }
+                waitingControls.append(.init(id: id, admission: admission, started: started,
+                    deadline: until, continuation: continuation))
+                scheduleControlQueueTimer()
+            }
+        } onCancel: {
+            Task { await self.cancelWaitingControl(id) }
+        }
+    }
+    private func settleWaitingControl(_ waiter: WaitingControl, error: (any Error)? = nil) {
+        let elapsed = waiter.started.duration(to: .now).components
+        controlQueueSeconds += Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        controlQueueSettled &+= 1
+        if let error { waiter.continuation.resume(throwing: error) }
+        else { grantControl(waiter.admission.target.identity); waiter.continuation.resume() }
+    }
+    private func cancelWaitingControl(_ id: UUID) {
+        guard let index = waitingControls.firstIndex(where: { $0.id == id }) else { return }
+        settleWaitingControl(waitingControls.remove(at: index), error: CancellationError())
+        scheduleControlQueueTimer()
+    }
+    private func admitWaitingControls() {
+        var index = 0
+        let now = ContinuousClock.now
+        while index < waitingControls.count {
+            let waiter = waitingControls[index]
+            let error: (any Error)?
+            if stopped { error = V2ActorAuthenticationError.overloaded }
+            else if !admits(waiter.admission) { error = V2ActorAuthenticationError.sessionExpired }
+            else if waiter.deadline <= now {
+                reject(.control, .queueTimeout); error = V2ActorAuthenticationError.overloaded
+            } else { error = nil }
+            if let error {
+                waitingControls.remove(at: index); settleWaitingControl(waiter, error: error)
+            } else if activeControl < 4, peerControlActive[waiter.admission.target.identity, default: 0] < 2 {
+                waitingControls.remove(at: index); settleWaitingControl(waiter)
+            } else { index += 1 }
+        }
+        scheduleControlQueueTimer()
+    }
+    private func scheduleControlQueueTimer() {
+        let deadline = waitingControls.map(\.deadline).min()
+        guard deadline != controlQueueDeadline else { return }
+        controlQueueTimer?.cancel(); controlQueueTimer = nil; controlQueueDeadline = deadline
+        guard let deadline else { return }
+        controlQueueTimer = Task {
+            do { try await Task.sleep(until: deadline, clock: .continuous) } catch { return }
+            guard controlQueueDeadline == deadline else { return }
+            controlQueueDeadline = nil; controlQueueTimer = nil
+            admitWaitingControls()
+        }
+    }
+    func exchange(_ operation: ShardOperation, to target: V2GatewayRealtimeDescriptor,
+                  admissionDeadline: ContinuousClock.Instant? = nil) async throws -> ShardResult {
         try Task.checkCancellation()
         try target.validate()
         try trust.validateRealtimeReceiver(target.identity)
@@ -279,40 +372,34 @@ actor V2RealtimeShardSender {
         let lane: V2RealtimeRPCAdmissionLane = isControl ? .control : .publish
         guard !stopped else { reject(lane, .stopped); throw V2ActorAuthenticationError.overloaded }
         guard let admission = admissions[target.identity.nodeID], admission.target == target, admits(admission) else { throw V2ActorAuthenticationError.sessionExpired }
-        // Each lane reserves peer progress independently. Each peer lane has
-        // a ceiling of two; the global control4/publish12 ceilings remain fixed.
-        // waiting publication replies cannot spend control's reserved permits.
-        let peerCalls = isControl ? peerControlActive[target.identity, default: 0] : peerPublishActive[target.identity, default: 0]
-        guard isControl ? activeControl < 4 : activePublish < 12 else {
-            reject(lane, .global)
-            if !isControl { throw V2RealtimeLocalAdmissionBackpressure.globalRPCs }
-            throw V2ActorAuthenticationError.overloaded
-        }
-        guard peerCalls < 2 else {
-            reject(lane, .peer)
-            if !isControl { throw V2RealtimeLocalAdmissionBackpressure.peerRPCs }
-            throw V2ActorAuthenticationError.overloaded
-        }
         if isControl {
-            activeControl += 1; controlStarted &+= 1
-            peerControlActive[target.identity, default: 0] += 1
+            try await reserveControl(admission, deadline: admissionDeadline)
         } else {
+            guard activePublish < 12 else {
+                reject(lane, .global); throw V2RealtimeLocalAdmissionBackpressure.globalRPCs
+            }
+            guard peerPublishActive[target.identity, default: 0] < 2 else {
+                reject(lane, .peer); throw V2RealtimeLocalAdmissionBackpressure.peerRPCs
+            }
+            active += 1
             activePublish += 1; publishStarted &+= 1
             peerPublishActive[target.identity, default: 0] += 1
         }
-        active += 1
         defer {
             active -= 1
             if isControl {
                 activeControl -= 1; controlSettled &+= 1
                 peerControlActive[target.identity, default: 1] -= 1
                 if peerControlActive[target.identity] == 0 { peerControlActive.removeValue(forKey: target.identity) }
+                admitWaitingControls()
             } else {
                 activePublish -= 1; publishSettled &+= 1
                 peerPublishActive[target.identity, default: 1] -= 1
                 if peerPublishActive[target.identity] == 0 { peerPublishActive.removeValue(forKey: target.identity) }
             }
         }
+        try Task.checkCancellation()
+        guard admits(admission) else { throw V2ActorAuthenticationError.sessionExpired }
         // This owns the local invocation until its reply/timeout settles. A
         // RemoteCall timeout is NOT confirmation that the remote task stopped.
         var session = try await session(for: target, admission: admission)
@@ -393,6 +480,7 @@ actor V2RealtimeShardSender {
     }
     public func stop(deadline: ContinuousClock.Instant) async -> Bool {
         stopped = true
+        admitWaitingControls()
         while active > 0 && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) } catch { break }
         }

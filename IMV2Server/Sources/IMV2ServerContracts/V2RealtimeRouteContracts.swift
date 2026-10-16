@@ -4,7 +4,7 @@ import IMV2ActorContracts
 /// A publication was rejected by a known bounded capacity gate. This does not
 /// classify transport failures, retired routes, or unknown delivery outcomes.
 public enum V2RealtimePublicationBackpressure: Error, Equatable, Sendable {
-    case routeQueries, globalRPCs, peerRPCs, receiverQueue
+    case globalRPCs, peerRPCs, receiverQueue
 }
 
 public enum V2RealtimeDirectoryError: Error, Equatable, Sendable {

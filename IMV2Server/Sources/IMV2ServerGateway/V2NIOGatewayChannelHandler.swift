@@ -121,6 +121,7 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
         let eventLoop = context.eventLoop
         let stream = stream
         let socketGate = V2RoomSubscriptionSocketGate(eventLoop: eventLoop)
+        let diagnosticPeerPort = V2GatewayCoverageDiagnostics.enabled ? context.channel.remoteAddress?.port : nil
         let foregroundWriter = V2NIOGatewayForegroundWriter(
             channel: context.channel,
             scheduler: foregroundWriteScheduler,
@@ -267,9 +268,12 @@ public final class V2NIOGatewayChannelHandler: ChannelInboundHandler {
                         continuation.resume(returning: accepted)
                     }
                 }
-            }, roomSubscriptionSocketGate: socketGate)
+            }, roomSubscriptionSocketGate: socketGate, diagnosticPeerPort: diagnosticPeerPort)
             eventLoop.execute {
                 let handler = boundHandler.value
+                // Attachment has returned and has no remaining async work.
+                // EOF already captured the task when an actual join is needed.
+                handler.attachmentTask = nil
                 guard attached, !handler.closed else { return }
                 handler.callbacksReady = true
                 handler.processNext(context: boundContext.value)
@@ -736,7 +740,9 @@ struct V2GatewayForegroundWriteQueue: Sendable {
         precondition(maximumQueuedBytes > 0 && maximumQueuedFrames > 0)
         self.maximumQueuedBytes = maximumQueuedBytes
         self.maximumQueuedFrames = maximumQueuedFrames
-        frames = .init(initialCapacity: min(maximumQueuedFrames, 32))
+        // Most online connections have no queued foreground frames. Grow on
+        // actual demand instead of reserving the maximum prefix on every socket.
+        frames = .init(initialCapacity: 1)
     }
 
     var isEmpty: Bool { frames.isEmpty && recoveryFrame == nil }
@@ -1054,7 +1060,9 @@ struct V2GatewayInboundQueue {
         precondition(maximumBytes > 0 && maximumChunks > 0)
         self.maximumBytes = maximumBytes
         self.maximumChunks = maximumChunks
-        self.chunks = .init(initialCapacity: min(maximumChunks, 16))
+        // Authentication/heartbeats normally drain one chunk at a time. The
+        // byte/chunk admission limits remain independent of storage capacity.
+        self.chunks = .init(initialCapacity: 1)
     }
 
     var isEmpty: Bool { chunks.isEmpty }

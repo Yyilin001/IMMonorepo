@@ -7,6 +7,31 @@ import IMV2ActorContracts
 
 @Suite("Trusted journal receiver and socket authority")
 struct V2GatewayJournalProjectionReceiverTests {
+    @Test func retainedConnectionBaselineNeverAuthorizesWithdrawnOrReplacementCoverage() {
+        let f = Fixture(), time = Mutex(ContinuousClock.now), current = Mutex(true)
+        let start = time.withLock { $0 }
+        let receiver = V2GatewayJournalProjectionReceiver(projection: .init(), now: { time.withLock { $0 } })
+        let installed = receiver.install(source: f.source, serviceID: "publisher", fence: f.fence,
+            deadline: start + .seconds(10), rooms: [], viewers: [], current: { current.withLock { $0 } })
+        #expect(installed)
+        #expect(receiver.installUserControlFloors(source: f.source, fence: f.fence, versions: [f.user: 0]))
+        current.withLock { $0 = false }
+        let old = f.fence
+        func revised(session: UUID) -> V2RealtimeJournalProjectionFence {
+            .init(publisherIncarnationID: old.publisherIncarnationID, sourceLeaseEpoch: old.sourceLeaseEpoch,
+                sourceLeaseToken: old.sourceLeaseToken, sourceLeaseExpiresAt: old.sourceLeaseExpiresAt,
+                routingPartitionEpoch: old.routingPartitionEpoch, routingLeaseToken: old.routingLeaseToken,
+                sessionID: session, interestGeneration: old.interestGeneration + 1, gatewayIncarnationID: old.gatewayIncarnationID)
+        }
+        let next = revised(session: old.sessionID)
+        #expect(receiver.bindingSnapshot(source: f.source) == nil)
+        #expect(receiver.authenticationBinding(userID: f.user) == nil)
+        #expect(receiver.retainsConnectionBaseline(source: f.source, fence: next, versions: [f.user: 0]))
+        #expect(!receiver.retainsConnectionBaseline(source: f.source, fence: next, versions: [UserID(uuid: UUID()): 0]))
+        #expect(!receiver.retainsConnectionBaseline(source: f.source, fence: revised(session: UUID()), versions: [f.user: 0]))
+        time.withLock { $0 = start + .seconds(11) }
+        #expect(!receiver.retainsConnectionBaseline(source: f.source, fence: next, versions: [f.user: 0]))
+    }
     @Test("checkpoint diagnostics preserve denial boundaries and identify control versus expiry")
     func checkpointFailureReasons() {
         let f = Fixture(), time = Mutex(ContinuousClock.now), coverage = Mutex(true)

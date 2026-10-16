@@ -176,33 +176,6 @@ public final class V2ActorRealtimeMetrics: V2ActorRealtimeMetricsSource, Sendabl
             $0.queues[queue, default: .init()].bytes += bytes
         }
     }
-    public func routeQueryAdmitted(kind: V2ActorRealtimeRouteQueryKind) {
-        state.withLock {
-            $0.routeQueries[kind, default: .init()].active += 1
-            $0.routeQueries[kind, default: .init()].started += 1
-        }
-    }
-    public func routeQuerySettled(kind: V2ActorRealtimeRouteQueryKind, empty: Bool,
-                                  elapsed: Duration, failed: Bool) {
-        let components = elapsed.components
-        let milliseconds = max(0, Double(components.seconds) * 1_000 + Double(components.attoseconds) / 1e15)
-        state.withLock {
-            var item = $0.routeQueries[kind, default: .init()]
-            precondition(item.active > 0)
-            item.active -= 1
-            if failed { item.failed += 1 }
-            else {
-                item.succeeded += 1
-                if empty { item.empty += 1 }
-            }
-            item.totalMilliseconds += milliseconds
-            item.maxMilliseconds = max(item.maxMilliseconds, milliseconds)
-            $0.routeQueries[kind] = item
-        }
-    }
-    public func routeQueryCapacityRejected(kind: V2ActorRealtimeRouteQueryKind) {
-        state.withLock { $0.routeQueries[kind, default: .init()].capacityRejected += 1 }
-    }
     public func sessionRotation(_ reason: V2ActorRealtimeSessionRotationReason) {
         state.withLock { $0.sessionRotations[reason, default: 0] += 1 }
     }
@@ -297,38 +270,6 @@ public func v2RenderPrometheusActorRealtimeMetrics(_ snapshot: V2ActorRealtimeMe
         }
         lines.append("im_v2_actor_realtime_store_seconds_total{operation=\"\(operation.rawValue)\"} \(snapshot.operationSeconds[operation, default: 0])")
     }
-    let routePrefix = "im_v2_actor_realtime_route_query"
-    for (suffix, type, help) in [
-        ("active", "gauge", "Admitted route-store calls not yet actually settled; includes database acquisition waiting."),
-        ("started_total", "counter", "Route-store calls admitted to the bounded query gate."),
-        ("succeeded_total", "counter", "Actual route-store calls that returned successfully, including empty route arrays."),
-        ("failed_total", "counter", "Admitted actual route-store calls that failed; excludes pre-call capacity rejection."),
-        ("capacity_rejected_total", "counter", "Publications rejected by the local query gate before any route-store call."),
-        ("empty_total", "counter", "Successful actual route-store calls that returned no routes; not RPC deliveries."),
-        ("duration_milliseconds_sum", "counter", "Elapsed milliseconds of actually settled route-store calls, including failures and acquisition waiting; not only SQL time."),
-        ("duration_milliseconds_count", "counter", "Actually settled route-store calls paired with duration sum; succeeded plus failed, not started calls."),
-        ("duration_milliseconds_max", "gauge", "Lifetime maximum elapsed milliseconds of an actually settled route-store call.")
-    ] {
-        lines.append("# HELP \(routePrefix)_\(suffix) \(help)")
-        lines.append("# TYPE \(routePrefix)_\(suffix) \(type)")
-    }
-    for kind in V2ActorRealtimeRouteQueryKind.allCases {
-        let item = snapshot.routeQueries[kind, default: .init()]
-        let completedSum = item.succeeded.addingReportingOverflow(item.failed)
-        let completed = completedSum.overflow ? UInt64.max : completedSum.partialValue
-        let label = "kind=\"\(kind.rawValue)\""
-        lines.append(contentsOf: [
-            "\(routePrefix)_active{\(label)} \(item.active)",
-            "\(routePrefix)_started_total{\(label)} \(item.started)",
-            "\(routePrefix)_succeeded_total{\(label)} \(item.succeeded)",
-            "\(routePrefix)_failed_total{\(label)} \(item.failed)",
-            "\(routePrefix)_capacity_rejected_total{\(label)} \(item.capacityRejected)",
-            "\(routePrefix)_empty_total{\(label)} \(item.empty)",
-            "\(routePrefix)_duration_milliseconds_sum{\(label)} \(item.totalMilliseconds)",
-            "\(routePrefix)_duration_milliseconds_count{\(label)} \(completed)",
-            "\(routePrefix)_duration_milliseconds_max{\(label)} \(item.maxMilliseconds)"
-        ])
-    }
     lines.append("# TYPE im_v2_actor_realtime_session_rotation_total counter")
     for reason in V2ActorRealtimeSessionRotationReason.allCases {
         lines.append("im_v2_actor_realtime_session_rotation_total{reason=\"\(reason.rawValue)\"} \(snapshot.sessionRotations[reason, default: 0])")
@@ -392,6 +333,9 @@ public func v2RenderPrometheusActorRealtimeMetrics(_ snapshot: V2ActorRealtimeMe
         scalar("im_v2_actor_realtime_control_started_total", transport.controlStarted, type: "counter")
         scalar("im_v2_actor_realtime_control_settled_total", transport.controlSettled, type: "counter")
         scalar("im_v2_actor_realtime_control_active", transport.controlActive, type: "gauge")
+        scalar("im_v2_actor_realtime_control_queued", transport.controlQueued, type: "gauge")
+        scalar("im_v2_actor_realtime_control_queue_seconds_sum", transport.controlQueueSeconds, type: "counter")
+        scalar("im_v2_actor_realtime_control_queue_seconds_count", transport.controlQueueSettled, type: "counter")
         scalar("im_v2_actor_realtime_publish_started_total", transport.publishStarted, type: "counter")
         scalar("im_v2_actor_realtime_publish_settled_total", transport.publishSettled, type: "counter")
         scalar("im_v2_actor_realtime_publish_active", transport.publishActive, type: "gauge")

@@ -7,12 +7,87 @@ import Testing
 
 @Suite("Room activation host owns placement, restore and physical retirement")
 struct V2RoomActivationHostTests {
+    @Test("idle maintenance does not inspect rooms before their idle deadlines")
+    func idleMaintenanceSkipsRecentRooms() async throws {
+        let fixture = try Fixture(maximumActiveRooms: 32, waiters: 33, idleMilliseconds: 10_000)
+        await fixture.host.start()
+        do {
+            for _ in 0..<32 {
+                guard case .ready = try await fixture.activate(roomID: RoomID(uuid: UUID())).value else {
+                    throw TestFailure.restore
+                }
+            }
+            // Observe a real maintenance pass, rather than assuming a sleep
+            // means the Host task has received its executor turn.
+            try await waitUntil { await fixture.host.idleMaintenancePassCount > 0 }
+            #expect(await fixture.host.idleRoomProbeCount == 0)
+            #expect(await fixture.host.snapshot().activeRooms == 32)
+            #expect(await fixture.host.scheduledIdleRoomCount == 32)
+            #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+            #expect(await fixture.host.scheduledIdleRoomCount == 0)
+        } catch {
+            _ = await fixture.host.stop(deadline: .now + .seconds(2))
+            throw error
+        }
+    }
+
+    @Test("idle deadline hints retain executing ownership and disappear after actual retirement")
+    func idleIndexKeepsBusyRoom() async throws {
+        let gate = Gate()
+        let fixture = try Fixture(executeGate: gate, idleMilliseconds: 50)
+        await fixture.host.start()
+        guard case .ready(let hot) = try await fixture.activate().value,
+              case .ready = try await fixture.activate(roomID: RoomID(uuid: UUID())).value else {
+            _ = await fixture.host.stop(deadline: .now + .seconds(2))
+            throw TestFailure.restore
+        }
+        let executing = fixture.invoke(token: hot)
+        do {
+            try await gate.waitForEntries(1)
+            try await waitUntil { await fixture.probe.closeCount == 1 }
+            #expect(await fixture.host.isReady(token: hot))
+            #expect(await fixture.host.scheduledIdleRoomCount == 1)
+            await gate.open()
+            #expect(try await executing.value == 1)
+            try await waitUntil { await fixture.probe.closeCount == 2 }
+            #expect(await fixture.host.scheduledIdleRoomCount == 0)
+            #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+        } catch {
+            await gate.open()
+            _ = await executing.result
+            _ = await fixture.host.stop(deadline: .now + .seconds(2))
+            throw error
+        }
+    }
+
+    @Test("ready rooms release completed restoration deadline task handles", arguments: [1, 32])
+    func restorationTimerIsReleased(roomCount: Int) async throws {
+        let fixture = try Fixture(maximumActiveRooms: roomCount, waiters: roomCount + 1,
+                                  idleMilliseconds: 10_000)
+        await fixture.host.start()
+        do {
+            for _ in 0..<roomCount {
+                guard case .ready = try await fixture.activate(roomID: RoomID(uuid: UUID())).value else {
+                    throw TestFailure.restore
+                }
+            }
+            try await waitUntil { await fixture.host.retainedRestoreTimerCount == 0 }
+            #expect(await fixture.host.snapshot().activeRooms == roomCount)
+            #expect((await fixture.host.stop(deadline: .now + .seconds(2))).completed)
+        } catch {
+            _ = await fixture.host.stop(deadline: .now + .seconds(2))
+            throw error
+        }
+    }
+
     @Test("native background pins retain physical ownership through cancellation and drain", arguments: [false, true])
     func backgroundLifetimeOwnsActualWork(cancelled: Bool) async throws {
         let captured = Mutex<V2RoomActivationLifetime?>(nil)
         let gate = Gate()
         let fixture = try Fixture(restoreObserver: { context in captured.withLock { $0 = context.lifetime } })
+        #expect(!(await fixture.host.isAcceptingRequests))
         await fixture.host.start()
+        #expect(await fixture.host.isAcceptingRequests)
         guard case .ready = try await fixture.activate().value else { throw TestFailure.restore }
         let lifetime = try #require(captured.withLock { $0 })
         let work = Task {
@@ -25,6 +100,7 @@ struct V2RoomActivationHostTests {
         try await gate.waitForEntries(1)
         if cancelled { work.cancel() }
         let incomplete = await fixture.host.drain(deadline: .now + .milliseconds(20))
+        #expect(!(await fixture.host.isAcceptingRequests))
         #expect(!incomplete.completed)
         #expect(incomplete.proof == nil)
         #expect(await fixture.probe.closeCount == 0)
@@ -176,7 +252,35 @@ struct V2RoomActivationHostTests {
         catch { _ = await fixture.host.drain(deadline: .now + .seconds(2)); throw error }
         #expect(!(await fixture.host.isReady(token: token)))
         #expect(!(await fixture.host.snapshot().accepting))
+        #expect(!(await fixture.host.isAcceptingRequests))
         #expect(await fixture.host.readyTokens().isEmpty)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+    }
+
+    @Test("same-generation qualification refresh preserves rooms and observes both extended and shortened deadlines", arguments: [false, true])
+    func qualificationRefreshKeepsExactDeadline(shortens: Bool) async throws {
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
+        let originalDeadline = ContinuousClock.now + (shortens ? .seconds(3) : .milliseconds(150))
+        let original = try #require(qualification.update(witnesses: ["b": originalDeadline]))
+        let fixture = try Fixture(qualification: qualification)
+        await fixture.host.start()
+        guard case .ready(let token) = try await fixture.activate().value else { throw TestFailure.restore }
+        let refreshedDeadline = ContinuousClock.now + .milliseconds(400)
+        let refreshed = try #require(qualification.update(witnesses: ["b": refreshedDeadline]))
+        #expect(refreshed.generation == original.generation)
+        await fixture.host.qualificationDidChange()
+        #expect(await fixture.host.isReady(token: token))
+        #expect(await fixture.store.acquireCount == 1)
+        if !shortens {
+            try await ContinuousClock().sleep(until: originalDeadline + .milliseconds(20))
+            #expect(await fixture.host.isReady(token: token))
+            #expect(await fixture.probe.closeCount == 0)
+        }
+        do { try await waitUntil { await fixture.probe.closeCount == 1 } }
+        catch { _ = await fixture.host.drain(deadline: .now + .seconds(2)); throw error }
+        #expect(!(await fixture.host.isReady(token: token)))
+        #expect(!(await fixture.host.isAcceptingRequests))
+        if shortens { #expect(ContinuousClock.now < originalDeadline) }
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
     }
 
@@ -237,6 +341,9 @@ struct V2RoomActivationHostTests {
         await gate.open()
         _ = try await first.value
         #expect(await fixture.host.snapshot().pendingRooms == 0)
+        await expectFailure(.notAccepted(.roomCapacityExhausted), fixture.activate(roomID: other))
+        // Existing rooms still resolve when the Host's room capacity is full.
+        _ = try await fixture.activate().value
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
     }
 
@@ -497,36 +604,82 @@ struct V2RoomActivationHostTests {
         guard case .ready(let first) = try await fixture.activate().value else {
             Issue.record("expected ready"); return
         }
+        #expect(await fixture.host.scheduledIdleRoomCount == 1)
         try await waitUntil { await fixture.probe.closeCount == 1 }
         #expect(await fixture.host.readyTokens().isEmpty)
         try await waitUntil { await fixture.host.snapshot().completedIdleRetirements == 1 }
+        #expect(await fixture.host.scheduledIdleRoomCount == 0)
         guard case .ready(let second) = try await fixture.activate().value else {
             Issue.record("expected second ready"); return
         }
         #expect(second.activationEpoch > first.activationEpoch)
         #expect(!(await fixture.host.isReady(token: first)))
         #expect(await fixture.host.isReady(token: second))
+        #expect(await fixture.host.scheduledIdleRoomCount == 1)
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        #expect(await fixture.host.scheduledIdleRoomCount == 0)
         #expect(await fixture.host.snapshot().completedIdleRetirements == 1)
+    }
+
+    @Test("wake coalescing retains every changed room and an old observer cannot consume a successor")
+    func coalescedChangedRooms() async throws {
+        let fixture = try Fixture(maximumActiveRooms: 4, waiters: 8)
+        await fixture.host.start()
+        let first = await fixture.host.changes()
+        #expect(await fixture.host.takeChanges(observerID: first.id) == .rescan)
+        let rooms = Set((0..<3).map { _ in RoomID(uuid: UUID()) })
+        for room in rooms {
+            _ = try await fixture.host.activate(roomID: room, owner: fixture.owner, deadline: .now + .seconds(1))
+        }
+        #expect(await fixture.host.takeChanges(observerID: first.id) == .rooms(rooms))
+        #expect(await fixture.host.takeChanges(observerID: first.id) == .rooms([]))
+        let successor = await fixture.host.changes()
+        #expect(await fixture.host.takeChanges(observerID: first.id) == nil)
+        #expect(await fixture.host.takeChanges(observerID: successor.id) == .rescan)
+        await fixture.host.stopObservingChanges(observerID: first.id)
+        #expect(await fixture.host.takeChanges(observerID: successor.id) == .rooms([]))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        await fixture.host.stopObservingChanges(observerID: successor.id)
+    }
+
+    @Test("a stalled delta observer stays bounded across room churn and requests one rescan")
+    func changedRoomsOverflowRescan() async throws {
+        let fixture = try Fixture(maximumActiveRooms: 2, idleMilliseconds: 50)
+        await fixture.host.start()
+        let feed = await fixture.host.changes()
+        #expect(await fixture.host.takeChanges(observerID: feed.id) == .rescan)
+        for _ in 0..<3 {
+            _ = try await fixture.host.activate(roomID: RoomID(uuid: UUID()), owner: fixture.owner,
+                deadline: .now + .seconds(1))
+            try await waitUntil {
+                let state = await fixture.host.snapshot()
+                return state.activeRooms == 0 && state.retiringRooms == 0
+            }
+        }
+        #expect(await fixture.host.takeChanges(observerID: feed.id) == .rescan)
+        #expect(await fixture.host.takeChanges(observerID: feed.id) == .rooms([]))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        await fixture.host.stopObservingChanges(observerID: feed.id)
     }
 
     @Test("coalesced lifecycle changes reconcile exact ready tokens")
     func lifecycleChanges() async throws {
         let fixture = try Fixture()
         await fixture.host.start()
-        let stream = await fixture.host.changes()
-        var iterator = stream.makeAsyncIterator()
-        let initialRevision = try #require(await iterator.next())
+        let feed = await fixture.host.changes()
+        var iterator = feed.wakes.makeAsyncIterator()
+        _ = try #require(await iterator.next())
+        #expect(await fixture.host.takeChanges(observerID: feed.id) == .rescan)
         guard case .ready(let token) = try await fixture.activate().value else {
             Issue.record("expected ready"); return
         }
-        let readyRevision = try #require(await iterator.next())
-        #expect(readyRevision > initialRevision)
+        _ = try #require(await iterator.next())
+        #expect(await fixture.host.takeChanges(observerID: feed.id) == .rooms([token.roomID]))
         #expect(await fixture.host.readyTokens() == [token])
         #expect(await fixture.host.isReady(token: token))
         await fixture.host.beginDrain()
-        let drainingRevision = try #require(await iterator.next())
-        #expect(drainingRevision > readyRevision)
+        _ = try #require(await iterator.next())
+        #expect(await fixture.host.takeChanges(observerID: feed.id) == .rooms([token.roomID]))
         #expect(!(await fixture.host.isReady(token: token)))
         #expect(await fixture.host.readyTokens().isEmpty)
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)

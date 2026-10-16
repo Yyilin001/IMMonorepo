@@ -5,23 +5,22 @@ import IMV2ServerApplication
 /// Shared versioned facts for every room on this node. Snapshot reads never
 /// expire or renew ownership; committed updates advance their versions.
 package actor V2NodePolicyStateCache {
+    /// A direct room can use both accounts, their pair and both stranger
+    /// policies. Scale retained facts with room residency instead of evicting
+    /// active facts at a fixed node-wide threshold. LRU still bounds other
+    /// workloads, including group senders and uneven ownership placement.
+    package static func capacityForActiveRooms(_ rooms: Int) throws -> Int {
+        let (facts, overflow) = rooms.multipliedReportingOverflow(by: 5)
+        guard rooms > 0, !overflow else {
+            throw V2ActorContractError.invalidConfiguration("invalid policy snapshot room capacity")
+        }
+        return max(32_768, facts)
+    }
+
     private typealias Key = V2PolicyAuthorizationScope
-    private let maximumEntries: Int
     private let identity: V2ActorHostIdentity?
     private let now: @Sendable () -> ContinuousClock.Instant
-    private final class Session {
-        let wire: V2PolicyControlSessionWire
-        var deadline: ContinuousClock.Instant
-        var sequence: UInt64 = 0
-        var retired = false
-        init(_ wire: V2PolicyControlSessionWire, now: ContinuousClock.Instant) {
-            self.wire = wire; deadline = now + .seconds(10)
-        }
-        func ready(at now: ContinuousClock.Instant) -> Bool {
-            if now >= deadline { retired = true }
-            return !retired
-        }
-    }
+    private typealias Session = V2PolicySnapshotSession
     private var sessions: [V2ActorHostIdentity: Session] = [:]
     private var currentSources: [V2ActorHostID: V2ActorHostIdentity] = [:]
     private var scopeSources: [Key: V2ActorHostIdentity] = [:]
@@ -34,7 +33,9 @@ package actor V2NodePolicyStateCache {
         let route: InterestRoute
         let revision: UInt64
     }
-    private struct Releases: Sendable {
+    // Actor-confined mutable storage. Copying a value out of `releases` before
+    // editing scopes would copy the entire nested dictionary on every enqueue.
+    private final class Releases {
         var scopes: [Key: UInt64] = [:]
         var resetThrough: UInt64?
         var resetSessionGeneration: UInt64?
@@ -43,6 +44,8 @@ package actor V2NodePolicyStateCache {
     private let subscriber: V2PolicySnapshotSubscriberWire?
     private let releaseInterests: ReleaseInterests?
     private let maximumPendingReleases: Int
+    package enum Event: Sendable { case capacityEviction, releaseReset }
+    private let observe: (@Sendable (Event) -> Void)?
     private var nextInterestRevision: UInt64 = 0
     private var interests: [Key: Interest] = [:]
     private var releases: [InterestRoute: Releases] = [:]
@@ -60,8 +63,7 @@ package actor V2NodePolicyStateCache {
         let id: UUID
         let task: Task<[LoadedSnapshot], any Error>
     }
-    private var snapshots: [Key: V2PolicyFactsSnapshot] = [:]
-    private var snapshotOrder = V2IndexedFIFO<Key, Key>()
+    private nonisolated let snapshots: V2PolicySnapshotMemory
     private var snapshotFlights: [Key: SnapshotFlight] = [:]
     private var pendingSnapshots: [Key: V2PolicyFactsSnapshot] = [:]
     private var invalidatedFlights: Set<UUID> = []
@@ -69,23 +71,18 @@ package actor V2NodePolicyStateCache {
     package func invalidate(_ scope: V2PolicyAuthorizationScope) {
         let key = scope.canonical
         snapshots.removeValue(forKey: key); pendingSnapshots.removeValue(forKey: key)
-        snapshotOrder.remove(key)
         if let flight = snapshotFlights[key] {
             invalidatedFlights.insert(flight.id); flight.task.cancel()
         }
         forgetUnusedSource(key)
     }
 
-    package func cachedSnapshots(scopes: [V2PolicyAuthorizationScope], requestedAt: ContinuousClock.Instant? = nil) throws -> [V2PolicyFactsSnapshot]? {
-        if let requestedAt { V2SendPathTrace.current?.record("policy_cache_actor_entry_wait", from: requestedAt) }
-        try validate(scopes)
-        guard scopes.allSatisfy({ snapshots[$0.canonical] != nil && sourceReady($0.canonical) }) else { return nil }
-        return scopes.map {
-            let key = $0.canonical
-            let moved = snapshotOrder.moveToLast(key)
-            precondition(moved)
-            return snapshots[key]!
-        }
+    package nonisolated func cachedSnapshots(scopes: [V2PolicyAuthorizationScope], requestedAt: ContinuousClock.Instant? = nil) throws -> [V2PolicyFactsSnapshot]? {
+        let enteredAt = ContinuousClock.now
+        if let requestedAt { V2SendPathTrace.current?.record("policy_cache_read_entry_gap", from: requestedAt, to: enteredAt) }
+        defer { V2SendPathTrace.current?.record("policy_cache_read_body", from: enteredAt) }
+        try Task.checkCancellation()
+        return try snapshots.cached(scopes: scopes, at: now())
     }
 
     /// Updates do not populate unrelated Gateway scopes. A scope currently
@@ -95,18 +92,23 @@ package actor V2NodePolicyStateCache {
         let key = snapshot.scope.canonical
         let expectedInterest = interests[key]
         if interestedOnly, snapshots[key] == nil, snapshotFlights[key] == nil { return }
-        guard sourceReady(key) else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
+        let authority = try sourceAuthority(key)
         if let current = pendingSnapshots[key] ?? snapshots[key] {
-            if snapshot.version < current.version { return }
+            if snapshot.version < current.version {
+                snapshots.rebind(key, session: authority)
+                return
+            }
             if snapshot.version == current.version {
                 guard snapshot == current else { throw V2PolicyAuthorizationLifecycleError.corruptPersistence }
-                if snapshots[key] != nil { return }
+                if snapshots[key] != nil {
+                    snapshots.rebind(key, session: authority)
+                    return
+                }
             }
         }
         if snapshotFlights[key] != nil { pendingSnapshots[key] = snapshot }
-        if snapshots[key] == nil, snapshots.count >= maximumEntries,
-           let victim = snapshotOrder.removeFirst() {
-            snapshots[victim] = nil
+        if let victim = snapshots.evictIfNeeded(for: key) {
+            observe?(.capacityEviction)
             forgetUnusedSource(victim)
         }
         if let expectedInterest {
@@ -115,8 +117,7 @@ package actor V2NodePolicyStateCache {
                 throw V2PolicyAuthorizationLifecycleError.ownerChanged
             }
         }
-        snapshots[key] = snapshot
-        if !snapshotOrder.moveToLast(key) { snapshotOrder.append(key, key: key) }
+        snapshots.publish(snapshot, session: authority)
     }
 
     /// The authenticated route establishes the expected source before a first
@@ -130,7 +131,7 @@ package actor V2NodePolicyStateCache {
         nextInterestRevision += 1
         let revision = nextInterestRevision
         if let old = currentSources[source.hostID], old != source {
-            sessions[old]?.retired = true
+            sessions[old]?.retire()
             sessions.removeValue(forKey: old)
             // Native replacement makes old registrations unusable. Do not
             // keep retrying cleanup RPCs against an incarnation that is gone.
@@ -140,7 +141,7 @@ package actor V2NodePolicyStateCache {
             }
             for (key, interest) in interests where interest.route.source == old {
                 snapshots.removeValue(forKey: key); pendingSnapshots.removeValue(forKey: key)
-                snapshotOrder.remove(key); scopeSources.removeValue(forKey: key); scopeSessions.removeValue(forKey: key)
+                scopeSources.removeValue(forKey: key); scopeSessions.removeValue(forKey: key)
                 interests.removeValue(forKey: key)
                 if let flight = snapshotFlights[key] { invalidatedFlights.insert(flight.id); flight.task.cancel() }
             }
@@ -151,7 +152,7 @@ package actor V2NodePolicyStateCache {
             if let old = interests.removeValue(forKey: key) { enqueueRelease(key, interest: old) }
             if scopeSources[key] != source {
                 snapshots.removeValue(forKey: key); pendingSnapshots.removeValue(forKey: key)
-                snapshotOrder.remove(key); scopeSessions.removeValue(forKey: key)
+                scopeSessions.removeValue(forKey: key)
             }
             scopeSources[key] = source
             interests[key] = Interest(route: .init(source: source, endpoint: endpoint), revision: revision)
@@ -179,7 +180,7 @@ package actor V2NodePolicyStateCache {
                 scopeSessions[snapshot.scope.canonical] = session.wire
                 try install(snapshot)
             }
-        } catch { session.retired = true; throw error }
+        } catch { session.retire(); throw error }
     }
     package func applyControl(_ update: V2PolicySnapshotUpdateWire) throws {
         guard !closed, update.session.recipient == identity else { throw V2PolicyAuthorizationLifecycleError.invalidTarget }
@@ -191,25 +192,21 @@ package actor V2NodePolicyStateCache {
             }
             let session = try snapshotSession(update.session)
             do {
+                try session.advance(sequence: update.sequence, at: now())
                 if scopeSources[key] == update.session.source {
                     scopeSessions[key] = session.wire
                     try install(.init(wire: wire), interestedOnly: true)
                 }
-                if update.sequence > session.sequence {
-                    session.sequence = update.sequence; session.deadline = now() + .seconds(10)
-                }
-            } catch { session.retired = true; throw error }
+            } catch { session.retire(); throw error }
         case .heartbeat:
             guard let session = sessions[update.session.source], session.wire == update.session,
                   session.ready(at: now()) else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
-            if update.sequence > session.sequence {
-                session.sequence = update.sequence; session.deadline = now() + .seconds(10)
-            }
+            try session.advance(sequence: update.sequence, at: now())
         case .retire:
             guard let session = sessions[update.session.source], session.wire == update.session else {
                 throw V2PolicyAuthorizationLifecycleError.ownerChanged
             }
-            session.retired = true
+            session.retire()
         }
     }
     private func snapshotSession(_ wire: V2PolicyControlSessionWire) throws -> Session {
@@ -222,7 +219,7 @@ package actor V2NodePolicyStateCache {
                 return old
             }
             guard wire.generation > old.wire.generation else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
-            old.retired = true
+            old.retire()
         } else if sessions.count >= 128 { throw V2PolicyAuthorizationLifecycleError.busy }
         let session = Session(wire, now: now()); sessions[wire.source] = session
         return session
@@ -238,18 +235,20 @@ package actor V2NodePolicyStateCache {
     private func enqueueRelease(_ key: Key, interest: Interest) {
         guard !closed, releaseInterests != nil else { return }
         let route = interest.route
-        var queued = releases[route] ?? Releases()
+        let queued: Releases
+        if let existing = releases[route] { queued = existing }
+        else { queued = Releases(); releases[route] = queued }
         if let cut = queued.resetThrough, interest.revision <= cut { return }
         if queued.scopes[key] == nil, pendingReleaseCount >= maximumPendingReleases {
             // Never drop cleanup responsibility. A bounded reset replaces all
             // old interests for this source and closes their shared authority.
             queued.resetSessionGeneration = sessions[route.source]?.wire.generation
-            sessions[route.source]?.retired = true
+            sessions[route.source]?.retire()
             pendingReleaseCount -= queued.scopes.count
             queued.scopes.removeAll(); queued.resetThrough = nextInterestRevision
+            observe?(.releaseReset)
             for (scope, active) in interests where active.route == route {
                 snapshots.removeValue(forKey: scope); pendingSnapshots.removeValue(forKey: scope)
-                snapshotOrder.remove(scope)
                 if let flight = snapshotFlights[scope] {
                     invalidatedFlights.insert(flight.id); flight.task.cancel()
                 } else {
@@ -261,7 +260,6 @@ package actor V2NodePolicyStateCache {
             if queued.scopes[key] == nil { pendingReleaseCount += 1 }
             queued.scopes[key] = max(queued.scopes[key] ?? 0, interest.revision)
         }
-        releases[route] = queued
         if !releaseRouteOrder.moveToLast(route) { releaseRouteOrder.append(route, key: route) }
         releaseWakes.continuation.yield(())
     }
@@ -308,8 +306,8 @@ package actor V2NodePolicyStateCache {
                 }
             }
             for await (route, request, accepted) in group {
-                guard !closed, var queued = releases[route] else { continue }
-                guard accepted else { sessions[route.source]?.retired = true; continue }
+                guard !closed, let queued = releases[route] else { continue }
+                guard accepted else { sessions[route.source]?.retire(); continue }
                 switch request.payload {
                 case .reset(let cut, let generation):
                     if queued.resetThrough == cut && queued.resetSessionGeneration == generation {
@@ -320,16 +318,23 @@ package actor V2NodePolicyStateCache {
                         queued.scopes.removeValue(forKey: item.scope.policyScope.canonical); pendingReleaseCount -= 1
                     }
                 }
-                releases[route] = queued.scopes.isEmpty && queued.resetThrough == nil ? nil : queued
-                if releases[route] == nil { releaseRouteOrder.remove(route) }
+                if queued.scopes.isEmpty && queued.resetThrough == nil {
+                    releases.removeValue(forKey: route); releaseRouteOrder.remove(route)
+                }
             }
         }
     }
-    private func sourceReady(_ key: Key) -> Bool {
-        guard let source = scopeSources[key] else { return true } // Local authoritative facts.
+    private func sourceAuthority(_ key: Key) throws -> Session? {
+        guard let source = scopeSources[key] else { return nil } // Local authoritative facts.
         guard let wire = scopeSessions[key], let session = sessions[source], wire == session.wire,
-              currentSources[source.hostID] == source else { return false }
-        return session.ready(at: now())
+              currentSources[source.hostID] == source, session.ready(at: now()) else {
+            throw V2PolicyAuthorizationLifecycleError.ownerChanged
+        }
+        return session
+    }
+    private func sourceReady(_ key: Key) -> Bool {
+        do { _ = try sourceAuthority(key); return true }
+        catch { return false }
     }
 
     /// No logical-read concurrency quota. Only the SQL loader acquires a
@@ -341,7 +346,6 @@ package actor V2NodePolicyStateCache {
         if let cached = try cachedSnapshots(scopes: scopes) { return cached }
         for scope in scopes where !sourceReady(scope.canonical) {
             snapshots.removeValue(forKey: scope.canonical); pendingSnapshots.removeValue(forKey: scope.canonical)
-            snapshotOrder.remove(scope.canonical)
         }
         let missing = scopes.filter { snapshots[$0.canonical] == nil }
         let newScopes = missing.filter { snapshotFlights[$0.canonical] == nil }
@@ -427,18 +431,21 @@ package actor V2NodePolicyStateCache {
     package init(maximumEntries: Int = 32_768, identity: V2ActorHostIdentity? = nil,
                  subscriber: V2PolicySnapshotSubscriberWire? = nil, releaseInterests: ReleaseInterests? = nil,
                  maximumPendingReleases: Int = 65_536,
+                 observe: (@Sendable (Event) -> Void)? = nil,
                  now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
         precondition(maximumEntries > 0 && maximumPendingReleases > 0)
         precondition(releaseInterests == nil || (subscriber != nil && subscriber?.host == identity))
-        self.maximumEntries = maximumEntries
+        self.snapshots = .init(maximumEntries: maximumEntries)
         self.identity = identity; self.now = now
         self.subscriber = subscriber; self.releaseInterests = releaseInterests
         self.maximumPendingReleases = maximumPendingReleases
+        self.observe = observe
     }
 
     package func shutdown() async {
         closed = true
-        for session in sessions.values { session.retired = true }
+        snapshots.close()
+        for session in sessions.values { session.retire() }
         let routes = Set(interests.values.map(\.route)).union(releases.keys)
         releaseWakes.continuation.finish(); releaseWorker?.cancel(); await releaseWorker?.value
         let tasks = Array(snapshotFlights.values.map(\.task))
@@ -460,7 +467,7 @@ package actor V2NodePolicyStateCache {
                 for await _ in group { if let request = pending.next() { admit(request) } }
             }
         }
-        snapshots.removeAll(); snapshotOrder.removeAll(); pendingSnapshots.removeAll()
+        pendingSnapshots.removeAll()
         sessions.removeAll(); currentSources.removeAll(); scopeSources.removeAll(); scopeSessions.removeAll()
         interests.removeAll(); releases.removeAll(); releaseRouteOrder.removeAll(); pendingReleaseCount = 0; releaseWorker = nil
         invalidatedFlights.removeAll()

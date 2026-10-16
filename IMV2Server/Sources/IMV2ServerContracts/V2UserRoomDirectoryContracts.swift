@@ -13,20 +13,16 @@ public struct V2UserRoomDirectoryPage: Sendable {
     }
 }
 
-/// 同一代次内，物理存储必须去重并保持一致的排序。
-public struct V2RoomRecoveryTopology: Sendable {
+/// One authoritative page, including its topology generation.
+public struct V2RoomRecoveryDirectorySnapshot: Sendable {
     public let generation: String
-    public let stores: [any V2UserRoomDirectoryReading]
-
-    public init(generation: String, stores: [any V2UserRoomDirectoryReading]) throws {
-        guard !generation.isEmpty, generation.utf8.count <= 128, !stores.isEmpty,
-              stores.count <= Int(Int32.max) else { throw V2RoomRecoveryReadError.invalidRequest }
-        self.generation = generation
-        self.stores = stores
+    public let slice: V2UserRoomDirectorySlice
+    public init(generation: String, slice: V2UserRoomDirectorySlice) throws {
+        guard !generation.isEmpty, generation.utf8.count <= 128 else { throw V2RoomRecoveryReadError.invalidRequest }
+        self.generation = generation; self.slice = slice
     }
 }
-
-public protocol V2RoomRecoveryTopologyReading: Sendable {
-    /// 只要扫描可能漏掉跨物理存储迁移的房间，代次就会变化。
-    func topology() async throws -> V2RoomRecoveryTopology
+public protocol V2RoomRecoveryDirectoryReading: Sendable {
+    var storeCount: Int { get }
+    func snapshot(actorUserID: UserID, after: RoomID?, limit: Int, storeIndex: Int) async throws -> V2RoomRecoveryDirectorySnapshot
 }

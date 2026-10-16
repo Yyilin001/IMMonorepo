@@ -28,6 +28,16 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
                 && lhs.requiresRoomInterest == rhs.requiresRoomInterest
         }
     }
+    enum ProgressAbsence: String, Sendable {
+        case authorityMissing = "authority_missing", noInterest = "no_interest", noRoom = "no_room"
+        case authorizationNotReady = "authorization_not_ready", sessionUnavailable = "session_unavailable", noMember = "no_member"
+    }
+    struct ProgressObservation: Sendable {
+        let snapshot: (authorization: Permit, highWatermark: UInt64)?
+        let absence: ProgressAbsence?
+        init(snapshot: (authorization: Permit, highWatermark: UInt64)) { self.snapshot = snapshot; absence = nil }
+        init(absence: ProgressAbsence) { snapshot = nil; self.absence = absence }
+    }
     public enum ApplyResult: Sendable, Equatable {
         case applied(permits: [Permit])
         case stale, invalid, snapshotRequired
@@ -46,14 +56,21 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
     private let maximumRooms: Int
     private let maximumRetiredRooms: Int
     private let maximumMembersPerRoom: Int
+    private let installationMetrics: V2RoomSubscriptionHeadDeliveryMetrics
+    private enum InstallationSession {
+        case gate(V2RoomDeliverySessionGate)
+        case refused(V2RoomSubscriptionHeadDeliveryMetrics.Stage)
+    }
     private let now: @Sendable () -> ContinuousClock.Instant
     public init(maximumRooms: Int = 256, maximumRetiredRooms: Int? = nil, maximumConnections: Int = 16_384,
                 maximumMembersPerRoom: Int = V2GroupCapacityPolicy.largeMaximumMembers,
-                now: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) {
+                now: @escaping @Sendable () -> ContinuousClock.Instant = { .now },
+                installationMetrics: V2RoomSubscriptionHeadDeliveryMetrics = .shared) {
         precondition(maximumRooms > 0 && maximumConnections > 0 && maximumMembersPerRoom > 0)
         precondition(maximumRetiredRooms.map { $0 > 0 } ?? true)
         self.maximumRooms = maximumRooms; self.maximumRetiredRooms = maximumRetiredRooms ?? maximumRooms
         self.maximumMembersPerRoom = maximumMembersPerRoom; self.now = now
+        self.installationMetrics = installationMetrics
         connections = .init(maximumConnections: maximumConnections)
     }
     private func room(_ id: RoomID) -> V2RoomSubscriptionActor? { catalog.withLock { $0.closed ? nil : $0.rooms[id] } }
@@ -63,9 +80,6 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
                   gate.serviceID == serviceID else { return nil }
             return gate
         }
-    }
-    public func sessionRooms(host: V2ActorHostIdentity) -> [RoomID] {
-        catalog.withLock { $0.hostsByRoom.compactMap { $0.value == host ? $0.key : nil } }
     }
     /// Only a grant installed from a confirmed native room route may supersede
     /// an incarnation. An unsolicited open/pulse is not that proof. Room and
@@ -110,15 +124,36 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
     }
     public func install(fence: V2RoomSubscriptionFence, serviceID: String, session: V2RoomDeliverySession,
                         afterAuthoritativeReset: Bool = false) async -> Bool {
-        guard (try? fence.validate()) != nil, session.host == fence.activation.host,
-              let gate = sessionGate(session, serviceID: serviceID), gate.isReady(), !serviceID.isEmpty,
-              serviceID.utf8.count <= 128 else { return false }
+        guard (try? fence.validate()) != nil else { return rejectInstallation(.installInvalidFence) }
+        guard session.host == fence.activation.host else { return rejectInstallation(.installHostMismatch) }
+        guard !serviceID.isEmpty, serviceID.utf8.count <= 128 else { return rejectInstallation(.installInvalidService) }
+        let lookup = catalog.withLock { value -> InstallationSession in
+            guard !value.closed else { return .refused(.installCatalogClosed) }
+            guard let gate = value.sessions[session.host] else { return .refused(.installSessionMissing) }
+            guard gate.serviceID == serviceID else { return .refused(.installSessionServiceMismatch) }
+            guard gate.session == session else { return .refused(.installSessionReplaced) }
+            return .gate(gate)
+        }
+        let gate: V2RoomDeliverySessionGate
+        switch lookup {
+        case .gate(let current): gate = current
+        case .refused(let stage): return rejectInstallation(stage)
+        }
+        guard gate.isReady() else { return rejectInstallation(.installSessionNotReady) }
         let selected = catalog.withLock { value -> V2RoomSubscriptionActor? in
-            guard !value.closed,
-                  value.rooms[fence.roomID] != nil || value.rooms.count < maximumRooms + maximumRetiredRooms, value.rooms[fence.roomID] != nil || !value.requiresReset || afterAuthoritativeReset,
-                  value.active.contains(fence.roomID) || value.active.count < maximumRooms else { return nil }
+            guard !value.closed else { _ = rejectInstallation(.installCatalogClosed); return nil }
+            guard value.rooms[fence.roomID] != nil || value.rooms.count < maximumRooms + maximumRetiredRooms else {
+                _ = rejectInstallation(.installHistoryCapacity); return nil
+            }
+            guard value.rooms[fence.roomID] != nil || !value.requiresReset || afterAuthoritativeReset else {
+                _ = rejectInstallation(.installResetRequired); return nil
+            }
+            guard value.active.contains(fence.roomID) || value.active.count < maximumRooms else {
+                _ = rejectInstallation(.installRoomCapacity); return nil
+            }
             let cell = value.rooms[fence.roomID] ?? V2RoomSubscriptionActor(roomID: fence.roomID,
-                connections: connections, maximumMembersPerRoom: maximumMembersPerRoom, now: now)
+                connections: connections, maximumMembersPerRoom: maximumMembersPerRoom, now: now,
+                installationMetrics: installationMetrics)
             value.rooms[fence.roomID] = cell
             return cell
         }
@@ -137,6 +172,9 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
             }
         }
         return result
+    }
+    private func rejectInstallation(_ stage: V2RoomSubscriptionHeadDeliveryMetrics.Stage) -> Bool {
+        installationMetrics.record(stage); return false
     }
     public func pause(fence: V2RoomSubscriptionFence) async -> Bool {
         await room(fence.roomID)?.mutate { $0.pause(fence: fence) } ?? false
@@ -157,8 +195,15 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
     public func capturePermits(roomID: RoomID) async -> [Permit] { await room(roomID)?.capture(detail: true) ?? [] }
     public func captureOnlinePermits(roomID: RoomID) async -> [Permit] { await room(roomID)?.capture(detail: false) ?? [] }
     public func progressSnapshot(connectionID: UUID) async -> (authorization: Permit, highWatermark: UInt64)? {
-        guard let interest = connections.snapshot().connections[connectionID]?.interest,
-              let cell = room(interest.roomID) else { return nil }
+        await progressObservation(connectionID: connectionID).snapshot
+    }
+    func progressObservation(connectionID: UUID) async -> ProgressObservation {
+        guard let interest = connections.connection(connectionID)?.interest else {
+            installationMetrics.record(.progressNoInterest); return .init(absence: .noInterest)
+        }
+        guard let cell = room(interest.roomID) else {
+            installationMetrics.record(.progressNoRoom); return .init(absence: .noRoom)
+        }
         return await cell.progress(connectionID: connectionID)
     }
     public func authorizedMemberRevision(roomID: RoomID, userID: UserID) async -> UInt64? {
@@ -180,7 +225,7 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
     func validateDeviceProgress(connectionID: UUID, userID: UserID,
         reports: [(RoomID, UInt64)]) async throws -> [V2DeviceRoomProgress] {
         guard reports.count <= 64, Set(reports.map { $0.0 }).count == reports.count,
-              connections.snapshot().connections[connectionID]?.userID == userID else { throw V2RoomRecoveryReadError.invalidRequest }
+              connections.connection(connectionID)?.userID == userID else { throw V2RoomRecoveryReadError.invalidRequest }
         var result: [V2DeviceRoomProgress] = []
         for report in reports {
             guard let cell = room(report.0) else { throw V2RoomRecoveryReadError.topologyChanged }
@@ -190,34 +235,35 @@ public final class V2GatewayRoomSubscriptionAuthority: Sendable {
     }
     @discardableResult
     public func registerConnection(_ connectionID: UUID, userID: UserID, lifecycle: UUID) -> Bool {
-        let old = connections.snapshot().connections[connectionID]
+        let old = connections.connection(connectionID)
         let accepted = connections.registerConnection(connectionID, userID: userID, lifecycle: lifecycle)
         if accepted, let old, old.lifecycle != lifecycle || old.userID != userID { _ = old.socketGate?.close() }
         return accepted
     }
     func bindSocket(_ connectionID: UUID, lifecycle: UUID, gate: V2RoomSubscriptionSocketGate) async {
         guard connections.bindSocket(connectionID, lifecycle: lifecycle, gate: gate) else { return }
-        if let pending = connections.snapshot().connections[connectionID]?.publication { try? await pending.get() }
+        if let pending = connections.connection(connectionID)?.publication { try? await pending.get() }
     }
     public func removeConnection(_ connectionID: UUID, lifecycle: UUID) {
-        let gate = connections.snapshot().connections[connectionID]?.socketGate
+        let gate = connections.connection(connectionID)?.socketGate
         connections.removeConnection(connectionID, lifecycle: lifecycle)
-        if gate != nil, connections.snapshot().connections[connectionID] == nil { _ = gate?.close() }
+        if gate != nil, connections.connection(connectionID) == nil { _ = gate?.close() }
     }
     @discardableResult
     public func registerRoomInterest(connectionID: UUID, lifecycle: UUID, roomID: RoomID, scopeGeneration: UInt64) async -> Bool {
         guard connections.registerRoomInterest(connectionID: connectionID, lifecycle: lifecycle, roomID: roomID,
             scopeGeneration: scopeGeneration) else { return false }
-        if let pending = connections.snapshot().connections[connectionID]?.publication { try? await pending.get() }
+        if let pending = connections.connection(connectionID)?.publication { try? await pending.get() }
         return true
     }
-    public func removeRoomInterest(connectionID: UUID, lifecycle: UUID, roomID: RoomID) async {
-        connections.removeRoomInterest(connectionID: connectionID, lifecycle: lifecycle, roomID: roomID)
-        if let pending = connections.snapshot().connections[connectionID]?.publication { try? await pending.get() }
+    public func removeRoomInterest(connectionID: UUID, lifecycle: UUID, roomID: RoomID, scopeGeneration: UInt64) async {
+        connections.removeRoomInterest(connectionID: connectionID, lifecycle: lifecycle, roomID: roomID,
+            scopeGeneration: scopeGeneration)
+        if let pending = connections.connection(connectionID)?.publication { try? await pending.get() }
     }
     func interestPermit(connectionID: UUID, lifecycle: UUID, roomID: RoomID,
                         generation: UInt64) -> @Sendable (@Sendable () -> Void) -> Bool {
-        let gate = connections.snapshot().connections[connectionID]?.socketGate
+        let gate = connections.connection(connectionID)?.socketGate
         return { enqueue in
             guard let gate, gate.eventLoop.inEventLoop else { return false }
             return gate.enqueueInterest(lifecycle: lifecycle, roomID: roomID, generation: generation, body: enqueue)
@@ -253,9 +299,11 @@ fileprivate actor V2RoomSubscriptionActor {
     private var publicationBarrier: [UUID: EventLoopFuture<Void>] = [:]
     private var projected: [UUID: (UserID, V2RoomSubscriptionSocketGate, V2RoomSubscriptionSocketGate.RoomPermission)] = [:]
     init(roomID: RoomID, connections: V2RoomSubscriptionConnections, maximumMembersPerRoom: Int,
-         now: @escaping @Sendable () -> ContinuousClock.Instant) {
+         now: @escaping @Sendable () -> ContinuousClock.Instant,
+         installationMetrics: V2RoomSubscriptionHeadDeliveryMetrics) {
         self.roomID = roomID; self.connections = connections
-        machine = .init(directory: connections, maximumMembersPerRoom: maximumMembersPerRoom, now: now)
+        machine = .init(directory: connections, maximumMembersPerRoom: maximumMembersPerRoom, now: now,
+            installationMetrics: installationMetrics)
     }
     func read<T: Sendable>(_ body: @Sendable (V2RoomSubscriptionStateMachine) throws -> T) async rethrows -> T {
         await enter(); defer { leave() }; return try body(machine)
@@ -297,12 +345,13 @@ fileprivate actor V2RoomSubscriptionActor {
         await settle()
         return permits
     }
-    func progress(connectionID: UUID) async -> (authorization: V2GatewayRoomSubscriptionAuthority.Permit, highWatermark: UInt64)? {
+    func progress(connectionID: UUID) async -> V2GatewayRoomSubscriptionAuthority.ProgressObservation {
         await enter(); defer { leave() }
-        guard let result = machine.progressSnapshot(connectionID: connectionID) else { return nil }
+        let observation = machine.progressObservation(connectionID: connectionID)
+        guard let result = observation.snapshot else { return observation }
         let permit = bind([result.authorization])[0]
         await settle()
-        return (permit, result.highWatermark)
+        return .init(snapshot: (permit, result.highWatermark))
     }
     func apply(_ delivery: V2RoomSubscriptionDelivery, serviceID: String) async -> V2GatewayRoomSubscriptionAuthority.ApplyResult {
         await enter(); defer { leave() }
@@ -314,11 +363,11 @@ fileprivate actor V2RoomSubscriptionActor {
         return result
     }
     private func bind(_ permits: [V2GatewayRoomSubscriptionAuthority.Permit]) -> [V2GatewayRoomSubscriptionAuthority.Permit] {
-        let liveConnections = connections.snapshot().connections
+        let gates = connections.socketGates(for: permits.lazy.map(\.connectionID))
         return permits.map { original in
             var permit = original
             if users.insert(permit.userID).inserted { projectionDirty = true }
-            if let gate = liveConnections[permit.connectionID]?.socketGate {
+            if let gate = gates[permit.connectionID] {
                 permit.socketGate = gate
                 if projected[permit.connectionID]?.1 !== gate || projected[permit.connectionID]?.0 != permit.userID {
                     projected[permit.connectionID] = (permit.userID, gate, .denied); projectionDirty = true
@@ -338,7 +387,7 @@ fileprivate actor V2RoomSubscriptionActor {
         guard projectionDirty else { return Array(publicationBarrier.values) }
         projectionDirty = false
         let permissions = Dictionary(uniqueKeysWithValues: users.map { ($0, machine.permission(roomID: roomID, userID: $0)) })
-        let liveConnections = connections.snapshot().connections
+        let gates = connections.socketGates(for: projected.keys)
         for (id, (user, gate, previous)) in projected {
             let permission = permissions[user] ?? .denied
             if permission != previous {
@@ -348,14 +397,14 @@ fileprivate actor V2RoomSubscriptionActor {
                 publicationBarrier[id] = future
                 projected[id] = (user, gate, permission)
             }
-            if liveConnections[id]?.socketGate !== gate { projected.removeValue(forKey: id); publicationBarrier.removeValue(forKey: id) }
+            if gates[id] !== gate { projected.removeValue(forKey: id); publicationBarrier.removeValue(forKey: id) }
         }
         return Array(publicationBarrier.values)
     }
 }
 
 /// Mutable room state is exclusively owned by one room actor. Connection
-/// selection uses short directory snapshots; transitions execute no socket
+/// selection copies only this room's target devices; transitions execute no socket
 /// callback, SQL, or await.
 fileprivate final class V2RoomSubscriptionStateMachine {
     typealias Permit = V2GatewayRoomSubscriptionAuthority.Permit
@@ -421,9 +470,6 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         var unknownRoomsRequireReset = false
         var closed = false
         let directory: V2RoomSubscriptionConnections
-        var connections: [UUID: V2RoomSubscriptionConnections.Connection] { directory.snapshot().connections }
-        var connectionsByUser: [UserID: Set<UUID>] { directory.snapshot().connectionsByUser }
-        var connectionsByRoomUser: [V2RoomSubscriptionConnections.RoomUser: Set<UUID>] { directory.snapshot().connectionsByRoomUser }
     }
     private var state: State
     private func withState<T>(_ body: (inout State) throws -> T) rethrows -> T { try body(&state) }
@@ -435,7 +481,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         reports: [(RoomID, UInt64)]) throws -> [V2DeviceRoomProgress] {
         try withState { value in
             guard reports.count <= 64, Set(reports.map { $0.0 }).count == reports.count,
-                  !value.closed, let connection = value.connections[connectionID],
+                  !value.closed, let connection = value.directory.connection(connectionID),
                   connection.userID == userID else { throw V2RoomRecoveryReadError.invalidRequest }
             return try reports.map { roomID, applied in
                 guard let room = value.rooms[roomID], room.authorization.ready, room.session.isReady() else {
@@ -451,23 +497,24 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         }
     }
     private let maximumMembersPerRoom: Int
+    private let installationMetrics: V2RoomSubscriptionHeadDeliveryMetrics
     init(directory: V2RoomSubscriptionConnections, maximumMembersPerRoom: Int,
-         now: @escaping @Sendable () -> ContinuousClock.Instant) {
+         now: @escaping @Sendable () -> ContinuousClock.Instant,
+         installationMetrics: V2RoomSubscriptionHeadDeliveryMetrics) {
         self.state = State(directory: directory)
         self.maximumRooms = 1; self.maximumRetiredRooms = 1
         self.maximumMembersPerRoom = maximumMembersPerRoom; self.now = now
+        self.installationMetrics = installationMetrics
     }
     /// Baseline/Ready and H capture the same exact room/user/device gate as bodies.
     func capturePermits(roomID: RoomID) -> [Permit] {
         withState { value in
             guard !value.closed, let room = value.rooms[roomID], room.authorization.ready, room.session.isReady() else { return [] }
-            return room.authorization.members.flatMap { userID, member in
-                (value.connectionsByRoomUser[V2RoomSubscriptionConnections.RoomUser(roomID: roomID, userID: userID)] ?? []).compactMap { connectionID -> Permit? in
-                    guard let connection = value.connections[connectionID], let interest = connection.interest else { return nil }
-                    return Permit(fence: room.fence, userID: userID, memberRevision: member.revision,
-                        connectionID: connectionID, lifecycle: connection.lifecycle, scopeGeneration: interest.scopeGeneration,
-                        baselineSequence: member.baselineSequence, roomInterestID: interest.id, authorizationID: member.authorizationID)
-                }
+            return value.directory.selectConnections(for: room.authorization.members.keys, roomID: roomID).compactMap { connectionID, connection in
+                guard let member = room.authorization.members[connection.userID], let interest = connection.interest else { return nil }
+                return Permit(fence: room.fence, userID: connection.userID, memberRevision: member.revision,
+                    connectionID: connectionID, lifecycle: connection.lifecycle, scopeGeneration: interest.scopeGeneration,
+                    baselineSequence: member.baselineSequence, roomInterestID: interest.id, authorizationID: member.authorizationID)
             }
         }
     }
@@ -477,11 +524,9 @@ fileprivate final class V2RoomSubscriptionStateMachine {
         withState { value in
             guard !value.closed, let room = value.rooms[roomID], room.authorization.ready,
                   room.session.isReady() else { return [] }
-            return room.authorization.members.flatMap { userID, member in
-                (value.connectionsByUser[userID] ?? []).compactMap { connectionID in
-                    guard let connection = value.connections[connectionID] else { return nil }
-                    return accountPermit(room: room, member: member, connectionID: connectionID, connection: connection)
-                }
+            return value.directory.selectConnections(for: room.authorization.members.keys).compactMap { connectionID, connection in
+                guard let member = room.authorization.members[connection.userID] else { return nil }
+                return accountPermit(room: room, member: member, connectionID: connectionID, connection: connection)
             }
         }
     }
@@ -489,27 +534,30 @@ fileprivate final class V2RoomSubscriptionStateMachine {
     /// O(1) connection-local snapshot. Neither caller room IDs nor progress
     /// reports select authority; only the authenticated connection's interest does.
     func progressSnapshot(connectionID: UUID) -> (authorization: Permit, highWatermark: UInt64)? {
+        progressObservation(connectionID: connectionID).snapshot
+    }
+    func progressObservation(connectionID: UUID) -> V2GatewayRoomSubscriptionAuthority.ProgressObservation {
         withState { value in
-            guard !value.closed, let connection = value.connections[connectionID],
+            guard !value.closed, let connection = value.directory.connection(connectionID),
                   let interest = connection.interest else {
-                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressNoInterest); return nil
+                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressNoInterest); return .init(absence: .noInterest)
             }
             guard let room = value.rooms[interest.roomID] else {
-                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressNoRoom); return nil
+                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressNoRoom); return .init(absence: .noRoom)
             }
             guard room.authorization.ready else {
-                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressAuthorityNotReady); return nil
+                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressAuthorityNotReady); return .init(absence: .authorizationNotReady)
             }
             guard room.session.isReady() else {
-                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressSessionUnavailable); return nil
+                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressSessionUnavailable); return .init(absence: .sessionUnavailable)
             }
             guard let member = room.authorization.members[connection.userID] else {
-                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressNoMember); return nil
+                V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.progressNoMember); return .init(absence: .noMember)
             }
             let permit = Permit(fence: room.fence, userID: connection.userID, memberRevision: member.revision,
                 connectionID: connectionID, lifecycle: connection.lifecycle, scopeGeneration: interest.scopeGeneration,
                 baselineSequence: member.baselineSequence, roomInterestID: interest.id, authorizationID: member.authorizationID)
-            return (permit, room.messages.recoveryHighWatermark)
+            return .init(snapshot: (permit, room.messages.recoveryHighWatermark))
         }
     }
 
@@ -520,30 +568,38 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                         session: V2RoomDeliverySessionGate, afterAuthoritativeReset: Bool = false,
                         reserve: @Sendable () -> Bool = { true }) -> Bool {
         withState { value in
-            do { try fence.validate() } catch { return false }
-            guard !value.closed, session.isReady(),
-                  !serviceID.isEmpty, serviceID.utf8.count <= 128,
-                  value.rooms[fence.roomID].map({ !$0.retired }) == true || value.activeRoomCount < maximumRooms else { return false }
+            do { try fence.validate() } catch { return rejectInstallation(.installInvalidFence) }
+            guard !value.closed else { return rejectInstallation(.installStateClosed) }
+            guard session.isReady() else { return rejectInstallation(.installSessionNotReady) }
+            guard !serviceID.isEmpty, serviceID.utf8.count <= 128 else { return rejectInstallation(.installInvalidService) }
+            guard value.rooms[fence.roomID].map({ !$0.retired }) == true || value.activeRoomCount < maximumRooms else {
+                return rejectInstallation(.installRoomCapacity)
+            }
             // This flag comes only from a locally validated reset RPC, never
             // from a delivery packet. Once history is evicted, unknown rooms
             // cannot use an ordinary grant to bypass the missing fence floor.
-            guard value.rooms[fence.roomID] != nil || !value.unknownRoomsRequireReset || afterAuthoritativeReset else { return false }
+            guard value.rooms[fence.roomID] != nil || !value.unknownRoomsRequireReset || afterAuthoritativeReset else {
+                return rejectInstallation(.installResetRequired)
+            }
             if let old = value.rooms[fence.roomID] {
                 if old.fence == fence {
-                    guard !old.retired, old.serviceID == serviceID, old.session.isReady() else { return false }
-                    guard reserve() else { return false }
-                    return old.session === session
+                    guard !old.retired else { return rejectInstallation(.installRetiredFence) }
+                    guard old.serviceID == serviceID else { return rejectInstallation(.installServiceMismatch) }
+                    guard old.session.isReady() else { return rejectInstallation(.installPreviousSessionRetired) }
+                    guard reserve() else { return rejectInstallation(.installReservationRejected) }
+                    guard old.session === session else { return rejectInstallation(.installDifferentSession) }
+                    return true
                 }
                 if fence.activation == old.fence.activation {
-                    guard fence.generation > old.fence.generation else { return false }
+                    guard fence.generation > old.fence.generation else { return rejectInstallation(.installFenceNotNewer) }
                 } else {
                     // Same data epoch can start a new activation at generation 1.
                     // An equal activation epoch on another host is a conflict,
                     // never a newer activation or a reason to revive old authority.
-                    guard fence.activation.isNewer(than: old.fence.activation) else { return false }
+                    guard fence.activation.isNewer(than: old.fence.activation) else { return rejectInstallation(.installActivationNotNewer) }
                 }
             }
-            guard reserve() else { return false }
+            guard reserve() else { return rejectInstallation(.installReservationRejected) }
             let previous = value.rooms[fence.roomID]
             let retainedHead = previous?.fence.activation.owner == fence.activation.owner
                 ? previous?.messages.recoveryHighWatermark ?? 0 : 0
@@ -554,6 +610,9 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             value.rooms[fence.roomID] = replacement
             return true
         }
+    }
+    private func rejectInstallation(_ stage: V2RoomSubscriptionHeadDeliveryMetrics.Stage) -> Bool {
+        installationMetrics.record(stage); return false
     }
 
     @discardableResult
@@ -704,34 +763,31 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                 guard event.roomID == id, event.roomSequence > room.messages.eventSequence, validMembers(members) else { return .invalid }
                 room.messages.eventSequence = event.roomSequence
                 room.messages.recoveryHighWatermark = max(room.messages.recoveryHighWatermark, event.highWatermark)
-                let directory = value.directory.snapshot()
-                for recipient in members {
+                let recipients = members.compactMap { recipient -> UserID? in
                     let userID = recipient.userID
                     guard (event.recipientUserIDs.isEmpty && event.groupMembershipRevision != nil)
                             || event.recipientUserIDs.contains(userID),
                           let member = room.authorization.members[userID], recipient.memberRevision == member.revision,
-                          event.roomSequence > member.baselineSequence else { continue }
-                    // Enumerate only this delivery's users and their devices.
-                    for connectionID in directory.connectionsByUser[userID] ?? [] {
-                        guard connectionID != event.excludedConnectionID,
-                              let connection = directory.connections[connectionID] else { continue }
-                        permits.append(accountPermit(room: room, member: member, connectionID: connectionID, connection: connection))
-                    }
+                          event.roomSequence > member.baselineSequence else { return nil }
+                    return userID
+                }
+                for (connectionID, connection) in value.directory.selectConnections(for: recipients) {
+                    guard connectionID != event.excludedConnectionID,
+                          let member = room.authorization.members[connection.userID] else { continue }
+                    permits.append(accountPermit(room: room, member: member, connectionID: connectionID, connection: connection))
                 }
             case .broadcast(let event):
                 guard room.authorization.ready else { return .snapshotRequired }
                 guard event.roomID == id, event.roomSequence > room.messages.eventSequence else { return .invalid }
                 room.messages.eventSequence = event.roomSequence
                 room.messages.recoveryHighWatermark = max(room.messages.recoveryHighWatermark, event.highWatermark)
-                let directory = value.directory.snapshot()
-                for (userID, member) in room.authorization.members {
-                    guard event.roomSequence > member.baselineSequence else { continue }
-                    // Enumerate only this delivery's users and their devices.
-                    for connectionID in directory.connectionsByUser[userID] ?? [] {
-                        guard connectionID != event.excludedConnectionID,
-                              let connection = directory.connections[connectionID] else { continue }
-                        permits.append(accountPermit(room: room, member: member, connectionID: connectionID, connection: connection))
-                    }
+                let recipients = room.authorization.members.compactMap { userID, member in
+                    event.roomSequence > member.baselineSequence ? userID : nil
+                }
+                for (connectionID, connection) in value.directory.selectConnections(for: recipients) {
+                    guard connectionID != event.excludedConnectionID,
+                          let member = room.authorization.members[connection.userID] else { continue }
+                    permits.append(accountPermit(room: room, member: member, connectionID: connectionID, connection: connection))
                 }
             case .authorizationInvalidated:
                 // A terminal can close a cut with missing preceding controls,
@@ -834,7 +890,28 @@ fileprivate final class V2RoomSubscriptionConnections: Sendable {
     private let state = Mutex(ConnectionState())
     let maximumConnections: Int
     init(maximumConnections: Int) { self.maximumConnections = maximumConnections }
-    func snapshot() -> ConnectionState { state.withLock { $0 } }
+    /// Return only selected values. Global Dictionary storage never leaves the
+    /// mutex, so unrelated lifecycle writes cannot copy a retained node snapshot.
+    func connection(_ id: UUID) -> Connection? { state.withLock { $0.connections[id] } }
+    /// One consistent directory cut, containing only recipients of this turn.
+    func selectConnections(for userIDs: some Sequence<UserID>, roomID: RoomID? = nil) -> [(UUID, Connection)] {
+        state.withLock { value in
+            var selected: [(UUID, Connection)] = []
+            for userID in userIDs {
+                let ids = roomID.map { value.connectionsByRoomUser[RoomUser(roomID: $0, userID: userID)] ?? [] }
+                    ?? value.connectionsByUser[userID] ?? []
+                for id in ids { if let connection = value.connections[id] { selected.append((id, connection)) } }
+            }
+            return selected
+        }
+    }
+    func socketGates<S: Sequence>(for ids: S) -> [UUID: V2RoomSubscriptionSocketGate] where S.Element == UUID {
+        state.withLock { value in
+            var selected: [UUID: V2RoomSubscriptionSocketGate] = [:]
+            for id in ids { if let gate = value.connections[id]?.socketGate { selected[id] = gate } }
+            return selected
+        }
+    }
     private func withLock<T>(_ body: (inout sending ConnectionState) throws -> sending T) rethrows -> T {
         try state.withLock(body)
     }
@@ -886,10 +963,11 @@ fileprivate final class V2RoomSubscriptionConnections: Sendable {
             return true
         }
     }
-    func removeRoomInterest(connectionID: UUID, lifecycle: UUID, roomID: RoomID) {
+    func removeRoomInterest(connectionID: UUID, lifecycle: UUID, roomID: RoomID, scopeGeneration: UInt64) {
         withLock { value in
             guard var connection = value.connections[connectionID], connection.lifecycle == lifecycle,
-                  connection.interest?.roomID == roomID else { return }
+                  connection.interest?.roomID == roomID,
+                  connection.interest?.scopeGeneration == scopeGeneration else { return }
             removeInterestIndex(connectionID, connection: connection, in: &value)
             connection.interest = nil
             connection.publication = connection.socketGate?.interest(lifecycle: lifecycle, roomID: nil)

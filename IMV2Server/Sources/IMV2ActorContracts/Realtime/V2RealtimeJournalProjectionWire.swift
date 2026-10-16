@@ -30,12 +30,17 @@ public struct V2RealtimeJournalProjectionFence: Equatable, Codable, Sendable {
         self.sessionID = sessionID; self.interestGeneration = interestGeneration
         self.gatewayIncarnationID = gatewayIncarnationID
     }
-    /// Deadline renewal may retain the same exact ownership generation.
-    public func sameGeneration(as other: Self) -> Bool {
+    /// Subscription revisions may change without replacing the source/route session.
+    /// This comparison is for trusted baseline preparation, never authorization.
+    public func sameAuthority(as other: Self) -> Bool {
         publisherIncarnationID == other.publisherIncarnationID && sourceLeaseEpoch == other.sourceLeaseEpoch
             && sourceLeaseToken == other.sourceLeaseToken && routingPartitionEpoch == other.routingPartitionEpoch
             && routingLeaseToken == other.routingLeaseToken && sessionID == other.sessionID
-            && interestGeneration == other.interestGeneration && gatewayIncarnationID == other.gatewayIncarnationID
+            && gatewayIncarnationID == other.gatewayIncarnationID
+    }
+    /// Deadline renewal may retain the same exact ownership generation.
+    public func sameGeneration(as other: Self) -> Bool {
+        sameAuthority(as: other) && interestGeneration == other.interestGeneration
     }
 }
 

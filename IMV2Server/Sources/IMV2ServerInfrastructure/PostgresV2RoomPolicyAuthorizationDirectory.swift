@@ -4,6 +4,7 @@ import IMV2ActorContracts
 import IMV2Core
 import IMV2ServerApplication
 import SQLKit
+import Synchronization
 
 /// A physical room owner's bounded activation registry.
 /// Restored memory registries use the activation boundary's validated snapshot.
@@ -27,6 +28,7 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
     private var creations = 0
     private var closing: Task<Void, Never>?
     private var closed = false
+    private nonisolated let readyRegistries = ReadyRegistries()
 
     init(endpoint: String, maximumRooms: Int, maximumCreations: Int = 16,
          factory: @escaping Factory,
@@ -104,9 +106,16 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
         }
         let registry = try initializedFactory(initialization)
         entries[token.roomID] = .init(id: UUID(), token: token, creation: Task { registry })
+        readyRegistries.publish(registry, token: token)
     }
 
-    func registry(token: V2RoomActivationToken) async throws -> PostgresV2RoomPolicyAuthorizationRegistry {
+    nonisolated(nonsending) func registry(token: V2RoomActivationToken) async throws -> PostgresV2RoomPolicyAuthorizationRegistry {
+        try Task.checkCancellation()
+        if let registry = try readyRegistries.find(token) { return registry }
+        return try await createOrAwaitRegistry(token: token)
+    }
+
+    private func createOrAwaitRegistry(token: V2RoomActivationToken) async throws -> PostgresV2RoomPolicyAuthorizationRegistry {
         try Task.checkCancellation()
         guard !closed else { throw V2PolicyAuthorizationLifecycleError.closed }
         let entry: Entry
@@ -142,12 +151,14 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
         try Task.checkCancellation()
         guard !closed, entries[token.roomID]?.id == entry.id,
               entries[token.roomID]?.sealed == false else { throw V2PolicyAuthorizationLifecycleError.closed }
+        readyRegistries.publish(registry, token: token)
         return registry
     }
 
     func retire(token: V2RoomActivationToken) async {
         guard let entry = entries[token.roomID], entry.token == token else { return }
         if let retirement = entry.retirement { return await retirement.value }
+        readyRegistries.remove(token)
         let task = Task.detached {
             if case .success(let registry) = await entry.creation.result { await registry.shutdown() }
         }
@@ -160,6 +171,7 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
     func shutdown() async {
         if let closing { return await closing.value }
         closed = true
+        readyRegistries.close()
         let tokens = entries.values.map(\.token)
         let task = Task.detached {
             for token in tokens { await self.retire(token: token) }
@@ -178,6 +190,49 @@ actor PostgresV2RoomPolicyAuthorizationDirectory {
     }
     private struct RoomKind: Decodable { let room_kind: String }
     private struct Participants: Decodable { let lower_user_id: UUID; let higher_user_id: UUID }
+
+    /// A bounded index of initialized references, never cached permission results.
+    /// Only the directory Actor publishes/removes entries; the Registry itself
+    /// still controls command admission and draining. No work runs under the lock.
+    private final class ReadyRegistries: Sendable {
+        private struct Ready: Sendable {
+            let token: V2RoomActivationToken
+            let registry: PostgresV2RoomPolicyAuthorizationRegistry
+        }
+        private struct State: Sendable {
+            var closed = false
+            var values: [RoomID: Ready] = [:]
+        }
+        private let state = Mutex(State())
+        func find(_ token: V2RoomActivationToken) throws -> PostgresV2RoomPolicyAuthorizationRegistry? {
+            try state.withLock {
+                guard !$0.closed else { throw V2PolicyAuthorizationLifecycleError.closed }
+                guard let ready = $0.values[token.roomID] else { return nil }
+                guard ready.token == token else { throw V2PolicyAuthorizationLifecycleError.ownerChanged }
+                return ready.registry
+            }
+        }
+        func publish(_ registry: PostgresV2RoomPolicyAuthorizationRegistry, token: V2RoomActivationToken) {
+            state.withLock {
+                precondition(!$0.closed)
+                $0.values[token.roomID] = Ready(token: token, registry: registry)
+            }
+        }
+        func remove(_ token: V2RoomActivationToken) {
+            state.withLock {
+                if $0.values[token.roomID]?.token == token { $0.values.removeValue(forKey: token.roomID) }
+            }
+        }
+        func close() {
+            let removed = state.withLock {
+                $0.closed = true
+                let removed = $0.values
+                $0.values = [:]
+                return removed
+            }
+            withExtendedLifetime(removed) {}
+        }
+    }
 }
 
 private extension Result {

@@ -12,6 +12,134 @@ benchmark = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(benchmark)
 
 
+class MergedLatencyHistogramTests(unittest.TestCase):
+    def sample(self, values):
+        return dict(count=sum(values.values()), maximum=max(values, default=0),
+            histogramBuckets=[dict(lowerBoundMilliseconds=k, count=v) for k, v in values.items()])
+
+    def test_global_rank_weights_samples_instead_of_shard_percentiles(self):
+        result = benchmark.merge_latency_histograms([self.sample({10: 999}), self.sample({1400: 1})])
+        self.assertEqual(result['count'], 1000)
+        self.assertEqual(result['p99'], 10)
+        self.assertEqual(result['p99UpperBoundExclusiveMilliseconds'], 11)
+        result = benchmark.merge_latency_histograms([self.sample({10: 98}), self.sample({1400: 2})])
+        self.assertEqual(result['p99'], 1400)
+
+    def test_missing_counts_and_inconsistent_histograms_do_not_prove_a_percentile(self):
+        self.assertIsNone(benchmark.merge_latency_histograms([dict(count=1, p99=10)]))
+        wrong = self.sample({10: 5})
+        wrong['count'] = 6
+        with self.assertRaises(ValueError):
+            benchmark.merge_latency_histograms([wrong])
+
+    def test_overflow_cannot_claim_a_finite_upper_bound(self):
+        result = benchmark.merge_latency_histograms([self.sample({10000: 1})])
+        self.assertIsNone(result['p99UpperBoundExclusiveMilliseconds'])
+
+
+class MessageSendCohortSummaryTests(unittest.TestCase):
+    sample = MergedLatencyHistogramTests.sample
+    def reports(self):
+        fast, complete = self.sample({10: 1}), self.sample({10: 1, 900: 1})
+        return [dict(scenarioPhases=[dict(name='measured', messagesAcknowledged=1,
+                observedDurationSeconds=1, durationSeconds=1, completed=True,
+                messageLatency=fast, messageEndToEndLatency=fast)],
+            messageSendCohorts=dict(measured=dict(messagesSent=2, messagesAcknowledged=2,
+                messageLatency=complete, messageEndToEndLatency=complete)))
+            for _ in range(benchmark.PARTS)]
+
+    def test_late_ack_is_included_without_using_other_phase_samples(self):
+        reports = self.reports()
+        for report in reports:
+            report['messageSendCohorts']['warmup'] = dict(messagesSent=100,
+                messagesAcknowledged=100, messageLatency=self.sample({5000: 100}))
+        result = benchmark.summarize(reports, [0]*benchmark.PARTS, 12, measurement_phase='measured')
+        self.assertTrue(result['measurementMessageCohort']['complete'])
+        self.assertEqual(result['measurementLatency']['messageEndToEndLatency']['count'], 24)
+        self.assertEqual(result['measurementLatency']['messageEndToEndLatency']['p99'], 900)
+        self.assertEqual(result['measurementWindowLatency']['messageEndToEndLatency']['count'], 12)
+        self.assertEqual(result['measurementWindowLatency']['messageEndToEndLatency']['p99'], 10)
+
+    def test_incomplete_missing_or_inconsistent_cohort_cannot_prove_p99(self):
+        for field in ('missing', 'messagesAcknowledged', 'histogramCount'):
+            reports = self.reports()
+            if field == 'missing': reports[0].pop('messageSendCohorts')
+            elif field == 'messagesAcknowledged': reports[0]['messageSendCohorts']['measured'][field] = 1
+            else: reports[0]['messageSendCohorts']['measured']['messageLatency'] = self.sample({10: 1})
+            result = benchmark.summarize(reports, [0]*benchmark.PARTS, 12, measurement_phase='measured')
+            self.assertFalse(result['measurementMessageCohort']['complete'])
+            self.assertIsNone(result['measurementLatency']['messageEndToEndLatency'])
+
+    def test_corrupt_bucket_count_is_rejected(self):
+        reports = self.reports()
+        reports[0]['messageSendCohorts']['measured']['messageLatency']['histogramBuckets'][0]['count'] += 1
+        with self.assertRaises(ValueError):
+            benchmark.summarize(reports, [0]*benchmark.PARTS, 12, measurement_phase='measured')
+
+
+class WorkloadTCPInspectionTests(unittest.TestCase):
+    def test_custom_source_range_does_not_wait_for_an_unrelated_default_range(self):
+        for system, text in [
+            ('Darwin', '\n'.join([
+                'tcp4 0 0 127.0.0.1.1024 127.0.0.1.21453 TIME_WAIT',
+                'tcp4 0 0 127.0.0.1.21023 127.0.0.1.21458 ESTABLISHED',
+                'tcp4 0 0 127.0.0.1.21024 127.0.0.1.21453 TIME_WAIT',
+                'tcp4 0 0 127.0.0.1.25000 127.0.0.1.21453 TIME_WAIT',
+            ])),
+            ('Linux', '\n'.join(f'{i}: 0100007F:{local:04X} 0100007F:{remote:04X} 06 0:0'
+                for i, (local, remote) in enumerate([
+                    (1024, 21453), (21023, 21458), (21024, 21453), (25000, 21453)]))),
+        ]:
+            with self.subTest(system=system):
+                self.assertEqual(benchmark.count_workload_tcp_tuples(text, 21453,
+                    system=system, local_port_base=1024), 2)
+
+    def test_darwin_counts_only_workload_source_and_gateway_destination_pairs(self):
+        rows = '\n'.join([
+            'Proto Recv-Q Send-Q Local Address Foreign Address (state)',
+            'tcp4 0 0 127.0.0.1.25000 127.0.0.1.21453 TIME_WAIT',
+            'tcp6 0 0 ::1.44999 ::1.21458 ESTABLISHED',
+            'tcp4 0 0 127.0.0.1.24999 127.0.0.1.21453 TIME_WAIT',
+            'tcp4 0 0 127.0.0.1.45000 127.0.0.1.21453 TIME_WAIT',
+            'tcp4 0 0 127.0.0.1.25000 127.0.0.1.21459 ESTABLISHED',
+            'tcp4 0 0 *.21453 *.* LISTEN',
+            'udp4 0 0 127.0.0.1.25000 127.0.0.1.21453 CONNECTED',
+        ])
+        self.assertEqual(benchmark.count_workload_tcp_tuples(rows, 21453, system='Darwin'), 2)
+
+    def test_linux_decodes_hex_ports_for_both_tcp_address_families(self):
+        rows = ['sl local_address rem_address st tx_queue rx_queue']
+        for index, (local, remote, state) in enumerate([
+            (25000, 21453, '06'), (44999, 21458, '01'),
+            (24999, 21453, '06'), (45000, 21453, '06'),
+            (25000, 21459, '01'), (21453, 0, '0A'),
+        ]):
+            address = '0100007F' if index % 2 == 0 else '00000000000000000000000001000000'
+            rows.append(f'{index}: {address}:{local:04X} {address}:{remote:04X} {state} 0:0')
+        rows += ['malformed', '7: invalid:nothex invalid:53CD 01 0:0']
+        self.assertEqual(benchmark.count_workload_tcp_tuples('\n'.join(rows), 21453, system='Linux'), 2)
+
+
+class PostgresSamplerFailureTests(unittest.TestCase):
+    def test_connection_failures_are_distinct_from_execution_timeouts_without_retaining_inputs(self):
+        cases = (
+            (2, 'connection to server at private-host failed: timeout expired', 'connection_timeout'),
+            (2, 'Connection refused', 'connection_refused'),
+            (2, 'FATAL: remaining connection slots are reserved', 'connection_capacity'),
+            (2, 'FATAL: too many clients already', 'connection_capacity'),
+            (2, 'password authentication failed for user private-user', 'authentication'),
+            (2, 'server closed the connection unexpectedly', 'connection_closed'),
+            (2, 'could not receive data from server', 'connection_closed'),
+            (1, 'ERROR: canceling statement due to statement timeout\nSELECT private-data', 'statement_timeout'),
+            (1, 'ERROR: canceling statement due to lock timeout', 'lock_timeout'),
+            (2, 'unknown private diagnostic', 'connection_error'),
+            (1, 'unknown private diagnostic', 'statement_error'),
+        )
+        for returncode, stderr, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(benchmark.postgres_sampler_failure_category(returncode, stderr), expected)
+
+
 class LoaderFailureReportDrainTests(unittest.TestCase):
     def test_failed_peer_does_not_immediately_abort_and_later_failures_do_not_extend_deadline(self):
         drain = benchmark.LoaderFailureReportDrain(30)
@@ -65,6 +193,11 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
             manifest = dict(userBucket='user-a', shardID='room-a', capacityProfileID='standard', commandWindowLimit=100)
             defaults = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
             self.assertNotIn('IM_V2_GATEWAY_HEARTBEAT_DIAGNOSTICS', defaults)
+            self.assertNotIn('IM_V2_GATEWAY_COVERAGE_DIAGNOSTICS', defaults)
+            args.candidate_coverage_diagnostics = True
+            diagnostic = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
+            self.assertEqual(diagnostic['IM_V2_GATEWAY_COVERAGE_DIAGNOSTICS'], 'true')
+            args.candidate_coverage_diagnostics = False
             args.candidate_heartbeat_diagnostics = True
             diagnostic = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
             self.assertEqual(diagnostic['IM_V2_GATEWAY_HEARTBEAT_DIAGNOSTICS'], 'true')
@@ -78,7 +211,7 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
             self.assertEqual(one['IM_V2_DATABASE_POLICY_CONTROL_CONNECTIONS_PER_EVENT_LOOP'], '4')
             args.candidate_event_loop_threads = 2
             two = benchmark.gateway_env(args, 'candidate', 'test_database', 0, fixture, manifest)
-            self.assertEqual(two['IM_V2_SEND_PATH_TRACE_MODE'], 'sampled')
+            self.assertEqual(two['IM_V2_SEND_PATH_TRACE_MODE'], 'off')
             self.assertEqual(two['IM_V2_MESSAGE_WRITE_PREPARED_QUERIES_ENABLED'], 'true')
             self.assertEqual(two['IM_V2_ACTOR_BINARY_INVOCATIONS_ENABLED'], 'true')
             args.candidate_actor_binary_invocations = 'enabled'
@@ -170,7 +303,7 @@ class CandidateAuthorizationConfigurationTests(unittest.TestCase):
                 if mode is not None:
                     args.candidate_authorization_mode = mode
                 actors, parts = benchmark.prepare(args, dict(shardID='rooms-primary',
-                    userBucket='users-primary', users=benchmark.PARTS))
+                    userBucket='users-primary', users=benchmark.PARTS, rooms=benchmark.PARTS))
                 self.assertEqual(parts, [1] * benchmark.PARTS)
                 placement = None
                 for name in [f'gateway-{index}' for index in range(benchmark.NODES)] + ['account']:

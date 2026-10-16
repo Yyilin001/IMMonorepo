@@ -569,6 +569,19 @@ public actor V2GatewaySession {
         captureAuthorSample: Bool = false,
         roomProgress: (@Sendable (IMV2Heartbeat) async -> [IMV2GroupEventProgressState])? = nil
     ) async throws -> V2GatewaySessionResponse {
+        switch envelope.body {
+        case .heartbeat, .messageSendOperation, .messageSendOperationRecover:
+            return try await receiveAuthenticatedHot(frame, envelope: envelope, handler: handler,
+                originatingConnectionID: originatingConnectionID, roomProgress: roomProgress)
+        default:
+            return try await receiveAuthenticatedFull(frame, envelope: envelope, handler: handler,
+                originatingConnectionID: originatingConnectionID, captureAuthorSample: captureAuthorSample)
+        }
+    }
+
+    /// Shared synchronous validation owns request correlation before any await.
+    private func beginAuthenticatedRequest(_ frame: V2GatewayInboundFrame, envelope: IMV2Envelope) throws
+        -> (version: UInt8, identity: V2AuthenticatedConnection, clock: (date: Date, milliseconds: Int64)) {
         guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
         guard case .authenticated(let version, let identity) = state.phase else {
             throw V2GatewaySessionError.unsupportedCommand
@@ -598,6 +611,60 @@ public actor V2GatewaySession {
                   UUID(uuidString: request.roomID) != nil else { throw V2GatewaySessionError.unsupportedCommand }
         }
         try state.receiveAuthenticatedRequest(frame.header)
+        return (version, identity, clock)
+    }
+
+    /// Keep the common send/heartbeat suspension independent of prepared pages,
+    /// author presentation and the other cold command-specific response state.
+    @inline(never)
+    private func receiveAuthenticatedHot(_ frame: V2GatewayInboundFrame, envelope: IMV2Envelope,
+        handler: any V2GatewayCommandHandler, originatingConnectionID: UUID?,
+        roomProgress: (@Sendable (IMV2Heartbeat) async -> [IMV2GroupEventProgressState])?
+    ) async throws -> V2GatewaySessionResponse {
+        let context = try beginAuthenticatedRequest(frame, envelope: envelope)
+        do {
+            let response: IMV2Envelope
+            if !(await commandAdmission.admit(identity: context.identity,
+                cost: commandAdmissionCost(for: envelope), now: context.clock.date)) {
+                var limited = IMV2Envelope()
+                limited.error.code = "RATE_LIMITED"; limited.error.retryable = true
+                limited.error.retryAfterSeconds = 1
+                response = limited
+            } else if case .heartbeat(let heartbeat) = envelope.body {
+                guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
+                let milliseconds = try currentServerTime().milliseconds
+                guard heartbeat.roomProgress.count <= 1, heartbeat.roomProgress.allSatisfy({
+                    UUID(uuidString: $0.roomID) != nil && $0.scopeGeneration > 0
+                        && $0.appliedRoomSequence <= UInt64(Int64.max)
+                }) else { throw V2GatewaySessionError.unsupportedCommand }
+                frame.heartbeatProbe?.mark(.progressSubmitted)
+                let progress = await roomProgress?(heartbeat) ?? []
+                frame.heartbeatProbe?.mark(.progressReturned)
+                var heartbeatResponse = IMV2Envelope()
+                heartbeatResponse.heartbeatAck.serverTimeMs = milliseconds
+                heartbeatResponse.heartbeatAck.roomSubscriptionStates = progress
+                response = heartbeatResponse
+            } else {
+                guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
+                response = try await handler.handle(envelope: envelope, identity: context.identity,
+                    originatingConnectionID: originatingConnectionID)
+            }
+            return try completeAuthenticatedResponse(response, request: envelope, version: context.version)
+        } catch {
+            try? state.completeResponse(requestID: envelope.requestID)
+            throw error
+        }
+    }
+
+    @inline(never)
+    private func receiveAuthenticatedFull(
+        _ frame: V2GatewayInboundFrame,
+        envelope: IMV2Envelope,
+        handler: any V2GatewayCommandHandler,
+        originatingConnectionID: UUID?,
+        captureAuthorSample: Bool = false
+    ) async throws -> V2GatewaySessionResponse {
+        let (version, identity, clock) = try beginAuthenticatedRequest(frame, envelope: envelope)
         do {
             var response: IMV2Envelope
             var preparedFrame: V2Frame?
@@ -619,18 +686,6 @@ public actor V2GatewaySession {
                 response.error.code = "RATE_LIMITED"
                 response.error.retryable = true
                 response.error.retryAfterSeconds = 1
-            } else if case .heartbeat(let heartbeat) = envelope.body {
-                guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
-                response = IMV2Envelope()
-                response.heartbeatAck = .init()
-                response.heartbeatAck.serverTimeMs = try currentServerTime().milliseconds
-                guard heartbeat.roomProgress.count <= 1, heartbeat.roomProgress.allSatisfy({
-                    UUID(uuidString: $0.roomID) != nil && $0.scopeGeneration > 0
-                        && $0.appliedRoomSequence <= UInt64(Int64.max)
-                }) else { throw V2GatewaySessionError.unsupportedCommand }
-                frame.heartbeatProbe?.mark(.progressSubmitted)
-                response.heartbeatAck.roomSubscriptionStates = await roomProgress?(heartbeat) ?? []
-                frame.heartbeatProbe?.mark(.progressReturned)
             } else if case .groupEventPull(let request) = envelope.body,
                       let preparedGroupEventPageCache,
                       let preparedHandler = handler as? any V2PreparedGroupEventCommandHandling {
@@ -675,51 +730,64 @@ public actor V2GatewaySession {
                     originatingConnectionID: originatingConnectionID
                 )
             }
-            if case .groupEventSubscribe(let request) = envelope.body,
-               case .groupEventSubscribed(var subscribed) = response.body {
-                guard let requestedRoom = try? RoomID(request.roomID),
-                      let subscribedRoom = try? RoomID(subscribed.roomID), requestedRoom == subscribedRoom else {
-                    throw V2GatewaySessionError.unsupportedCommand
-                }
-                subscribed.authorPresentationViewID = request.authorPresentationViewID
-                response.groupEventSubscribed = subscribed
-            }
-            response.requestID = envelope.requestID
-            guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
-            response.protocolVersion = UInt32(version)
-            let responseCompression: V2NegotiatedFrameCompression? = if case .groupEventPage? = response.body {
-                negotiatedFrameCompression
-            } else {
-                nil
-            }
-            let cached = try preparedFrame ?? preparedGroupEventPageCache?.frame(
-                for: response,
-                frameVersion: version,
-                compression: responseCompression,
-                maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
-                compressionThresholdBytes: compressionThresholdBytes,
-                maximumExpansionRatio: maximumCompressionExpansionRatio
-            )
-            let encoded = try cached.map(V2GatewayOutboundFrame.init) ?? V2ServerProtobufFrameCodec.encodeBuffered(
-                response,
-                frameVersion: version,
-                compression: responseCompression,
-                maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
-                compressionThresholdBytes: compressionThresholdBytes,
-                maximumExpansionRatio: maximumCompressionExpansionRatio
-            )
-            try state.completeResponse(requestID: envelope.requestID)
-            if captureAuthorSample, authorPresentationStreamID != nil, preparedFrame == nil,
-               case .groupEventPull = envelope.body, case .groupEventPage(let page) = response.body {
-                authorSample = .init(page: page)
-            }
-            return .init(envelope: response, frame: encoded, authorSample: authorSample)
+            return try completeAuthenticatedResponse(response, request: envelope, version: version,
+                preparedFrame: preparedFrame, authorSample: authorSample, captureAuthorSample: captureAuthorSample)
         } catch {
             // 处理器尚未生成响应；在连接决定重试或关闭前，
             // 先释放请求关联信息。
             try? state.completeResponse(requestID: envelope.requestID)
             throw error
         }
+    }
+
+    /// Encoding and completed-response bookkeeping are synchronous. Their
+    /// temporary storage must not become part of every suspended request frame.
+    @inline(never)
+    private func completeAuthenticatedResponse(_ value: IMV2Envelope, request envelope: IMV2Envelope,
+        version: UInt8, preparedFrame: V2Frame? = nil,
+        authorSample initialAuthorSample: V2AuthorPresentationPageSample? = nil,
+        captureAuthorSample: Bool = false) throws -> V2GatewaySessionResponse {
+        var response = value
+        var authorSample = initialAuthorSample
+        if case .groupEventSubscribe(let request) = envelope.body,
+           case .groupEventSubscribed(var subscribed) = response.body {
+            guard let requestedRoom = try? RoomID(request.roomID),
+                  let subscribedRoom = try? RoomID(subscribed.roomID), requestedRoom == subscribedRoom else {
+                throw V2GatewaySessionError.unsupportedCommand
+            }
+            subscribed.authorPresentationViewID = request.authorPresentationViewID
+            response.groupEventSubscribed = subscribed
+        }
+        response.requestID = envelope.requestID
+        guard terminalGate.isActive() else { throw V2GatewaySessionError.unsupportedCommand }
+        response.protocolVersion = UInt32(version)
+        let responseCompression: V2NegotiatedFrameCompression? = if case .groupEventPage? = response.body {
+            negotiatedFrameCompression
+        } else {
+            nil
+        }
+        let cached = try preparedFrame ?? preparedGroupEventPageCache?.frame(
+            for: response,
+            frameVersion: version,
+            compression: responseCompression,
+            maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+            compressionThresholdBytes: compressionThresholdBytes,
+            maximumExpansionRatio: maximumCompressionExpansionRatio
+        )
+        let encoded = try cached.map(V2GatewayOutboundFrame.init) ?? V2ServerProtobufFrameCodec.encodeBuffered(
+            response,
+            frameVersion: version,
+            compression: responseCompression,
+            maximumUncompressedPayloadBytes: maximumUncompressedPayloadBytes,
+            compressionThresholdBytes: compressionThresholdBytes,
+            maximumExpansionRatio: maximumCompressionExpansionRatio
+        )
+        try state.completeResponse(requestID: envelope.requestID)
+        if captureAuthorSample, authorPresentationStreamID != nil, preparedFrame == nil,
+           case .groupEventPull = envelope.body, case .groupEventPage(let page) = response.body {
+            authorSample = .init(page: page)
+        }
+        return .init(envelope: response, frame: encoded, authorSample: authorSample)
     }
 
     /// 读取一次服务器时间，并安全转换为协议毫秒值。

@@ -8,15 +8,16 @@ import Testing
 
 @Suite("Fixed RPC Protobuf boundary")
 struct V2HotRPCProtobufTests {
-    @Test("delivery session pulses use fixed PB and preserve every generation and identity")
-    func deliverySessionFixedEnvelope() throws {
+    @Test("delivery session pulses use fixed PB and preserve every generation and identity",
+          arguments: [UInt64(42), UInt64(1) << 53 | 1, UInt64(1) << 63, UInt64.max])
+    func deliverySessionFixedEnvelope(nodeID: UInt64) throws {
         let host = V2ActorHostIdentity(hostID: try .init("host"), incarnationID: UUID())
         let gateway = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "gateway", incarnationID: UUID())
         let session = V2RoomDeliverySession(host: host, gateway: gateway, generation: 9)
         for kind in [V2RoomDeliverySessionPulse.Kind.open, .retire] {
             let call = RoomDeliverySessionCall(serviceID: try .init("publisher"), version: 1,
                 callerIncarnation: UUID(), recipient: gateway, sessionID: UUID(), sequence: 13, attemptID: UUID(),
-                sourceNode: .init(systemName: "publisher", host: "127.0.0.1", port: 9001, nid: .init(42)), sourceShardID: "rooms", pulse: .init(session: session, kind: kind, sequence: 7))
+                sourceNode: .init(systemName: "publisher", host: "127.0.0.1", port: 9001, nid: .init(nodeID)), sourceShardID: "rooms", pulse: .init(session: session, kind: kind, sequence: 7))
             let bytes = try V2ActorProtobuf.encode(call)
             let wire = try Im_Actor_V1_HotDeliverySessionCall(serializedBytes: bytes)
             #expect(wire.pulse.kind == kind.rawValue && wire.pulse.sequence == 7)

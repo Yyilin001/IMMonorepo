@@ -99,7 +99,7 @@ struct V2RoomActivationContractTests {
     func rejectionClassificationAndCoding() throws {
         for failure in [
             V2RoomCallFailure.notAccepted(.forbidden),
-            .notAccepted(.cancelled), .notAccepted(.overloaded),
+            .notAccepted(.cancelled), .notAccepted(.overloaded), .notAccepted(.roomCapacityExhausted),
             .rolledBack(.idempotencyConflict),
         ] {
             #expect(failure.retryAction(policy: .durableIdempotent, hasStableOperationID: true)
@@ -108,10 +108,12 @@ struct V2RoomActivationContractTests {
         let stale = V2RoomCallFailure.notAccepted(.staleActivation)
         #expect(stale.retryAction(policy: .noAutomaticRetry, hasStableOperationID: false)
             == .refreshLocation)
-        for failure in [stale, .outcomeUnknown, .rolledBack(.unavailable)] {
+        for failure in [stale, .outcomeUnknown, .rolledBack(.unavailable), .notAccepted(.roomCapacityExhausted)] {
             #expect(try JSONDecoder().decode(
                 V2RoomCallFailure.self, from: JSONEncoder().encode(failure)
             ) == failure)
+            #expect(try V2ActorProtobuf.decode(V2RoomCallFailure.self,
+                from: V2ActorProtobuf.encode(failure)) == failure)
         }
     }
 

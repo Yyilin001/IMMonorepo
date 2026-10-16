@@ -112,7 +112,7 @@ public struct V2GatewayRuntimePressureMetricsSource: V2RuntimePressureMetricsSou
             sendOperationBatching: sendOperationMetrics?.sendOperationBatchMetricsSnapshot(),
             sendOperationOwnerBatching: await sendOperationOwnerMetrics?.sendOperationOwnerMetricsSnapshot(),
             databaseLoans: databaseLoans?(),
-            gatewayMessageSend: await gatewayMessageSendBudget?.metricsSnapshot(),
+            gatewayMessageSend: gatewayMessageSendBudget?.metricsSnapshot(),
             registryRecovery: await connectionRegistry?.registryRecoveryMetricsSnapshot(),
             roomRecoveryBatches: roomRecoveryBatches?()
         )

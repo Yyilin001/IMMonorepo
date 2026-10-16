@@ -14,6 +14,31 @@ struct V2PolicyControlSessionTests {
         return try .init(scope: scope, version: version, facts: .account(.init(userID: user, isActive: active,
             specialKind: nil, specialStatus: nil, allowsServiceMessages: nil, allowsCustomerMessages: nil)))
     }
+    @Test("configured recipient capacity rejects an entire oversized registration and exact release restores capacity")
+    func configuredRecipientCapacity() async throws {
+        let local = V2NodePolicyStateCache(), delivered = Mutex<[V2PolicySnapshotUpdateWire]>([])
+        let target = try V2PolicySnapshotSubscriberWire(host: recipient, endpoint: "gateway")
+        let publisher = V2PolicySnapshotPublisher(targets: [try .init(hostID: recipient.hostID, endpoint: target.endpoint)],
+            identity: source, cache: local, maximumScopesPerRecipient: 2,
+            validateRecipient: { _ in }, send: { update, _ in delivered.withLock { $0.append(update) } })
+        let first = V2PolicyAuthorizationScope.account(UUID()), second = V2PolicyAuthorizationScope.account(UUID())
+        let third = V2PolicyAuthorizationScope.account(UUID())
+        let session = try await publisher.subscribe(scopes: [first], target: target, interestRevision: 1)
+        try await publisher.confirmRegistration(session)
+        await #expect(throws: V2PolicyAuthorizationLifecycleError.ownerChanged) {
+            try await publisher.subscribe(scopes: [second, third], target: target, interestRevision: 2)
+        }
+        try await publisher.publish(snapshot(second))
+        #expect(delivered.withLock { $0.isEmpty })
+        _ = try await publisher.subscribe(scopes: [third], target: target, interestRevision: 3)
+        try await publisher.confirmRegistration(session, scopes: [first], interestRevision: 1)
+        try await publisher.release(.init(endpoint: "policy", source: source, subscriber: target,
+            payload: .scopes([.init(scope: first.policyWire, revision: 1)])))
+        _ = try await publisher.subscribe(scopes: [second], target: target, interestRevision: 4)
+        try await publisher.publish(snapshot(second, version: 2))
+        #expect(delivered.withLock { $0.contains { if case .snapshot(let value) = $0.payload { return value.scope.key == second.key }; return false } })
+        await publisher.shutdown(); await local.shutdown()
+    }
     @Test("expired generation rejects late heartbeats and snapshots; new generation cannot revive other scopes")
     func expiredGenerationNeedsFreshSnapshots() async throws {
         let clock = Mutex(ContinuousClock.now)
@@ -41,6 +66,63 @@ struct V2PolicyControlSessionTests {
         #expect(try await cache.cachedSnapshots(scopes: [first]) != nil)
         await cache.shutdown()
     }
+    @Test("a fresh baseline reauthorizes retained facts without reviving other scopes")
+    func equalAndOlderBaselineRebindExactScope() async throws {
+        let cache = V2NodePolicyStateCache(identity: recipient)
+        let first = V2PolicyAuthorizationScope.account(UUID()), second = V2PolicyAuthorizationScope.account(UUID())
+        let current = try snapshot(first, version: 2, active: false)
+        let old = try V2PolicyControlSessionWire(source: source, recipient: recipient, generation: 1)
+        try await cache.prepareRemoteScopes([first, second], source: source)
+        try await cache.installRemoteBatch(.init(session: old,
+            snapshots: [current.wire, snapshot(second).wire]), source: source)
+        try await cache.applyControl(.init(endpoint: "gateway", session: old, sequence: 1, payload: .retire))
+        let fresh = try V2PolicyControlSessionWire(source: source, recipient: recipient, generation: 2)
+        try await cache.installRemoteBatch(.init(session: fresh, snapshots: [current.wire]), source: source)
+        #expect(try cache.cachedSnapshots(scopes: [first]) == [current])
+        #expect(try cache.cachedSnapshots(scopes: [second]) == nil)
+        let newer = try V2PolicyControlSessionWire(source: source, recipient: recipient, generation: 3)
+        try await cache.installRemoteBatch(.init(session: newer, snapshots: [snapshot(first).wire]), source: source)
+        #expect(try cache.cachedSnapshots(scopes: [first]) == [current])
+        #expect(try cache.cachedSnapshots(scopes: [second]) == nil)
+        await cache.shutdown()
+    }
+
+    @Test("concurrent warm readers cannot admit retired control authority")
+    func concurrentWarmReadsObserveRetirement() async throws {
+        let cache = V2NodePolicyStateCache(identity: recipient), retired = Mutex(false)
+        let first = V2PolicyAuthorizationScope.account(UUID()), second = V2PolicyAuthorizationScope.account(UUID())
+        let session = try V2PolicyControlSessionWire(source: source, recipient: recipient, generation: 1)
+        try await cache.prepareRemoteScopes([first, second], source: source)
+        try await cache.installRemoteBatch(.init(session: session,
+            snapshots: [snapshot(first).wire, snapshot(second).wire]), source: source)
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for _ in 0..<64 {
+                group.addTask {
+                    for _ in 0..<64 {
+                        let completedBeforeRead = retired.withLock { $0 }
+                        let facts = try cache.cachedSnapshots(scopes: [first, second])
+                        if completedBeforeRead { #expect(facts == nil) }
+                        else { #expect(facts == nil || facts?.count == 2) }
+                        await Task.yield()
+                    }
+                }
+            }
+            group.addTask {
+                try await cache.applyControl(.init(endpoint: "gateway", session: session, sequence: 1, payload: .retire))
+                retired.withLock { $0 = true }
+            }
+            try await group.waitForAll()
+        }
+        #expect(try cache.cachedSnapshots(scopes: [first, second]) == nil)
+        await #expect(throws: V2PolicyAuthorizationLifecycleError.ownerChanged) {
+            try await cache.applyControl(.init(endpoint: "gateway", session: session, sequence: 2, payload: .heartbeat))
+        }
+        await cache.shutdown()
+        #expect(throws: V2PolicyAuthorizationLifecycleError.closed) {
+            try cache.cachedSnapshots(scopes: [first])
+        }
+    }
+
     @Test("owner incarnation replacement invalidates every old scope and rejects its delayed reply")
     func newSourceIncarnationRejectsLateOldReply() async throws {
         let cache = V2NodePolicyStateCache(identity: recipient)
@@ -299,6 +381,77 @@ struct V2PolicyControlSessionTests {
         }
         #expect(sent.withLock { $0.contains { if case .reset(let cut, _) = $0.payload { return cut == thirdRevision }; return false } })
         await cache.shutdown()
+    }
+
+    @Test("a release ACK cannot remove a newer release enqueued while its RPC was suspended")
+    func releaseAckPreservesNewRevision() async throws {
+        let gate = PolicyControlTestGate(), sent = Mutex<[V2PolicyInterestReleaseWire]>([])
+        let target = try V2PolicySnapshotSubscriberWire(host: recipient, endpoint: "gateway")
+        let cache = V2NodePolicyStateCache(maximumEntries: 1, identity: recipient, subscriber: target,
+            releaseInterests: { request in
+                await gate.hold(); sent.withLock { $0.append(request) }
+            })
+        let session = try V2PolicyControlSessionWire(source: source, recipient: recipient, generation: 1)
+        let first = V2PolicyAuthorizationScope.account(UUID()), second = V2PolicyAuthorizationScope.account(UUID())
+        func install(_ scope: V2PolicyAuthorizationScope) async throws -> UInt64 {
+            let revision = try await cache.prepareRemoteScopes([scope], source: source)
+            try await cache.installRemoteBatch(.init(session: session,
+                snapshots: [snapshot(scope).wire], interestRevision: revision), source: source)
+            return revision
+        }
+        let original = try await install(first)
+        let secondRevision = try await install(second)
+        await cache.startInterestReleases(); await gate.waitUntilEntered()
+        let reloaded = try await install(first)
+        _ = try await install(second)
+        await gate.release()
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !sent.withLock({ requests in
+            requests.contains { request in
+                guard case .scopes(let items) = request.payload else { return false }
+                return items.contains { $0.scope.key == first.key && $0.revision == reloaded }
+            }
+        }) {
+            try #require(ContinuousClock.now < deadline); try await Task.sleep(for: .milliseconds(1))
+        }
+        let released = sent.withLock { requests in requests.flatMap { request -> [V2PolicyInterestReleaseWire.Item] in
+            if case .scopes(let items) = request.payload { return items }; return []
+        } }
+        #expect(released.contains { $0.scope.key == first.key && $0.revision == original })
+        #expect(released.contains { $0.scope.key == second.key && $0.revision == secondRevision })
+        #expect(try await cache.cachedSnapshots(scopes: [second]) != nil)
+        await cache.shutdown()
+    }
+
+    @Test("registrations during a suspended push preserve all scopes and consecutive control sequences")
+    func registrationsDuringPush() async throws {
+        let gate = PolicyControlTestGate(), delivered = Mutex<[V2PolicySnapshotUpdateWire]>([])
+        let local = V2NodePolicyStateCache()
+        let target = try V2PolicySnapshotSubscriberWire(host: recipient, endpoint: "gateway")
+        let publisher = V2PolicySnapshotPublisher(targets: [try .init(hostID: recipient.hostID, endpoint: target.endpoint)],
+            identity: source, cache: local, validateRecipient: { _ in }, send: { update, _ in
+                if case .snapshot = update.payload { await gate.hold() }
+                delivered.withLock { $0.append(update) }
+            })
+        let first = V2PolicyAuthorizationScope.account(UUID()), last = V2PolicyAuthorizationScope.account(UUID())
+        let session = try await publisher.subscribe(scopes: [first], target: target, interestRevision: 1)
+        try await publisher.confirmRegistration(session)
+        let push = Task { try await publisher.publish(snapshot(first, version: 2)) }
+        await gate.waitUntilEntered()
+        for revision in 2..<258 {
+            _ = try await publisher.subscribe(scopes: [.account(UUID())], target: target, interestRevision: UInt64(revision))
+        }
+        _ = try await publisher.subscribe(scopes: [last], target: target, interestRevision: 258)
+        await gate.release(); try await push.value
+        try await publisher.confirmRegistration(session, scopes: [last], interestRevision: 258)
+        try await publisher.publish(snapshot(last, version: 2))
+        try await publisher.publish(snapshot(first, version: 3))
+        let updates = delivered.withLock { $0.filter { if case .snapshot = $0.payload { return true }; return false } }
+        #expect(updates.map(\.sequence) == [1, 2, 3])
+        #expect(updates.compactMap { update -> String? in
+            if case .snapshot(let snapshot) = update.payload { return snapshot.scope.key }; return nil
+        } == [first.key, last.key, first.key])
+        await publisher.shutdown(); await local.shutdown()
     }
 
     @Test("cache shutdown releases its remote registrations and stops further source publication")

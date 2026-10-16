@@ -75,7 +75,8 @@ struct GatewayFrontdoorAssembly {
         let transportMetrics = V2GatewayTransportMetrics()
         let directRoomLogAppendStageMetrics = V2DirectRoomLogAppendStageMetrics()
         let messageSendBudget = V2GatewayMessageSendBudget(
-            maximumBytes: configuration.messageSendMaximumInFlightBytesProcess)
+            maximumBytes: configuration.messageSendMaximumInFlightBytesProcess,
+            maximumRequests: configuration.messageSendMaximumInFlightProcess)
         let gatewayEventLoopLagMetrics = V2EventLoopLagMetrics()
         let directSendPolicyCache = V2DirectSendPolicyCache(
             capacity: configuration.directSendPolicyCacheMaximumEntries

@@ -82,6 +82,27 @@ private func v2WithRoomActivationTransactionCore<Value: Sendable>(
     }
 }
 
+/// A single SELECT carries the complete committed room cut. Its implicit
+/// statement snapshot needs no BEGIN or separate owner read. Keep the same
+/// physical-loan deadline, cancellation and actual completion ownership.
+func v2WithRoomSnapshotConnection<Value: Sendable>(database: any Database,
+    deadline: ContinuousClock.Instant,
+    _ body: @escaping @Sendable (any SQLDatabase) async throws -> Value
+) async throws -> Value {
+    try await v2WithRoomPhysicalConnection(database: database, deadline: deadline,
+        sendOperationMetrics: nil) { _, _, sql, state in
+        do {
+            let value = try await body(sql)
+            guard .now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
+            guard state.connectionIsUsable else { throw state.notAcceptedFailure }
+            return value
+        } catch {
+            if !state.connectionIsUsable { throw state.notAcceptedFailure }
+            throw error
+        }
+    }
+}
+
 /// Own one physical loan across independent owner-cohort/isolation transactions.
 /// This function opens no transaction and grants no room or quota authority.
 func v2WithOwnerBatchConnection<Value: Sendable>(database: any Database,

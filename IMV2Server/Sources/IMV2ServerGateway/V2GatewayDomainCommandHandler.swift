@@ -720,6 +720,7 @@ private func messageFailureReason(_ reason: V2RoomFailureReason) -> V2MessageSen
     case .authorityLost: .authorityLost
     case .unavailable: .unavailable
     case .overloaded: .overloaded
+    case .roomCapacityExhausted: .overloaded
     case .deadlineExceeded: .deadlineExceeded
     case .cancelled: .cancelled
     case .notFound: .notFound

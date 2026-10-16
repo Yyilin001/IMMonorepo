@@ -57,7 +57,11 @@ def main() -> None:
     parser.add_argument("--policy-partitions", type=int, default=16,
                         help="Memory policy owner partition count: power of two (1..4096); default 16")
     parser.add_argument("--policy-endpoint", help="Configured shard alias used for the policy control RPC")
+    parser.add_argument("--maximum-rooms-per-host", type=int, default=10000,
+                        help="Advertised and actual active room capacity of each Host")
     args = parser.parse_args()
+    if not 128 <= args.maximum_rooms_per_host <= 65536:
+        parser.error("maximum rooms per host must be within 128..65536")
     if len(args.voters) != 3:
         parser.error("exactly three placement voters are required")
     nodes = args.hosts + args.callers + args.voters
@@ -155,7 +159,7 @@ def main() -> None:
                              permissions=permissions, hostIDs=[host_ids[name]] if name in host_names else ([voter_ids[name]] if name in voter_names else []),
                              shardIDs=shards, userBucketIDs=user_buckets, gatewayNodeIDs=[name]))
     peers = [dict(hostID=host_ids[name], serviceID=name, address=address, port=port,
-                  shardIDs=shards, maximumRooms=10000) for name, address, port in args.hosts]
+                  shardIDs=shards, maximumRooms=args.maximum_rooms_per_host) for name, address, port in args.hosts]
     # Only Gateway hosts run realtime discovery/voting. A caller such as Account
     # remains trusted for RPC, but must not create an unreachable quorum vote.
     realtime_peers = [dict(nodeID=name, serviceID=name, address=address, port=port)

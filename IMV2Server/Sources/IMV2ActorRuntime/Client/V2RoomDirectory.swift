@@ -1,5 +1,6 @@
 import Foundation
 import Crypto
+import Synchronization
 import IMV2ActorContracts
 import IMV2Core
 
@@ -127,12 +128,11 @@ public actor V2RoomDirectory {
     private let transport: any V2RoomClientTransport
     private let configuration: V2RoomRuntimeConfiguration
     private let clock = ContinuousClock()
-    private var cache: V2RoomLocationCache<RoomID, Cached>
+    private nonisolated let cache: CallState
     private var nextCacheRevision: UInt64 = 0
     private var pending: [RoomID: Pending] = [:]
     private var pendingQueue: [RoomID] = []
     private var activeResolutions = 0
-    private var activeCalls = 0
     // All recovery callers share this physical RPC budget; nested batches do
     // not multiply the Gateway authorization window by the host fanout window.
     private let maximumRecoveryHostCalls = 4
@@ -145,13 +145,9 @@ public actor V2RoomDirectory {
     private var recoveryHostWaiters: [UUID: RecoveryHostWaiter] = [:]
     private var recoveryHostOrder: [UUID] = []
     private var waiterCount = 0
-    private var accepting = true
-    private var cachedCalls: UInt64 = 0
-    private var cachedResponses: UInt64 = 0
-    private var cacheMisses: UInt64 = 0
+    private nonisolated var accepting: Bool { cache.isAccepting }
     private var locationInvalidations: UInt64 = 0
     private var recoveryAttempts: UInt64 = 0
-    private var recoveryWaits: UInt64 = 0
     private var recoveryWarmItems: UInt64 = 0
     private var recoveryColdItems: UInt64 = 0
     private var recoveryHostCohorts: UInt64 = 0
@@ -182,9 +178,10 @@ public actor V2RoomDirectory {
     }
 
     public func callMetricsSnapshot() -> V2RoomDirectoryCallMetricsSnapshot {
-        .init(cachedCalls: cachedCalls, cachedResponses: cachedResponses,
-            cacheMisses: cacheMisses, locationInvalidations: locationInvalidations,
-            recoveryAttempts: recoveryAttempts, recoveryWaits: recoveryWaits,
+        let calls = cache.metrics()
+        return .init(cachedCalls: calls.cachedCalls, cachedResponses: calls.cachedResponses,
+            cacheMisses: calls.cacheMisses, locationInvalidations: locationInvalidations,
+            recoveryAttempts: recoveryAttempts, recoveryWaits: calls.recoveryWaits,
             recoveringRooms: pending.values.filter { $0.demandRecovery && $0.started && $0.recoveryPhase == .recovering }.count,
             recoveryWarmItems: recoveryWarmItems, recoveryColdItems: recoveryColdItems,
             recoveryHostCohorts: recoveryHostCohorts, recoveryHostItems: recoveryHostItems,
@@ -246,7 +243,7 @@ public actor V2RoomDirectory {
     }
 
     public func drain() {
-        accepting = false
+        cache.stopAccepting()
         for id in recoveryHostOrder {
             finishRecoveryHostWaiter(id, failure: .notAccepted(.retired))
         }
@@ -263,7 +260,7 @@ public actor V2RoomDirectory {
     /// 应用关闭共享数据库连接池前，必须等待此流程和传输静默完成。
     public func quiesce(deadline: ContinuousClock.Instant) async -> Bool {
         drain()
-        while activeResolutions > 0 || activeCalls > 0 {
+        while activeResolutions > 0 || cache.activeCalls > 0 {
             guard clock.now < deadline, !Task.isCancelled else { return false }
             do { try await clock.sleep(until: min(deadline, clock.now + .milliseconds(10))) }
             catch { return false }
@@ -331,14 +328,21 @@ public actor V2RoomDirectory {
         }
     }
 
-    public func call(_ request: V2RoomRequest, principal: V2RoomClientPrincipal,
+    public nonisolated(nonsending) func call(_ request: V2RoomRequest, principal: V2RoomClientPrincipal,
                      deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
+        V2SendPathTrace.current?.mark("directory_call_body_enter")
+        defer { V2SendPathTrace.current?.mark("directory_call_body_return") }
         try checkDeadline(deadline)
-        activeCalls += 1
-        defer { activeCalls -= 1 }
+        try cache.beginCall()
+        defer { cache.finishCall() }
         if request.permitsCachedCall {
             return try await callCachedReplayableOperation(request, principal: principal, deadline: deadline)
         }
+        return try await callUncached(request, principal: principal, deadline: deadline)
+    }
+
+    private func callUncached(_ request: V2RoomRequest, principal: V2RoomClientPrincipal,
+                             deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
         var lastFailure: V2RoomCallFailure = .notAccepted(.unavailable)
         for _ in 0..<configuration.maximumResolveAttempts {
             try checkDeadline(deadline)
@@ -378,7 +382,7 @@ public actor V2RoomDirectory {
         throw lastFailure
     }
 
-    private func callCachedReplayableOperation(_ request: V2RoomRequest, principal: V2RoomClientPrincipal,
+    private nonisolated(nonsending) func callCachedReplayableOperation(_ request: V2RoomRequest, principal: V2RoomClientPrincipal,
                                       deadline: ContinuousClock.Instant) async throws -> V2RoomResponse {
         var lastFailure: V2RoomCallFailure = .notAccepted(.unavailable)
         var forceRecovery = false
@@ -387,14 +391,17 @@ public actor V2RoomDirectory {
             var installed = cache[request.roomID]
             do {
                 if !forceRecovery, let cached = installed, cached.admission() {
-                    count(&cachedCalls)
+                    cache.record(.cachedCall)
+                    V2SendPathTrace.current?.mark("directory_cached_dispatch")
                     switch try await transport.tryInvokeCached(cached.token, request: request,
                         principal: principal, deadline: min(deadline, clock.now + configuration.callTimeout.duration)) {
                     case .response(let response):
-                        count(&cachedResponses)
+                        V2SendPathTrace.current?.mark("directory_cached_resumed")
+                        cache.record(.cachedResponse)
                         return response
                     case .cacheMiss:
-                        count(&cacheMisses)
+                        V2SendPathTrace.current?.mark("directory_cached_miss")
+                        cache.record(.cacheMiss)
                     }
                 }
                 let resolveStartedAt = ContinuousClock.now
@@ -425,14 +432,14 @@ public actor V2RoomDirectory {
                     case .notAccepted(.staleActivation), .rolledBack(.staleActivation),
                          .notAccepted(.retired), .rolledBack(.retired),
                          .notAccepted(.authorityLost), .rolledBack(.authorityLost):
-                        if let installed { invalidate(installed) }
+                        if let installed { await invalidate(installed) }
                     default: break // unavailability does not revoke committed ownership
                     }
                 case .retryRead, .retrySameOperation:
                     forceRecovery = false // exact request/ID is retained; suspect handling belongs to transport
                 }
                 if attempt + 1 < configuration.maximumResolveAttempts {
-                    count(&recoveryWaits)
+                    cache.record(.recoveryWait)
                     try await clock.sleep(until: min(deadline, clock.now + .milliseconds(100)))
                 }
             }
@@ -450,8 +457,8 @@ public actor V2RoomDirectory {
               pair.targetRoomID.uuidValue != nil else { throw V2RoomCallFailure.notAccepted(.invalidRequest) }
         try checkDeadline(deadline)
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
-        activeCalls += 1
-        defer { activeCalls -= 1 }
+        try cache.beginCall()
+        defer { cache.finishCall() }
         var lastFailure = V2RoomCallFailure.notAccepted(.unavailable)
         var sawUnknown = false
         for attempt in 0..<configuration.maximumResolveAttempts {
@@ -525,8 +532,8 @@ public actor V2RoomDirectory {
         }
         try checkDeadline(deadline)
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
-        activeCalls += 1
-        defer { activeCalls -= 1 }
+        try cache.beginCall()
+        defer { cache.finishCall() }
         let cold = queries.filter { cache[$0.roomID] == nil }
         let warm = queries.compactMap { query in cache[query.roomID].map { (query, $0.token) } }
         add(warm.count, to: &recoveryWarmItems)
@@ -931,7 +938,7 @@ public actor V2RoomDirectory {
                 }
                 entry.recoveryPhase = .recovering
                 try checkDeadline(deadline)
-                count(&recoveryWaits)
+                cache.record(.recoveryWait)
                 try await clock.sleep(until: min(deadline, clock.now + backoff))
                 backoff = min(backoff * 2, .seconds(1))
             }
@@ -1079,7 +1086,7 @@ public actor V2RoomDirectory {
         }
     }
 
-    private func checkDeadline(_ deadline: ContinuousClock.Instant) throws {
+    private nonisolated func checkDeadline(_ deadline: ContinuousClock.Instant) throws {
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
         guard !Task.isCancelled else { throw V2RoomCallFailure.notAccepted(.cancelled) }
         guard clock.now < deadline else { throw V2RoomCallFailure.notAccepted(.deadlineExceeded) }
@@ -1095,6 +1102,77 @@ public actor V2RoomDirectory {
         let token: V2RoomActivationToken
         let revision: UInt64
         let admission: @Sendable () -> Bool
+    }
+
+    /// The warm path only captures immutable locations and accounts for actual
+    /// calls. Resolution, revision assignment and stale-result invalidation stay
+    /// on the directory Actor. No callbacks, RPCs or waits execute under this lock.
+    private final class CallState: Sendable {
+        enum Event { case cachedCall, cachedResponse, cacheMiss, recoveryWait }
+        struct Metrics: Sendable {
+            var cachedCalls: UInt64 = 0
+            var cachedResponses: UInt64 = 0
+            var cacheMisses: UInt64 = 0
+            var recoveryWaits: UInt64 = 0
+        }
+        private struct State: Sendable {
+            var locations: V2RoomLocationCache<RoomID, Cached>
+            var accepting = true
+            var activeCalls = 0
+            var metrics = Metrics()
+        }
+        private let maximumCount: Int
+        private let state: Mutex<State>
+        init(maximumCount: Int) {
+            self.maximumCount = maximumCount
+            state = Mutex(State(locations: .init(maximumCount: maximumCount)))
+        }
+        var isAccepting: Bool { state.withLock { $0.accepting } }
+        var activeCalls: Int { state.withLock { $0.activeCalls } }
+        var count: Int { state.withLock { $0.locations.count } }
+        subscript(room: RoomID) -> Cached? { state.withLock { $0.locations[room] } }
+        func beginCall() throws {
+            try state.withLock {
+                guard $0.accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
+                $0.activeCalls += 1
+            }
+        }
+        func finishCall() {
+            state.withLock {
+                precondition($0.activeCalls > 0)
+                $0.activeCalls -= 1
+            }
+        }
+        func stopAccepting() { state.withLock { $0.accepting = false } }
+        func remember(_ value: Cached, for room: RoomID) {
+            state.withLock { $0.locations.remember(value, for: room) }
+        }
+        func removeValue(forKey room: RoomID) {
+            state.withLock { _ = $0.locations.removeValue(forKey: room) }
+        }
+        func removeAll() {
+            let removed = state.withLock {
+                let removed = $0.locations
+                $0.locations = .init(maximumCount: maximumCount)
+                return removed
+            }
+            // Release the potentially large retired location set after unlocking.
+            withExtendedLifetime(removed) {}
+        }
+        func metrics() -> Metrics { state.withLock { $0.metrics } }
+        func record(_ event: Event) {
+            state.withLock {
+                switch event {
+                case .cachedCall: Self.increment(&$0.metrics.cachedCalls)
+                case .cachedResponse: Self.increment(&$0.metrics.cachedResponses)
+                case .cacheMiss: Self.increment(&$0.metrics.cacheMisses)
+                case .recoveryWait: Self.increment(&$0.metrics.recoveryWaits)
+                }
+            }
+        }
+        private static func increment(_ value: inout UInt64) {
+            if value < .max { value += 1 }
+        }
     }
 
     private enum RecoveryPhase: Equatable { case usable, recovering }

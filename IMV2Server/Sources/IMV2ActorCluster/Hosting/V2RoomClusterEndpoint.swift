@@ -1,6 +1,7 @@
 import Distributed
 import DistributedCluster
 import Foundation
+import Synchronization
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
@@ -102,11 +103,22 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
     private let maximumInboundRequests: Int
     private let localGeneration: UUID
     private let actorSystem: ClusterSystem
-    private var roomActors: [V2RoomActivationToken: V2RoomClusterActor] = [:]
+    private struct RoomActorEntry {
+        let token: V2RoomActivationToken
+        let actor: V2RoomClusterActor
+    }
+    private var roomActors: [RoomID: RoomActorEntry] = [:]
+    private var changeFeed: V2RoomActivationChangeFeed?
+    private var watcherStarting = false
+    private var watcherStartWaiters: [CheckedContinuation<Void, Never>] = []
     private var watcher: Task<Void, Never>?
     private var accepting = true
-    private var activeRequests = 0
-    private var batchAdmission: V2RoomBatchAdmission
+    private struct RequestAdmission: Sendable {
+        var accepting = true
+        var active = 0
+    }
+    private nonisolated let requestAdmission = Mutex(RequestAdmission())
+    private nonisolated let batchAdmission: Mutex<V2RoomBatchAdmission>
 
     public init(identity: V2ActorHostIdentity,
                 host: V2RoomActivationHost<V2RoomRequest, V2RoomResponse>,
@@ -138,40 +150,61 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         self.forwardPairs = forwardPairs
         self.placementDrain = placementDrain
         self.maximumInboundRequests = maximumInboundRequests
-        self.batchAdmission = .init()
+        self.batchAdmission = Mutex(.init())
         self.localGeneration = localGeneration
         self.actorSystem = actorSystem
     }
 
     public func startWatching() async {
+        guard accepting else { return }
+        if watcherStarting {
+            await withCheckedContinuation { watcherStartWaiters.append($0) }
+            return
+        }
         guard watcher == nil else { return }
+        watcherStarting = true
+        defer {
+            watcherStarting = false
+            let waiters = watcherStartWaiters; watcherStartWaiters = []
+            for waiter in waiters { waiter.resume() }
+        }
         let changes = await host.changes()
-        guard accepting, watcher == nil else { return }
+        guard accepting, watcher == nil else {
+            await host.stopObservingChanges(observerID: changes.id)
+            return
+        }
+        changeFeed = changes
         watcher = Task { [weak self] in
-            for await _ in changes { await self?.reconcileActors() }
+            for await _ in changes.wakes { await self?.reconcileChanges(changes) }
         }
     }
 
-    public func stop() {
+    public func stop() async {
         accepting = false
-        watcher?.cancel()
-        watcher = nil
+        requestAdmission.withLock { $0.accepting = false }
+        if watcherStarting { await withCheckedContinuation { watcherStartWaiters.append($0) } }
+        let actual = watcher, feed = changeFeed
+        actual?.cancel()
+        if let feed { await host.stopObservingChanges(observerID: feed.id) }
+        await actual?.value
+        watcher = nil; changeFeed = nil
         roomActors.removeAll()
     }
 
     public func quiesce(deadline: ContinuousClock.Instant) async -> Bool {
         accepting = false
-        while activeRequests > 0 && ContinuousClock.now < deadline {
+        requestAdmission.withLock { $0.accepting = false }
+        while inFlightRequestCount() > 0 && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) }
             catch { break }
         }
-        return activeRequests == 0
+        return inFlightRequestCount() == 0
     }
 
     public func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try beginRequest()
-        defer { activeRequests -= 1 }
-        let grant = try await authenticator.openSession(packet)
+        defer { endRequest() }
+        let grant = try authenticator.openSession(packet)
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         return try signer.sign(grant, maximumBytes: limits.maximumReplyBytes)
     }
@@ -179,19 +212,19 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
     func openLocalSession(_ packet: V2ActorSignedPacket, generation: UUID) async throws
         -> (V2ActorSignedPacket, V2ActorLocalCapability) {
         try beginRequest()
-        defer { activeRequests -= 1 }
+        defer { endRequest() }
         guard generation == localGeneration else { throw V2ActorAuthenticationError.wrongRecipient }
-        let (grant, capability) = try await authenticator.openLocalSession(packet, generation: generation)
+        let (grant, capability) = try authenticator.openLocalSession(packet, generation: generation)
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         return (try signer.sign(grant, maximumBytes: limits.maximumReplyBytes), capability)
     }
 
-    public func exchange(_ packet: V2ActorSignedPacket,
+    public nonisolated(nonsending) func exchange(_ packet: V2ActorSignedPacket,
                          boundToken: V2RoomActivationToken?) async throws -> V2ActorSignedPacket {
         let receivedAt = ContinuousClock.now
         try beginRequest()
-        defer { activeRequests -= 1 }
-        let verified = try await authenticator.accept(packet)
+        defer { endRequest() }
+        let verified = try authenticator.accept(packet)
         if isBoundedBatch(verified.call.request), packet.body.count > 65_536 {
             throw V2ActorAuthenticationError.oversized
         }
@@ -203,15 +236,15 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         return try signer.sign(reply, maximumBytes: maximumBytes)
     }
 
-    func exchangeLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,
+    nonisolated(nonsending) func exchangeLocal(_ payload: V2ActorLocalPayload<V2ActorAuthenticatedCall>,
                        capability: V2ActorLocalCapability, generation: UUID,
                        boundToken: V2RoomActivationToken?) async throws
         -> V2ActorLocalPayload<V2ActorAuthenticatedReply> {
         let receivedAt = ContinuousClock.now
         try beginRequest()
-        defer { activeRequests -= 1 }
+        defer { endRequest() }
         guard generation == localGeneration else { throw V2ActorAuthenticationError.wrongRecipient }
-        let verified = try await authenticator.acceptLocal(payload, capability: capability,
+        let verified = try authenticator.acceptLocal(payload, capability: capability,
                                                            generation: generation)
         if isBoundedBatch(verified.call.request), payload.byteCount > 65_536 {
             throw V2ActorAuthenticationError.oversized
@@ -225,7 +258,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         return encoded
     }
 
-    private func exchangeTracedVerified(_ verified: V2ActorVerifiedCall,
+    private nonisolated(nonsending) func exchangeTracedVerified(_ verified: V2ActorVerifiedCall,
         boundToken: V2RoomActivationToken?, receivedAt: ContinuousClock.Instant) async throws -> V2ActorAuthenticatedReply {
         guard V2SendPathTrace.enabled else {
             return try await exchangeVerified(verified, boundToken: boundToken)
@@ -250,9 +283,9 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         trace.record("receiver_authentication", from: receivedAt)
         if let enteredAt = verified.authenticationEnteredAt,
            let returnedAt = verified.authenticationReturnedAt {
-            trace.record("receiver_auth_actor_entry_wait", from: receivedAt, to: enteredAt)
+            trace.record("receiver_auth_entry_wait", from: receivedAt, to: enteredAt)
             trace.record("receiver_auth_body", from: enteredAt, to: returnedAt)
-            trace.record("receiver_auth_resume_wait", from: returnedAt)
+            trace.record("receiver_auth_return_gap", from: returnedAt)
         }
         defer { trace.finish() }
         return try await V2SendPathTrace.$current.withValue(trace) {
@@ -263,9 +296,9 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         }
     }
 
-    private func exchangeVerified(_ verified: V2ActorVerifiedCall,
+    private nonisolated(nonsending) func exchangeVerified(_ verified: V2ActorVerifiedCall,
                                   boundToken: V2RoomActivationToken?) async throws -> V2ActorAuthenticatedReply {
-        guard accepting else { throw V2ActorAuthenticationError.overloaded }
+        guard requestAdmission.withLock({ $0.accepting }) else { throw V2ActorAuthenticationError.overloaded }
         let request = verified.call.request
         let token = requestToken(request)
         if let boundToken {
@@ -288,15 +321,21 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         default: batchKind = nil
         }
         if let batchKind {
-            guard batchAdmission.acquire(batchKind, peer: verified.call.serviceID) else {
+            guard batchAdmission.withLock({ $0.acquire(batchKind, peer: verified.call.serviceID) }) else {
                 return .init(call: verified.call, response: .failure(.notAccepted(.overloaded)))
             }
         }
         defer {
-            if let batchKind { batchAdmission.release(batchKind, peer: verified.call.serviceID) }
+            if let batchKind { batchAdmission.withLock { $0.release(batchKind, peer: verified.call.serviceID) } }
         }
         let response: V2ActorRPCResponse
-        do { response = try await dispatch(request, deadline: verified.deadline) }
+        do {
+            if case .invoke(let token, let invocation) = request {
+                response = try await invokeRoom(token: token, request: invocation, deadline: verified.deadline)
+            } else {
+                response = try await dispatch(request, deadline: verified.deadline)
+            }
+        }
         catch let failure as V2RoomCallFailure { response = .failure(failure) }
         catch let leaseError as V2RoomActorStateError where leaseError == .roomNotFound {
             response = .failure(.notAccepted(.notFound))
@@ -309,11 +348,22 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         return V2ActorAuthenticatedReply(call: verified.call, response: response)
     }
 
-    public func reconcileActors() async {
+    private func reconcileChanges(_ feed: V2RoomActivationChangeFeed) async {
+        guard accepting, changeFeed?.id == feed.id,
+              let changes = await host.takeChanges(observerID: feed.id),
+              accepting, changeFeed?.id == feed.id else { return }
+        switch changes {
+        case .rooms(let roomIDs): await reconcileActors(roomIDs: roomIDs)
+        case .rescan: await reconcileActors(roomIDs: Set(roomActors.keys))
+        }
+    }
+
+    public func reconcileActors(roomIDs: Set<RoomID>) async {
         // Capture installations before yielding. A stale observer must not
         // remove an actor installed for the same token during this await.
-        let installed = roomActors.map { (token: $0.key, actorID: $0.value.id) }
-        let ready = Set(await host.readyTokens())
+        let installed = roomIDs.compactMap { roomActors[$0] }.map { (token: $0.token, actorID: $0.actor.id) }
+        guard accepting, !installed.isEmpty else { return }
+        let ready = await host.readyTokens(among: installed.map(\.token))
         guard accepting else { return }
         for installation in installed where !ready.contains(installation.token) {
             removePhysicalReference(for: installation.token, actorID: installation.actorID)
@@ -325,36 +375,54 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
     @discardableResult
     func removePhysicalReference(for token: V2RoomActivationToken,
                                  actorID: ClusterSystem.ActorID) -> Bool {
-        guard roomActors[token]?.id == actorID else { return false }
-        roomActors.removeValue(forKey: token)
+        guard let current = roomActors[token.roomID], current.token == token,
+              current.actor.id == actorID else { return false }
+        roomActors.removeValue(forKey: token.roomID)
         return true
     }
 
     public func actorCount() -> Int { roomActors.count }
 
-    public func inFlightRequestCount() -> Int { activeRequests }
+    public nonisolated func inFlightRequestCount() -> Int { requestAdmission.withLock { $0.active } }
 
-    private func beginRequest() throws {
-        guard accepting, activeRequests < maximumInboundRequests else {
-            throw V2ActorAuthenticationError.overloaded
+    private nonisolated func beginRequest() throws {
+        try requestAdmission.withLock { value in
+            guard value.accepting, value.active < maximumInboundRequests else {
+                throw V2ActorAuthenticationError.overloaded
+            }
+            value.active += 1
         }
-        activeRequests += 1
+    }
+    private nonisolated func endRequest() {
+        requestAdmission.withLock { value in
+            precondition(value.active > 0)
+            value.active -= 1
+        }
     }
 
     func physicalReference(for token: V2RoomActivationToken) async throws -> Data {
         guard accepting, token.host == identity, await host.isReady(token: token), accepting else {
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
-        if roomActors[token] == nil {
-            roomActors[token] = V2RoomClusterActor(actorSystem: actorSystem, token: token, service: self)
+        if roomActors[token.roomID]?.token != token {
+            // Derive the transient cache ceiling from the actual room budget;
+            // a slow observer cannot grow an unbounded retired-reference cache.
+            let capacity = host.roomCapacity <= Int.max / 2 ? host.roomCapacity * 2 : Int.max
+            guard roomActors[token.roomID] != nil || roomActors.count < capacity else {
+                throw V2RoomCallFailure.notAccepted(.overloaded)
+            }
+            roomActors[token.roomID] = .init(token: token,
+                actor: V2RoomClusterActor(actorSystem: actorSystem, token: token, service: self))
         }
-        guard let actor = roomActors[token] else {
+        guard let entry = roomActors[token.roomID], entry.token == token else {
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
+        let actor = entry.actor
         // Retain this precise installation across readiness's actor hop. Even
         // same-token reconstruction must not be deleted by this old attempt.
         let ready = await host.isReady(token: token)
-        guard ready, accepting, roomActors[token]?.id == actor.id else {
+        guard ready, accepting, roomActors[token.roomID]?.token == token,
+              roomActors[token.roomID]?.actor.id == actor.id else {
             removePhysicalReference(for: token, actorID: actor.id)
             throw V2RoomCallFailure.notAccepted(.staleActivation)
         }
@@ -418,11 +486,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         case .lookup(let token):
             return .ready(token: token, physicalReference: try await physicalReference(for: token))
         case .invoke(let token, let request):
-            V2SendPathTrace.current?.mark("receiver_invoke_enter")
-            V2SendPathTrace.current?.mark("receiver_host_dispatch")
-            let result = try await host.invoke(token: token, request: request, deadline: deadline)
-            V2SendPathTrace.current?.mark("receiver_host_return")
-            return .result(result)
+            return try await invokeRoom(token: token, request: request, deadline: deadline)
         case .recoveryBatch(let items):
             let local = items.map { V2RoomRecoveryBatchCallItem(token: $0.token, query: $0.query, deadline: deadline) }
             return .recoveryBatch(await host.invokeRecoveryBatch(items: local, deadline: deadline))
@@ -438,11 +502,22 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         }
     }
 
-    private func isBoundedBatch(_ request: V2ActorRPCRequest) -> Bool {
+    /// A physical room actor keeps its request across authentication and room
+    /// execution. It never rejoins the node-wide control actor's mailbox.
+    private nonisolated(nonsending) func invokeRoom(token: V2RoomActivationToken, request: V2RoomRequest,
+        deadline: ContinuousClock.Instant) async throws -> V2ActorRPCResponse {
+        V2SendPathTrace.current?.mark("receiver_invoke_enter")
+        V2SendPathTrace.current?.mark("receiver_host_dispatch")
+        let result = try await host.invoke(token: token, request: request, deadline: deadline)
+        V2SendPathTrace.current?.mark("receiver_host_return")
+        return .result(result)
+    }
+
+    private nonisolated func isBoundedBatch(_ request: V2ActorRPCRequest) -> Bool {
         switch request { case .recoveryBatch: true; default: false }
     }
 
-    private func requestToken(_ request: V2ActorRPCRequest) -> V2RoomActivationToken? {
+    private nonisolated func requestToken(_ request: V2ActorRPCRequest) -> V2RoomActivationToken? {
         switch request {
         case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .recoveryBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests: nil
         case .lookup(let token), .invoke(let token, _), .reserve(let token, _): token
@@ -451,7 +526,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         }
     }
 
-    private func requestShard(_ request: V2ActorRPCRequest) -> String {
+    private nonisolated func requestShard(_ request: V2ActorRPCRequest) -> String {
         switch request {
         case .placementWrite(let request), .placementRead(let request), .placementRaft(let request): request.shardID
         case .drainPlacement(let request): request.shardID
@@ -468,7 +543,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         }
     }
 
-    private func isHostOnly(_ request: V2ActorRPCRequest) -> Bool {
+    private nonisolated func isHostOnly(_ request: V2ActorRPCRequest) -> Bool {
         switch request {
         case .placementWrite, .placementRead, .placementRaft, .drainPlacement, .activate, .lookup, .recoveryBatch, .mutatePolicy, .policySnapshots, .updatePolicySnapshot, .releasePolicyInterests, .forwardPair: true
         default: false

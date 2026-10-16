@@ -124,8 +124,9 @@ enum V2GatewayHeartbeatDiagnostics {
 }
 
 public func v2RenderPrometheusGatewayHeartbeatDiagnostics() -> String {
-    V2GatewayHeartbeatDiagnostics.enabled
-        ? V2GatewayHeartbeatDiagnostics.render(V2GatewayHeartbeatDiagnostics.metrics.snapshot()) : ""
+    (V2GatewayHeartbeatDiagnostics.enabled
+        ? V2GatewayHeartbeatDiagnostics.render(V2GatewayHeartbeatDiagnostics.metrics.snapshot()) : "")
+        + (V2GatewayCoverageDiagnostics.enabled ? V2GatewayCoverageDiagnostics.render() + V2GatewayCoverageDiagnostics.renderRooms() : "")
 }
 
 final class V2GatewayHeartbeatProbe: Sendable {

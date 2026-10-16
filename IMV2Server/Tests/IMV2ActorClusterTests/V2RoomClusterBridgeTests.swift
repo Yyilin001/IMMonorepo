@@ -1,6 +1,7 @@
 import Crypto
 import DistributedCluster
 import Foundation
+import Synchronization
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
@@ -9,6 +10,58 @@ import Testing
 
 @Suite("Room Cluster bridge authenticates native distributed exchanges", .serialized)
 struct V2RoomClusterBridgeTests {
+    @Test("small and large authenticated sends use their codec executor policy across real TCP", arguments: [32, 32_768])
+    func messageCodecExecutionAcrossTCP(textBytes: Int) async throws {
+        let fixture = try await Fixture()
+        var settings = ClusterSystemSettings(name: "v2-codec-caller", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remote = await ClusterSystem("v2-codec-caller", settings: settings)
+        let caller = V2RoomClusterClient(system: remote, signer: fixture.client,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        let observations = Mutex<[V2SendPathTrace.Snapshot]>([])
+        V2SendPathTrace.installSink { snapshot in
+            if snapshot.segment == "codec_execution_test" { observations.withLock { $0.append(snapshot) } }
+        }
+        defer { V2SendPathTrace.installSink(nil) }
+        var failure: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: [fixture.owner.shardID],
+                availableRooms: 2, isHealthy: true))
+            guard case .ready(let token) = try await caller.activate(on: fixture.identity,
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(3)) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let user = UserID(uuid: UUID())
+            let command = try V2MessageSendOperationCommand(command: .init(roomID: fixture.room,
+                senderUserID: user, clientMessageID: .init(uuid: UUID()), text: String(repeating: "x", count: textBytes),
+                limits: .init(maxUTF8Bytes: 65_536)), firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)
+            let trace = V2SendPathTrace(operations: [UUID().uuidString], segment: "codec_execution_test")
+            let response = try await V2SendPathTrace.$current.withValue(trace) {
+                try await caller.tryInvokeCached(token, request: .messaging(.sendOperation(command)),
+                    principal: .user(user), deadline: .now + .seconds(3))
+            }
+            trace.finish()
+            guard case .response(let value) = response else { throw V2ActorAuthenticationError.invalidConfiguration }
+            #expect(value == .recovery(.failure(.invalidRequest)))
+            let observed = try #require(observations.withLock { $0.last })
+            let stages = Set(observed.spans.map(\.stage))
+            #expect(stages.contains("rpc_remote_return"))
+            #expect(stages.contains(textBytes == 32 ? "rpc_request_codec_inline" : "rpc_request_codec_offloaded"))
+            #expect(stages.contains(textBytes == 32 ? "rpc_reply_codec_inline" : "rpc_reply_codec_offloaded"))
+            #expect(stages.contains("rpc_reply_verification_return"))
+        } catch { failure = error }
+        #expect(await caller.quiesce(deadline: .now + .seconds(3)))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
+        await fixture.inbound.stop()
+        try await remote.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
     @Test("signed Raft voting RPC binds fixed voter role, shard and group across real TCP")
     func remoteRaftVoting() async throws {
         let fixture = try await Fixture(raft: true), voter = try #require(fixture.raftVoter)
@@ -478,6 +531,28 @@ struct V2RoomClusterBridgeTests {
         if let failure { throw failure }
     }
 
+    @Test("incremental reference cleanup touches only its changed rooms")
+    func incrementalReferenceCleanup() async throws {
+        let fixture = try await Fixture(watchChanges: false)
+        var tokens: [V2RoomActivationToken] = []
+        for room in [fixture.room, RoomID(uuid: UUID())] {
+            switch try await fixture.host.activate(roomID: room,
+                owner: fixture.owner, deadline: .now + .seconds(2)) {
+            case .ready(let token):
+                _ = try await fixture.inbound.physicalReference(for: token)
+                tokens.append(token)
+            }
+        }
+        #expect(await fixture.inbound.actorCount() == 2)
+        #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
+        await fixture.inbound.reconcileActors(roomIDs: [tokens[0].roomID])
+        #expect(await fixture.inbound.actorCount() == 1)
+        await fixture.inbound.reconcileActors(roomIDs: [tokens[1].roomID])
+        #expect(await fixture.inbound.actorCount() == 0)
+        await fixture.inbound.stop()
+        try await fixture.system.shutdown().wait()
+    }
+
     @Test("same-token reconstruction survives cleanup of the previous physical installation")
     func physicalInstallationCleanup() async throws {
         let fixture = try await Fixture()
@@ -504,7 +579,7 @@ struct V2RoomClusterBridgeTests {
         } catch {
             #expect(error as? V2RoomCallFailure == .notAccepted(.staleActivation))
         }
-        await fixture.inbound.reconcileActors()
+        await fixture.inbound.reconcileActors(roomIDs: [token.roomID])
         #expect(await fixture.inbound.actorCount() == 0)
         await fixture.inbound.stop()
         try await fixture.system.shutdown().wait()
@@ -594,7 +669,7 @@ struct V2RoomClusterBridgeTests {
         }
         let drained = await fixture.host.drain(deadline: .now + .seconds(2))
         #expect(drained.completed)
-        await fixture.inbound.reconcileActors()
+        await fixture.inbound.reconcileActors(roomIDs: [token.roomID])
         #expect(await fixture.inbound.actorCount() == 0)
         let stale = fixture.call(grant: grant, sequence: 5,
                                  request: .invoke(token: token, request: request),
@@ -649,15 +724,35 @@ struct V2RoomClusterBridgeTests {
         try await fixture.system.shutdown().wait()
     }
 
-    @Test("admission bounds calls before authentication and includes session hello")
-    func boundedInboundAdmission() async throws {
+    @Test("admission bounds calls before authentication, including room execution and session hello", arguments: [false, true])
+    func boundedInboundAdmission(holdBusiness: Bool) async throws {
         let gate = RestoreGate()
-        let fixture = try await Fixture(restoreGate: gate, maximumInboundRequests: 1)
+        let fixture = try await Fixture(restoreGate: holdBusiness ? nil : gate,
+            executeGate: holdBusiness ? gate : nil, maximumInboundRequests: 1)
         let grant = try await fixture.open()
-        let firstCall = fixture.call(grant: grant, sequence: 1,
-                                     request: .activate(roomID: fixture.room, owner: fixture.owner))
+        let firstCall: V2ActorAuthenticatedCall
+        if holdBusiness {
+            guard case .ready(let token) = try await fixture.host.activate(
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(2)) else {
+                Issue.record("expected ready room for inbound business call"); return
+            }
+            let user = UserID(uuid: UUID())
+            let request = try V2RoomRequest.messaging(.sendOperation(.init(command: .init(
+                roomID: fixture.room, senderUserID: user, clientMessageID: .init(uuid: UUID()),
+                text: "held inbound", limits: .init(maxUTF8Bytes: 64)),
+                firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
+            firstCall = fixture.call(grant: grant, sequence: 1,
+                request: .invoke(token: token, request: request), principal: .user(user))
+        } else {
+            firstCall = fixture.call(grant: grant, sequence: 1,
+                request: .activate(roomID: fixture.room, owner: fixture.owner))
+        }
         let first = Task {
-            try await fixture.endpoint.exchange(fixture.client.sign(firstCall, maximumBytes: 10_000))
+            let packet = try fixture.client.sign(firstCall, maximumBytes: 10_000)
+            if case .invoke(let token, _) = firstCall.request {
+                return try await fixture.inbound.exchange(packet, boundToken: token)
+            }
+            return try await fixture.endpoint.exchange(packet)
         }
         try await gate.waitForEntry()
         #expect(await fixture.inbound.inFlightRequestCount() == 1)
@@ -667,12 +762,19 @@ struct V2RoomClusterBridgeTests {
             _ = try await fixture.endpoint.exchange(fixture.client.sign(second, maximumBytes: 10_000))
         }
         await expectAuthentication(.overloaded) { _ = try await fixture.open() }
+        if holdBusiness {
+            #expect(!(await fixture.inbound.quiesce(deadline: .now + .milliseconds(20))))
+            #expect(fixture.inbound.inFlightRequestCount() == 1)
+        }
         await gate.open()
         let signed = try await first.value
-        guard case .ready = try fixture.trust.verifyReply(signed, for: firstCall, maximumBytes: 10_000) else {
-            Issue.record("first admitted activation did not complete"); return
+        switch try fixture.trust.verifyReply(signed, for: firstCall, maximumBytes: 10_000) {
+        case .ready where !holdBusiness, .result where holdBusiness: break
+        default: Issue.record("first admitted actual operation did not complete")
         }
         #expect(await fixture.inbound.inFlightRequestCount() == 0)
+        #expect(await fixture.inbound.quiesce(deadline: .now + .seconds(1)))
+        await expectAuthentication(.overloaded) { _ = try await fixture.open() }
         #expect((await fixture.host.drain(deadline: .now + .seconds(2))).completed)
         await fixture.inbound.stop()
         try await fixture.system.shutdown().wait()
@@ -1080,7 +1182,8 @@ struct V2RoomClusterBridgeTests {
              maximumActiveRooms: Int = 2, restoreGateRoom: RoomID? = nil,
              coordinatorUserCalls: Bool = false, recoveryBatchGate: RecoveryBatchGate? = nil,
              maximumActivationWaitersPerHost: Int = 2, maximumConcurrentReservations: Int = 1,
-             ownerShardID: String = "allowed", nativePlacement: Bool = false, raft: Bool = false) async throws {
+             ownerShardID: String = "allowed", nativePlacement: Bool = false, raft: Bool = false,
+             watchChanges: Bool = true) async throws {
             owner = try .init(shardID: ownerShardID, epoch: 0)
             identity = .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             let clientKey = Curve25519.Signing.PrivateKey()
@@ -1186,7 +1289,7 @@ struct V2RoomClusterBridgeTests {
                 endpoint = V2RoomHostEndpoint(actorSystem: system, service: inbound)
             }
             await host.start()
-            await inbound.startWatching()
+            if watchChanges { await inbound.startWatching() }
         }
 
         func open() async throws -> V2ActorSessionGrant {

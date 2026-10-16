@@ -82,6 +82,10 @@ extension V2GatewayByteStream {
 import IMV2ActorContracts
 private let fixtureDeliveryGateway = V2GatewayRealtimeIdentity(nodeID: "fixture", serviceID: "fixture", incarnationID: UUID())
 extension V2GatewayRoomSubscriptionAuthority {
+    func retireTestSession(fence: V2RoomSubscriptionFence, serviceID: String) -> V2RoomDeliverySessionResult {
+        let session = V2RoomDeliverySession(host: fence.activation.host, gateway: fixtureDeliveryGateway, generation: 1)
+        return applyDeliverySession(.init(session: session, kind: .retire, sequence: 2), serviceID: serviceID)
+    }
     func installTestSession(fence: V2RoomSubscriptionFence, serviceID: String,
                             afterAuthoritativeReset: Bool = false) async -> Bool {
         let session = V2RoomDeliverySession(host: fence.activation.host, gateway: fixtureDeliveryGateway, generation: 1)

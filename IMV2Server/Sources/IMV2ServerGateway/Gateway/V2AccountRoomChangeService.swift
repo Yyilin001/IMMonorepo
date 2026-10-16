@@ -30,8 +30,13 @@ public actor V2AccountRoomChangeService {
         var membershipRefresh = UUID()
         var membershipRefreshPending = false
         var membershipRefreshRooms: Set<RoomID> = []
-        var membershipRefreshTask: Task<Void, Never>?
-        var bootstrapTask: Task<Void, Error>?
+        var membershipRefreshRetryAt: ContinuousClock.Instant?
+        var bootstrapWork: V2BoundedInitialization.Ticket?
+        var bootstrapID: UUID?
+        var bootstrapCursor: String?
+        var bootstrapTopology: String?
+        var bootstrapPage: V2UserRoomDirectoryPage?
+        var bootstrapFailures = 0
         var bootstrapped = false
         var bootstrapStartedAt: ContinuousClock.Instant?
         var bootstrapLastReportAt: ContinuousClock.Instant?
@@ -55,6 +60,7 @@ public actor V2AccountRoomChangeService {
     private let states: any V2RoomStateReading
     private let directoryPage: (@Sendable (UserID, String?) async throws -> V2UserRoomDirectoryPage)?
     private let onlineDelivery: OnlineDelivery
+    private let initialization: V2BoundedInitialization
     private var accounts: [UserID: Account] = [:]
     private var sessions: [UUID: Session] = [:]
     private struct Cleanup {
@@ -63,16 +69,24 @@ public actor V2AccountRoomChangeService {
     }
     private var cleanups: [UUID: Cleanup] = [:]
     private var closed = false
+    private var readyAccounts = 0
+    private var completedInitializations: UInt64 = 0
+    private var initializationRetries: UInt64 = 0
+    private var initializationFailures: UInt64 = 0
     private let logger = Logger(label: "imv2.gateway.account_coverage")
 
     public init(states: any V2RoomStateReading,
                 directoryPage: (@Sendable (UserID, String?) async throws -> V2UserRoomDirectoryPage)? = nil,
                 maximumRevokedRoomsPerAccount: Int = 4096,
+                maximumConcurrentInitializations: Int = 32,
+                maximumInitializationJobs: Int = 65_536,
                 onlineDelivery: OnlineDelivery) throws {
         self.index = .init(maximumRevokedRoomsPerAccount: maximumRevokedRoomsPerAccount)
         self.states = states
         self.directoryPage = directoryPage
         self.onlineDelivery = onlineDelivery
+        self.initialization = V2BoundedInitialization(maximumConcurrent: maximumConcurrentInitializations,
+            maximumJobs: maximumInitializationJobs + maximumConcurrentInitializations)
     }
 
     /// Establish account coverage from server membership state before Ready.
@@ -82,64 +96,126 @@ public actor V2AccountRoomChangeService {
             throw Failure.staleConnection
         }
         if !account.bootstrapped {
-            if account.bootstrapTask == nil {
-                account.bootstrapStartedAt = .now
-                account.bootstrapTask = Task {
-                    while self.accounts[ticket.userID] === account, !account.recovering {
-                        try Task.checkCancellation()
-                        guard let active = account.connections.compactMap({ self.sessions[$0]?.ticket }).first else {
-                            throw Failure.staleConnection
-                        }
-                        do {
-                            _ = try await self.loadServerMemberships(active, collectingRooms: false)
-                            guard self.accounts[ticket.userID] === account, !account.recovering else {
-                                throw Failure.staleConnection
-                            }
-                            account.bootstrapped = true
-                            return
-                        } catch Failure.staleConnection {
-                            // The scan's device may leave while a sibling still owns coverage.
-                            guard self.accounts[ticket.userID] === account, !account.recovering,
-                                  self.current(active) == nil else { throw Failure.staleConnection }
-                        } catch {
-                            // A departing device's late failure cannot invalidate
-                            // coverage now owned by another authenticated device.
-                            if self.accounts[ticket.userID] === account, !account.recovering,
-                               self.current(active) == nil { continue }
-                            var reason = "other"
-                            if let value = error as? V2RoomRecoveryReadError { reason = String(describing: value) }
-                            if let value = error as? V2GatewayRoomSubscriptionCoordinationError {
-                                switch value {
-                                case .refused(let code): reason = "owner_" + String(describing: code)
-                                case .superseded: reason = "superseded"
-                                case .closed: reason = "closed"
-                                case .overloaded: reason = "overloaded"
-                                case .invalidGrant: reason = "invalid_grant"
-                                case .deadlineExpired: reason = "deadline_expired"
-                                }
-                            }
-                            self.logger.warning("Account coverage bootstrap failed", metadata: [
-                                "stage": "account_bootstrap", "reason": .string(reason),
-                                "error_type": .string(String(reflecting: type(of: error)))])
-                            if self.accounts[ticket.userID] === account { self.invalidate(userID: ticket.userID) }
-                            throw error
-                        }
+            if account.bootstrapWork == nil {
+                let id = account.bootstrapID ?? UUID()
+                account.bootstrapID = id
+                if account.bootstrapStartedAt == nil { account.bootstrapStartedAt = .now }
+                do {
+                    let work = try await initialization.submit(id: id) {
+                        try await self.accountWorkStep(userID: ticket.userID, id: id)
                     }
-                    throw Failure.staleConnection
+                    guard accounts[ticket.userID] === account, !closed else {
+                        await work.cancelAndDrain(); throw Failure.staleConnection
+                    }
+                    account.bootstrapWork = work
+                } catch V2BoundedInitialization.Failure.overloaded {
+                    account.bootstrapID = nil
+                    throw V2RealtimePublicationBackpressure.receiverQueue
                 }
             }
             if !waitForCompletion { return }
-            let task = account.bootstrapTask!
-            do { try await task.value }
-            catch {
-                if accounts[ticket.userID] === account { invalidate(userID: ticket.userID) }
-                throw error
-            }
+            guard let work = account.bootstrapWork else { throw V2RealtimePublicationBackpressure.receiverQueue }
+            try await work.wait()
         }
         try Task.checkCancellation()
         guard current(ticket) != nil, accounts[ticket.userID] === account, !account.recovering else {
             throw Failure.staleConnection
         }
+    }
+
+    /// One authoritative page per scheduled step. Only executing jobs own tasks;
+    /// retries release their slot and retain the last completed directory cursor.
+    private func bootstrapStep(userID: UserID, id: UUID) async throws -> V2BoundedInitialization.Step {
+        try Task.checkCancellation()
+        guard !closed, let account = accounts[userID], account.bootstrapID == id, !account.recovering,
+              let ticket = account.connections.compactMap({ sessions[$0]?.ticket }).first else { throw Failure.staleConnection }
+        do {
+            if account.bootstrapped { return .finished }
+            guard let directoryPage else { completeBootstrap(account); return .finished }
+            account.bootstrapStage = "directory"
+            let cursor = account.bootstrapCursor
+            let page: V2UserRoomDirectoryPage
+            if let pending = account.bootstrapPage { page = pending }
+            else { page = try await directoryPage(userID, cursor) }
+            guard accounts[userID] === account, current(ticket) != nil, !account.recovering else { throw Failure.staleConnection }
+            if let previous = account.bootstrapTopology, previous != page.topologyGeneration {
+                // Restart the authoritative scan on topology change. Existing
+                // grants remain governed by Owner controls, never by this cursor.
+                throw V2RoomRecoveryReadError.topologyChanged
+            }
+            guard page.nextCursor == nil || page.nextCursor != cursor else { throw V2RoomRecoveryReadError.corruptPersistence }
+            account.bootstrapPage = page
+            try await install(page.rooms, ticket: ticket)
+            try Task.checkCancellation()
+            guard accounts[userID] === account, current(ticket) != nil, !account.recovering else { throw Failure.staleConnection }
+            account.bootstrapTopology = page.topologyGeneration; account.bootstrapCursor = page.nextCursor
+            account.bootstrapPage = nil
+            if page.nextCursor != nil { return .again(at: .now) }
+            account.bootstrapFailures = 0
+            completeBootstrap(account)
+            return account.membershipRefreshPending || !account.membershipRefreshRooms.isEmpty ? .again(at: .now) : .finished
+        } catch {
+            guard accounts[userID] === account, !closed, !account.recovering else { throw Failure.staleConnection }
+            if current(ticket) == nil { return .again(at: .now) }
+            if Self.retryableInitialization(error) {
+                if initializationRetries != .max { initializationRetries += 1 }
+                if case V2RoomRecoveryReadError.topologyChanged = error {
+                    account.bootstrapCursor = nil; account.bootstrapTopology = nil; account.bootstrapPage = nil
+                }
+                account.bootstrapFailures += 1
+                account.bootstrapOwnerRetries += 1
+                account.bootstrapStage = "retry_wait"
+                // Shared delayed queue, not one sleeping task per account.
+                let delay = Self.retryDelayMilliseconds(error, failures: account.bootstrapFailures, id: id)
+                if account.bootstrapFailures == 1 {
+                    logger.warning("Account initialization temporarily deferred", metadata: [
+                        "stage": "account_bootstrap", "error_type": .string(String(reflecting: type(of: error)))])
+                }
+                return .again(at: .now + .milliseconds(delay))
+            }
+            logger.warning("Account coverage bootstrap failed", metadata: [
+                "stage": "account_bootstrap", "error_type": .string(String(reflecting: type(of: error)))])
+            if initializationFailures != .max { initializationFailures += 1 }
+            invalidate(userID: userID)
+            throw error
+        }
+    }
+    private func completeBootstrap(_ account: Account) {
+        guard !account.bootstrapped else { return }
+        account.bootstrapped = true; readyAccounts += 1
+        if completedInitializations != .max { completedInitializations += 1 }
+    }
+    public func initializationMetricsSnapshot() async -> V2AccountInitializationMetricsSnapshot {
+        let work = await initialization.snapshot
+        return .init(accounts: accounts.count, readyAccounts: readyAccounts, active: work.active,
+            queued: work.ready, deferred: work.delayed, completed: completedInitializations,
+            retries: initializationRetries, failures: initializationFailures)
+    }
+    private static func retryableInitialization(_ error: any Error) -> Bool {
+        if let safe = error as? any V2SafeOperationalErrorCodeProviding {
+            switch safe.safeOperationalErrorCode {
+            case .databaseLoanQueueFull, .databaseLoanTimedOut: return true
+            default: break
+            }
+        }
+        switch error {
+        case V2GatewayRoomSubscriptionCoordinationError.overloaded,
+             V2GatewayRoomSubscriptionCoordinationError.deadlineExpired,
+             V2GatewayRoomSubscriptionCoordinationError.refused(.overloaded),
+             V2GatewayRoomSubscriptionCoordinationError.refused(.unavailable): return true
+        case V2RoomCallFailure.notAccepted(let reason), V2RoomCallFailure.rolledBack(let reason):
+            return reason == .overloaded || reason == .roomCapacityExhausted || reason == .unavailable || reason == .notReady || reason == .deadlineExceeded
+        case V2RoomRecoveryReadError.topologyChanged: return true
+        default: return false
+        }
+    }
+    package static func retryDelayMilliseconds(_ error: any Error, failures: Int, id: UUID) -> Int {
+        if case V2RoomCallFailure.notAccepted(.roomCapacityExhausted) = error {
+            // A full Host needs retirement or a capacity change, not rapid RPC retries.
+            let jitter = (Int(id.uuid.0) * 256 + Int(id.uuid.1)) % 5_001
+            return 30_000 + jitter
+        }
+        return min(10_000, 100 << min(7, max(0, failures - 1))) + Int(id.uuid.0)
     }
 
     /// The listener RPC observes account-owned installation; it must not own
@@ -202,37 +278,50 @@ public actor V2AccountRoomChangeService {
 
     /// Control consumption must not wait for a complete membership directory.
     /// Each account owns one refresh; changes during a scan request another pass.
-    public func requestServerMembershipRefresh(userID: UserID, rooms: Set<RoomID>? = nil) {
+    public func requestServerMembershipRefresh(userID: UserID, rooms: Set<RoomID>? = nil) async {
         guard !closed, directoryPage != nil, let account = accounts[userID], !account.recovering else { return }
         if let rooms { account.membershipRefreshRooms.formUnion(rooms) }
         else { account.membershipRefreshPending = true }
         if account.membershipRefreshRooms.count > 4096 {
             account.membershipRefreshRooms.removeAll(); account.membershipRefreshPending = true
         }
-        guard account.membershipRefreshTask == nil else { return }
-        account.membershipRefreshTask = Task {
-            defer { account.membershipRefreshTask = nil }
-            // Initial discovery owns route installation until its barrier completes.
-            // Keep dirty rooms queued instead of acquiring the same reference twice.
-            if !account.bootstrapped, let bootstrap = account.bootstrapTask {
-                do { try await bootstrap.value }
-                catch { return }
+        // Bootstrap owns first discovery. Its final step sees these dirty flags.
+        guard account.bootstrapped else { return }
+        let id = account.bootstrapID ?? UUID(); account.bootstrapID = id
+        do {
+            let work = try await initialization.submit(id: id, repeatExisting: true) {
+                try await self.accountWorkStep(userID: userID, id: id)
             }
-            while !Task.isCancelled, self.accounts[userID] === account,
-                  !account.recovering, account.membershipRefreshPending || !account.membershipRefreshRooms.isEmpty {
-                let full = account.membershipRefreshPending
-                let rooms = account.membershipRefreshRooms
-                account.membershipRefreshPending = false
-                account.membershipRefreshRooms.removeAll()
-                if full { await self.refreshServerMemberships(userID: userID) }
-                else { await self.refreshServerMemberships(userID: userID, rooms: rooms) }
-            }
+            guard accounts[userID] === account, !closed else { await work.cancelAndDrain(); return }
+            account.bootstrapWork = work
+        } catch {
+            if !closed { invalidate(userID: userID) }
         }
+    }
+    private func accountWorkStep(userID: UserID, id: UUID) async throws -> V2BoundedInitialization.Step {
+        guard !closed, let account = accounts[userID], account.bootstrapID == id, !account.recovering else { throw Failure.staleConnection }
+        if !account.bootstrapped { return try await bootstrapStep(userID: userID, id: id) }
+        guard account.membershipRefreshPending || !account.membershipRefreshRooms.isEmpty else { return .finished }
+        if let at = account.membershipRefreshRetryAt, at > .now { return .again(at: at) }
+        account.membershipRefreshRetryAt = nil
+        let full = account.membershipRefreshPending, rooms = account.membershipRefreshRooms
+        account.membershipRefreshPending = false; account.membershipRefreshRooms.removeAll()
+        if full { await refreshMembershipDirectory(userID: userID) }
+        else { await refreshServerMemberships(userID: userID, rooms: rooms) }
+        try Task.checkCancellation()
+        guard accounts[userID] === account, !account.recovering else { throw Failure.staleConnection }
+        if let at = account.membershipRefreshRetryAt { return .again(at: at) }
+        account.bootstrapFailures = 0
+        return account.membershipRefreshPending || !account.membershipRefreshRooms.isEmpty ? .again(at: .now) : .finished
+    }
+    public func refreshServerMemberships(userID: UserID) async {
+        await requestServerMembershipRefresh(userID: userID)
+        if let work = accounts[userID]?.bootstrapWork { _ = try? await work.waitCurrent() }
     }
 
     /// Only membership-discovery control changes trigger this reconciliation.
     /// Ordinary room messages consume existing grants without directory reads.
-    public func refreshServerMemberships(userID: UserID) async {
+    private func refreshMembershipDirectory(userID: UserID) async {
         guard directoryPage != nil, let account = accounts[userID], !account.recovering,
               let ticket = account.connections.compactMap({ sessions[$0]?.ticket }).first else { return }
         let generation = UUID()
@@ -359,23 +448,8 @@ public actor V2AccountRoomChangeService {
                 let reference = request.scope
                 guard account.routes[request.roomID] == request.scope else { continue }
                 do {
-                    while true {
-                        try Task.checkCancellation()
-                        do {
-                            try await onlineDelivery.activate(ticket.userID, request.roomID, reference)
-                            break
-                        } catch V2GatewayRoomSubscriptionCoordinationError.refused(let reason) where reason == .overloaded || reason == .unavailable {
-                            account.bootstrapStage = reason == .unavailable ? "owner_unavailable" : "owner_overloaded"
-                            account.bootstrapOwnerRetries += 1
-                            guard current(ticket) != nil, accounts[ticket.userID] === account,
-                                  !account.recovering, account.routes[request.roomID] == request.scope else {
-                                throw Failure.staleConnection
-                            }
-                            // Owner admission and route recovery can be temporarily
-                            // unavailable. Retry this reference in the owned task.
-                            try await Task.sleep(for: reason == .unavailable ? .milliseconds(100) : .milliseconds(50))
-                        }
-                    }
+                    try Task.checkCancellation()
+                    try await onlineDelivery.activate(ticket.userID, request.roomID, reference)
                 }
                 catch {
                     guard account.routes[request.roomID] != request.scope else { throw error }
@@ -396,13 +470,24 @@ public actor V2AccountRoomChangeService {
             }
 
         } catch {
-            if current(ticket) != nil, accounts[ticket.userID] === account { invalidate(userID: ticket.userID) }
+            // Transient resource failures are owned by the bounded bootstrap
+            // scheduler. They must not retire the account's installed progress.
+            if current(ticket) != nil, accounts[ticket.userID] === account,
+               !Self.retryableInitialization(error) { invalidate(userID: ticket.userID) }
             throw error
         }
     }
 
     private func failMembershipRefresh(userID: UserID, account: Account, generation: UUID, error: any Error) {
         guard accounts[userID] === account, account.membershipRefresh == generation else { return }
+        if Self.retryableInitialization(error) {
+            account.membershipRefreshPending = true
+            account.bootstrapFailures += 1
+            account.membershipRefreshRetryAt = .now + .milliseconds(Self.retryDelayMilliseconds(error,
+                failures: account.bootstrapFailures, id: account.membershipRefresh))
+            if initializationRetries != .max { initializationRetries += 1 }
+            return
+        }
         if case V2AccountRoomCoverageIndex.Failure.revocationHistoryFull = error {
             logger.warning("Account membership history reached its capacity; retiring coverage", metadata: [
                 "stage": "membership_refresh", "reason": "revocation_history_full"])
@@ -427,6 +512,7 @@ public actor V2AccountRoomChangeService {
     }
 
     public func invalidate(userID: UserID) {
+        if let account = accounts[userID], account.bootstrapped && !account.recovering { readyAccounts -= 1 }
         accounts[userID]?.recovering = true
         index.invalidate(userID: userID)
         for id in accounts[userID]?.connections ?? [] { if let session = sessions[id] { kick(session) } }
@@ -496,18 +582,17 @@ public actor V2AccountRoomChangeService {
         let account = accounts[user]
         account?.connections.remove(session.ticket.connectionID)
         let last = account?.connections.isEmpty == true
-        if last { accounts.removeValue(forKey: user) }
+        if last {
+            if let account, account.bootstrapped && !account.recovering { readyAccounts -= 1 }
+            accounts.removeValue(forKey: user)
+        }
         index.end(session.ticket)
         if last, let account {
-            let bootstrap = account.bootstrapTask
-            bootstrap?.cancel()
-            let refresh = account.membershipRefreshTask
-            refresh?.cancel()
+            let bootstrap = account.bootstrapWork
             let scopes = account.routes
             let onlineDelivery = self.onlineDelivery
             let task = Task {
-                _ = try? await bootstrap?.value
-                await refresh?.value
+                await bootstrap?.cancelAndDrain()
                 for reference in scopes.values { await onlineDelivery.deactivate(reference) }
             }
             cleanups[session.ticket.connectionID] = .init(ticket: session.ticket, task: task)
@@ -521,6 +606,7 @@ public actor V2AccountRoomChangeService {
     public func shutdown() async {
         guard !closed else { return }
         closed = true
+        await initialization.shutdown()
         for session in Array(sessions.values) {
             let drain = session.drain
             await remove(session)

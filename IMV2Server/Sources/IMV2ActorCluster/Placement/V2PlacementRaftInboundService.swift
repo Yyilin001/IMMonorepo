@@ -24,14 +24,14 @@ package actor V2PlacementRaftInboundService: V2ActorHostInboundServing {
     package func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try begin()
         defer { finish() }
-        let grant = try await authenticator.openSession(packet)
+        let grant = try authenticator.openSession(packet)
         return try signer.sign(grant, maximumBytes: limits.maximumReplyBytes)
     }
     package func exchange(_ packet: V2ActorSignedPacket, boundToken: V2RoomActivationToken?) async throws -> V2ActorSignedPacket {
         try begin()
         defer { finish() }
         guard boundToken == nil else { throw V2ActorAuthenticationError.wrongRecipient }
-        let verified = try await authenticator.accept(packet)
+        let verified = try authenticator.accept(packet)
         let response: V2ActorRPCResponse
         do {
             switch verified.call.request {

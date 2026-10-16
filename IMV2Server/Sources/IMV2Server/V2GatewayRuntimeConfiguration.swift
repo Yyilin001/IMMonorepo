@@ -5,6 +5,7 @@ import Foundation
 import IMV2Compression
 import IMV2Core
 import IMV2ServerGateway
+import NIOCore
 
 /// 指标刻意只绑定到 loopback 监听器。
 ///
@@ -79,6 +80,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     }
     /// 独立的权威私聊发送连接池；容量与每个 EventLoop 的前台连接池相匹配。
     public let directSendControlConnectionsPerEventLoop: Int
+    /// Dedicated membership initialization budget, independent of sync and writes.
+    public let initializationConnectionsPerEventLoop: Int
     /// 每个事件循环允许的数据库连接数。
     ///
     /// Fluent 默认每个事件循环只用一个 PostgreSQL 连接。
@@ -88,6 +91,8 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
         databasePolicy.maximumConnectionsPerEventLoop
     }
     public let tls: V2TLSListenerConfiguration
+    /// Per-process TCP I/O budget, separate from database and Actor loops.
+    public let tcpEventLoopThreads: Int
     public let groupInviteSecretIssuer: V2GroupInviteSecretIssuer
     public let accessTokenKey: V2AccessTokenHMACKey
     public let capacityProfile: V2CapacityProfile
@@ -95,6 +100,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
     public let frameLimits: V2FrameLimits
     public let messageSendOperationsEnabled: Bool
     public let messageSendMaximumInFlightPerConnection: Int
+    public let messageSendMaximumInFlightProcess: Int
     public let messageSendMaximumInFlightBytesPerConnection: Int
     public let messageSendMaximumInFlightBytesProcess: Int
     public let maximumProtobufMessageDepth: Int
@@ -327,6 +333,15 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                 ? databaseWorkloadPoolBudget.foregroundConnectionsPerEventLoop
                 : databasePolicy.maximumConnectionsPerEventLoop
         }
+        initializationConnectionsPerEventLoop = try Self.positiveWithDefault(
+            "IM_V2_DATABASE_INITIALIZATION_CONNECTIONS_PER_EVENT_LOOP", defaultValue: 4,
+            maximum: 256, environment: environment)
+        if let raw = Self.optional("IM_V2_TCP_EVENT_LOOP_THREADS", environment: environment) {
+            guard let count = Int(raw), (1...256).contains(count) else {
+                throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_TCP_EVENT_LOOP_THREADS")
+            }
+            tcpEventLoopThreads = count
+        } else { tcpEventLoopThreads = System.coreCount }
         tls = try .init(
             host: try v2RequiredEnvironmentValue("IM_V2_TLS_HOST", environment: environment),
             port: try v2RequiredEnvironmentInteger("IM_V2_TLS_PORT", environment: environment),
@@ -342,6 +357,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             .map { _ in try Self.explicitBoolean("IM_V2_MESSAGE_SEND_OPERATIONS_ENABLED", environment: environment) } ?? true
         messageSendMaximumInFlightPerConnection = try Self.positiveWithDefault(
             "IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PER_CONNECTION", defaultValue: 4, maximum: 64, environment: environment)
+        messageSendMaximumInFlightProcess = try Self.positiveWithDefault(
+            "IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_PROCESS", defaultValue: 1_024,
+            maximum: 1_048_576, environment: environment)
         messageSendMaximumInFlightBytesPerConnection = try Self.positiveWithDefault(
             "IM_V2_MESSAGE_SEND_MAX_IN_FLIGHT_BYTES_PER_CONNECTION", defaultValue: 4_194_304,
             maximum: 67_108_864, environment: environment)
@@ -936,6 +954,9 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS")
         }
         let messageDatabaseURLs = Set([databaseURL] + userShardStorage.map(\.databaseURL) + roomShardStorage.map(\.databaseURL))
+        let initializationConnectionCount = messageDatabaseURLs.count * databaseNonMessagePoolEventLoopThreads * initializationConnectionsPerEventLoop
+        let (allDedicatedConnections, initializationOverflow) = dedicatedConnections.addingReportingOverflow(initializationConnectionCount)
+        guard !initializationOverflow else { throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MAX_TOTAL_CONNECTIONS") }
         guard Set(messageWriteUnixSockets.keys).isSubset(of: messageDatabaseURLs) else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_DATABASE_MESSAGE_WRITE_UNIX_SOCKETS_JSON")
         }
@@ -946,7 +967,7 @@ public struct V2GatewayRuntimeConfiguration: Sendable {
                     ? databaseWorkloadPoolBudget.totalConnectionsPerEventLoop
                     : databasePolicy.maximumConnectionsPerEventLoop,
             // 用户路由、策略控制和房间身份读取均使用专用控制连接。
-            additionalConnections: dedicatedConnections,
+            additionalConnections: allDedicatedConnections,
             workloadConnectionsPerPhysicalStore: databaseWorkloadPoolIsolationEnabled
                 ? databasePolicy.eventLoopThreads * databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop
                     + databaseNonMessagePoolEventLoopThreads * (databaseWorkloadPoolBudget.totalConnectionsPerEventLoop - databaseWorkloadPoolBudget.messageWriteConnectionsPerEventLoop)

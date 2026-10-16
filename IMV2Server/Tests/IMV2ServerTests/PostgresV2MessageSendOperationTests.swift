@@ -47,8 +47,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let journal = try PostgresV2RealtimeChangeJournalStore(database: database)
             let recovery = try PostgresV2RoomRecoveryStore(database: database)
             let topology = try PostgresV2RoomRecoveryTopology(database: database,
-                stores: [recovery], orderedStoreIdentities: ["room-a"])
-            let directory = V2UserRoomDirectoryService(topologySource: topology,
+                stores: [recovery], orderedStoreIdentities: ["room-a"], atomicStores: [:])
+            let directory = V2UserRoomDirectoryService(snapshotSource: topology,
                 cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
             let scans = Mutex(0), references = Mutex<Set<UUID>>([])
             let reads = Mutex<[[RoomID: V2RoomStateReadResult]]>([])
@@ -175,8 +175,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 committedMessageObserver: facts)
             let recovery = try PostgresV2RoomRecoveryStore(database: database)
             let topology = try PostgresV2RoomRecoveryTopology(database: database,
-                stores: [recovery], orderedStoreIdentities: ["room-a"])
-            let directory = V2UserRoomDirectoryService(topologySource: topology,
+                stores: [recovery], orderedStoreIdentities: ["room-a"], atomicStores: [:])
+            let directory = V2UserRoomDirectoryService(snapshotSource: topology,
                 cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
             let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 71, count: 32))
             try await withRoomActivationLifetime(database: database, roomID: roomID) { token, lifetime in

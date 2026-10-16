@@ -7,6 +7,7 @@ import Synchronization
 /// foreground authentication/control, and background work.
 public final class V2DatabaseWorkloadResources: Sendable {
     public let control: V2DatabaseResources
+    public let initialization: V2DatabaseResources
     public let messageWrite: V2DatabaseResources?
     public let foreground: V2DatabaseResources?
     private let shutdownTask = Mutex<Task<Void, any Error>?>(nil)
@@ -16,6 +17,8 @@ public final class V2DatabaseWorkloadResources: Sendable {
         precondition(controlEventLoopThreads > 0)
         if let count = messageEventLoopThreads { precondition(count > 0) }
         control = V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(
+            numberOfThreads: controlEventLoopThreads), logger: logger, ownsEventLoopGroup: true)
+        initialization = V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(
             numberOfThreads: controlEventLoopThreads), logger: logger, ownsEventLoopGroup: true)
         messageWrite = messageEventLoopThreads.map { count in
             V2DatabaseResources(eventLoopGroup: MultiThreadedEventLoopGroup(numberOfThreads: count),
@@ -48,8 +51,9 @@ public final class V2DatabaseWorkloadResources: Sendable {
     }
     private func performShutdown() async throws {
         var firstError: (any Error)?
+        do { try await initialization.shutdown() } catch { firstError = error }
         if let messageWrite {
-            do { try await messageWrite.shutdown() } catch { firstError = error }
+            do { try await messageWrite.shutdown() } catch { if firstError == nil { firstError = error } }
         }
         if let foreground {
             do { try await foreground.shutdown() } catch { if firstError == nil { firstError = error } }

@@ -282,6 +282,91 @@ struct V2RealtimeShardAuthenticationTests {
         }
     }
 
+    @Test(arguments: ["release", "cancel", "retire", "stop", "deadline", "queueFull"])
+    func controlsWaitForActualPeerCapacity(action: String) async throws {
+        let f = try Fixture(held: true)
+        let port = Int.random(in: 30_000...60_000)
+        var settings = ClusterSystemSettings(name: "control-admission-\(action)", host: "127.0.0.1", port: port)
+        settings.threadPoolSize = 1
+        settings.downingStrategy = .none; settings.onDownAction = .none
+        let system = await ClusterSystem("control-admission-\(action)", settings: settings)
+        let inbound = V2RealtimeShardInbound(identity: f.token.host, signer: f.receiver, trust: f.trust,
+            serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], limits: .init())
+        let endpoint = V2RealtimeShardEndpoint(actorSystem: system, service: inbound)
+        let bytes = try V2ActorProtobuf.encode(endpoint.id); inbound.bindEndpointReference(bytes)
+        let target = V2GatewayRealtimeDescriptor(identity: f.token.host, endpointReference: bytes,
+            address: "127.0.0.1", port: port)
+        let sender = try V2RealtimeShardSender(system: system, signer: f.caller, trust: f.trust,
+            limits: .init(callTimeout: .seconds(10)), incarnation: f.gateway.incarnationID)
+        var calls: [Task<ShardResult, any Error>] = []
+        do {
+            try await sender.installAuthenticatedReference(target)
+            for _ in 0..<2 { calls.append(Task { try await sender.exchange(.control(f.control()), to: target) }) }
+            try await waitForControlState { await f.serving.calls == 2 }
+            let count = action == "queueFull" ? 256 : 1
+            for _ in 0..<count {
+                calls.append(Task {
+                    try await sender.exchange(.control(f.control()), to: target,
+                        admissionDeadline: action == "deadline" ? .now + .milliseconds(100) : nil)
+                })
+            }
+            try await waitForControlState { await sender.metrics().9 == count }
+            let held = await sender.metrics()
+            #expect(held.0 == 2 && held.2 == 2 && held.6 == 0)
+            switch action {
+            case "cancel":
+                calls[2].cancel()
+                await #expect(throws: CancellationError.self) { try await calls[2].value }
+            case "retire":
+                #expect(!(await sender.beginRetirement(f.token.host, reference: bytes)))
+                await #expect(throws: V2ActorAuthenticationError.sessionExpired) { try await calls[2].value }
+            case "stop":
+                #expect(!(await sender.stop(deadline: .now)))
+                await #expect(throws: V2ActorAuthenticationError.overloaded) { try await calls[2].value }
+            case "deadline":
+                await #expect(throws: V2ActorAuthenticationError.overloaded) { try await calls[2].value }
+                #expect(await sender.metrics().8[.control]?[.queueTimeout] == 1)
+            case "queueFull":
+                await #expect(throws: V2ActorAuthenticationError.overloaded) {
+                    try await sender.exchange(.control(f.control()), to: target)
+                }
+                #expect(await sender.metrics().8[.control]?[.queueFull] == 1)
+                for call in calls.dropFirst(2) { call.cancel() }
+                for call in calls.dropFirst(2) { _ = await call.result }
+            default: break
+            }
+            if action != "release" { try await waitForControlState { await sender.metrics().9 == 0 } }
+            // A cancelled/expired waiter must not release either dispatched RPC.
+            #expect(await sender.metrics().2 == 2)
+            await f.serving.release()
+            for call in calls.prefix(2) { _ = try await call.value }
+            if action == "release" {
+                _ = try await calls[2].value
+                #expect(await f.serving.calls == 3)
+                #expect(await sender.metrics().6 == 0)
+            } else { #expect(await f.serving.calls == 2) }
+            #expect(await sender.metrics().9 == 0)
+            #expect(await sender.stop(deadline: .now + .seconds(2)))
+            #expect(await inbound.stop(deadline: .now + .seconds(2)))
+            try await system.shutdown().wait()
+        } catch {
+            for call in calls { call.cancel() }
+            await f.serving.release()
+            for call in calls { _ = await call.result }
+            _ = await sender.stop(deadline: .now + .seconds(2))
+            _ = await inbound.stop(deadline: .now + .seconds(2))
+            try? await system.shutdown().wait()
+            throw error
+        }
+    }
+    private func waitForControlState(_ ready: () async -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while !(await ready()) {
+            guard ContinuousClock.now < deadline else { throw V2ActorAuthenticationError.overloaded }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
     private struct Fixture: Sendable {
         let caller: V2ActorSigningIdentity
         let receiver: V2ActorSigningIdentity
@@ -330,13 +415,14 @@ struct V2RealtimeShardAuthenticationTests {
         let held: Bool
         var calls = 0
         var entryWaiters: [CheckedContinuation<Void, Never>] = []
-        var releaseWaiter: CheckedContinuation<Void, Never>?
+        var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+        var released = false
         init(held: Bool) { self.held = held }
         func waitForEntry() async { if calls > 0 { return }; await withCheckedContinuation { entryWaiters.append($0) } }
-        func release() { releaseWaiter?.resume(); releaseWaiter = nil }
+        func release() { released = true; releaseWaiters.forEach { $0.resume() }; releaseWaiters.removeAll() }
         func control(_ request: V2RealtimeShardControlRequest) async throws -> V2RealtimeShardControlReply {
             calls += 1; entryWaiters.forEach { $0.resume() }; entryWaiters.removeAll()
-            if held { await withCheckedContinuation { releaseWaiter = $0 } }
+            if held && !released { await withCheckedContinuation { releaseWaiters.append($0) } }
             return .init(appliedRevision: request.nextRevision, remainingSessionMilliseconds: 10_000, status: .applied)
         }
         func publish(_ request: V2RealtimeShardPublishRequest) async throws -> V2RealtimeShardPublishReply {

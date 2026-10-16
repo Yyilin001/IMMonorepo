@@ -39,15 +39,21 @@ struct GatewayPolicyAssembly: Sendable {
         let endpoint = document.owners.first(where: { $0.hostID == hostID })?.endpoint
             ?? configuration.allowedShards.sorted()[0]
         let subscriber = try V2PolicySnapshotSubscriberWire(host: identity, endpoint: endpoint)
-        let cache = V2NodePolicyStateCache(identity: identity, subscriber: subscriber, releaseInterests: { request in
+        let snapshotCapacity = try V2NodePolicyStateCache.capacityForActiveRooms(configuration.runtime.maximumActiveRooms)
+        let cache = V2NodePolicyStateCache(maximumEntries: snapshotCapacity, identity: identity, subscriber: subscriber, releaseInterests: { request in
             let client = try binding.client()
             try await client.releasePolicyInterests(request, on: request.source, deadline: .now + .seconds(2))
+        }, observe: { event in
+            switch event {
+            case .capacityEviction: stateMetrics?.recordPolicyMemoryEvent(.nodeSnapshotEviction)
+            case .releaseReset: stateMetrics?.recordPolicyMemoryEvent(.snapshotReleaseReset)
+            }
         })
         let snapshots = V2PolicySnapshotPublisher(targets: try configuration.discovery.peers.map { peer in
             try .init(hostID: peer.hostID,
                 endpoint: document.owners.first { $0.hostID == peer.hostID.uuidValue }?.endpoint
                     ?? peer.accessibleShardIDs.sorted()[0])
-        }, identity: identity, cache: cache, validateRecipient: { target in
+        }, identity: identity, cache: cache, maximumScopesPerRecipient: snapshotCapacity, validateRecipient: { target in
             let client = try binding.client()
             guard try await client.resolvePolicyHost(hostID: target.hostID, endpoint: target.endpoint) == target.host else {
                 throw V2PolicyAuthorizationLifecycleError.ownerChanged
@@ -61,6 +67,10 @@ struct GatewayPolicyAssembly: Sendable {
         let owners = PostgresV2PolicyOwnerDirectory(journal: journal, dispatcher: dispatcher,
             ownerID: identity.incarnationID,
             snapshotPublisher: snapshots,
+            snapshotMaximumEntries: snapshotCapacity,
+            snapshotObservation: { event in
+                if case .capacityEviction = event { stateMetrics?.recordPolicyMemoryEvent(.ownerSnapshotEviction) }
+            },
             ownsScope: { placement.owns($0, hostID: hostID) })
         let remote = PostgresV2RemotePolicyOwners(clientProvider: { try binding.client() }, localOwners: owners, stateCache: cache, subscriber: subscriber, resolveBatch: { keys in
             let client = try binding.client()

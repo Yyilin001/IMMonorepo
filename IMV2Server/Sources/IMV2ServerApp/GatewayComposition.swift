@@ -153,11 +153,16 @@ struct GatewayComposition {
                 states: roomServices.roomQueries,
                 latestVisible: latestVisible
             )
+            let initializationDirectory = try GatewayRoomRecoveryDirectory.build(
+                configuration: configuration, topology: prepared.topology, initialization: true)
             let accountChanges = try V2AccountRoomChangeService(
                 states: roomServices.roomQueries,
                 directoryPage: { user, cursor in
-                    try await recoveryDirectory.list(actorUserID: user, cursor: cursor, pageSize: 100)
-                }, onlineDelivery: .init(
+                    try await initializationDirectory.list(actorUserID: user, cursor: cursor, pageSize: 100)
+                }, maximumConcurrentInitializations: min(configuration.maximumConnections,
+                    configuration.initializationConnectionsPerEventLoop * configuration.databaseNonMessagePoolEventLoopThreads * 8),
+                maximumInitializationJobs: configuration.maximumConnections,
+                onlineDelivery: .init(
                     activate: { [weak registry = prepared.frontdoor.connectionRegistry] user, room, reference in
                         guard let registry else { throw V2AccountRoomChangeService.Failure.closed }
                         try await registry.acquireAccountRoomDelivery(userID: user, roomID: room, reference: reference)

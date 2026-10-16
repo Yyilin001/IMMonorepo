@@ -53,7 +53,7 @@ struct V2RoomProfileCohortPostgresTests {
                 maximumForegroundWriteInFlight: 1, maximumInteractiveReadInFlight: 1,
                 maximumSyncInFlight: 1, maximumForegroundWriteQueued: 2,
                 maximumInteractiveReadQueued: 2, maximumSyncQueued: 1, timeout: .seconds(1)))
-            let owner = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
+            let owner = try V2RoomServerOwnerResources(database: database, initializationDatabase: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: 1), writes: writes, membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
                 invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
                 invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),
                 receiptProjectionDelivery: CohortProjectionDelivery(),

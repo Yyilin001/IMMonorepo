@@ -187,7 +187,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         if let earliest = selected.map({ $0.1 }).min() {
             let commands = selected.flatMap { requests[$0.0].commands }
             let snapshot = try await V2RoomSQLDeadline.withDeadline(earliest) {
-                let budget = await preparationMemory.snapshot(commands)
+                let budget = preparationMemory.snapshot(commands)
                 var prior: Set<String> = []
                 for command in commands {
                     let identity = try command.identity, key = operationKey(identity: identity)
@@ -353,7 +353,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             do {
                 let results = try await executePreparedBody(prepared, capacityProfile: capacityProfile, identifiers: identifiers, now: now)
                 await afterCommit { [preparationMemory, roomAcceptance] in
-                    await preparationMemory.remember(commands: prepared.commands, results: results)
+                    preparationMemory.remember(commands: prepared.commands, results: results)
                     roomAcceptance.invalidate(prepared.token)
                 }
                 return results
@@ -648,7 +648,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             }
             let outcomes = commits.map { $0.commit.outcome }
             await afterCommit { [preparationMemory, roomAcceptance, sendOperationMetrics, committedMessageObserver] in
-                await preparationMemory.remember(commands: prepared.commands, results: values)
+                preparationMemory.remember(commands: prepared.commands, results: values)
                 roomAcceptance.committed(commands: prepared.commands, results: values, token: prepared.token)
                 sendOperationMetrics?.recordOwnerCohortCommitted(acceptedCommandCount: values.count, replayedCommandCount: 0)
                 committedMessageObserver?.observeCommittedMessages(outcomes, activation: prepared.token)
@@ -849,7 +849,7 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
             guard let values = committed.results else { return .scalarFallback(.optimizationNotApplicable) }
             await afterCommit { [preparationMemory, roomAcceptance, sendOperationMetrics, committedMessageObserver] in
                 let results = values.map { V2RoomMessagingResult.sendOperation($0) }
-                await preparationMemory.remember(commands: prepared.commands, results: results)
+                preparationMemory.remember(commands: prepared.commands, results: results)
                 roomAcceptance.committed(commands: prepared.commands, results: results, token: prepared.token)
                 if !committed.usesRuntimeState { roomAcceptance.invalidateCursor(prepared.token) }
                 sendOperationMetrics?.recordOwnerCohortCommitted(acceptedCommandCount: committed.newlyAccepted.count,
@@ -1046,14 +1046,6 @@ public struct PostgresV2MessageSendOperationStore:Sendable {
         }
     }
 
-    private func requiresDomainRecovery(_ result: V2MessageSendOperationRecoveryResult) -> Bool {
-        switch result {
-        case .fingerprintConflict: return true
-        case .receipt(let receipt): return receipt.outcome == .rejected(.directPolicyDenied)
-        default: return false
-        }
-    }
-
     private func admissionDeferred(identity: V2OperationIdentity, fingerprint: V2OperationFingerprint,
                                    rejection: LateShardAdmissionRejection) throws -> V2MessageSendOperationRecoveryResult {
         switch rejection {
@@ -1235,34 +1227,55 @@ fileprivate struct DurableSendPreparationRow: Sendable {
 
 /// Only confirmed permanent outcomes enter this bounded cache. A miss follows
 /// the durable execution path; absence in memory never authorizes a new insert.
-private actor V2SendPreparationResultMemory {
-    private var rows = V2BoundedInsertionCache<String, DurableSendPreparationRow>(capacity: 8192)
-    private func key(_ command: V2MessageSendOperationCommand) -> String {
-        "\(command.command.roomID.rawValue):\(command.command.senderUserID.rawValue):\(command.command.clientMessageID.rawValue)"
+private final class V2SendPreparationResultMemory: Sendable {
+    private struct Key: Hashable, Sendable {
+        let room: UUID
+        let sender: UUID
+        let message: UUID
+        init?(_ command: V2MessageSendOperationCommand) {
+            guard let room = command.command.roomID.uuidValue,
+                  let sender = command.command.senderUserID.uuidValue,
+                  let message = command.command.clientMessageID.uuidValue else { return nil }
+            self.room = room; self.sender = sender; self.message = message
+        }
+    }
+    private final class Partition: Sendable {
+        let rows = Mutex(V2BoundedInsertionCache<Key, DurableSendPreparationRow>(capacity: 256))
+    }
+    // Fixed total capacity, independent of online users. Rooms do not await a
+    // node-wide result Actor before SQL or after COMMIT. Fingerprinting and
+    // response construction happen outside the short per-partition lock.
+    private let partitions = (0..<32).map { _ in Partition() }
+    private func partition(_ key: Key) -> Partition {
+        partitions[key.room.hashValue & (partitions.count - 1)]
     }
     func snapshot(_ commands: [V2MessageSendOperationCommand]) -> [String: [DurableSendPreparationRow]] {
+        let startedAt = ContinuousClock.now
+        defer { V2SendPathTrace.current?.record("prepare_result_memory", from: startedAt) }
         var result: [String: [DurableSendPreparationRow]] = [:]
         for command in commands {
-            guard let row = rows.value(for: key(command)) else { continue }
-            let operation = [row.roomID, row.senderID, UUID(uuidString: command.command.clientMessageID.rawValue)!].map { $0.uuidString.lowercased() }.joined(separator: ":")
+            guard let key = Key(command),
+                  let row = partition(key).rows.withLock({ $0.value(for: key) }) else { continue }
+            let operation = [key.room, key.sender, key.message].map { $0.uuidString.lowercased() }.joined(separator: ":")
             result[operation] = [row]
         }
         return result
     }
     func remember(commands: [V2MessageSendOperationCommand], results: [V2RoomMessagingResult]) {
+        let startedAt = ContinuousClock.now
+        defer { V2SendPathTrace.current?.record("commit_result_memory", from: startedAt) }
         guard commands.count == results.count else { return }
         for (command, result) in zip(commands, results) {
             guard case .sendOperation(.receipt(let receipt)) = result,
-                  let room = command.command.roomID.uuidValue,
-                  let sender = command.command.senderUserID.uuidValue,
+                  let key = Key(command),
                   case .accepted(let accepted) = receipt.outcome,
                   let message = accepted.messageID.uuidValue,
                   let fingerprint = try? command.fingerprint,
                   let resolved = Int64(exactly: receipt.resolvedAtMilliseconds) else { continue }
-            let k = key(command)
-            rows.insert(.init(roomID: room, senderID: sender, receipt: .init(messageID: message, roomSequence: Int64(accepted.roomSequence),
+            let row = DurableSendPreparationRow(roomID: key.room, senderID: key.sender, receipt: .init(messageID: message, roomSequence: Int64(accepted.roomSequence),
                     domainFingerprint: command.command.fingerprint.digest, fingerprintVersion: 3,
-                    operationFingerprint: fingerprint.digest, resolvedAt: resolved)), for: k)
+                    operationFingerprint: fingerprint.digest, resolvedAt: resolved))
+            partition(key).rows.withLock { $0.insert(row, for: key) }
         }
     }
 }

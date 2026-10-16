@@ -113,10 +113,10 @@ public actor V2RoomTurnLane<Request: Sendable, Response: Sendable> {
         self.activity = Mutex(ContinuousClock.now)
     }
 
-    /// A recent observation can only skip a premature probe. An old observation
-    /// never grants retirement; beginIdleDrain must still validate atomically.
-    nonisolated func wasActive(after cutoff: ContinuousClock.Instant) -> Bool {
-        activity.withLock { $0 > cutoff }
+    /// A scheduling hint only. Activity can advance after this read;
+    /// beginIdleDrain must still validate admission and ownership atomically.
+    nonisolated func idleDeadline(timeout: Duration) -> ContinuousClock.Instant {
+        activity.withLock { $0 } + timeout
     }
 
     public func submit(request: Request, deadline: ContinuousClock.Instant) async throws -> Response {

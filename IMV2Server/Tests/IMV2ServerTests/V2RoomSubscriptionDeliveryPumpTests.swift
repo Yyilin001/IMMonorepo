@@ -7,6 +7,53 @@ import IMV2ActorContracts
 
 @Suite("Room delivery pump peer isolation")
 struct V2RoomSubscriptionDeliveryPumpTests {
+    @Test("queued retirement removes exact rooms and reattachment joins the FIFO tail")
+    func queuedRetirementPreservesOtherRooms() async throws {
+        let user = UserID(uuid: UUID())
+        let gateway = V2GatewayRealtimeIdentity(nodeID: "retirement", serviceID: "gateway", incarnationID: UUID())
+        let descriptor = V2GatewayRealtimeDescriptor(identity: gateway, endpointReference: Data([1]),
+            address: "127.0.0.1", port: 9999)
+        let received = Mutex<[RoomID]>([])
+        let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1, maximumBatchItems: 8,
+            sendBatch: { batch, _, _ in
+                received.withLock { rooms in rooms.append(contentsOf: batch.deliveries.map { $0.fence.roomID }) }
+                return .init(receipts: batch.deliveries.map {
+                    .init(fence: $0.fence, result: .appliedThrough($0.deliverySequence))
+                })
+            })
+        var bindings: [(key: V2RoomSubscriptionDeliveryPump.Key, relay: V2RoomSubscriptionRelay)] = []
+        for _ in 0..<64 {
+            let room = RoomID(uuid: UUID())
+            let activation = try V2RoomActivationToken(roomID: room, owner: .init(shardID: "rooms", epoch: 0),
+                activationEpoch: .init(1), host: .init(hostID: .init("host"), incarnationID: UUID()))
+            let relay = try V2RoomSubscriptionRelay(activation: activation, baselineSequence: 0,
+                members: [.init(userID: user, memberRevision: 0)])
+            try await relay.offer(.init(ownerEpoch: 0, inputSequence: 1,
+                operation: .subscribe(gateway: gateway, userID: user, memberRevision: 0,
+                    subscriptionID: UUID(), generation: 1)))
+            let key = V2RoomSubscriptionDeliveryPump.Key(roomID: room, gateway: gateway)
+            #expect(await pump.bind(key, relay: relay, descriptor: descriptor, sourceShardID: "rooms"))
+            bindings.append((key, relay))
+        }
+        #expect(await pump.snapshot().queuedRooms == 128) // independent authorization and message lanes
+        for index in stride(from: 0, to: bindings.count, by: 2) { await pump.unbind(bindings[index].key) }
+        #expect(await pump.snapshot().queuedRooms == 64)
+        #expect(await pump.bind(bindings[0].key, relay: bindings[0].relay, descriptor: descriptor, sourceShardID: "rooms"))
+        let expected = stride(from: 1, to: bindings.count, by: 2).map { bindings[$0].key.roomID } + [bindings[0].key.roomID]
+        await pump.start()
+        do { try await waitUntil {
+            let state = await pump.snapshot()
+            return received.withLock { $0.count == expected.count } && state.actualCalls == 0 && state.queuedRooms == 0
+        } }
+        catch {
+            let state = await pump.snapshot()
+            let counts = received.withLock { ($0.count, Set($0).count) }
+            Issue.record("expected=\(expected.count) received=\(counts.0) unique=\(counts.1) state=\(state)")
+            await pump.close(); throw error
+        }
+        #expect(received.withLock { $0 } == expected)
+        await pump.close()
+    }
     @Test(arguments: ["duplicate", "missing", "foreign"])
     func malformedSharedReceiptsRetainEveryRoom(mode: String) async throws {
         let user = UserID(uuid: UUID())

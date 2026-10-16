@@ -300,9 +300,20 @@ public actor V2DeviceConnectionRegistry {
               let highWatermark = await authority.recoveryHighWatermark(roomID: roomID) else { return }
         roomSubscriptionHeadWorker.withLock { $0 }?.offer(roomID: roomID, highWatermark: highWatermark)
     }
-    nonisolated func roomSubscriptionProgressSnapshot(connectionID: UUID) async
-        -> (authorization: V2GatewayRoomSubscriptionAuthority.Permit, highWatermark: UInt64)? {
-        await roomSubscriptionAuthority.withLock { $0 }?.progressSnapshot(connectionID: connectionID)
+    nonisolated func roomSubscriptionProgressObservation(connectionID: UUID) async
+        -> V2GatewayRoomSubscriptionAuthority.ProgressObservation {
+        guard let authority = roomSubscriptionAuthority.withLock({ $0 }) else { return .init(absence: .authorityMissing) }
+        return await authority.progressObservation(connectionID: connectionID)
+    }
+
+    /// A current foreground connection observed missing authority. Wake the
+    /// existing room repair owner; the Owner still validates every new grant.
+    /// No request field selects a room or supplies permission evidence here.
+    func roomSubscriptionProgressNeedsRepair(connectionID: UUID) async {
+        guard directory.identityByConnection[connectionID] != nil,
+              roomSubscriptionConnections[connectionID]?.reference != nil,
+              let room = subscriptions.foregroundGroupByConnection[connectionID] else { return }
+        await roomSubscriptionCoordinator?.requestBaselineIfRequired(roomID: room)
     }
 
     private func requestRoomSubscriptionRepair(roomID: RoomID) async {
@@ -630,6 +641,10 @@ public actor V2DeviceConnectionRegistry {
     }
 
     /// Called only after the authenticated response has actually been written.
+    nonisolated func accountCoverageDiagnostic(connectionID: UUID) async -> V2GatewayCoverageDiagnostics.Recovery {
+        await recoveryCoordinator.accountCoverageDiagnostic(connectionID: connectionID)
+    }
+
     public func authenticationResponseWritten(connectionID: UUID) async {
         guard let lifecycle = directory.lifecycleByConnection[connectionID] else { return }
         await recoveryCoordinator.authenticationResponseWritten(connectionID: connectionID, lifecycle: lifecycle)
@@ -687,6 +702,7 @@ public actor V2DeviceConnectionRegistry {
         var snapshot = await recoveryCoordinator.registryRecoveryMetricsSnapshot()
         snapshot.presenceObservationStages = await presenceRefreshCoordinator?.metricsSnapshot() ?? [:]
         snapshot.retiredRecoveryWriterStages = lifecycleSupervisor.metricsSnapshot()
+        snapshot.accountInitialization = await accountChangeService?.initializationMetricsSnapshot()
         return snapshot
     }
 
@@ -1060,6 +1076,21 @@ public actor V2DeviceConnectionRegistry {
             let grant = try await coordinator.acquire(roomID: roomID, userID: identity.userID, reference: reference)
             guard directory.lifecycleByConnection[connectionID] == lifecycle,
                   roomSubscriptionConnections[connectionID]?.reference == reference,
+                  subscriptions.foregroundGroupByConnection[connectionID] == roomID,
+                  let generation = roomSubscriptionConnections[connectionID]?.scopeGeneration else {
+                await coordinator.release(reference: reference)
+                throw V2GatewayRoomSubscriptionCoordinationError.superseded
+            }
+            // Reusing an Owner grant still owes this actual socket its scope
+            // controls. A prior offer may have lost authority while suspended.
+            await stream.beginRoomSubscription(roomID: roomID, scopeGeneration: generation,
+                permit: authority.interestPermit(connectionID: connectionID, lifecycle: localLifecycle,
+                    roomID: roomID, generation: generation))
+            await roomSubscriptionBaselineInstalled(roomID: roomID)
+            guard directory.lifecycleByConnection[connectionID] == lifecycle,
+                  roomSubscriptionConnections[connectionID]?.lifecycle == localLifecycle,
+                  roomSubscriptionConnections[connectionID]?.reference == reference,
+                  roomSubscriptionConnections[connectionID]?.scopeGeneration == generation,
                   subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
                 await coordinator.release(reference: reference)
                 throw V2GatewayRoomSubscriptionCoordinationError.superseded
@@ -1085,14 +1116,28 @@ public actor V2DeviceConnectionRegistry {
             userID: identity.userID,
             stream: stream
         )
+        // Publish local ownership before the first suspension. Retirement can
+        // then capture and remove this exact attempt, including an in-flight
+        // interest registration that completes after its caller was cancelled.
+        roomSubscriptionConnections[connectionID]?.scopeGeneration = mutation
         guard directory.streamsByUser[identity.userID]?[connectionID] === stream,
               await authority.registerRoomInterest(connectionID: connectionID, lifecycle: localLifecycle,
                 roomID: roomID, scopeGeneration: mutation) else {
-            _ = subscriptions.detachForeground(connectionID: connectionID)
-            foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
+            if roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation {
+                _ = subscriptions.detachForeground(connectionID: connectionID)
+                foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
+                roomSubscriptionConnections[connectionID]?.scopeGeneration = nil
+            }
             return nil
         }
-        roomSubscriptionConnections[connectionID]?.scopeGeneration = mutation
+        guard directory.lifecycleByConnection[connectionID] == lifecycle,
+              roomSubscriptionConnections[connectionID]?.lifecycle == localLifecycle,
+              roomSubscriptionConnections[connectionID]?.scopeGeneration == mutation,
+              subscriptions.foregroundGroupByConnection[connectionID] == roomID else {
+            await authority.removeRoomInterest(connectionID: connectionID, lifecycle: localLifecycle,
+                roomID: roomID, scopeGeneration: mutation)
+            throw V2GatewayRoomSubscriptionCoordinationError.superseded
+        }
         let interestPermit = authority.interestPermit(connectionID: connectionID, lifecycle: localLifecycle,
             roomID: roomID, generation: mutation)
         await stream.beginRoomSubscription(roomID: roomID, scopeGeneration: mutation, permit: interestPermit)
@@ -1484,23 +1529,20 @@ public actor V2DeviceConnectionRegistry {
     private func removeForegroundGroupSubscription(connectionID: UUID) async {
         guard let roomID = subscriptions.detachForeground(connectionID: connectionID) else { return }
         let stream = foregroundRoutes.target(roomID: roomID, connectionID: connectionID)?.stream
-        if let authority = roomSubscriptionAuthority.withLock({ $0 }) {
-            if let lifecycle = roomSubscriptionConnections[connectionID]?.lifecycle {
-                await authority.removeRoomInterest(connectionID: connectionID, lifecycle: lifecycle, roomID: roomID)
-            }
-            foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
-            let generation = roomSubscriptionConnections[connectionID]?.scopeGeneration
-            roomSubscriptionConnections[connectionID]?.scopeGeneration = nil
-            if let reference = roomSubscriptionConnections[connectionID]?.reference {
-                roomSubscriptionConnections[connectionID]?.reference = nil
-                await roomSubscriptionCoordinator?.release(reference: reference)
-            }
-            if let generation {
-                await stream?.endRoomSubscription(roomID: roomID, scopeGeneration: generation)
-            }
-            return
-        }
+        let lifecycle = roomSubscriptionConnections[connectionID]?.lifecycle
+        let generation = roomSubscriptionConnections[connectionID]?.scopeGeneration
+        let reference = roomSubscriptionConnections[connectionID]?.reference
+        // Detach every local field in one actor turn. Everything after await
+        // belongs to this captured generation, never a successor registration.
         foregroundRoutes.remove(connectionID: connectionID, roomID: roomID)
+        roomSubscriptionConnections[connectionID]?.scopeGeneration = nil
+        roomSubscriptionConnections[connectionID]?.reference = nil
+        if let authority = roomSubscriptionAuthority.withLock({ $0 }), let lifecycle, let generation {
+            await authority.removeRoomInterest(connectionID: connectionID, lifecycle: lifecycle,
+                roomID: roomID, scopeGeneration: generation)
+        }
+        if let reference { await roomSubscriptionCoordinator?.release(reference: reference) }
+        if let generation { await stream?.endRoomSubscription(roomID: roomID, scopeGeneration: generation) }
     }
 
     private func rollbackRegistration(

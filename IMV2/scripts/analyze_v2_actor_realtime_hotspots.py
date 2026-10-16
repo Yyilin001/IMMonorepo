@@ -112,10 +112,6 @@ def counter_summary(points, baseline):
             summary['meanScope'] = ('completed_actual_loan_or_stage_delta; exact source and stage or SQL phase, '
                                     'same disclosed counter boundary; SQL futures include driver/network/continuation '
                                     'time and may overlap, excludes still active observations')
-        elif key.startswith('im_v2_actor_realtime_route_query_duration_milliseconds_sum'):
-            count = result.get(key.replace('_milliseconds_sum', '_milliseconds_count'), {}).get('delta')
-            summary['meanMilliseconds'] = summary['delta']/count if count and summary['delta'] is not None else None
-            summary['meanScope'] = 'completed_route_query_delta; same fixed topic kind, includes downstream loan waiting, excludes capacity-rejected and still-active queries'
         elif key == 'im_v2_gateway_event_loop_lag_milliseconds_sum':
             count = result.get('im_v2_gateway_event_loop_lag_milliseconds_count', {}).get('delta')
             summary['meanMilliseconds'] = summary['delta']/count if count and summary['delta'] is not None else None
@@ -257,7 +253,7 @@ def postgres(rows, start, end):
     xid_examples = []
     versioned = []
     for row in inside:
-        if row.get('samplerVersion') == 'pg-hotspot-v2':
+        if row.get('samplerVersion') == 'pg-hotspot-v3':
             versioned.append(row['time'])
         waiters = row.get('blocked', [])
         blocked.append(row.get('blocked_total', len(waiters)))

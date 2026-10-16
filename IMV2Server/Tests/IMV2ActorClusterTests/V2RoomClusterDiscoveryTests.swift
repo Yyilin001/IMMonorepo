@@ -91,8 +91,9 @@ struct V2RoomClusterDiscoveryTests {
         }
     }
 
-    @Test("two real ClusterSystems discover a signed endpoint and replace its incarnation")
-    func discoversRestartedHost() async throws {
+    @Test("two real ClusterSystems discover a signed endpoint and replace its incarnation",
+          arguments: ["127.0.0.1", "localhost"])
+    func discoversRestartedHost(address: String) async throws {
         let port = Int.random(in: 30_000...60_000)
         let callerPort = Int.random(in: 30_000...60_000)
         let hostID = try V2ActorHostID("discovery-host")
@@ -115,16 +116,16 @@ struct V2RoomClusterDiscoveryTests {
             maximumActivationWaitersPerHost: 4, maximumConcurrentResolutions: 2,
             maximumConcurrentReservations: 2, maximumResolveAttempts: 2
         )
-        let callerSystem = await makeSystem(port: callerPort)
+        let callerSystem = await makeSystem(port: callerPort, address: address)
         let caller = V2RoomClusterClient(system: callerSystem, signer: callerSigner,
                                          trust: trust, limits: limits, configuration: runtime)
         let peer = try V2RoomDiscoveryPeer(hostID: hostID, serviceID: hostSigner.serviceID,
-                                           address: "127.0.0.1", port: port,
+                                           address: address, port: port,
                                            accessibleShardIDs: ["pinned-shard"], maximumRooms: 2)
         let discovery = V2RoomClusterDiscovery(system: callerSystem, client: caller,
             trust: trust, configuration: try .init(peers: [peer], pollInterval: .milliseconds(100)))
 
-        var hostSystem = await makeSystem(port: port)
+        var hostSystem = await makeSystem(port: port, address: address)
         let first = try await publish(hostID: hostID, signer: hostSigner,
                                       system: hostSystem, port: port, availableRooms: 4)
         defer { withExtendedLifetime(first) {} }
@@ -173,7 +174,7 @@ struct V2RoomClusterDiscoveryTests {
         #expect(sameMember.status < .down)
 
         try await hostSystem.shutdown().wait()
-        hostSystem = await makeSystem(port: port)
+        hostSystem = await makeSystem(port: port, address: address)
         let second = try await publish(hostID: hostID, signer: hostSigner,
                                        system: hostSystem, port: port, availableRooms: 1)
         defer { withExtendedLifetime(second) {} }
@@ -186,7 +187,7 @@ struct V2RoomClusterDiscoveryTests {
         #expect(try await caller.candidates(for: owner).count == 1)
 
         try await hostSystem.shutdown().wait()
-        hostSystem = await makeSystem(port: port)
+        hostSystem = await makeSystem(port: port, address: address)
         let third = try await publish(hostID: hostID, signer: hostSigner,
                                       system: hostSystem, port: port, availableRooms: 2)
         defer { withExtendedLifetime(third) {} }
@@ -303,8 +304,8 @@ struct V2RoomClusterDiscoveryTests {
         try await hostSystem.shutdown().wait()
     }
 
-    private func makeSystem(port: Int) async -> ClusterSystem {
-        var settings = ClusterSystemSettings(name: "v2-discovery-test", host: "127.0.0.1", port: port)
+    private func makeSystem(port: Int, address: String = "127.0.0.1") async -> ClusterSystem {
+        var settings = ClusterSystemSettings(name: "v2-discovery-test", host: address, port: port)
         settings.threadPoolSize = 1
         settings.downingStrategy = .none
         settings.onDownAction = .none
@@ -320,7 +321,7 @@ struct V2RoomClusterDiscoveryTests {
         let endpoint = DiscoveryTestEndpoint(actorSystem: system)
         let descriptor = try V2RoomClusterHostDescriptor(
             identity: .init(hostID: hostID, incarnationID: UUID()), endpointID: endpoint.id,
-            address: "127.0.0.1", port: port,
+            address: endpoint.id.node.host, port: port,
             accessibleShardIDs: ["untrusted-claim"], availableRooms: availableRooms, isHealthy: true)
         let beacon = V2RoomDiscoveryBeacon(actorSystem: system, descriptor: descriptor,
                                             signer: signer, state: .init())

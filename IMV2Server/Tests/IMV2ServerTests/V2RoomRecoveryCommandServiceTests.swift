@@ -54,8 +54,8 @@ struct V2RoomRecoveryCommandServiceTests {
     }
 
     private func makeService(_ reader: CommandStateFixture) throws -> V2RoomRecoveryCommandService {
-        let source = try CommandTopologyFixture(value: .init(generation: "1", stores: [CommandDirectoryFixture()]))
-        let directory = V2UserRoomDirectoryService(topologySource: source,
+        let source = CommandTopologyFixture()
+        let directory = V2UserRoomDirectoryService(snapshotSource: source,
             cursorCodec: try .init(key: Data(repeating: 1, count: 32)))
         return try .init(directory: directory, states: reader, latestVisible: .init(reader: reader))
     }
@@ -80,7 +80,9 @@ private struct CommandDirectoryFixture: V2UserRoomDirectoryReading {
     }
 }
 
-private struct CommandTopologyFixture: V2RoomRecoveryTopologyReading {
-    let value: V2RoomRecoveryTopology
-    func topology() async throws -> V2RoomRecoveryTopology { value }
+private struct CommandTopologyFixture: V2RoomRecoveryDirectoryReading {
+    let storeCount = 1
+    func snapshot(actorUserID: UserID, after: RoomID?, limit: Int, storeIndex: Int) async throws -> V2RoomRecoveryDirectorySnapshot {
+        try await .init(generation: "1", slice: CommandDirectoryFixture().rooms(actorUserID: actorUserID, after: after, limit: limit))
+    }
 }

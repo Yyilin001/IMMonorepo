@@ -26,7 +26,7 @@ public struct V2UserRoomDirectoryCursorCodec: Sendable {
         return result
     }
 
-    public func decode(_ cursor: String, userID: UserID, topologyGeneration: String, storeCount: Int) throws -> Position {
+    public func decode(_ cursor: String, userID: UserID, storeCount: Int) throws -> Position {
         guard !cursor.isEmpty, cursor.utf8.count <= Self.maximumBytes else { throw V2RoomRecoveryReadError.invalidCursor }
         let components = cursor.split(separator: ".", omittingEmptySubsequences: false)
         guard components.count == 2, let payload = Data(base64Encoded: String(components[0])),
@@ -35,19 +35,20 @@ public struct V2UserRoomDirectoryCursorCodec: Sendable {
               let value = try? JSONDecoder().decode(Payload.self, from: payload), value.version == 1,
               let encodedUser = try? UserID(value.userID), encodedUser == userID
         else { throw V2RoomRecoveryReadError.invalidCursor }
-        guard value.topology == topologyGeneration else { throw V2RoomRecoveryReadError.topologyChanged }
+        guard !value.topology.isEmpty, value.topology.utf8.count <= 128 else { throw V2RoomRecoveryReadError.invalidCursor }
         guard value.storeIndex >= 0, value.storeIndex < storeCount else { throw V2RoomRecoveryReadError.invalidCursor }
         let after: RoomID?
         if let raw = value.after {
             guard let parsed = try? RoomID(raw), parsed.uuidValue != nil else { throw V2RoomRecoveryReadError.invalidCursor }
             after = parsed
         } else { after = nil }
-        return .init(storeIndex: value.storeIndex, after: after)
+        return .init(storeIndex: value.storeIndex, after: after, topologyGeneration: value.topology)
     }
 
     public struct Position: Equatable, Sendable {
         public let storeIndex: Int
         public let after: RoomID?
+        public let topologyGeneration: String
     }
 
     private struct Payload: Codable {

@@ -11,8 +11,8 @@ struct V2UserRoomDirectoryServiceTests {
     @Test("an empty physical store continues to the next without reading it early")
     func emptyStore() async throws {
         let first = DirectoryStoreProbe(), second = DirectoryStoreProbe()
-        let topology = try V2RoomRecoveryTopology(generation: "a", stores: [first, second])
-        let service = try makeService(DirectoryTopologyProbe(value: topology))
+        let topology = DirectoryTopologyProbe(generation: "a", stores: [first, second])
+        let service = try makeService(topology)
         let user = UserID(uuid: UUID())
         let page = try await service.list(actorUserID: user, cursor: nil, pageSize: 10)
         #expect(page.rooms.isEmpty && page.nextCursor != nil)
@@ -26,16 +26,16 @@ struct V2UserRoomDirectoryServiceTests {
     @Test("a topology change during a physical read invalidates its page")
     func concurrentTopologyChange() async throws {
         let store = DirectoryStoreProbe()
-        let topology = try V2RoomRecoveryTopology(generation: "a", stores: [store])
-        let service = try makeService(DirectoryTopologyProbe(value: topology, changesAfterFirstRead: true))
+        let topology = DirectoryTopologyProbe(generation: "a", stores: [store])
+        let service = try makeService(DirectoryTopologyProbe(generation: "a", stores: [store], changesAfterFirstRead: true))
         await #expect(throws: V2RoomRecoveryReadError.topologyChanged) {
             try await service.list(actorUserID: .init(uuid: UUID()), cursor: nil, pageSize: 10)
         }
         #expect(await store.calls == 1)
     }
 
-    private func makeService(_ topology: any V2RoomRecoveryTopologyReading) throws -> V2UserRoomDirectoryService {
-        .init(topologySource: topology, cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
+    private func makeService(_ topology: any V2RoomRecoveryDirectoryReading) throws -> V2UserRoomDirectoryService {
+        .init(snapshotSource: topology, cursorCodec: try .init(key: Data(repeating: 7, count: 32)))
     }
 }
 
@@ -47,17 +47,20 @@ private actor DirectoryStoreProbe: V2UserRoomDirectoryReading {
     }
 }
 
-private actor DirectoryTopologyProbe: V2RoomRecoveryTopologyReading {
-    let value: V2RoomRecoveryTopology
+private actor DirectoryTopologyProbe: V2RoomRecoveryDirectoryReading {
+    nonisolated let storeCount: Int
+    let generation: String
+    let stores: [any V2UserRoomDirectoryReading]
     let changesAfterFirstRead: Bool
     var calls = 0
-    init(value: V2RoomRecoveryTopology, changesAfterFirstRead: Bool = false) {
-        self.value = value
+    init(generation: String, stores: [any V2UserRoomDirectoryReading], changesAfterFirstRead: Bool = false) {
+        self.generation = generation; self.stores = stores; self.storeCount = stores.count
         self.changesAfterFirstRead = changesAfterFirstRead
     }
-    func topology() async throws -> V2RoomRecoveryTopology {
+    func snapshot(actorUserID: UserID, after: RoomID?, limit: Int, storeIndex: Int) async throws -> V2RoomRecoveryDirectorySnapshot {
         calls += 1
-        if changesAfterFirstRead && calls > 1 { return try .init(generation: "b", stores: value.stores) }
-        return value
+        let page = try await stores[storeIndex].rooms(actorUserID: actorUserID, after: after, limit: limit)
+        if changesAfterFirstRead { throw V2RoomRecoveryReadError.topologyChanged }
+        return try .init(generation: generation, slice: page)
     }
 }

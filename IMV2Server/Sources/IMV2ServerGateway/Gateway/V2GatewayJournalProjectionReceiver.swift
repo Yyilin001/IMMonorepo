@@ -327,6 +327,18 @@ public final class V2GatewayJournalProjectionReceiver: V2RealtimeJournalProjecti
         }
     }
 
+    /// Locally retained floors across a subscription revision. The caller must
+    /// independently prove the new route/source, replay every intervening control,
+    /// and freshly read every new connection lifecycle. This grants no authority.
+    public func retainsConnectionBaseline(source: V2RealtimeJournalSource,
+        fence: V2RealtimeJournalProjectionFence, versions: [UserID: UInt64]) -> Bool {
+        state.withLock { value in
+            guard !value.closed, let binding = value.bindings[source], binding.deadline > now(),
+                  binding.fence.sameAuthority(as: fence) else { return false }
+            return versions.allSatisfy { user, version in binding.userControlFloors[user].map { $0 >= version } ?? false }
+        }
+    }
+
     /// Called only after trusted source and routing observers confirmed this
     /// exact generation. An expired binding always requires a fresh baseline.
     @discardableResult

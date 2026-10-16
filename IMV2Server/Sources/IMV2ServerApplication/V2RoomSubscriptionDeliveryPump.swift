@@ -1,6 +1,7 @@
 import Foundation
 import IMV2Core
 import IMV2ActorContracts
+import IMV2ServerContracts
 
 /// Owns bounded online RPCs independently of room commit and socket workers.
 /// A transport deadline bounds each admitted call. Failed admission retains
@@ -49,8 +50,12 @@ public actor V2RoomSubscriptionDeliveryPump {
     @discardableResult
     public func bind(_ key: Key, relay: V2RoomSubscriptionRelay,
                      descriptor: V2GatewayRealtimeDescriptor, sourceShardID: String) async -> Bool {
-        guard !closed, bindingFlights[key] == nil, key.gateway == descriptor.identity,
+        guard !closed, key.gateway == descriptor.identity,
               !sourceShardID.isEmpty else { return false }
+        guard bindingFlights[key] == nil else {
+            V2RoomSubscriptionOwnerFailureMetrics.shared.record(.pumpBindingInProgress)
+            return false
+        }
         let controls = self.controls, messages = self.messages
         let flight = Task {
             guard await controls.reserveBinding(key) else { return false }
@@ -66,6 +71,15 @@ public actor V2RoomSubscriptionDeliveryPump {
         let result = await flight.value
         bindingFlights.removeValue(forKey: key)
         return result
+    }
+    /// An already activated exact binding remains installed while its RPC is
+    /// in flight. Retirement removes the entry before joining that RPC.
+    package func retainsBinding(_ key: Key, relay: V2RoomSubscriptionRelay,
+                                descriptor: V2GatewayRealtimeDescriptor, sourceShardID: String) async -> Bool {
+        guard !closed, bindingFlights[key] == nil,
+              await controls.retainsBinding(key, relay: relay, descriptor: descriptor, sourceShardID: sourceShardID),
+              await messages.retainsBinding(key, relay: relay, descriptor: descriptor, sourceShardID: sourceShardID) else { return false }
+        return !closed && bindingFlights[key] == nil
     }
     public func signal(_ key: Key) async { await controls.signal(key); await messages.signal(key) }
     public func baselineInstalled(_ key: Key) async { await controls.baselineInstalled(key); await messages.baselineInstalled(key) }
@@ -113,24 +127,6 @@ private actor V2RoomSubscriptionLanePump {
         let entry: Entry
         let last: V2RoomSubscriptionDelivery
     }
-    private struct KeyQueue: Sendable {
-        private var storage: [Key] = []
-        private var index = 0
-        var count: Int { storage.count - index }
-        var isEmpty: Bool { count == 0 }
-        mutating func append(_ key: Key) { storage.append(key) }
-        mutating func popFirst() -> Key? {
-            guard !isEmpty else { return nil }
-            let key = storage[index]; index += 1
-            if index >= 1024 && index * 2 >= storage.count {
-                storage.removeFirst(index); index = 0
-            }
-            return key
-        }
-        mutating func remove(_ key: Key) {
-            storage = storage.dropFirst(index).filter { $0 != key }; index = 0
-        }
-    }
     private let maximumEntries: Int
     private let maximumCalls: Int
     private let sendBatch: SendBatch
@@ -151,7 +147,8 @@ private actor V2RoomSubscriptionLanePump {
     private var queue: [Group] = []
     private var queueIndex = 0
     private var queued: Set<Group> = []
-    private var groupKeys: [Group: KeyQueue] = [:]
+    // Exact cancellation never filters/copies the other rooms in this group.
+    private var groupKeys: [Group: V2RealtimeKeyQueue<Key>] = [:]
     private var queuedKeys: Set<Key> = []
     private var owner: Task<Void, Never>?
     private var closed = false
@@ -171,12 +168,28 @@ private actor V2RoomSubscriptionLanePump {
         self.lane = lane; self.sendBatch = sendBatch
     }
     func reserveBinding(_ key: Key) -> Bool {
-        guard !closed, !activeKeys.contains(key), bindingReservations[key] == nil,
-              entries[key] != nil || entries.count + reservedNewBindings < maximumEntries else { return false }
+        guard !closed else { return false }
+        guard !activeKeys.contains(key) else {
+            V2RoomSubscriptionOwnerFailureMetrics.shared.record(.pumpBindingActive)
+            return false
+        }
+        guard bindingReservations[key] == nil else {
+            V2RoomSubscriptionOwnerFailureMetrics.shared.record(.pumpBindingInProgress)
+            return false
+        }
+        guard entries[key] != nil || entries.count + reservedNewBindings < maximumEntries else {
+            V2RoomSubscriptionOwnerFailureMetrics.shared.record(.pumpBindingCapacity)
+            return false
+        }
         let isNew = entries[key] == nil
         bindingReservations[key] = isNew
         if isNew { reservedNewBindings += 1 }
         return true
+    }
+    func retainsBinding(_ key: Key, relay: V2RoomSubscriptionRelay,
+                        descriptor: V2GatewayRealtimeDescriptor, sourceShardID: String) -> Bool {
+        guard !closed, bindingReservations[key] == nil, let entry = entries[key] else { return false }
+        return entry.relay === relay && entry.descriptor == descriptor && entry.shardID == sourceShardID
     }
     func releaseBinding(_ key: Key) {
         if bindingReservations.removeValue(forKey: key) == true { reservedNewBindings -= 1 }
@@ -195,7 +208,7 @@ private actor V2RoomSubscriptionLanePump {
         // groups explicitly, so repeated room signals need no extra hop.
         guard queuedKeys.insert(key).inserted else { return }
         let group = Group(gateway: key.gateway, shardID: entry.shardID)
-        groupKeys[group, default: KeyQueue()].append(key)
+        groupKeys[group, default: .init()].insert(key)
         enqueue(group)
         wakes.continuation.yield(())
     }
@@ -268,6 +281,7 @@ private actor V2RoomSubscriptionLanePump {
         // Visit each originally queued peer/shard group at most once. Blocked peers return
         // to the tail, without starving a fast peer beyond the first quantum.
         let visits = queue.count - queueIndex
+        var removedIdleWork = false
         for ordinal in 0..<visits {
             if ordinal > 0, ordinal % 64 == 0 { await Task.yield() }
             guard !closed, active.count < maximumCalls, queueIndex < queue.count else { break }
@@ -291,18 +305,19 @@ private actor V2RoomSubscriptionLanePump {
                 queuedKeys.remove(key)
                 if bindingReservations[key] != nil { signal(key); continue }
                 guard let entry = entries[key], !entry.waitingBaseline,
-                      !activeKeys.contains(key) else { continue }
+                      !activeKeys.contains(key) else { removedIdleWork = true; continue }
                 // Reserve before awaiting the Relay; reentrant bind cannot
                 // replace the identity whose pending prefix we are collecting.
                 activeKeys.insert(key); reservedBindings[key] = entry.id
                 guard let snapshot = await entry.relay.pendingSnapshot(for: key.gateway, lane: lane),
                       entries[key]?.id == entry.id, !closed else {
-                    releaseReservation(key, entryID: entry.id); continue
+                    releaseReservation(key, entryID: entry.id); removedIdleWork = true; continue
                 }
                 let status = snapshot.status
                 bindingFences[Binding(key: key, entryID: entry.id)] = status.fence
                 if status.needsBaseline {
-                    releaseReservation(key, entryID: entry.id); waitForBaseline(key, entry: entry); continue
+                    releaseReservation(key, entryID: entry.id); waitForBaseline(key, entry: entry)
+                    removedIdleWork = true; continue
                 }
                 let pending = snapshot.pending
                 var last: V2RoomSubscriptionDelivery?
@@ -315,8 +330,8 @@ private actor V2RoomSubscriptionLanePump {
                     if descriptor == nil { descriptor = entry.descriptor }
                 } else {
                     releaseReservation(key, entryID: entry.id)
-                    if pending.isEmpty { continue }
-                    if builder.count == 0 { waitForBaseline(key, entry: entry) }
+                    if pending.isEmpty { removedIdleWork = true; continue }
+                    if builder.count == 0 { waitForBaseline(key, entry: entry); removedIdleWork = true }
                     else { signal(key); break }
                 }
             }
@@ -330,9 +345,18 @@ private actor V2RoomSubscriptionLanePump {
             let callID = UUID()
             let admittedWork = work
             let sendBatch = self.sendBatch
-            active[callID] = Task { [weak self] in
+            active[callID] = Task { [weak self, lane] in
                 let result: Result<V2RoomSubscriptionBatchResult, any Error>
-                do { try Task.checkCancellation(); result = .success(try await sendBatch(batch, group.shardID, descriptor)) }
+                do {
+                    try Task.checkCancellation()
+                    if lane == .authorization {
+                        for item in admittedWork {
+                            await item.entry.relay.authorizationTransmissionStarted(gateway: item.key.gateway,
+                                fence: item.last.fence)
+                        }
+                    }
+                    result = .success(try await sendBatch(batch, group.shardID, descriptor))
+                }
                 catch { result = .failure(error) }
                 await self?.complete(callID, group: group, work: admittedWork, result: result)
             }
@@ -343,6 +367,10 @@ private actor V2RoomSubscriptionLanePump {
         if queueIndex >= 1024 && queueIndex * 2 >= queue.count {
             queue.removeFirst(queueIndex); queueIndex = 0
         }
+        // A bounded pass may find only already-drained rooms, leaving no RPC
+        // completion to wake the remaining prefix. Continue after real removal;
+        // passes containing only reserved, active or retry-blocked groups stop.
+        if !closed, removedIdleWork, queueIndex < queue.count { wakes.continuation.yield(()) }
     }
     private func waitForBaseline(_ key: Key, entry: Entry) {
         guard entries[key]?.id == entry.id else { return }

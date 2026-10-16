@@ -3,10 +3,14 @@ import Logging
 import IMV2ActorContracts
 
 public enum V2SendPathTraceLogging {
-    /// Detailed message diagnostics default to a stable 1/64 sample across
-    /// nodes/segments. Log only diagnostic spans, never message content.
+    /// Detailed diagnostics are opt-in. A nil collection removes the sink and
+    /// avoids allocating per-message spans on normal production paths.
     public static func install(logger: Logger = Logger(label: "im.v2.send.path"),
-                               collection: V2SendPathTrace.Collection = .sampledOperations) {
+                               collection: V2SendPathTrace.Collection? = nil) {
+        guard let collection else {
+            V2SendPathTrace.installSink(nil)
+            return
+        }
         V2SendPathTrace.installSink({ snapshot in
             let slow = snapshot.durationMilliseconds >= 100
             let sampled = snapshot.operations.contains { UUID(uuidString: $0)?.uuid.0 ?? 1 < 4 }

@@ -22,6 +22,10 @@ struct V2DatabaseWorkloadResourcesTests {
         #expect(messageLoops.count == 2)
         #expect(messageLoops.allSatisfy { ObjectIdentifier($0) != ObjectIdentifier(control) })
         let foregroundLoop = foreground.eventLoopGroup.next()
+        let initializationLoop = resources.initialization.eventLoopGroup.next()
+        #expect(resources.initialization.databases !== resources.control.databases)
+        #expect(ObjectIdentifier(initializationLoop) != ObjectIdentifier(control))
+        #expect(ObjectIdentifier(initializationLoop) != ObjectIdentifier(foregroundLoop))
         #expect(ObjectIdentifier(foregroundLoop) != ObjectIdentifier(control))
         #expect(messageLoops.allSatisfy { ObjectIdentifier($0) != ObjectIdentifier(foregroundLoop) })
         let entered = Mutex(false), completed = Mutex(0)
@@ -35,10 +39,11 @@ struct V2DatabaseWorkloadResourcesTests {
             try #require(entered.withLock { $0 })
             for loop in messageLoops { loop.execute { completed.withLock { $0 += 1 } } }
             foregroundLoop.execute { completed.withLock { $0 += 1 } }
-            while completed.withLock({ $0 }) != 3, ContinuousClock.now < deadline {
+            initializationLoop.execute { completed.withLock { $0 += 1 } }
+            while completed.withLock({ $0 }) != 4, ContinuousClock.now < deadline {
                 try await Task.sleep(for: .milliseconds(1))
             }
-            #expect(completed.withLock { $0 } == 3)
+            #expect(completed.withLock { $0 } == 4)
             unblock.signal()
             async let first: Void = resources.shutdown()
             async let second: Void = resources.shutdown()
@@ -48,12 +53,13 @@ struct V2DatabaseWorkloadResourcesTests {
         }
     }
 
-    @Test("explicit shared-pool mode creates no extra driver group")
+    @Test("shared message pools retain an isolated initialization driver group")
     func sharedMode() async throws {
         let resources = V2DatabaseWorkloadResources(controlEventLoopThreads: 1,
             messageEventLoopThreads: nil, logger: Logger(label: "imv2.workload.resources.shared.tests"))
         #expect(resources.messageWrite == nil)
         #expect(resources.foreground == nil)
+        #expect(resources.initialization.databases !== resources.control.databases)
         #expect(resources.resources(for: .foreground) === resources.control)
         #expect(resources.resources(for: .messageWrite) === resources.control)
         try await resources.shutdown()

@@ -250,7 +250,7 @@ private func overloadHost(database: any Database,
     let writes = PostgresV2RoomWriteStore(database: database,
         strangerMessagePolicy: try .init(maximumMessagesPerWindow: 10, window: 86_400),
         contentReviewMode: .disabled)
-    let resources = try V2RoomServerOwnerResources(database: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: writeCapacity), writes: writes,
+    let resources = try V2RoomServerOwnerResources(database: database, initializationDatabase: database, sendDatabase: try v2FixtureMessageWriteDatabase(database, capacity: writeCapacity), writes: writes,
         membershipIdentities: V2PostgresMembershipIdentitySnapshotValidator(database: database),
         invitationIdentities: PostgresV2GroupInvitationIdentityReader(database: database),
         invitationSecretIssuer: try .init(rawKey: Data(repeating: 0x73, count: 32)),

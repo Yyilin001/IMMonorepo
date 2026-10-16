@@ -42,13 +42,10 @@ public final class V2GatewayRoomSubscriptionIngress: V2RoomSubscriptionHandler, 
     @discardableResult
     public func retire(fence: V2RoomSubscriptionFence) async -> Bool { await authority.retire(fence: fence) }
 
-    @discardableResult
-    public func refreshProgress(fence: V2RoomSubscriptionFence, sourceShardID: String, serviceID: String,
-                                highWatermark: UInt64) async -> Bool {
-        guard sourceShardID == fence.activation.owner.shardID else { return false }
-        let accepted = await authority.recordCommittedHead(fence: fence, serviceID: serviceID, highWatermark: highWatermark)
-        if accepted, let head = await authority.recoveryHighWatermark(roomID: fence.roomID) { offerHead(fence.roomID, head) }
-        return accepted
+    /// A successful local repair can outlive its original head publication.
+    /// This advisory wake grants no authority; the consumer captures fresh gates.
+    package func resignalProgress(roomID: RoomID) async {
+        if let head = await authority.recoveryHighWatermark(roomID: roomID) { offerHead(roomID, head) }
     }
 
     private let sessionChanged = Synchronization.Mutex<(@Sendable (V2ActorHostIdentity) async -> Void)?>(nil)
