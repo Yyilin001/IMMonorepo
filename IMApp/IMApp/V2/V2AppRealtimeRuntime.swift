@@ -1117,18 +1117,17 @@ struct V2AppRealtimeRuntime {
                 return try await localStore.groupEventCursor(roomID: roomID)
             }, receiveAccountEvent: { hint in
                 guard try await localStore.groupEventAccess(roomID: hint.roomID)?.isAuthorized == true else {
-                    // Retain the target before membership reconciliation. The recovery
-                    // worker checks authoritative room state before requesting content.
-                    try await roomCatchUpWorker.retainOnlineRoomHead(roomID: hint.roomID,
-                        highWatermark: hint.highWatermark, userID: actorUserID)
-                    return
+                    return false
                 }
-                if try await !groupEventSync.applyOnlineEvents(hint) {
-                    try await roomCatchUpWorker.retainOnlineRoomHead(roomID: hint.roomID,
-                        highWatermark: hint.highWatermark, userID: actorUserID)
-                }
+                let caughtUp = try await groupEventSync.applyOnlineEvents(hint)
                 let persisted = try await localStore.groupEventCursor(roomID: hint.roomID)
                 try await transport.enqueueDeviceRoomProgress(roomID: hint.roomID, appliedThrough: min(persisted, hint.highWatermark))
+                return caughtUp
+            }, recoverAccountEvent: { hint in
+                // Only a gap that outlives the bounded online grace becomes
+                // durable recovery work. This also retains unknown-authority H.
+                try await roomCatchUpWorker.retainOnlineRoomHead(roomID: hint.roomID,
+                    highWatermark: hint.highWatermark, userID: actorUserID)
             }
         )
         self.roomSubscriptions = roomSubscriptions

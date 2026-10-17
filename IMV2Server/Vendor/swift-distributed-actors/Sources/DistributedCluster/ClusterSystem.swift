@@ -1307,51 +1307,37 @@ extension ClusterSystem {
         let callID = UUID()
 
         let timeout = RemoteCall.timeout ?? self.settings.remoteCall.defaultTimeout
-        let timeoutTask: Task<Void, Error> = Task.detached {
-            try await Task.sleep(nanoseconds: UInt64(timeout.nanoseconds))
-            guard !Task.isCancelled else {
-                return
+        // One NIO timer registration, rather than a sleeping Swift task per RPC.
+        // Register the continuation first: even an immediate timeout must find it.
+        let fail: @Sendable (Bool) -> Void = { shuttingDown in
+            let continuation = self.inFlightCallLock.withLock {
+                self._inFlightCalls.removeValue(forKey: callID)
             }
-
-            self.inFlightCallLock.withLockVoid {
-                guard let continuation = self._inFlightCalls.removeValue(forKey: callID) else {
-                    // remoteCall was already completed successfully, nothing to do here
-                    return
-                }
-
-                let error: Error
-                if self.isShuttingDown {
-                    // If the system is shutting down, we should offer a more specific error;
-                    //
-                    // We may not be getting responses simply because we've shut down associations
-                    // and cannot receive them anymore.
-                    // Some subsystems may ignore those errors, since they are "expected".
-                    //
-                    // If we're shutting down, it is okay to not get acknowledgements to calls for example,
-                    // and we don't care about them missing -- we're shutting down anyway.
-                    error = RemoteCallError(.clusterAlreadyShutDown, on: actorID, target: target)
-                } else {
-                    error = RemoteCallError(
-                        .timedOut(
-                            callID,
-                            TimeoutError(message: "Remote call [\(callID)] to [\(target)](\(actorID)) timed out", timeout: timeout)
-                        ),
-                        on: actorID,
-                        target: target
-                    )
-                }
-
-                continuation.resume(throwing: error)
+            guard let continuation else { return }
+            let error: Error
+            if shuttingDown || self.isShuttingDown {
+                error = RemoteCallError(.clusterAlreadyShutDown, on: actorID, target: target)
+            } else {
+                error = RemoteCallError(
+                    .timedOut(callID, TimeoutError(
+                        message: "Remote call [\(callID)] to [\(target)](\(actorID)) timed out", timeout: timeout)),
+                    on: actorID, target: target)
             }
+            continuation.resume(throwing: error)
         }
-        defer {
-            timeoutTask.cancel()
-        }
-
+        var timeoutTask: Scheduled<Void>?
+        defer { timeoutTask?.cancel() }
         let reply: any AnyRemoteCallReply = try await withCheckedThrowingContinuation { continuation in
             self.inFlightCallLock.withLock {
-                self._inFlightCalls[callID] = continuation  // this is to be resumed from an incoming reply or timeout
+                self._inFlightCalls[callID] = continuation
             }
+            let timer = self._eventLoopGroup.next().scheduleTask(in: .nanoseconds(timeout.nanoseconds)) {
+                fail(false)
+            }
+            timeoutTask = timer
+            // EventLoop shutdown cancels scheduled work. Settle outstanding calls
+            // as well; normal cancellation after a reply finds no pending entry.
+            timer.futureResult.whenFailure { _ in fail(true) }
             body(callID)
         }
 

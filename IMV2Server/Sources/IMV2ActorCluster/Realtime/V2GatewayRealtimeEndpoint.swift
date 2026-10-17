@@ -116,7 +116,17 @@ struct RoomSubscriptionBatchReply: Codable, Sendable {
     let sessionID: UUID
     let sequence: UInt64
     let attemptID: UUID
-    let result: V2RoomSubscriptionBatchResult
+    let results: [V2RoomSubscriptionDeliveryResult]
+
+    func result(for validated: V2ValidatedRoomSubscriptionBatch) throws -> V2RoomSubscriptionBatchResult {
+        guard results.count == validated.rooms.count else { throw V2ActorAuthenticationError.wrongRecipient }
+        return try .init(receipts: zip(validated.rooms, results).map { room, result in
+            if case .appliedThrough(let sequence) = result, sequence != room.lastSequence {
+                throw V2ActorAuthenticationError.wrongRecipient
+            }
+            return .init(fence: room.fence, result: result)
+        })
+    }
 }
 
 struct RoomDeliverySessionCall: Codable, Equatable, Sendable {
@@ -337,7 +347,7 @@ actor V2GatewayRealtimeInbound {
         try session.accept(sequence: call.sequence, attemptID: call.attemptID)
         let result = try await applyRoomSubscriptionBatch(validated, serviceID: peer.serviceID, sourceShardID: call.sourceShardID)
         return try sessionReply(RoomSubscriptionBatchReply(recipient: identity, sessionID: call.sessionID,
-            sequence: call.sequence, attemptID: call.attemptID, result: result), session: session, maximumBytes: limits.maximumPacketBytes)
+            sequence: call.sequence, attemptID: call.attemptID, results: try validated.orderedResults(result)), session: session, maximumBytes: limits.maximumPacketBytes)
     }
     // Only the native composition's exact local descriptor can reach this
     // typed boundary. Network callers still use authenticated session packets.
@@ -682,8 +692,7 @@ public actor V2RealtimeClusterSender {
             try validatePeer(peer, target: target)
             guard reply.recipient == target.identity, reply.sessionID == call.sessionID,
                   reply.sequence == call.sequence, reply.attemptID == call.attemptID else { throw V2ActorAuthenticationError.wrongRecipient }
-            try validateRoomSubscriptionBatchReceipt(reply.result, validated: validated)
-            return reply.result
+            return try reply.result(for: validated)
         } catch {
             if let auth = error as? V2ActorAuthenticationError,
                auth == .sessionExpired || auth == .wrongRecipient, sessions[target]?.id == session.id {

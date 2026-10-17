@@ -115,7 +115,7 @@ struct V2RoomSubscriptionAuthenticationTests {
         let packet = try fixture.publisher.sign(call, maximumBytes: 262_144)
         let response = try await fixture.inbound.deliverRoomSubscriptionBatch(packet)
         let (reply, _) = try fixture.trust.verify(response, as: RoomSubscriptionBatchReply.self, maximumBytes: 262_144)
-        #expect(reply.result.receipts == [.init(fence: fixture.delivery.fence, result: .appliedThrough(1)),
+        #expect(try reply.result(for: batch.validated()).receipts == [.init(fence: fixture.delivery.fence, result: .appliedThrough(1)),
                                          .init(fence: otherFence, result: .appliedThrough(1))])
         #expect(handler.count == 2)
         await #expect(throws: V2ActorAuthenticationError.replay) {

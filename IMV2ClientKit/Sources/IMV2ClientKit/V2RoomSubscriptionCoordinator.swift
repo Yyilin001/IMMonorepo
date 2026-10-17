@@ -101,7 +101,16 @@ public actor V2RoomSubscriptionCoordinator {
     private let activityEvents: any V2LiveActivityEventSource
     private let isAuthorized: @Sendable (RoomID) async throws -> Bool
     private let didUnsubscribeRoom: @Sendable (RoomID) async -> Void
-    private let receiveAccountEvent: @Sendable (V2GroupEventAvailabilityHint) async throws -> Void
+    private let receiveAccountEvent: @Sendable (V2GroupEventAvailabilityHint) async throws -> Bool
+    private let recoverAccountEvent: @Sendable (V2GroupEventAvailabilityHint) async throws -> Void
+    private let recoveryGrace: Duration
+    private struct PendingAccountEvent {
+        var hint: V2GroupEventAvailabilityHint
+        let deadline: ContinuousClock.Instant
+    }
+    private var pendingAccountEvents: [RoomID: PendingAccountEvent] = [:]
+    private var pendingAccountBytes = 0
+    private var recoveryWake: AsyncStream<Void>.Continuation?
     private let roomCursor: @Sendable (RoomID) async throws -> UInt64
     private let retryDelay: Duration
     private let refreshInterval: Duration
@@ -121,6 +130,9 @@ public actor V2RoomSubscriptionCoordinator {
     ///   - isAuthorized: 判断房间当前是否授权的闭包。
     ///   - roomCursor: 读取房间当前持久化游标的闭包。
     ///   - didUnsubscribeRoom: 取消订阅后的回调，默认忽略。
+    ///   - receiveAccountEvent: 应用连续正文；只有持久游标已追平 H 时返回 true。
+    ///   - recoverAccountEvent: 缺口超过等待期限后保留可靠恢复任务。
+    ///   - recoveryGrace: 首次缺口的固定等待上限，默认 100 ms，须大于零。
     ///   - retryDelay: 重试退避间隔，需大于零。
     ///   - refreshInterval: 周期刷新间隔，需大于零。
     ///   - maximumRooms: 允许同时订阅的房间上限，需大于零，默认 128。
@@ -135,13 +147,15 @@ public actor V2RoomSubscriptionCoordinator {
         isAuthorized: @escaping @Sendable (RoomID) async throws -> Bool,
         roomCursor: @escaping @Sendable (RoomID) async throws -> UInt64,
         didUnsubscribeRoom: @escaping @Sendable (RoomID) async -> Void = { _ in },
-        receiveAccountEvent: @escaping @Sendable (V2GroupEventAvailabilityHint) async throws -> Void = { _ in },
+        receiveAccountEvent: @escaping @Sendable (V2GroupEventAvailabilityHint) async throws -> Bool = { _ in true },
+        recoverAccountEvent: @escaping @Sendable (V2GroupEventAvailabilityHint) async throws -> Void = { _ in },
+        recoveryGrace: Duration = .milliseconds(100),
         retryDelay: Duration = .seconds(1),
         refreshInterval: Duration = .seconds(30),
         maximumRooms: Int = 128,
         maximumConsumers: Int = 512
     ) {
-        precondition(retryDelay > .zero && refreshInterval > .zero && maximumRooms > 0 && maximumConsumers > 0)
+        precondition(retryDelay > .zero && refreshInterval > .zero && recoveryGrace > .zero && maximumRooms > 0 && maximumConsumers > 0)
         self.subscriptions = subscriptions
         self.activity = activity
         self.groupEvents = groupEvents
@@ -150,6 +164,8 @@ public actor V2RoomSubscriptionCoordinator {
         self.roomCursor = roomCursor
         self.didUnsubscribeRoom = didUnsubscribeRoom
         self.receiveAccountEvent = receiveAccountEvent
+        self.recoverAccountEvent = recoverAccountEvent
+        self.recoveryGrace = recoveryGrace
         self.retryDelay = retryDelay
         self.refreshInterval = refreshInterval
         self.maximumRooms = maximumRooms
@@ -296,13 +312,19 @@ public actor V2RoomSubscriptionCoordinator {
         let wake = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         runState = .init(id: id, connectionID: connectionID, wake: wake.continuation)
         resetConnectionFacts()
+        let recovery = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        recoveryWake = recovery.continuation
         wake.continuation.yield(())
         defer {
+            recovery.continuation.finish()
+            recoveryWake = nil
+            pendingAccountEvents.removeAll(); pendingAccountBytes = 0
             wake.continuation.finish()
             if runState?.id == id { runState = nil; resetConnectionFacts() }
         }
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { try await self.reconcileLoop(wakes: wake.stream, id: id) }
+            group.addTask { try await self.recoverAccountLoop(wakes: recovery.stream, id: id) }
             group.addTask {
                 while !Task.isCancelled {
                     let hint = try await self.groupEvents.nextGroupEventAvailabilityHint()
@@ -467,22 +489,60 @@ public actor V2RoomSubscriptionCoordinator {
 
     private func accept(_ hint: V2GroupEventAvailabilityHint, id: UUID) async throws {
         try checkRun(id)
-        try await receiveAccountEvent(hint)
+        // Retain a bounded sparse batch before applying. A later body can close
+        // the gap even when it has the same (or a lower) advertised H.
+        let previousAccount = pendingAccountEvents[hint.roomID]
+        let merged = previousAccount.map { $0.hint.coalescing(with: hint) } ?? hint
+        let bytes = pendingAccountBytes - (previousAccount?.hint.estimatedLiveBytes ?? 0) + merged.estimatedLiveBytes
+        guard (previousAccount != nil || pendingAccountEvents.count < 4096), bytes <= 16 * 1024 * 1024 else {
+            throw V2TLSFrameConnectionError.unexpectedResponse
+        }
+        pendingAccountEvents[hint.roomID] = .init(hint: merged,
+            deadline: previousAccount?.deadline ?? ContinuousClock.now.advanced(by: recoveryGrace))
+        pendingAccountBytes = bytes
+        let caughtUp = try await receiveAccountEvent(merged)
         try checkRun(id)
+        if caughtUp, pendingAccountEvents[hint.roomID]?.hint == merged {
+            removePendingAccountEvent(hint.roomID)
+        }
+        if pendingAccountEvents[hint.roomID] != nil { recoveryWake?.yield(()) }
         guard rooms[hint.roomID]?.desired.contains(.roomEvents) == true else { return }
         let previous = rooms[hint.roomID]?.wake
-        var wake = previous.map { $0.coalescing(with: hint) } ?? hint
-        // Unlike the socket's pending buffer, a snapshot retains its last
-        // wake after consumers have applied it. A metadata ACK or an old full
-        // batch must not suppress every later payload forever. Keep the newest
-        // batch when merging cannot preserve it; each consumer still checks
-        // its authoritative cursor and pulls on a gap.
-        if wake.liveEvents.isEmpty, !hint.liveEvents.isEmpty,
-           hint.highWatermark >= (previous?.highWatermark ?? 0) {
-            wake = hint
-        }
+        let wake = previous.map { $0.coalescing(with: hint) } ?? hint
         rooms[hint.roomID]?.wake = wake
         publish(hint.roomID)
+    }
+
+    private func removePendingAccountEvent(_ roomID: RoomID) {
+        if let old = pendingAccountEvents.removeValue(forKey: roomID) {
+            pendingAccountBytes -= old.hint.estimatedLiveBytes
+        }
+    }
+
+    /// One structured worker per connection; new hints never extend a room's
+    /// first-gap deadline. Cancellation/error drains with the connection group.
+    private func recoverAccountLoop(wakes: AsyncStream<Void>, id: UUID) async throws {
+        for await _ in wakes {
+            try checkRun(id)
+            while let deadline = pendingAccountEvents.values.lazy.map(\.deadline).min() {
+                try await ContinuousClock().sleep(until: deadline)
+                try checkRun(id)
+                let now = ContinuousClock.now
+                let due = pendingAccountEvents.filter { $0.value.deadline <= now }
+                for (roomID, pending) in due {
+                    try checkRun(id)
+                    // Keep a newer arrival independent of this expired attempt.
+                    guard let current = pendingAccountEvents[roomID], current.deadline == pending.deadline else { continue }
+                    removePendingAccountEvent(roomID)
+                    let caughtUp = try await receiveAccountEvent(current.hint)
+                    try checkRun(id)
+                    if !caughtUp {
+                        try await recoverAccountEvent(current.hint)
+                        try checkRun(id)
+                    }
+                }
+            }
+        }
     }
 
     private func accept(_ event: V2LiveActivityEvent, id: UUID) throws {

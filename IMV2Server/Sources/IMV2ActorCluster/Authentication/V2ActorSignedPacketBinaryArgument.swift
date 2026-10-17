@@ -1,7 +1,7 @@
 import DistributedCluster
 import Foundation
 
-/// Only the outer argument is binary. The signature and signed body are copied
+/// Only the outer argument is binary. The signature and signed body are retained
 /// unchanged and go through the existing Trust verification before body decoding.
 extension V2ActorSignedPacket: ClusterBinaryInvocationArgument {
     private static var argumentMagic: [UInt8] { [73, 77, 86, 80] } // IMVP
@@ -45,8 +45,11 @@ extension V2ActorSignedPacket: ClusterBinaryInvocationArgument {
                 throw V2ActorAuthenticationError.invalidRequest
             }
             let bodyStart = 17 + idCount, signatureStart = bodyStart + bodyCount
-            return .init(signerID: signer, body: Data(raw[bodyStart..<signatureStart]),
-                signature: Data(raw[signatureStart..<raw.count]))
+            // Retain bounded Data slices; do not eagerly copy the payload and MAC
+            // out of the invocation buffer. Account for sliced input indices.
+            let start = bytes.startIndex
+            return .init(signerID: signer, body: bytes[(start + bodyStart)..<(start + signatureStart)],
+                signature: bytes[(start + signatureStart)..<bytes.endIndex])
         }
     }
 }

@@ -827,6 +827,8 @@ message GroupEventUnsubscribe {
 
 message GroupEventAvailable {
   string room_id = 1;
+  // Known committed head; optional bodies may end below this watermark.
+  // It never advances the applied cursor without contiguous validated bodies.
   uint64 high_watermark = 2;
   // Optional acceleration payload for a plain room-log event. Its absence
   // retains the original metadata-only contract. Group payload publication

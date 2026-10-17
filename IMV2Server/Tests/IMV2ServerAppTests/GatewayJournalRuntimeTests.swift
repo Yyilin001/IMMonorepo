@@ -6,6 +6,27 @@ import IMV2ServerContracts
 @testable import IMV2ServerApp
 
 struct GatewayJournalRuntimeTests {
+    @Test func coverageBurstsCoalesceWithoutLosingChangesDuringProofRead() {
+        var work = GatewayJournalReconciliationWork()
+        for _ in 0..<20 { work.request(partition: 7) }
+        work.request(partition: 19)
+        guard case .partitions(let first) = work.take() else { Issue.record("unexpected full scan"); return }
+        #expect(first == [7, 19])
+        // A renewal during the first pass's await must survive that pass.
+        work.request(partition: 7)
+        guard case .partitions(let next) = work.take() else { Issue.record("unexpected full scan"); return }
+        #expect(next == [7])
+        work.request(partition: 1)
+        work.request(partition: nil) // periodic proof refresh includes all coverage
+        work.request(partition: 2)
+        guard case .all = work.take() else { Issue.record("lost full refresh"); return }
+        work.request(partition: 3)
+        guard case .partitions(let afterFull) = work.take() else { Issue.record("full refresh stuck"); return }
+        #expect(afterFull == [3])
+        guard case .partitions(let idle) = work.take() else { Issue.record("idle full refresh"); return }
+        #expect(idle.isEmpty)
+    }
+
     @Test func productionJournalRetainsOnlyUserControlsAndOrderedCut() {
         let room = RoomID(uuid: UUID()), user = UserID(uuid: UUID())
         let fence = V2RealtimeJournalProjectionFence(publisherIncarnationID: UUID(), sourceLeaseEpoch: 1,

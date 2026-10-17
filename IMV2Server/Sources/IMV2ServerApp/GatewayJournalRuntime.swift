@@ -38,6 +38,7 @@ final class GatewayJournalRuntime: Sendable {
     }
     private let proofCache = Mutex<[String: CachedProofs]>([:])
     private let repairWakes = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+    private let reconciliationWork = Mutex(GatewayJournalReconciliationWork())
     private let wakes = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
     private let recovery: GatewayJournalRecoveryCoordinator
     private let logger = Logger(label: "imv2.gateway.journal")
@@ -124,14 +125,20 @@ final class GatewayJournalRuntime: Sendable {
             // Coverage withdrawal already makes the captured current() gate deny.
             // Retain bounded local floors for a same-session incremental rebuild;
             // they cannot authorize a socket while coverage is withdrawn.
-            _ = change
-            runtime.wakes.continuation.yield(())
+            switch change {
+            case .installed(let coverage), .renewed(let coverage):
+                runtime.requestReconciliation(partition: coverage.token.partitionID)
+            case .invalidated(let partitionID):
+                runtime.requestReconciliation(partition: partitionID)
+            }
         }
         coordinator.configureTrustedJournalRenewal { [weak runtime] coverage in
             guard let runtime else { return false }
             return runtime.controlProgressIsCurrent(coverage)
         }
-        await registry.configureJournalInterestChanges { [weak runtime] in runtime?.wakes.continuation.yield(()) }
+        await registry.configureJournalInterestChanges { [weak runtime] user in
+            runtime?.requestReconciliation(partition: V2RealtimeTopicKey(kind: .userSync, id: user.rawValue).partitionID())
+        }
         await registry.configureJournalUserBaselineBarrier { [weak runtime] user in
             guard let runtime else { throw V2RealtimeJournalError.authorityLost }
             do { return try await runtime.ensureUserBaseline(user) }
@@ -167,10 +174,10 @@ final class GatewayJournalRuntime: Sendable {
         let timer = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                self?.wakes.continuation.yield(())
+                self?.requestReconciliation()
             }
         }
-        clock.withLock { $0 = timer }; wakes.continuation.yield(())
+        clock.withLock { $0 = timer }; requestReconciliation()
     }
     private func refresh(_ source: V2RealtimeJournalSource, minimumCut: Int64 = 0,
         sourceProof: GatewayJournalSourceCatalog.SourceProof? = nil) async throws {
@@ -195,12 +202,23 @@ final class GatewayJournalRuntime: Sendable {
         }
         try Task.checkCancellation()
     }
+    private func requestReconciliation(partition: Int? = nil) {
+        reconciliationWork.withLock { $0.request(partition: partition) }
+        wakes.continuation.yield(())
+    }
     private func reconcile() async {
         let span = GatewayJournalDiagnostics.begin()
         defer { GatewayJournalDiagnostics.end(span, stage: .reconcile) }
         // Include room-DB user partitions: membership triggers are physically
         // local and must not be mistaken for the authentication source.
-        let partitions = coordinator.activeJournalCoverages().map { $0.token.partitionID }.sorted()
+        let work = reconciliationWork.withLock { $0.take() }
+        let partitions: [Int]
+        switch work {
+        case .all:
+            partitions = coordinator.activeJournalCoverages().map { $0.token.partitionID }.sorted()
+        case .partitions(let changed):
+            partitions = changed.filter { coordinator.journalCoverage(partitionID: $0).map { !$0.interests.isEmpty } ?? false }.sorted()
+        }
         guard !partitions.isEmpty else { return }
         for alias in aliases {
             if Task.isCancelled { return }
@@ -255,7 +273,9 @@ final class GatewayJournalRuntime: Sendable {
         let fresh = old.map { $0.observedAt + .seconds(5) > now } ?? false
         let needed = fresh ? partitions.filter { partition in
             old?.requested.contains(partition) != true || old?.values[partition].map { $0.validUntil <= now } == true
-        } : partitions
+        } : Array((old?.requested ?? []).union(partitions)).sorted()
+        // Renew cached DB proofs together at their existing observation cadence.
+        // A dirty-partition wake must not fragment expiry into one SQL per partition.
         if needed.isEmpty { return old?.values ?? [:] }
         let values = try await catalog.sourceProofs(logicalAlias: alias, partitionIDs: needed)
         var cached = fresh ? old! : CachedProofs(observedAt: now, requested: [], values: [:])
@@ -380,5 +400,28 @@ final class GatewayJournalRuntime: Sendable {
         await recovery.close(); await timer?.value; await task?.value; await repairTask?.value
         repairs.withLock { $0.pending.removeAll(); $0.running.removeAll(); $0.order.removeAll() }; proofCache.withLock { $0.removeAll() }
         await publisher.close(); await fanout.close(); await authority.shutdown()
+    }
+}
+
+/// Pending work is independent of the coalesced wake token. Changes arriving
+/// during an awaited proof read remain pending for the next pass.
+struct GatewayJournalReconciliationWork: Sendable {
+    enum Selection { case all, partitions(Set<Int>) }
+    private var full = false
+    private var partitions: Set<Int> = []
+    mutating func request(partition: Int?) {
+        if let partition {
+            guard (0..<256).contains(partition), !full else { return }
+            partitions.insert(partition)
+        } else {
+            full = true
+            partitions.removeAll(keepingCapacity: true)
+        }
+    }
+    mutating func take() -> Selection {
+        if full { full = false; return .all }
+        let selected = partitions
+        partitions.removeAll(keepingCapacity: true)
+        return .partitions(selected)
     }
 }

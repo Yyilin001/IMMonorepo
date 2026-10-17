@@ -231,17 +231,21 @@ public actor V2GroupEventSyncEngine {
         let current = PageFlight(id: UUID(), task: Task { [store] in
             let cursor = try await store.groupEventCursor(roomID: roomID)
             if hint.highWatermark <= cursor { return .init(appliedEventCount: 0, hasMore: false) }
-            let events = Array(hint.liveEvents.drop(while: { $0.roomSequence <= cursor }))
-            guard let first = events.first, let last = events.last,
-                  events.count <= V2GroupEventLogLimits.maximumPageSize,
-                  events.allSatisfy({ $0.roomSequence <= UInt64(Int64.max) }),
-                  cursor < UInt64(Int64.max), first.roomSequence == cursor + 1,
-                  last.roomSequence <= hint.highWatermark,
-                  zip(events, events.dropFirst()).allSatisfy({ $1.roomSequence == $0.roomSequence + 1 }) else {
+            let candidates = hint.liveEvents.filter { $0.roomSequence > cursor }
+            guard candidates.count <= V2GroupEventLogLimits.maximumPageSize,
+                  candidates.allSatisfy({ $0.roomSequence <= hint.highWatermark && $0.roomSequence <= UInt64(Int64.max) }),
+                  zip(candidates, candidates.dropFirst()).allSatisfy({ $1.roomSequence > $0.roomSequence }) else {
                 return .init(appliedEventCount: 0, hasMore: true)
             }
+            var through = cursor
+            let events = candidates.prefix { event in
+                guard through < UInt64(Int64.max), event.roomSequence == through + 1 else { return false }
+                through = event.roomSequence
+                return true
+            }
+            guard let last = events.last else { return .init(appliedEventCount: 0, hasMore: true) }
             try Task.checkCancellation()
-            let page = try V2ClientGroupEventPage(roomID: roomID, events: events,
+            let page = try V2ClientGroupEventPage(roomID: roomID, events: Array(events),
                 nextRoomSequence: last.roomSequence, hasMore: last.roomSequence < hint.highWatermark)
             let commit = try await store.applyGroupEventPageReportingChanges(page)
             return .init(appliedEventCount: commit.insertedEventCount, hasMore: commit.appliedThrough < hint.highWatermark)

@@ -155,43 +155,37 @@ public struct V2GroupEventAvailabilityHint: Equatable, Sendable {
         self.liveEvents = liveEvents
     }
 
-    /// 合并同房间提示，尽量保留有界且连续的加速事件。
-    ///
-    /// - Parameter newer: 后收到的提示。
-    /// - Returns: 合并提示，或只保留高水位以要求正常补拉。
-    ///
-    /// 不同房间采用新提示；较低水位保留旧提示；相同水位仅在旧批次为空时采用新批次。
-    /// 水位推进但任一批次为空、追加序列有间隔、超过页上限或尾序列未抵达新水位时丢弃加速载荷。
-    /// 既有批次的内部顺序依赖来源验证，此方法不重新验证整个输入。
+    /// H 是提交水位，不是本帧正文的尾序号。保留同 H、较低 H 及暂时不连续的
+    /// 正文，消费端只应用连续前缀。超过预算保留较新的正文，缺失部分仍可靠补拉。
     func coalescing(with newer: Self) -> Self {
         guard roomID == newer.roomID else { return newer }
-        guard newer.highWatermark >= highWatermark else { return self }
-        guard newer.highWatermark > highWatermark else {
-            return liveEvents.isEmpty && !newer.liveEvents.isEmpty ? newer : self
-        }
-        guard !liveEvents.isEmpty, !newer.liveEvents.isEmpty else {
-            return .init(roomID: roomID, highWatermark: newer.highWatermark)
-        }
-        var merged = liveEvents
-        var lastSequence = merged.last!.roomSequence
-        for event in newer.liveEvents where event.roomSequence > lastSequence {
-            guard event.roomSequence == lastSequence + 1,
-                  merged.count < V2GroupEventLogLimits.maximumPageSize
-            else {
-                return .init(roomID: roomID, highWatermark: newer.highWatermark)
+        let head = max(highWatermark, newer.highWatermark)
+        var bySequence: [UInt64: V2ClientGroupEvent] = [:]
+        for event in liveEvents + newer.liveEvents {
+            guard event.roomSequence > 0, event.roomSequence <= head else {
+                return .init(roomID: roomID, highWatermark: head)
             }
-            merged.append(event)
-            lastSequence = event.roomSequence
+            if let previous = bySequence[event.roomSequence], previous != event {
+                // Conflicting optional bodies cannot establish a trustworthy prefix.
+                return .init(roomID: roomID, highWatermark: head)
+            }
+            bySequence[event.roomSequence] = event
         }
-        guard lastSequence == newer.highWatermark else {
-            return .init(roomID: roomID, highWatermark: newer.highWatermark)
+        var retained: [V2ClientGroupEvent] = []
+        var bytes = 0
+        for sequence in bySequence.keys.sorted(by: >) {
+            let event = bySequence[sequence]!
+            let size = event.payload.count + 128
+            guard retained.count < V2GroupEventLogLimits.maximumPageSize,
+                  size <= Self.maximumLiveBytes - bytes else { break }
+            retained.append(event); bytes += size
         }
-        return .init(
-            roomID: roomID,
-            highWatermark: newer.highWatermark,
-            liveEvents: merged
-        )
+        return .init(roomID: roomID, highWatermark: head, liveEvents: retained.reversed())
     }
+
+    static let maximumLiveBytes = 1_048_576
+    var estimatedLiveBytes: Int { liveEvents.reduce(128) { $0 + $1.payload.count + 128 } }
+
 }
 
 /// 供单个应用所属消费者等待的尽力同步提示来源；收到提示后仍须执行正常拉取与确认。
@@ -1216,21 +1210,24 @@ public actor V2TLSFrameConnection: V2AuthenticatedFrameTransport, V2SyncAvailabi
 
     /// 从可选加速载荷提取连续事件批次，失败时返回空数组而不使连接报错。
     ///
-    /// 群批量字段要求所有事件可构造、相邻序列连续且尾序列等于提示高水位。
-    /// 没有批量字段时读取私聊单事件字段，要求其序列等于提示高水位。
+    /// 群批量字段要求所有事件可构造、相邻序列连续且尾序列不超过提示高水位。
+    /// 没有批量字段时读取私聊单事件字段，要求其序列不超过提示高水位。
     /// 无效加速内容降级为普通唤醒，由可靠日志补拉恢复。
     static func liveGroupEvents(from hint: IMV2GroupEventAvailable) -> [V2ClientGroupEvent] {
         if !hint.liveEvents.isEmpty {
             let events = hint.liveEvents.compactMap(Self.liveGroupEvent(from:))
             guard events.count == hint.liveEvents.count,
-                  events.last?.roomSequence == hint.highWatermark,
+                  events.count <= V2GroupEventLogLimits.maximumPageSize,
+                  (events.last?.roomSequence ?? 0) <= hint.highWatermark,
+                  events.reduce(0, { $0 + $1.payload.count + 128 }) <= V2GroupEventAvailabilityHint.maximumLiveBytes,
                   zip(events, events.dropFirst()).allSatisfy({
                       $1.roomSequence == $0.roomSequence + 1
                   })
             else { return [] }
             return events
         }
-        guard hint.roomSequence == hint.highWatermark else { return [] }
+        guard hint.roomSequence <= hint.highWatermark,
+              hint.eventPayload.count + 128 <= V2GroupEventAvailabilityHint.maximumLiveBytes else { return [] }
         return Self.liveGroupEvent(
             sourceEventID: hint.sourceEventID,
             roomSequence: hint.roomSequence,

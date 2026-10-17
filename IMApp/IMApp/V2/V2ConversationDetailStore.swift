@@ -682,8 +682,8 @@ final class V2ConversationDetailStore {
 
     /// 在混合大群恢复宽限期内等待，并判断是否应当改为拉取。
     ///
-    /// 这里只等待仅含元数据的唤醒。畸形或不连续的实时载荷仍会立即进入持久化恢复流程，
-    /// 绝不能用于推进游标。即使不断有更新的元数据唤醒到达，总等待时间仍有截止上限。
+    /// 正文可能只覆盖已知水位的一部分，短暂缺口与元数据提示共享同一个有界等待。
+    /// 只有经过验证的连续正文可以推进游标；新提示不会延长截止时间。
     ///
     /// - Parameters:
     ///   - initialWake: 首次收到的唤醒信息。
@@ -694,7 +694,6 @@ final class V2ConversationDetailStore {
         initialWake: V2ActiveHybridGroupWake,
         synchronizer: any V2ActiveHybridGroupSynchronizing
     ) async throws -> Bool {
-        guard initialWake.liveEvents.isEmpty else { return true }
         var requiredHighWatermark = initialWake.highWatermark
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: Self.hybridGroupRecoveryGrace)

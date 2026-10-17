@@ -235,7 +235,13 @@ message HotRealtimeHeader {
 message HotSubscriptionCall { HotRealtimeHeader header = 1; string source_shard_id = 2; HotSubscriptionDelivery delivery = 3; }
 message HotSubscriptionReply { HotRealtimeHeader header = 1; HotDeliveryResult result = 2; }
 message HotSubscriptionBatchCall { HotRealtimeHeader header = 1; string source_shard_id = 2; HotDeliveryBatch batch = 3; }
-message HotSubscriptionBatchReply { HotRealtimeHeader header = 1; HotDeliveryReceipts result = 2; }
+// Results follow the validated request's first-occurrence room order. The
+// authenticated header binds them to that exact request; fences stay local.
+message HotSubscriptionBatchReply {
+  HotRealtimeHeader header = 1;
+  reserved 2;
+  repeated HotDeliveryResult results = 3;
+}
 message HotTopic { string kind = 1; string id = 2; HotOwner owner = 3; }
 message HotRoomWake { string room_id = 1; uint64 watermark = 2; }
 message HotUserSync { string user_id = 1; uint64 watermark = 2; }

@@ -17,6 +17,13 @@ struct V2ActorBinaryArgumentTests {
         let packet = try signer.sign(Body(text: "消息 / original bytes"), maximumBytes: 1024)
         let encoded = try packet.encodeClusterInvocationArgument()
         #expect(try V2ActorSignedPacket.decodeClusterInvocationArgument(encoded) == packet)
+        var prefixed = Data([0, 1, 2, 3]); prefixed.append(encoded)
+        let slice = prefixed.dropFirst(4)
+        let retained = try #require(try V2ActorSignedPacket.decodeClusterInvocationArgument(slice))
+        prefixed.removeAll()
+        #expect(retained == packet)
+        #expect(try retained.encodeClusterInvocationArgument() == encoded)
+
         #expect(try trust.verify(try #require(try V2ActorSignedPacket.decodeClusterInvocationArgument(encoded)),
             as: Body.self, maximumBytes: 1024).0 == Body(text: "消息 / original bytes"))
         #expect(try V2ActorSignedPacket.decodeClusterInvocationArgument(JSONEncoder().encode(packet)) == nil)

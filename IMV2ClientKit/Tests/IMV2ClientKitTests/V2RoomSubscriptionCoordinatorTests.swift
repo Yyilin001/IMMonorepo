@@ -5,13 +5,111 @@ import Testing
 
 @Suite("Runtime room subscription intents", .timeLimit(.minutes(1)))
 struct V2RoomSubscriptionCoordinatorTests {
+    @Test("ordered and temporarily sparse same-H bodies avoid recovery", arguments: [false, true])
+    func onlinePrefixClosesDuringGrace(outOfOrder: Bool) async throws {
+        let wire = SubscriptionWire(), consumer = AccountPrefixConsumer(cursor: 7)
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true }, roomCursor: { _ in 0 },
+            receiveAccountEvent: { await consumer.apply($0) },
+            recoverAccountEvent: { await consumer.recover($0) }, recoveryGrace: .milliseconds(100))
+        let run = Task { try await owner.run(connectionID: UUID()) }
+        let room = RoomID(uuid: UUID())
+        for sequence in outOfOrder ? [8, 10, 9] : [8, 9, 10] {
+            let event = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString),
+                roomSequence: UInt64(sequence), projectionKind: "message", payload: Data([1]))
+            await wire.emitGroup(room: room, watermark: 10, events: [event])
+        }
+        try await Task.sleep(for: .milliseconds(180))
+        #expect(await consumer.cursor == 10)
+        #expect(await consumer.recovered.isEmpty)
+        run.cancel(); _ = await run.result
+    }
+
+    @Test("an already covered body announcing future H waits for the following body")
+    func duplicateBodyWithFutureHead() async throws {
+        let wire = SubscriptionWire(), consumer = AccountPrefixConsumer(cursor: 11)
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true }, roomCursor: { _ in 0 },
+            receiveAccountEvent: { await consumer.apply($0) }, recoverAccountEvent: { await consumer.recover($0) })
+        let run = Task { try await owner.run(connectionID: UUID()) }
+        let room = RoomID(uuid: UUID())
+        for sequence in [10, 12] {
+            let event = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString),
+                roomSequence: UInt64(sequence), projectionKind: "message", payload: Data([1]))
+            await wire.emitGroup(room: room, watermark: 12, events: [event])
+        }
+        try await Task.sleep(for: .milliseconds(160))
+        #expect(await consumer.cursor == 12)
+        #expect(await consumer.recovered.isEmpty)
+        run.cancel(); _ = await run.result
+    }
+
+    @Test("a persistent gap recovers after a fixed deadline and cancellation drains pending work")
+    func persistentGapAndCancellation() async throws {
+        let wire = SubscriptionWire(), consumer = AccountPrefixConsumer(cursor: 7)
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true }, roomCursor: { _ in 0 },
+            receiveAccountEvent: { await consumer.apply($0) },
+            recoverAccountEvent: { await consumer.recover($0) }, recoveryGrace: .milliseconds(60))
+        let run = Task { try await owner.run(connectionID: UUID()) }
+        let room = RoomID(uuid: UUID())
+        await wire.emitGroup(room: room, watermark: 10)
+        // Keep advancing H longer than the grace. This must not debounce forever.
+        for head in 11...20 {
+            try await Task.sleep(for: .milliseconds(15))
+            await wire.emitGroup(room: room, watermark: UInt64(head))
+        }
+        #expect(await consumer.cursor == 7)
+        #expect(await consumer.recovered.count > 0)
+        run.cancel(); _ = await run.result
+        let count = await consumer.recovered.count
+        try await Task.sleep(for: .milliseconds(90))
+        #expect(await consumer.recovered.count == count)
+    }
+
+    @Test("connection replacement discards the previous gap and buffered bodies")
+    func pendingGapDoesNotCrossConnection() async throws {
+        let wire = SubscriptionWire(), consumer = AccountPrefixConsumer(cursor: 7)
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true }, roomCursor: { _ in 0 },
+            receiveAccountEvent: { await consumer.apply($0) }, recoverAccountEvent: { await consumer.recover($0) })
+        let room = RoomID(uuid: UUID())
+        let first = Task { try await owner.run(connectionID: UUID()) }
+        let future = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString),
+            roomSequence: 10, projectionKind: "message", payload: Data([1]))
+        await wire.emitGroup(room: room, watermark: 10, events: [future])
+        while await consumer.receivedCount == 0 { await Task.yield() }
+        first.cancel(); _ = await first.result
+        let second = Task { try await owner.run(connectionID: UUID()) }
+        let next = try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString),
+            roomSequence: 8, projectionKind: "message", payload: Data([1]))
+        await wire.emitGroup(room: room, watermark: 8, events: [next])
+        try await Task.sleep(for: .milliseconds(160))
+        #expect(await consumer.cursor == 8)
+        #expect(await consumer.recovered.isEmpty)
+        second.cancel(); _ = await second.result
+    }
+
+    @Test("recovery failure terminates the owned connection tasks")
+    func recoveryFailureEndsRun() async throws {
+        let wire = SubscriptionWire()
+        let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
+            groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true }, roomCursor: { _ in 0 },
+            receiveAccountEvent: { _ in false },
+            recoverAccountEvent: { _ in throw V2TLSFrameConnectionError.connectionFailed },
+            recoveryGrace: .milliseconds(1))
+        let run = Task { try await owner.run(connectionID: UUID()) }
+        await wire.emitGroup(room: .init(uuid: UUID()), watermark: 10)
+        await #expect(throws: V2TLSFrameConnectionError.connectionFailed) { try await run.value }
+    }
+
     @Test("account events are consumed without acquiring a foreground room")
     func accountDeliveryWithoutRoomIntent() async throws {
         let wire = SubscriptionWire()
         let received = AsyncStream<V2GroupEventAvailabilityHint>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let owner = V2RoomSubscriptionCoordinator(subscriptions: wire, activity: wire,
             groupEvents: wire, activityEvents: wire, isAuthorized: { _ in true }, roomCursor: { _ in 0 },
-            receiveAccountEvent: { hint in received.continuation.yield(hint) })
+            receiveAccountEvent: { hint in received.continuation.yield(hint); return true })
         let run = Task { try await owner.run(connectionID: UUID()) }
         let room = RoomID(uuid: UUID())
         await wire.emitGroup(room: room, watermark: 1)
@@ -252,7 +350,7 @@ struct V2RoomSubscriptionCoordinatorTests {
         let later = try V2ClientGroupEvent(sourceEventID: try .init(UUID().uuidString), roomSequence: 10, projectionKind: "message", payload: Data([2]))
         await wire.emitGroup(room: room, watermark: 10, events: [later])
         let resumed = try await next(&snapshots) { $0.wake?.highWatermark == 10 }
-        #expect(resumed.wake?.liveEvents == [later])
+        #expect(resumed.wake?.liveEvents == [event, later])
         await owner.release(roomID: room, consumerID: lease.id)
         run.cancel()
         _ = await run.result
@@ -402,4 +500,20 @@ private actor SubscriptionCommittedCursor {
 private actor SubscriptionRefreshCounter {
     private(set) var count = 0
     func advance() { count += 1 }
+}
+
+private actor AccountPrefixConsumer {
+    private(set) var cursor: UInt64
+    private(set) var recovered: [UInt64] = []
+    private(set) var receivedCount = 0
+    init(cursor: UInt64) { self.cursor = cursor }
+    func apply(_ hint: V2GroupEventAvailabilityHint) -> Bool {
+        receivedCount += 1
+        for event in hint.liveEvents where event.roomSequence > cursor {
+            guard event.roomSequence == cursor + 1 else { break }
+            cursor = event.roomSequence
+        }
+        return cursor >= hint.highWatermark
+    }
+    func recover(_ hint: V2GroupEventAvailabilityHint) { recovered.append(hint.highWatermark) }
 }

@@ -61,3 +61,17 @@ handshake watchdog bounds one connected but silent peer; NIO's existing
 connection timeout and finite retry backoff cover resolution/connect attempts.
 Neither patch replaces the application's request/admission budget. The
 application must configure enough envelope overhead above its request size.
+
+- `ClusterSystem.withCallID`：远程调用截止时间使用已有 NIO EventLoop 定时队列，
+  不再为每次调用创建休眠的 Swift Task。先登记 continuation 再注册超时；回复、
+  超时和 EventLoop 关闭通过同一个 in-flight 字典互斥取出 continuation，并在锁外恢复。
+  `V2RemoteCallDeadlineTests` 验证正常回复、超时、迟到回复及关闭时未完成调用的结算。
+
+- `WireEnvelopeHandler`：在异步序列化完成后按连接合并 flush；最多 32 帧或 64 KiB，
+  单独到达的帧安排下一次 EventLoop 执行即 flush，关闭/移除时处理已写入内容。
+  不合并房间事务，不增加跨连接调度队列。
+- `WireEnvelopeCodec`：保留 Envelope PB 字段号和格式，直接写入 NIO 缓冲；接收侧
+  payload 使用 ByteBuffer 切片，路由/manifest 仍走生成的 PB 校验与模型转换。
+  保留重复嵌套字段合并、bytes 后值覆盖、未知字段跳过，并限制未知 group 嵌套深度。
+  Server 的 `V2ClusterWireTransportTests` 验证线格式一致性、切片存储、畸形输入、
+  flush 合并、帧数/字节上限及关闭边界；真实远程认证与超时测试验证调用行为。

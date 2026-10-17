@@ -5,6 +5,22 @@ import Testing
 
 @Suite("Finite room-log catch-up", .timeLimit(.minutes(1)))
 struct V2RoomLogCatchUpTests {
+    @Test("a sparse online batch applies only its continuous prefix and later closes the gap")
+    func sparsePrefix() async throws {
+        let room = try makeRooms(1)[0], store = CatchUpStore(rooms: [])
+        let transport = CatchUpTransport(tails: [room: 3])
+        let engine = V2GroupEventSyncEngine(transport: transport, store: store)
+        let events = try (1...3).map { try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString),
+            roomSequence: UInt64($0), projectionKind: "message", payload: Data()) }
+        let sparse = V2GroupEventAvailabilityHint(roomID: room, highWatermark: 3, liveEvents: [events[0], events[2]])
+        #expect(try await !engine.applyOnlineEvents(sparse))
+        #expect(await store.groupEventCursor(roomID: room) == 1)
+        #expect(try await engine.applyOnlineEvents(sparse.coalescing(with: .init(roomID: room,
+            highWatermark: 2, liveEvents: [events[1]]))))
+        #expect(await store.groupEventCursor(roomID: room) == 3)
+        #expect(await transport.roomsRequested().isEmpty)
+    }
+
     @Test("online bodies persist in unopened rooms and gaps never skip the durable cursor")
     func onlineBodiesAndGaps() async throws {
         let room = try makeRooms(1)[0], store = CatchUpStore(rooms: [])

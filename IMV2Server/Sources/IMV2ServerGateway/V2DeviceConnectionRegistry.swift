@@ -34,7 +34,7 @@ public actor V2DeviceConnectionRegistry {
     private var journalDeviceFloors: [V2RealtimeJournalSource: [V2RealtimeJournalDeviceKey: Int64]] = [:]
     private var journalUserFloors: [V2RealtimeJournalSource: [UUID: V2RealtimeJournalUserControl]] = [:]
     private var journalSourcesByUser: [UUID: Set<V2RealtimeJournalSource>] = [:]
-    private nonisolated let journalInterestChanged = Mutex<V2CallbackBox<@Sendable () -> Void>?>(nil)
+    private nonisolated let journalInterestChanged = Mutex<V2CallbackBox<@Sendable (UserID) -> Void>?>(nil)
     private nonisolated let journalReceiver = Mutex<V2GatewayJournalProjectionReceiver?>(nil)
     private nonisolated let roomSubscriptionAuthority = Mutex<V2GatewayRoomSubscriptionAuthority?>(nil)
     private nonisolated let roomSubscriptionHeadWorker = Mutex<V2GatewayRoomSubscriptionHeadWorker?>(nil)
@@ -371,7 +371,10 @@ public actor V2DeviceConnectionRegistry {
         for authorization in permits {
             guard let stream = onlineRoomStreams.withLock({ $0[authorization.connectionID] }) else { continue }
             let permit: @Sendable (@Sendable () -> Void) -> Bool = { enqueue in
-                authority.enqueueIfCurrent(authorization, enqueue: enqueue)
+                authority.enqueueIfCurrent(authorization) {
+                    enqueue()
+                    authorization.socketGate?.recordSubmittedHead(authorization, highWatermark: prepared.highWatermark)
+                }
             }
             if let submission = stream.prepareNIOGroupEventAvailable(prepared, enqueueIfCurrent: permit) {
                 submissions.append(submission)
@@ -423,7 +426,7 @@ public actor V2DeviceConnectionRegistry {
                 authority.removeConnection(connectionID, lifecycle: localLifecycle)
             }
         }
-        journalInterestChanged.withLock { $0?.callback }?()
+        journalInterestChanged.withLock { $0?.callback }?(identity.userID)
         if journalUserBaseline.withLock({ $0 != nil }) {
             stream.configureLiveStatePrimaryAuthentication { [weak self] enqueue in
                 guard let self, let receiver = self.journalReceiver.withLock({ $0 }),
@@ -503,7 +506,7 @@ public actor V2DeviceConnectionRegistry {
     public func unregister(connectionID: UUID) async {
         guard let removed = removeDirectoryConnection(connectionID) else { return }
         let roomReference = removeRoomSubscriptionConnection(connectionID)
-        journalInterestChanged.withLock { $0?.callback }?()
+        journalInterestChanged.withLock { $0?.callback }?(removed.identity.userID)
         removed.stream.invalidateForegroundAuthorization()
         removed.stream.revokeRecoveryWorkImmediately()
         directory.beginRetirementOperation(connectionID, lifecycle: removed.lifecycle)
@@ -849,7 +852,7 @@ public actor V2DeviceConnectionRegistry {
 
     /// Runtime owns coalescing and cold snapshot tasks; subscription changes
     /// only signal that owner and never create an independent background task.
-    public func configureJournalInterestChanges(_ changed: @escaping @Sendable () -> Void) async {
+    public func configureJournalInterestChanges(_ changed: @escaping @Sendable (UserID) -> Void) async {
         journalInterestChanged.withLock { $0 = V2CallbackBox(changed) }
     }
 
@@ -1554,7 +1557,7 @@ public actor V2DeviceConnectionRegistry {
               removeDirectoryConnection(connectionID, lifecycle: lifecycle) != nil else { return }
         let roomReference = removeRoomSubscriptionConnection(connectionID)
         if let roomReference { await roomSubscriptionCoordinator?.release(reference: roomReference) }
-        journalInterestChanged.withLock { $0?.callback }?()
+        journalInterestChanged.withLock { $0?.callback }?(identity.userID)
         defer { directory.endOperation(connectionID) }
         let scope = userSyncScopes.removeValue(forKey: connectionID)
         let revokedScopes = recoveryCoordinator.revokeConnection(connectionID, lifecycle: lifecycle)

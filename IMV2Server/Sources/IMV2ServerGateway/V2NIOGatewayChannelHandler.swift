@@ -820,7 +820,14 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         var writers: [V2NIOGatewayForegroundWriter]
     }
 
+    private struct RoomHead: Sendable {
+        let permit: V2GatewayRoomSubscriptionAuthority.Permit
+        let encode: @Sendable (UInt64) -> ByteBuffer?
+        let enqueueIfCurrent: @Sendable (@Sendable () -> Void) -> Bool
+        var pending: UInt64?
+    }
     private struct State: Sendable {
+        var head: RoomHead?
         var queue: V2GatewayForegroundWriteQueue
         var scheduled = false
         var waitingForWritability = false
@@ -867,6 +874,29 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
             maximumQueuedBytes: maximumQueuedBytes,
             maximumQueuedFrames: maximumQueuedFrames
         ))
+    }
+
+    func activateRoomHead(_ permit: V2GatewayRoomSubscriptionAuthority.Permit,
+                          enqueueIfCurrent: @escaping @Sendable (@Sendable () -> Void) -> Bool,
+                          encode: @escaping @Sendable (UInt64) -> ByteBuffer?) {
+        state.withLock { value in
+            guard !value.finished else { return }
+            if value.head?.permit != permit { value.head = .init(permit: permit, encode: encode, enqueueIfCurrent: enqueueIfCurrent) }
+        }
+    }
+    /// One coalesced hint for the active foreground scope, separate from the
+    /// bounded body FIFO. No encoded bytes or suspended task per head offer.
+    func submitRoomHead(_ permit: V2GatewayRoomSubscriptionAuthority.Permit, highWatermark: UInt64) -> Bool {
+        let result = state.withLock { value -> (Bool, Bool) in
+            guard !value.finished, value.head?.permit == permit else { return (false, false) }
+            value.head!.pending = max(value.head!.pending ?? 0, highWatermark)
+            guard !value.scheduled, !value.waitingForWritability else { return (true, false) }
+            value.scheduled = true
+            return (true, true)
+        }
+        if result.0 { V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headOffered) }
+        if result.1 { schedulerLane.enqueue(self) }
+        return result.0
     }
 
     func submit(_ bytes: ByteBuffer) {
@@ -943,6 +973,7 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         state.withLock {
             $0.finished = true
             $0.queue.removeAll()
+            $0.head = nil
             $0.scheduled = false
             $0.waitingForWritability = false
         }
@@ -950,7 +981,7 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
 
     func resumeAfterWritabilityChange() {
         let shouldEnqueue = state.withLock { state in
-            guard !state.finished, !state.queue.isEmpty else {
+            guard !state.finished, !state.queue.isEmpty || state.head?.pending != nil else {
                 state.waitingForWritability = false
                 return false
             }
@@ -971,73 +1002,78 @@ final class V2NIOGatewayForegroundWriter: @unchecked Sendable {
         guard channel.isWritable else {
             state.withLock { state in
                 state.scheduled = false
-                if !state.finished, !state.queue.isEmpty {
+                if !state.finished, !state.queue.isEmpty || state.head?.pending != nil {
                     state.waitingForWritability = true
                 }
             }
             metrics?.foregroundWriteDeferredForWritability()
             return
         }
-        let result = state.withLock { state -> (
-            V2GatewayForegroundWriteQueue.Drain?, Bool
-        ) in
+        let result = state.withLock { state -> (V2GatewayForegroundWriteQueue.Drain?, RoomHead?, Bool) in
             state.scheduled = false
-            guard !state.finished else {
-                state.queue.removeAll()
-                return (nil, false)
-            }
-            let batch = state.queue.popBatch(
-                maximumFrames: maximumDrainFrames,
-                maximumBytes: maximumDrainBytes
-            )
+            guard !state.finished else { state.queue.removeAll(); state.head = nil; return (nil, nil, false) }
+            let batch = state.queue.popBatch(maximumFrames: maximumDrainFrames, maximumBytes: maximumDrainBytes)
             let reschedule = !state.queue.isEmpty
             if reschedule { state.scheduled = true }
-            return (batch, reschedule)
+            let head = reschedule ? nil : state.head
+            if !reschedule { state.head?.pending = nil }
+            return (batch, head, reschedule)
         }
-        guard let batch = result.0 else { return }
-        if batch.entries.contains(where: { $0.enqueueIfCurrent != nil }) {
-            var writtenFrames = 0
-            var writtenBytes = 0
-            for entry in batch.entries where entry.isAuthorizedToWrite() {
-                let accepted: Bool
-                if let permit = entry.enqueueIfCurrent {
-                    accepted = permit { self.channel.write(entry.bytes, promise: nil) }
-                } else {
-                    channel.write(entry.bytes, promise: nil); accepted = true
-                }
-                if accepted { writtenFrames += 1; writtenBytes += entry.bytes.readableBytes }
-            }
-            if writtenFrames > 0 {
-                channel.flush()
-                metrics?.foregroundWriteBatch(frames: writtenFrames, bytes: writtenBytes)
-            }
-            if result.1 { schedulerLane.enqueue(self) }
-            return
-        }
-        // Keep the single-frame shared-storage fast path, and coalesce only
-        // after seeing a second authorized frame. No filter/map snapshots.
-        var buffer: ByteBuffer?
         var writtenFrames = 0
         var writtenBytes = 0
-        for entry in batch.entries where entry.isAuthorizedToWrite() {
-            if writtenFrames == 0 {
-                buffer = entry.bytes
-            } else {
-                if writtenFrames == 1 {
-                    var combined = channel.allocator.buffer(capacity: batch.bytes)
-                    combined.writeImmutableBuffer(buffer!)
-                    buffer = combined
+        if let batch = result.0 {
+            if batch.entries.contains(where: { $0.enqueueIfCurrent != nil }) {
+                for entry in batch.entries where entry.isAuthorizedToWrite() {
+                    let accepted: Bool
+                    if let permit = entry.enqueueIfCurrent {
+                        accepted = permit { self.channel.write(entry.bytes, promise: nil) }
+                    } else { channel.write(entry.bytes, promise: nil); accepted = true }
+                    if accepted { writtenFrames += 1; writtenBytes += entry.bytes.readableBytes }
                 }
-                buffer!.writeImmutableBuffer(entry.bytes)
+            } else {
+                // Preserve the existing shared-buffer fast path for one frame.
+                var buffer: ByteBuffer?
+                for entry in batch.entries where entry.isAuthorizedToWrite() {
+                    if writtenFrames == 0 { buffer = entry.bytes }
+                    else {
+                        if writtenFrames == 1 {
+                            var combined = channel.allocator.buffer(capacity: batch.bytes)
+                            combined.writeImmutableBuffer(buffer!)
+                            buffer = combined
+                        }
+                        buffer!.writeImmutableBuffer(entry.bytes)
+                    }
+                    writtenFrames += 1; writtenBytes += entry.bytes.readableBytes
+                }
+                if let buffer { channel.write(buffer, promise: nil) }
             }
-            writtenFrames += 1
-            writtenBytes += entry.bytes.readableBytes
         }
-        if let buffer {
-            channel.writeAndFlush(buffer, promise: nil)
-            metrics?.foregroundWriteBatch(frames: writtenFrames, bytes: writtenBytes)
+        let wroteHead = result.1.map { drainRoomHead($0) } ?? false
+        if writtenFrames > 0 || wroteHead { channel.flush() }
+        if writtenFrames > 0 { metrics?.foregroundWriteBatch(frames: writtenFrames, bytes: writtenBytes) }
+        if result.2 { schedulerLane.enqueue(self) }
+    }
+
+    private func drainRoomHead(_ head: RoomHead) -> Bool {
+        guard let highWatermark = head.pending, let gate = head.permit.socketGate else { return false }
+        let metrics = V2RoomSubscriptionHeadDeliveryMetrics.shared
+        // A single EventLoop turn covers the check and the actual write. The
+        // connection fence is still held around admission, as for body frames.
+        if gate.hasSubmittedHead(head.permit, highWatermark: highWatermark) {
+            metrics.record(.headAlreadySubmitted)
+            return false
         }
-        if result.1 { schedulerLane.enqueue(self) }
+        guard let bytes = head.encode(highWatermark) else {
+            channel.close(promise: nil)
+            return false
+        }
+        let accepted = head.enqueueIfCurrent {
+            self.channel.write(bytes, promise: nil)
+            gate.recordSubmittedHead(head.permit, highWatermark: highWatermark)
+        }
+        metrics.record(accepted ? .headEnqueueAccepted : .headEnqueueRefused)
+        metrics.record(accepted ? .socketEnqueued : .socketPermitRejected)
+        return accepted
     }
 }
 

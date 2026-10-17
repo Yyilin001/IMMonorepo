@@ -12,6 +12,7 @@ import IMV2ActorContracts
 /// 这些字节不携带任何连接特定状态：
 /// 受众选择与传输生命周期校验都留在这个值之外。
 struct V2PreparedGatewayGroupEventAvailable: Sendable {
+    let highWatermark: UInt64
     let protocolVersion: UInt8
     /// `ByteBuffer` 是写时复制的、`Sendable` 的值。
     ///
@@ -56,6 +57,7 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
             compressionThresholdBytes: compressionThresholdBytes,
             maximumExpansionRatio: maximumExpansionRatio
         ) else { return nil }
+        self.highWatermark = envelope.groupEventAvailable.highWatermark
         self.protocolVersion = protocolVersion
         self.uncompressedBytes = uncompressedBytes
         compressedBytes = compression.flatMap { compression in
@@ -129,6 +131,7 @@ struct V2PreparedGatewayGroupEventAvailable: Sendable {
             compressionThresholdBytes: compressionThresholdBytes,
             maximumExpansionRatio: maximumExpansionRatio
         ) else { return nil }
+        self.highWatermark = envelope.groupEventAvailable.highWatermark
         self.protocolVersion = protocolVersion
         self.uncompressedBytes = uncompressedBytes
         compressedBytes = compression.flatMap { compression in
@@ -254,6 +257,17 @@ private final class V2GatewayForegroundTransport: Sendable {
         submission.writer.submit(submission.bytes,
             isAuthorizedToWrite: { authorization.isAuthorizedToWrite() },
             enqueueIfCurrent: enqueueIfCurrent)
+        return true
+    }
+
+    func submitRoomHead(_ permit: V2GatewayRoomSubscriptionAuthority.Permit, highWatermark: UInt64) -> Bool {
+        state.withLock { $0.writer }?.submitRoomHead(permit, highWatermark: highWatermark) ?? false
+    }
+    func activateRoomHead(_ permit: V2GatewayRoomSubscriptionAuthority.Permit,
+                          enqueueIfCurrent: @escaping @Sendable (@Sendable () -> Void) -> Bool,
+                          encode: @escaping @Sendable (UInt64) -> ByteBuffer?) -> Bool {
+        guard let writer = state.withLock({ $0.writer }) else { return false }
+        writer.activateRoomHead(permit, enqueueIfCurrent: enqueueIfCurrent, encode: encode)
         return true
     }
 
@@ -1295,7 +1309,12 @@ public actor V2GatewayByteStream {
 
     /// The socket retains only one latest H for its requested detail room.
     /// Ready's S is immutable in the authorization; later H never changes it.
-    func offerRoomSubscriptionHead(_ authorization: V2GatewayRoomSubscriptionAuthority.Permit,
+    nonisolated func offerRoomSubscriptionHead(_ authorization: V2GatewayRoomSubscriptionAuthority.Permit,
+        highWatermark: UInt64, permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) async -> Bool {
+        if foregroundTransport.submitRoomHead(authorization, highWatermark: highWatermark) { return true }
+        return await initializeRoomSubscriptionHead(authorization, highWatermark: highWatermark, permit: permit)
+    }
+    private func initializeRoomSubscriptionHead(_ authorization: V2GatewayRoomSubscriptionAuthority.Permit,
         highWatermark: UInt64, permit: @escaping @Sendable (@Sendable () -> Void) -> Bool) async -> Bool {
         V2RoomSubscriptionHeadDeliveryMetrics.shared.record(.headOffered)
         guard !transportClosed, !recoveryOutbound.isRevoked, scopedNotificationWriter != nil,
@@ -1409,6 +1428,33 @@ public actor V2GatewayByteStream {
                     }
                 }
                 guard let current = roomSubscriptionState, current.authorization == authorization else { continue }
+                // Once lifecycle controls reached the socket, normal heads share
+                // the bounded foreground writer. It checks body coverage at actual
+                // drain, and wakes on writability instead of polling this actor.
+                if let contract = await session.authenticatedFrameContract(),
+                   roomSubscriptionState?.authorization == authorization {
+                    // Bytes sent before Ready may have been ignored by a
+                    // recovering client. Start hint coverage after that boundary.
+                    guard let gate = authorization.socketGate,
+                          (try? await gate.eventLoop.submit { gate.resetSubmittedHead() }.get()) != nil,
+                          roomSubscriptionState?.authorization == authorization else { continue }
+                    let limits = frameLimits
+                    let session = self.session, outbound = recoveryOutbound
+                    if foregroundTransport.activateRoomHead(authorization, enqueueIfCurrent: { enqueue in
+                        outbound.enqueueIfActive {
+                            guard session.connectionIsActive else { return false }
+                            return authorization.socketGate?.enqueue(authorization, now: .now, body: enqueue) ?? false
+                        }
+                    }, encode: { head in
+                        V2PreparedGatewayGroupEventAvailable(roomID: authorization.fence.roomID,
+                            highWatermark: head, directEvent: nil, frameLimits: limits,
+                            protocolVersion: contract.protocolVersion, compression: contract.compression)?
+                            .bytes(for: contract.compression)
+                    }) {
+                        _ = foregroundTransport.submitRoomHead(authorization, highWatermark: current.highWatermark)
+                        break
+                    }
+                }
                 // Admission is acknowledged by the socket owner. Repeated
                 // offers of the same H need not create another TCP frame;
                 // refused writes remain dirty and fresh authorization starts

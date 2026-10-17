@@ -88,12 +88,14 @@ let package = Package(
                 .product(name: "DistributedCluster", package: "swift-distributed-actors"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOSSL", package: "swift-nio-ssl"),
+                .product(name: "NIOCore", package: "swift-nio"),
             ]
         ),
         .testTarget(
             name: "IMV2ActorClusterTests",
             dependencies: ["IMV2ActorCluster", "IMV2ActorContracts", "IMV2Core", "IMV2ServerGateway",
-                           .product(name: "Crypto", package: "swift-crypto")]
+                           .product(name: "Crypto", package: "swift-crypto"),
+                           .product(name: "NIOEmbedded", package: "swift-nio")]
         ),
         .target(
             name: "CIMV2Argon2",

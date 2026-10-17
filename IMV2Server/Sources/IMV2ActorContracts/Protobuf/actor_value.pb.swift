@@ -2722,6 +2722,8 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionBatchCall: Sendable {
   fileprivate var _batch: Im_Actor_V1_HotDeliveryBatch? = nil
 }
 
+/// Results follow the validated request's first-occurrence room order. The
+/// authenticated header binds them to that exact request; fences stay local.
 package nonisolated struct Im_Actor_V1_HotSubscriptionBatchReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
@@ -2736,21 +2738,13 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionBatchReply: Sendable {
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
-  package var result: Im_Actor_V1_HotDeliveryReceipts {
-    get {_result ?? Im_Actor_V1_HotDeliveryReceipts()}
-    set {_result = newValue}
-  }
-  /// Returns true if `result` has been explicitly set.
-  package var hasResult: Bool {self._result != nil}
-  /// Clears the value of `result`. Subsequent reads from it will return its default value.
-  package mutating func clearResult() {self._result = nil}
+  package var results: [Im_Actor_V1_HotDeliveryResult] = []
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
   package init() {}
 
   fileprivate var _header: Im_Actor_V1_HotRealtimeHeader? = nil
-  fileprivate var _result: Im_Actor_V1_HotDeliveryReceipts? = nil
 }
 
 package nonisolated struct Im_Actor_V1_HotTopic: Sendable {
@@ -8732,7 +8726,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionBatchCall: SwiftProtobuf.Messag
 
 nonisolated extension Im_Actor_V1_HotSubscriptionBatchReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionBatchReply"
-  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}result\0")
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{2}\u{2}results\0\u{c}\u{2}\u{1}")
 
   package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -8741,7 +8735,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionBatchReply: SwiftProtobuf.Messa
       // enabled. https://github.com/apple/swift-protobuf/issues/1034
       switch fieldNumber {
       case 1: try { try decoder.decodeSingularMessageField(value: &self._header) }()
-      case 2: try { try decoder.decodeSingularMessageField(value: &self._result) }()
+      case 3: try { try decoder.decodeRepeatedMessageField(value: &self.results) }()
       default: break
       }
     }
@@ -8755,15 +8749,15 @@ nonisolated extension Im_Actor_V1_HotSubscriptionBatchReply: SwiftProtobuf.Messa
     try { if let v = self._header {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 1)
     } }()
-    try { if let v = self._result {
-      try visitor.visitSingularMessageField(value: v, fieldNumber: 2)
-    } }()
+    if !self.results.isEmpty {
+      try visitor.visitRepeatedMessageField(value: self.results, fieldNumber: 3)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
   package static func ==(lhs: Im_Actor_V1_HotSubscriptionBatchReply, rhs: Im_Actor_V1_HotSubscriptionBatchReply) -> Bool {
     if lhs._header != rhs._header {return false}
-    if lhs._result != rhs._result {return false}
+    if lhs.results != rhs.results {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }

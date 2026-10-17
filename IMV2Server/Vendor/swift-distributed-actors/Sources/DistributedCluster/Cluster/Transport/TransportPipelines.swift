@@ -282,7 +282,7 @@ private final class ProtocolMagicBytesValidator: ChannelInboundHandler, Removabl
     }
 }
 
-private final class WireEnvelopeHandler: ChannelDuplexHandler {
+final class WireEnvelopeHandler: ChannelDuplexHandler {
     typealias OutboundIn = Wire.Envelope
     typealias OutboundOut = ByteBuffer
     typealias InboundIn = ByteBuffer
@@ -290,6 +290,14 @@ private final class WireEnvelopeHandler: ChannelDuplexHandler {
 
     let log: Logger
     let serialization: Serialization
+    // Serialization completes asynchronously upstream: flush ownership starts
+    // here, after bytes exist, never at the original actor write request.
+    private var flushScheduled = false
+    private var pendingFrames = 0
+    private var pendingBytes = 0
+    private var removed = false
+    private let maximumFlushFrames = 32
+    private let maximumFlushBytes = 64 * 1024
 
     init(serialization: Serialization, log: Logger) {
         self.serialization = serialization
@@ -299,9 +307,12 @@ private final class WireEnvelopeHandler: ChannelDuplexHandler {
     func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
         let envelope: Wire.Envelope = self.unwrapOutboundIn(data)
         do {
-            let serialized = try serialization.serialize(envelope)
-            let buffer = serialized.buffer.asByteBuffer(allocator: self.serialization.allocator)  // FIXME: yes we double allocate, no good ways around it today
-            context.writeAndFlush(NIOAny(buffer), promise: promise)
+            let buffer = try WireEnvelopeCodec.encode(envelope, context: serialization.context,
+                                                      allocator: serialization.allocator)
+            pendingFrames += 1
+            pendingBytes += buffer.readableBytes
+            context.write(NIOAny(buffer), promise: promise)
+            scheduleFlush(context: context)
         } catch {
             self.log.error(
                 "Failed to serialize message!",
@@ -310,15 +321,49 @@ private final class WireEnvelopeHandler: ChannelDuplexHandler {
                     "error": "\(error)",
                 ]
             )
+            promise?.fail(error)
             context.fireErrorCaught(error)
         }
+    }
+
+    func flush(context: ChannelHandlerContext) { scheduleFlush(context: context) }
+
+    private func scheduleFlush(context: ChannelHandlerContext) {
+        guard pendingFrames > 0, !removed else { return }
+        if pendingFrames >= maximumFlushFrames || pendingBytes >= maximumFlushBytes {
+            flushNow(context: context)
+            return
+        }
+        guard !flushScheduled else { return }
+        flushScheduled = true
+        context.eventLoop.execute {
+            self.flushScheduled = false
+            guard !self.removed else { return }
+            self.flushNow(context: context)
+        }
+    }
+    private func flushNow(context: ChannelHandlerContext) {
+        guard pendingFrames > 0 else { return }
+        pendingFrames = 0; pendingBytes = 0
+        context.flush()
+    }
+    func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+        flushNow(context: context)
+        context.close(mode: mode, promise: promise)
+    }
+    func handlerRemoved(context: ChannelHandlerContext) {
+        flushNow(context: context)
+        removed = true
+    }
+    func channelInactive(context: ChannelHandlerContext) {
+        pendingFrames = 0; pendingBytes = 0; removed = true
+        context.fireChannelInactive()
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let buffer = self.unwrapInboundIn(data)
         do {
-            let knownSpecializedWireEnvelopeManifest = Serialization.Manifest(serializerID: ._ProtobufRepresentable, hint: Wire.Envelope.typeHint)
-            let envelope = try self.serialization.deserialize(as: Wire.Envelope.self, from: .nioByteBuffer(buffer), using: knownSpecializedWireEnvelopeManifest)
+            let envelope = try WireEnvelopeCodec.decode(buffer, context: serialization.context)
             context.fireChannelRead(self.wrapInboundOut(envelope))
         } catch {
             self.log.error(

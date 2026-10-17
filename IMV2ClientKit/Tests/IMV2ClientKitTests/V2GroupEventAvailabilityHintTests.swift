@@ -101,8 +101,8 @@ struct V2GroupEventAvailabilityHintTests {
         #expect(merged.liveEvents.map(\.roomSequence) == [10, 11, 12, 13, 14])
     }
 
-    @Test("a pending gap keeps only the durable recovery waterline")
-    func coalescingGapDegradesToMetadata() throws {
+    @Test("a pending gap retains bounded bodies until its predecessor arrives")
+    func coalescingGapRetainsBodies() throws {
         let roomID = try RoomID("00000000-0000-0000-0000-000000000604")
         let older = V2GroupEventAvailabilityHint(
             roomID: roomID,
@@ -118,7 +118,63 @@ struct V2GroupEventAvailabilityHintTests {
         let merged = older.coalescing(with: newer)
 
         #expect(merged.highWatermark == 12)
-        #expect(merged.liveEvents.isEmpty)
+        #expect(merged.liveEvents.map(\.roomSequence) == [10, 12])
+    }
+
+    @Test("single and batch bodies may end before the committed head", arguments: [false, true])
+    func prefixBelowHead(direct: Bool) {
+        var hint = IMV2GroupEventAvailable()
+        hint.highWatermark = 10
+        let value = event(sequence: 8, idSuffix: 8)
+        if direct {
+            hint.roomSequence = value.roomSequence; hint.sourceEventID = value.sourceEventID
+            hint.projectionKind = value.projectionKind; hint.eventPayload = value.payload
+        } else { hint.liveEvents = [value] }
+        #expect(V2TLSFrameConnection.liveGroupEvents(from: hint).map(\.roomSequence) == [8])
+        hint.highWatermark = 7
+        #expect(V2TLSFrameConnection.liveGroupEvents(from: hint).isEmpty)
+    }
+
+    @Test("same-H and lower-H bodies fill sparse prefixes without losing metadata")
+    func sameHeadAndLatePredecessor() throws {
+        let room = RoomID(uuid: UUID())
+        let a = try clientEvent(sequence: 8, idSuffix: 8)
+        let b = try clientEvent(sequence: 9, idSuffix: 9)
+        let c = try clientEvent(sequence: 10, idSuffix: 10)
+        let gap = V2GroupEventAvailabilityHint(roomID: room, highWatermark: 10, liveEvents: [a])
+            .coalescing(with: .init(roomID: room, highWatermark: 10, liveEvents: [c]))
+        let filled = gap.coalescing(with: .init(roomID: room, highWatermark: 9, liveEvents: [b]))
+            .coalescing(with: .init(roomID: room, highWatermark: 12))
+        #expect(filled.highWatermark == 12)
+        #expect(filled.liveEvents == [a, b, c])
+        #expect(filled.coalescing(with: filled) == filled)
+        let conflict = try clientEvent(sequence: 9, idSuffix: 99)
+        #expect(filled.coalescing(with: .init(roomID: room, highWatermark: 12, liveEvents: [conflict])).liveEvents.isEmpty)
+    }
+
+    @Test("coalescing remains bounded and retains H on overflow")
+    func boundedBodies() throws {
+        let room = RoomID(uuid: UUID())
+        let limit = V2GroupEventLogLimits.maximumPageSize
+        let events = try (1...limit).map { try clientEvent(sequence: UInt64($0), idSuffix: $0) }
+        let merged = V2GroupEventAvailabilityHint(roomID: room, highWatermark: UInt64(limit), liveEvents: events)
+            .coalescing(with: .init(roomID: room, highWatermark: UInt64(limit + 1),
+                liveEvents: [try clientEvent(sequence: UInt64(limit + 1), idSuffix: limit + 1)]))
+        #expect(merged.liveEvents.count == limit)
+        #expect(merged.liveEvents.first?.roomSequence == 2)
+        #expect(merged.highWatermark == UInt64(limit + 1))
+    }
+
+    @Test("byte overflow retains recovery H without unbounded payload retention")
+    func byteBudget() throws {
+        let room = RoomID(uuid: UUID())
+        let body = Data(repeating: 1, count: 600_000)
+        let events = try (1...2).map { try V2ClientGroupEvent(sourceEventID: .init(UUID().uuidString),
+            roomSequence: UInt64($0), projectionKind: "message", payload: body) }
+        let merged = V2GroupEventAvailabilityHint(roomID: room, highWatermark: 2, liveEvents: [events[0]])
+            .coalescing(with: .init(roomID: room, highWatermark: 2, liveEvents: [events[1]]))
+        #expect(merged.highWatermark == 2)
+        #expect(merged.liveEvents == [events[1]])
     }
 
     private func event(sequence: UInt64, idSuffix: Int) -> IMV2GroupEvent {

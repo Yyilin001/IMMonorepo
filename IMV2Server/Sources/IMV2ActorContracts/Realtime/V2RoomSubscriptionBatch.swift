@@ -96,6 +96,16 @@ public struct V2ValidatedRoomSubscriptionBatch: Sendable {
         }
         return true
     }
+    /// Normalize a handler's unordered receipts without repeating identities on the wire.
+    package func orderedResults(_ result: V2RoomSubscriptionBatchResult) throws -> [V2RoomSubscriptionDeliveryResult] {
+        guard accepts(result) else { throw V2ActorContractError.invalidConfiguration("subscription receipts") }
+        var ordered = Array(repeating: V2RoomSubscriptionDeliveryResult.stale, count: rooms.count)
+        for receipt in result.receipts {
+            // accepts() proved membership, exact fence, uniqueness and sequence.
+            if let index = byRoom[receipt.fence.roomID.rawValue] { ordered[index] = receipt.result }
+        }
+        return ordered
+    }
     private func acceptsLarge(_ result: V2RoomSubscriptionBatchResult) -> Bool {
         var seen: Set<Int> = []
         for receipt in result.receipts {

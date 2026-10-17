@@ -2,6 +2,7 @@ import Distributed
 import DistributedCluster
 import Crypto
 import Foundation
+import NIOCore
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Core
@@ -1024,7 +1025,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         let failure = transportFailure(for: request)
         let completion = V2RoomRPCCompletion<TransportReply>()
         return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TransportReply, any Error>) in
                 if Task.isCancelled || ContinuousClock.now >= deadline {
                     continuation.resume(throwing: V2RoomCallFailure.notAccepted(
                         Task.isCancelled ? .cancelled : .deadlineExceeded
@@ -1041,14 +1042,16 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 default: break
                 }
                 completion.install(continuation)
-                let timer = Task.detached { [self] in
-                    do { try await ContinuousClock().sleep(until: deadline) }
-                    catch { return }
-                    if completion.cancelCaller(with: failure) {
-                        await recordDispatchTimeout(recoveryBatch: recoveryBatch,
-                            cancelled: false)
+                let timer = system._eventLoopGroup.next().scheduleTask(
+                    in: TimeAmount(max(.zero, ContinuousClock.now.duration(to: deadline)))
+                ) { [self] in
+                    if completion.cancelCaller(with: failure), recoveryBatch {
+                        Task { await recordDispatchTimeout(recoveryBatch: true, cancelled: false) }
                     }
                 }
+                // Shutdown cancels the timer too. Unblock the caller, while the
+                // actual operation below keeps ownership until it really settles.
+                timer.futureResult.whenFailure { _ in _ = completion.cancelCaller(with: failure) }
                 dispatchedCalls[id] = .init(host: host, completion: completion, timer: timer,
                     permit: dispatchPermit, recoveryPermit: recoveryPermit,
                     recoveryBatch: recoveryBatch)
@@ -1684,7 +1687,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private struct DispatchedCall {
         let host: V2ActorHostIdentity
         let completion: V2RoomRPCCompletion<TransportReply>
-        let timer: Task<Void, Never>
+        let timer: Scheduled<Void>
         let permit: V2RoomClusterBudget.Permit
         let recoveryPermit: V2RoomClusterBudget.Permit?
         let recoveryBatch: Bool

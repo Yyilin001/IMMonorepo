@@ -283,7 +283,7 @@ private struct LoadConfiguration: Sendable {
         ) else { throw LoadError.invalidArguments }
         self.roomLogReadTrigger = roomLogReadTrigger
         roomLogRecoveryGraceMilliseconds = try Self.integer(
-            values["--room-log-recovery-grace-ms"] ?? "0",
+            values["--room-log-recovery-grace-ms"] ?? "100",
             range: 0...2_000
         )
         self.peerTopology = peerTopology
@@ -2612,7 +2612,7 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "309423f2efa3376ff283508896315f6eb4185e0b30e484985ded33269d0af7ce"
+    static let algorithmSourceSHA256 = "a594a51032769acc47c66b7a92b85c2dddb8371386a42271224096accd653071"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
     static let maximumMessageWireAttempts = 5
@@ -2745,6 +2745,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private var syncInFlight = false
     private var syncRequested = false
     private var roomEventCursors: [String: UInt64] = [:]
+    private var roomEventLiveSequences: [String: V2LoadRoomLiveSequences] = [:]
     private var roomEventAcceptedSequences: [String: V2LoadRoomAcceptedSequences] = [:]
     private let isRestoredRecovery: Bool
     private var restoredRecoveryTargets: [String: UInt64] = [:]
@@ -2916,6 +2917,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         roomEventPullRetryTasks.removeAll(keepingCapacity: false)
         for task in roomEventRecoveryGraceTasks.values { task.cancel() }
         roomEventRecoveryGraceTasks.removeAll(keepingCapacity: false)
+        roomEventLiveSequences.removeAll(keepingCapacity: false)
         statistics.recordScenarioMessageQueueAbandoned(count: queuedScenarioMessages)
         queuedScenarioMessageStarts.removeAll(keepingCapacity: false)
         readReceiptInFlightRooms.removeAll(keepingCapacity: false)
@@ -2979,61 +2981,20 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 roomEventAnnouncedHighWatermarks[hint.roomID] = max(previous, hint.highWatermark)
                 statistics.recordRoomEventAvailabilityHint()
                 if !hint.liveEvents.isEmpty {
-                    var cursor = roomEventCursors[hint.roomID, default: 0]
                     for event in hint.liveEvents {
-                        // The sender may already have advanced its local
-                        // cursor from MessageAccepted. Shared group frames are
-                        // intentionally identical for every subscriber, so
-                        // skip duplicates and apply only one contiguous prefix.
-                        if event.roomSequence <= cursor { continue }
-                        let expected = cursor == .max ? .max : cursor + 1
-                        guard event.roomSequence == expected else {
-                            if event.roomSequence > expected {
-                                statistics.recordRoomEventLiveGap(
-                                    missingSequences: event.roomSequence - expected
-                                )
-                            }
-                            break
-                        }
-                        guard !event.sourceEventID.isEmpty,
-                              !event.projectionKind.isEmpty,
-                              !event.payload.isEmpty
-                        else { break }
-                        cursor = drainAcceptedRoomSequences(roomID: hint.roomID, through: event.roomSequence)
-                        statistics.recordRoomEventLivePayloadApplied()
+                        guard event.roomSequence > 0, event.roomSequence <= hint.highWatermark,
+                              event.roomSequence <= UInt64(Int64.max),
+                              !event.sourceEventID.isEmpty, !event.projectionKind.isEmpty,
+                              !event.payload.isEmpty else { continue }
+                        receiveRoomLiveSequence(event.roomSequence, roomID: hint.roomID)
                     }
-                    roomEventCursors[hint.roomID] = cursor
-                    cancelRoomEventRecoveryGraceIfCaughtUp(roomID: hint.roomID)
-                    if hint.highWatermark > cursor {
-                        try scheduleRoomEventRecoveryIfNeeded(
-                            roomID: hint.roomID,
-                            context: context
-                        )
-                    }
-                    return
+                } else if hint.roomSequence > 0, hint.roomSequence <= hint.highWatermark,
+                          hint.roomSequence <= UInt64(Int64.max),
+                          !hint.sourceEventID.isEmpty, !hint.projectionKind.isEmpty,
+                          !hint.eventPayload.isEmpty {
+                    receiveRoomLiveSequence(hint.roomSequence, roomID: hint.roomID)
                 }
-                let currentCursor = roomEventCursors[hint.roomID, default: 0]
-                let expectedSequence = currentCursor == .max
-                    ? .max
-                    : currentCursor + 1
-                if hint.roomSequence == hint.highWatermark,
-                   hint.roomSequence == expectedSequence,
-                   !hint.sourceEventID.isEmpty,
-                   !hint.projectionKind.isEmpty,
-                   !hint.eventPayload.isEmpty {
-                    roomEventCursors[hint.roomID] = drainAcceptedRoomSequences(roomID: hint.roomID, through: hint.roomSequence)
-                    statistics.recordRoomEventLivePayloadApplied()
-                    cancelRoomEventRecoveryGraceIfCaughtUp(roomID: hint.roomID)
-                    return
-                }
-                if hint.roomSequence > expectedSequence,
-                   !hint.sourceEventID.isEmpty,
-                   !hint.projectionKind.isEmpty,
-                   !hint.eventPayload.isEmpty {
-                    statistics.recordRoomEventLiveGap(
-                        missingSequences: hint.roomSequence - expectedSequence
-                    )
-                }
+                cancelRoomEventRecoveryGraceIfCaughtUp(roomID: hint.roomID)
                 try acceptRoomRecoveryTarget(roomID: hint.roomID, highWatermark: hint.highWatermark,
                     context: context, recordMetadataGap: true)
             default:
@@ -3619,13 +3580,39 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 context: context, recordMetadataGap: false)
         }
     }
+    private func receiveRoomLiveSequence(_ sequence: UInt64, roomID: String) {
+        let cursor = roomEventCursors[roomID, default: 0]
+        if cursor < .max, sequence > cursor + 1 {
+            statistics.recordRoomEventLiveGap(missingSequences: sequence - cursor - 1)
+        }
+        var live = roomEventLiveSequences[roomID] ?? .init()
+        let through = live.receive(sequence, after: cursor)
+        if through > cursor { statistics.recordRoomEventLivePayloadApplied() }
+        if live.pendingCount == 0 { roomEventLiveSequences.removeValue(forKey: roomID) }
+        else { roomEventLiveSequences[roomID] = live }
+        roomEventCursors[roomID] = drainAcceptedRoomSequences(roomID: roomID, through: through)
+    }
+
     private func drainAcceptedRoomSequences(roomID: String, through cursor: UInt64) -> UInt64 {
-        guard var known = roomEventAcceptedSequences[roomID] else { return cursor }
-        let progress = known.applied(through: cursor)
-        if known.pendingCount == 0 { roomEventAcceptedSequences.removeValue(forKey: roomID) }
-        else { roomEventAcceptedSequences[roomID] = known }
-        for _ in 0..<progress.appliedAcceptedCount { statistics.recordRoomEventLocalEchoApplied() }
-        return progress.cursor
+        var through = cursor
+        while true {
+            let before = through
+            if var known = roomEventAcceptedSequences[roomID] {
+                let progress = known.applied(through: through)
+                if known.pendingCount == 0 { roomEventAcceptedSequences.removeValue(forKey: roomID) }
+                else { roomEventAcceptedSequences[roomID] = known }
+                for _ in 0..<progress.appliedAcceptedCount { statistics.recordRoomEventLocalEchoApplied() }
+                through = progress.cursor
+            }
+            if var live = roomEventLiveSequences[roomID] {
+                let progress = live.applied(through: through)
+                if live.pendingCount == 0 { roomEventLiveSequences.removeValue(forKey: roomID) }
+                else { roomEventLiveSequences[roomID] = live }
+                for _ in 0..<progress.count { statistics.recordRoomEventLivePayloadApplied() }
+                through = progress.cursor
+            }
+            if before == through { return through }
+        }
     }
 
     private func acceptRoomRecoveryTarget(roomID: String, highWatermark: UInt64,
@@ -3944,7 +3931,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                     let progress = try known.accepted(accepted.roomSequence, after: cursor)
                     if known.pendingCount == 0 { roomEventAcceptedSequences.removeValue(forKey: roomID) }
                     else { roomEventAcceptedSequences[roomID] = known }
-                    roomEventCursors[roomID] = progress.cursor
+                    roomEventCursors[roomID] = drainAcceptedRoomSequences(roomID: roomID, through: progress.cursor)
                     for _ in 0..<progress.appliedAcceptedCount { statistics.recordRoomEventLocalEchoApplied() }
                     cancelRoomEventRecoveryGraceIfCaughtUp(roomID: roomID)
                     if accepted.roomSequence > cursor, cursor < .max, accepted.roomSequence > cursor + 1 {

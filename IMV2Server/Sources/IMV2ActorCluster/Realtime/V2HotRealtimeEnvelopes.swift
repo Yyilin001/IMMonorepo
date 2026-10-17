@@ -87,14 +87,14 @@ extension RoomSubscriptionReply: V2ActorProtobufMessage {
 extension RoomSubscriptionBatchReply: V2ActorProtobufMessage {
     package func protobufBytes() throws -> Data {
         var wire = Im_Actor_V1_HotSubscriptionBatchReply(); wire.header = replyHeader(recipient: recipient, session: sessionID, sequence: sequence, attempt: attemptID)
-        wire.result = Im_Actor_V1_HotDeliveryReceipts(result)
+        wire.results = results.map(Im_Actor_V1_HotDeliveryResult.init)
         return try wire.serializedData()
     }
     package static func fromProtobufBytes(_ bytes: borrowing RawSpan) throws -> Self {
         let wire = try Im_Actor_V1_HotSubscriptionBatchReply(serializedBytes: copy bytes)
-        try V2HotPB.check(wire, wire.hasHeader && wire.hasResult); let h = wire.header; try validate(h, reply: true)
+        try V2HotPB.check(wire, wire.hasHeader && !wire.results.isEmpty && wire.results.count <= 64); let h = wire.header; try validate(h, reply: true)
         return try .init(recipient: h.recipient.model(), sessionID: V2HotPB.uuid(h.sessionID), sequence: h.sequence,
-            attemptID: V2HotPB.uuid(h.attemptID), result: wire.result.model())
+            attemptID: V2HotPB.uuid(h.attemptID), results: wire.results.map { try $0.model() })
     }
 }
 
