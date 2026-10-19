@@ -63,13 +63,15 @@ struct V2AccountSecurityView: View {
 
     var body: some View {
         Form {
-            Section {
+            Section("安全操作") {
                 Picker("操作", selection: $action) {
                     Text("修改密码").tag(V2PasswordLifecycleAction.change)
                     Text("设置恢复码").tag(V2PasswordLifecycleAction.recoveryCode)
                     Text("找回账号").tag(V2PasswordLifecycleAction.recover)
                 }
                 .accessibilityIdentifier("v2.security.action")
+            }
+            Section("身份验证") {
                 TextField("登录账号", text: $account)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                     .accessibilityIdentifier("v2.security.account")
@@ -77,16 +79,26 @@ struct V2AccountSecurityView: View {
                     SecureField("当前密码", text: $current).textContentType(.password)
                         .accessibilityIdentifier("v2.security.current-password")
                 }
-                if action != .recoveryCode {
+            }
+            if action != .recoveryCode {
+                Section {
                     SecureField("新密码", text: $next).textContentType(.newPassword)
                         .accessibilityIdentifier("v2.security.new-password")
                     SecureField("确认新密码", text: $confirmation).textContentType(.newPassword)
+                } header: {
+                    Text("新密码")
+                } footer: {
                     Text("密码更新后所有设备都会退出登录，现有恢复码也会失效。")
                 }
-                if action == .recover {
+            }
+            if action == .recover {
+                Section {
                     SecureField("已保存的恢复码", text: $code)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .accessibilityIdentifier("v2.security.recovery-code")
+                } header: {
+                    Text("恢复验证")
+                } footer: {
                     Text("需要此前保存的恢复码。没有密码和恢复码时，无法仅凭公开资料找回账号。")
                 }
             }
@@ -128,9 +140,11 @@ struct V2AccountSecurityView: View {
                 }
             }
         }
+        .v2GroupedPageSurface()
         .disabled(store.state == .working || operation != nil)
         .navigationTitle("账号安全")
-        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() }.disabled(store.state == .working) } }
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() }.disabled(store.state == .working) } }
         .interactiveDismissDisabled(store.state == .working)
         .onChange(of: action) { _, _ in current = ""; next = ""; confirmation = ""; code = ""; savedCode = false; store.state = .editing }
         .onDisappear { operation?.cancel(); current = ""; next = ""; confirmation = ""; code = "" }

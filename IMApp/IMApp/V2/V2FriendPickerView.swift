@@ -33,8 +33,9 @@ struct V2FriendPickerView: View {
                     ProgressView().onAppear { Task { await store.loadMoreFriends() } }
                 }
             }
-            .v2PageSurface()
+            .v2GroupedPageSurface()
             .navigationTitle("选择好友")
+            .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, prompt: "搜索好友")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }

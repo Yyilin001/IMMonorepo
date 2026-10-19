@@ -1250,7 +1250,8 @@ final class V2ConversationDetailStore {
                 mentionHandlesText = ""
                 replyTarget = nil
             case .queuedForRetry:
-                sendFeedback = sender is any V2ConversationSendTracking ? "正在发送…" : "已安全保存，连接恢复后会重试。"
+                // Tracked sends display their progress on the pending message row.
+                sendFeedback = sender is any V2ConversationSendTracking ? nil : "已安全保存，连接恢复后会重试。"
                 await discardAttachmentsAfterDurableSend()
                 draft = ""
                 mentionHandlesText = ""

@@ -161,7 +161,7 @@ struct V2AccountHomeView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        Group {
             List {
                 Section {
                     if canOpenPublicIdentity {
@@ -175,21 +175,27 @@ struct V2AccountHomeView: View {
                 Section("常用功能") {
                     Button(action: openFavorites) { V2SettingsLabel(title: "收藏", symbol: "star.fill") }
                         .accessibilityIdentifier("v2.message.favorites")
-                    if canOpenDevices {
-                        Button(action: openDevices) { V2SettingsLabel(title: "登录设备", symbol: "iphone") }
-                            .accessibilityIdentifier("v2.device-sessions.open")
-                    }
-                    if canOpenPendingAvatars {
-                        Button(action: openPendingAvatars) { V2SettingsLabel(title: "待处理群头像", symbol: "person.3.fill") }
+                }
+                if canOpenPendingAvatars {
+                    Section("群聊管理") {
+                        Button(action: openPendingAvatars) { V2SettingsLabel(title: "待处理群头像", symbol: "person.2.fill") }
                             .accessibilityIdentifier("v2.group.avatar.pending.open")
                     }
                 }
-                Section("设置") {
+                Section("偏好设置") {
                     Button(action: openPrivacy) { V2SettingsLabel(title: "消息与隐私", symbol: "hand.raised.fill") }
                         .accessibilityIdentifier("v2.privacy.open")
-                    if canOpenSecurity {
-                        Button(action: openSecurity) { V2SettingsLabel(title: "账号安全", symbol: "lock.fill") }
-                            .accessibilityIdentifier("v2.security.open")
+                }
+                if canOpenDevices || canOpenSecurity {
+                    Section("账号与安全") {
+                        if canOpenDevices {
+                            Button(action: openDevices) { V2SettingsLabel(title: "登录设备", symbol: "iphone") }
+                                .accessibilityIdentifier("v2.device-sessions.open")
+                        }
+                        if canOpenSecurity {
+                            Button(action: openSecurity) { V2SettingsLabel(title: "账号安全", symbol: "lock.fill") }
+                                .accessibilityIdentifier("v2.security.open")
+                        }
                     }
                 }
                 Section {
@@ -198,9 +204,10 @@ struct V2AccountHomeView: View {
                 }
             }
             .listStyle(.insetGrouped)
-            .listRowSpacing(4)
-            .v2PageSurface()
+            .listRowSpacing(0)
+            .v2GroupedPageSurface()
             .navigationTitle("我的")
+            .navigationBarTitleDisplayMode(.inline)
             .accessibilityIdentifier("v2.account.home")
         }
     }

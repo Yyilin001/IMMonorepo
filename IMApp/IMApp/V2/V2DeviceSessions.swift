@@ -286,6 +286,7 @@ struct V2DeviceSessionsView: View {
             }
         }
         .navigationTitle("登录设备")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { actionTask = Task { await store.refresh() } } label: { Image(systemName: "arrow.clockwise") }
@@ -319,6 +320,7 @@ struct V2DeviceSessionsView: View {
                         }
                     }
                     .navigationTitle("确认退出范围")
+                    .navigationBarTitleDisplayMode(.inline)
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { pendingCommand = nil } } }
                 }
             }

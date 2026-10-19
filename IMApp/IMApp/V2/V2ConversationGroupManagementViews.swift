@@ -70,6 +70,7 @@ struct V2GroupAnnouncementSheet: View {
                 }
             }
             .navigationTitle("群公告")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }
@@ -145,6 +146,7 @@ struct V2GroupPermissionsSheet: View {
                 }
             }
             .navigationTitle("群权限")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
@@ -471,6 +473,7 @@ struct V2GroupMembersSheet: View {
                 }
             }
             .navigationTitle("群成员")
+            .navigationBarTitleDisplayMode(.inline)
             .onDisappear {
                 membershipChangeTask?.cancel()
                 moderationTask?.cancel()
@@ -573,6 +576,7 @@ private struct V2GroupMemberRemovalConfirmation: View {
                 }
             }
             .navigationTitle("确认移除成员")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
         }
         .authorPresentationPage(context: .list(profilePageID))

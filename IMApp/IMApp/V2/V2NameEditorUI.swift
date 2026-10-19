@@ -159,6 +159,7 @@ struct V2NameEditorView: View {
                 Button("读取最新值（保留输入）") { Task { await store.refresh() } }.disabled(store.isRefreshing)
             }
             .navigationTitle(store.title)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
             .task { await store.load() }
             .task { await store.observe() }

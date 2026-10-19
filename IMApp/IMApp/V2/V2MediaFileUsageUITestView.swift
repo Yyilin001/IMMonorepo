@@ -38,6 +38,7 @@ struct V2MediaFileUsageUITestView: View {
                 }
             }
             .navigationTitle("文件使用测试")
+            .navigationBarTitleDisplayMode(.inline)
             .sheet(item: $sheet) { value in
                 if let fixture {
                     Group {

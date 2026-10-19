@@ -1,3 +1,4 @@
+import IMV2Core
 import IMV2ClientKit
 import OSLog
 import SwiftUI
@@ -88,6 +89,7 @@ struct V2RootView: View {
                        let contactsStore = store.contactsStore,
                        let privacySettingsStore = store.privacySettingsStore {
                         V2SignedInRootView(
+                            appStore: store,
                             conversationStore: conversationStore,
                             contactsStore: contactsStore,
                             privacySettingsStore: privacySettingsStore,
@@ -104,25 +106,6 @@ struct V2RootView: View {
                         )
                         .environment(\.v2MediaThumbnailCache, store.mediaThumbnailCache)
                         .environment(\.v2AvatarPipeline, store.avatarPipeline)
-                        .safeAreaInset(edge:.top) {
-                            VStack(spacing: 0) {
-                            if store.realtimeCoverage?.state == .recovering {
-                                Text("实时通知正在恢复，可继续发送消息。")
-                                    .font(.footnote).foregroundStyle(.secondary)
-                                    .padding(.horizontal).padding(.vertical, 6)
-                                    .accessibilityIdentifier("v2.realtime.recovering")
-                            }
-                            if store.accountWorkPaused {
-                                HStack {
-                                    Text("账户后台同步已暂停，已保存的操作会保留。")
-                                    Button("重新连接") { Task { await store.resumeAccountWork() } }
-                                        .disabled(store.isResumingAccountWork)
-                                        .accessibilityIdentifier("v2.account-work.resume")
-                                }
-                                .padding().background(.regularMaterial)
-                            }
-                            }
-                        }
                     } else {
                         ProgressView("正在打开本地会话…")
                     }
@@ -168,10 +151,6 @@ struct V2RootView: View {
                 }
             }
 
-            if scenePhase != .active {
-                V2PrivacyShieldView()
-                    .zIndex(1)
-            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemGroupedBackground))
@@ -250,24 +229,6 @@ struct V2RootView: View {
         return valueIndex < arguments.endIndex ? arguments[valueIndex] : nil
     }
     #endif
-}
-
-/// 在 UIKit 记录应用切换器快照之前遮盖敏感会话像素。
-///
-/// 它刻意保持不透明且不做动画，使从活跃到非活跃的切换过程中不会暴露
-/// 底层视图层级中的任何一帧内容。
-private struct V2PrivacyShieldView: View {
-    var body: some View {
-        Color(.systemBackground)
-            .ignoresSafeArea()
-            .overlay {
-                Image(systemName: "lock.fill")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-            }
-            .accessibilityIdentifier("v2.privacy-shield")
-    }
 }
 
 struct V2SignInView: View {
@@ -458,6 +419,7 @@ struct V2SignedInRootView: View {
         var id: String { rawValue }
     }
 
+    let appStore: V2AppStore
     let conversationStore: V2ConversationListStore
     let contactsStore: V2ContactsStore
     let privacySettingsStore: V2PrivacySettingsStore
@@ -474,9 +436,11 @@ struct V2SignedInRootView: View {
     @State private var signOutTask: Task<Void, Never>?
     @State private var presentedSettingsSheet: PresentedSettingsSheet?
     @State var rootNavigation = V2RootNavigationStore()
+    @State private var conversationProfilePageID = UUID()
 
     var body: some View {
         @Bindable var rootNavigation = rootNavigation
+        NavigationStack(path: $rootNavigation.path) {
         TabView(selection: $rootNavigation.selectedTab) {
             V2ConversationListView(
                 store: conversationStore,
@@ -520,6 +484,95 @@ struct V2SignedInRootView: View {
             .tag(V2RootNavigationStore.Tab.account)
 
         }
+            .navigationTitle(rootNavigation.selectedTab == .conversations ? (conversationStore.isShowingArchived ? "已归档" : "消息") : rootNavigation.selectedTab == .contacts ? "联系人" : "我的")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if rootNavigation.selectedTab == .conversations {
+                    ToolbarItem(placement: .principal) {
+                        V2ConnectionStatusButton(store: appStore, navigationTitle:
+                            conversationStore.isShowingArchived ? "已归档" : "消息")
+                    }
+                }
+                if rootNavigation.selectedTab == .conversations {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Menu {
+                    Section("发起聊天") {
+                    Button("新建群聊", systemImage: "person.2") {
+                        rootNavigation.conversationAction = .newGroup
+                    }
+                    .accessibilityIdentifier("v2.conversation.new-group")
+                    if let groupInvitationStore {
+                        Button("加入群聊", systemImage: "qrcode.viewfinder") {
+                            groupInvitationStore.isPresentingJoin = true
+                        }
+                        .accessibilityIdentifier("v2.group-join.open")
+                    }
+                    }
+                    Section("查找内容") {
+                        Button(conversationStore.isShowingArchived ? "返回收件箱" : "已归档", systemImage: conversationStore.isShowingArchived ? "tray" : "archivebox") {
+                            Task { await conversationStore.toggleArchivedConversations() }
+                        }
+                        .accessibilityIdentifier("v2.conversation.archive-toggle")
+                        Button("搜索消息", systemImage: "magnifyingglass") {
+                            rootNavigation.conversationAction = .search
+                        }
+                        .accessibilityIdentifier("v2.message.search")
+                        Button("收藏", systemImage: "star") {
+                            rootNavigation.conversationAction = .favorites
+                        }
+                        .accessibilityIdentifier("v2.message.favorites")
+                    }
+                    Section("同步") {
+                        Button("刷新", systemImage: "arrow.clockwise") { Task { await conversationStore.refresh() } }
+                            .accessibilityIdentifier("v2.conversation.refresh")
+                        if conversationStore.preferenceActivity != nil {
+                            Button("待同步设置", systemImage: "arrow.triangle.2.circlepath") { rootNavigation.conversationAction = .preferences }
+                        }
+                    }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("会话工具")
+                    .accessibilityHint("打开归档、搜索和收藏")
+                    .accessibilityIdentifier("v2.conversation.tools")
+                    Button("新建私聊", systemImage: "square.and.pencil") {
+                        rootNavigation.conversationAction = .newDirect
+                    }
+                    .accessibilityIdentifier("v2.conversation.new-direct")
+
+                }
+                } else if rootNavigation.selectedTab == .contacts {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        NavigationLink(value: V2ContactsRoute.addFriend) {
+                            Label("添加好友", systemImage: "person.badge.plus")
+                        }.accessibilityIdentifier("v2.contacts.add")
+                    }
+                }
+            }
+            .navigationDestination(for: V2ConversationRoute.self) { route in
+                V2ConversationDetailView(
+                    store: conversationStore.detailStore(for: route.roomID,
+                        initialDraft: rootNavigation.fixtureRoomID == route.roomID ? localE2EConversationLaunchFixture?.initialMessage : nil,
+                        initialMentionHandles: rootNavigation.fixtureRoomID == route.roomID ? localE2EConversationLaunchFixture?.initialMentionHandles : nil),
+                    initiallyFocusedMessageID: route.messageID,
+                    groupInvitationStore: groupInvitationStore)
+            }
+            .navigationDestination(for: V2ContactsRoute.self) { route in
+                switch route {
+                case .requests: V2FriendRequestsView(store: contactsStore)
+                case .addFriend: V2AddFriendView(store: contactsStore)
+                case .contact(let userID):
+                    if let user = try? UserID(userID) {
+                        V2UserProfileSheet(key: .init(userID: user, context: .relationship), usesNavigationStack: false)
+                    }
+                }
+            }
+            .onChange(of: rootNavigation.conversationRequest) { _, request in
+                guard let request else { return }
+                rootNavigation.consumeConversationRequest(id: request.id)
+                rootNavigation.path = NavigationPath()
+                rootNavigation.path.append(V2ConversationRoute(roomID: request.roomID, messageID: request.messageID))
+            }
             .task(id: InvitationPresentationKey(url: pendingGroupInvitationURL, isActive: scenePhase == .active)) {
                 guard scenePhase == .active,
                       let url = pendingGroupInvitationURL, let invitations = groupInvitationStore else { return }
@@ -557,7 +610,7 @@ struct V2SignedInRootView: View {
                             userBlockSettingsStore: userBlockSettingsStore
                         )
                             .toolbar {
-                                ToolbarItem(placement: .cancellationAction) {
+                                ToolbarItem(placement: .confirmationAction) {
                                     Button("完成") { presentedSettingsSheet = nil }
                                         .accessibilityIdentifier("v2.privacy.done")
                                 }
@@ -568,7 +621,7 @@ struct V2SignedInRootView: View {
                         NavigationStack {
                             V2PublicIdentitySettingsView(store: publicIdentitySettingsStore)
                                 .toolbar {
-                                    ToolbarItem(placement: .cancellationAction) {
+                                    ToolbarItem(placement: .confirmationAction) {
                                         Button("完成") { presentedSettingsSheet = nil }
                                             .accessibilityIdentifier("v2.identity.done")
                                     }
@@ -580,7 +633,7 @@ struct V2SignedInRootView: View {
                         NavigationStack {
                             V2DeviceSessionsView(store: deviceSessionsStore)
                                 .toolbar {
-                                    ToolbarItem(placement: .cancellationAction) {
+                                    ToolbarItem(placement: .confirmationAction) {
                                         Button("完成") { presentedSettingsSheet = nil }
                                             .accessibilityIdentifier("v2.device-sessions.done")
                                     }
@@ -589,5 +642,8 @@ struct V2SignedInRootView: View {
                     }
                 }
             }
+        }
+        .authorPresentationPage(context: .list(conversationProfilePageID))
+        .environment(\.v2UserInteractionContext, .init(contacts: contactsStore, conversations: conversationStore, navigation: rootNavigation))
     }
 }

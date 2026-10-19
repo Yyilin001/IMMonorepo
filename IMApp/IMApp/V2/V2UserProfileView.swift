@@ -129,6 +129,7 @@ final class V2UserProfileActionStore {
 
 struct V2UserProfileSheet: View {
     let key: V2ProfileViewLookupKey
+    var usesNavigationStack = true
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var context
     @State private var identity: V2PublicIdentity?
@@ -137,7 +138,14 @@ struct V2UserProfileSheet: View {
     @State private var nameEditor: V2NameEditorStore?
     @State private var pageID = UUID()
     var body: some View {
-        NavigationStack {
+        if usesNavigationStack {
+            NavigationStack { profileContent }
+        } else {
+            profileContent
+        }
+    }
+    private var profileContent: some View {
+        Group {
             List {
                 Section {
                     VStack(spacing: 12) {
@@ -173,10 +181,11 @@ struct V2UserProfileSheet: View {
                     Button("编辑备注") { nameEditor = context.contacts.nameEditor(for: item) }
                 }
             }
-            .v2PageSurface()
+            .v2GroupedPageSurface()
             .navigationTitle("用户资料")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } }
+                if usesNavigationStack { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
                 ToolbarItem(placement: .topBarTrailing) { Button("刷新", systemImage: "arrow.clockwise") { Task { await actions?.refresh() } } }
             }
             .confirmationDialog(confirmation == .userBlock(.block) ? "屏蔽此人？" : "删除好友？", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {

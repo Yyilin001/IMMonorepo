@@ -16,15 +16,18 @@ struct IMAppApp: App {
 
     var body: some Scene {
         WindowGroup {
-            #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("-v2-mock-preview") {
-                V2MockPreview().tint(V2VisualStyle.accent)
-            } else {
+            Group {
+                #if DEBUG
+                if ProcessInfo.processInfo.arguments.contains("-v2-mock-preview") {
+                    V2MockPreview().tint(V2VisualStyle.accent)
+                } else {
+                    V2RootView(appPushDelegate: appPushDelegate).tint(V2VisualStyle.accent)
+                }
+                #else
                 V2RootView(appPushDelegate: appPushDelegate).tint(V2VisualStyle.accent)
+                #endif
             }
-            #else
-            V2RootView(appPushDelegate: appPushDelegate).tint(V2VisualStyle.accent)
-            #endif
+            .background(V2KeyboardDismissal())
         }
     }
 }

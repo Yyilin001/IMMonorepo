@@ -322,6 +322,7 @@ struct V2PublicIdentitySettingsView: View {
             }
         }
         .navigationTitle("我的资料")
+        .navigationBarTitleDisplayMode(.inline)
         .task { await store.load() }
         .task(id: store.avatarPresentationKey) {
             avatarPreviewImage = nil

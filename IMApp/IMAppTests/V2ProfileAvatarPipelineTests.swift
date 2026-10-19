@@ -62,8 +62,21 @@ struct V2ProfileAvatarPipelineTests {
         #expect(x.key == f.key && y.key == f.key)
         #expect(x.name == "Original" && y.name == "Original" && x.image == nil && y.image == nil)
         #expect(await f.reader.calls == 1)
+        // A reconstructed row can render immediately without publishing a fake name.
+        #expect(scope.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.name == "Original")
+        #expect(scope.cachedSnapshot(key: f.key, pixels: 64, pipeline: pipeline) == nil)
+        // Tab rows disappear, but the parent page retains bounded cache interests.
         for row in [a, b] { await pipeline.profiles.releaseVisibleInterest(row.1) }
-        scope.hide(); running.cancel(); await running.value
+        #expect(scope.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.name == "Original")
+        let returningRow = try await scope.retain(f.key, pipeline: pipeline)
+        #expect(scope.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.name == "Original")
+        await pipeline.profiles.releaseVisibleInterest(returningRow.1)
+        // Hidden-tab changes must still revoke the cached presentation.
+        await pipeline.profiles.invalidate([f.key])
+        try await waitForProfilePage { scope.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline) == nil }
+        scope.hide()
+        #expect(scope.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline) == nil)
+        running.cancel(); await running.value
         await f.reader.deny()
         let reentered = Task { await scope.run(pipeline: pipeline) }
         try await waitForProfilePage { scope.activation != nil }

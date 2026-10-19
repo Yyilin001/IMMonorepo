@@ -3,6 +3,7 @@ import IMV2ClientKit
 import IMV2Core
 import Observation
 import SwiftUI
+import MessagingUI
 import UIKit
 import AVKit
 import UniformTypeIdentifiers
@@ -638,7 +639,7 @@ final class V2ConversationListStore {
         defer { if conversationRefreshOperation == operation { conversationRefreshOperation = nil } }
         let retainedCount = resetWindow ? 50 : min(Self.maximumWindowCount, max(50, items.count))
         if resetWindow { items = []; conversationNextCursor = nil; hasEarlierConversations = false; viewport.reset() }
-        if items.isEmpty { state = .loading }
+        if state != .loaded || resetWindow { state = .loading }
         let archived = isShowingArchived
         do {
             while true {
@@ -1049,22 +1050,15 @@ struct V2ConversationListView: View {
         var id: String { rawValue }
     }
 
-    private struct SearchNavigationDestination: Hashable {
-        let roomID: String
-        let messageID: String
-    }
-
     @Environment(\.v2UserInteractionContext) private var userContext
     @State private var choosingGroupFriends = false
     @Bindable var store: V2ConversationListStore
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     private let accountMenu: V2ConversationAccountMenu?
-    private let rootNavigation: V2RootNavigationStore?
+    private let rootNavigation: V2RootNavigationStore
     private let groupInvitationStore: V2GroupInvitationStore?
-    @State private var navigationPath = NavigationPath()
     @State private var newConversationSheet: NewConversationSheet?
     @State private var directTargetUserID: String
-    @State private var localE2EFixtureRoomID: String?
     @State private var groupTitle = ""
     @State private var groupMemberUserIDs = ""
     @State private var directSubmissionTask: Task<Void, Never>?
@@ -1086,7 +1080,7 @@ struct V2ConversationListView: View {
         self.store = store
         self.localE2EConversationLaunchFixture = localE2EConversationLaunchFixture
         self.accountMenu = accountMenu
-        self.rootNavigation = rootNavigation
+        self.rootNavigation = rootNavigation ?? V2RootNavigationStore()
         self.groupInvitationStore = groupInvitationStore
         _directTargetUserID = State(
             initialValue: localE2EConversationLaunchFixture?.directTargetHandle ?? ""
@@ -1100,7 +1094,7 @@ struct V2ConversationListView: View {
     }
 
     var body: some View {
-        NavigationStack(path: $navigationPath) {
+        Group {
             Group {
                 switch store.state {
                 case .loading:
@@ -1127,7 +1121,7 @@ struct V2ConversationListView: View {
                                     V2AuthorizedAvatarView(key:.init(userID:request.command.targetUserID,context:.directConversation),showsName:true)
                                     Text(store.directConversationRequestStatus(request)).font(.subheadline).foregroundStyle(.secondary)
                                     if case .opened(let roomID,_)?=request.receipt?.outcome {
-                                        NavigationLink("打开会话",value:roomID.rawValue)
+                                        NavigationLink("打开会话",value:V2ConversationRoute(roomID: roomID.rawValue))
                                     } else if request.work.scheduling == .needsAttention {
                                         Button("重试") { Task { await store.resumeDirectConversationRequest(request) } }
                                     }
@@ -1143,8 +1137,22 @@ struct V2ConversationListView: View {
                             .accessibilityIdentifier("v2.conversation.return-to-latest")
                     }
                     ForEach(filteredConversations) { item in
-                        NavigationLink(value: item.id) {
+                        NavigationLink(value: V2ConversationRoute(roomID: item.id)) {
                             V2ConversationSummaryRow(item: item)
+                        }
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button(item.isPinned ? "取消置顶" : "置顶", systemImage: item.isPinned ? "pin.slash" : "pin") {
+                                Task { await store.updateConversationState(item, isPinned: !item.isPinned) }
+                            }.tint(.orange)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(item.isArchived ? "取消归档" : "归档", systemImage: "archivebox") {
+                                Task { await store.updateConversationState(item, isArchived: !item.isArchived) }
+                            }.tint(.indigo)
+                            Button(item.muteUntil.map { $0 > Date() } == true ? "恢复提醒" : "免打扰", systemImage: "bell.slash") {
+                                Task { await store.updateConversationState(item, muteUntil: .some(item.muteUntil.map { $0 > Date() } == true ? nil : Date().addingTimeInterval(315_576_000))) }
+                            }.tint(.gray)
                         }
                         .contextMenu {
                             Menu("会话置顶", systemImage: "pin") {
@@ -1234,104 +1242,37 @@ struct V2ConversationListView: View {
                 }
                 }
             }
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    Text(store.isShowingArchived ? "已归档" : "消息")
-                        .font(.headline)
-                        .accessibilityAddTraits(.isHeader)
+            .onChange(of: rootNavigation.conversationAction) { _, action in
+                guard let action else { return }
+                rootNavigation.conversationAction = nil
+                switch action {
+                case .newDirect: newConversationSheet = .direct
+                case .newGroup: newConversationSheet = .group
+                case .search:
+                    messageSearchStore = store.messageSearchStore()
+                    isPresentingMessageSearch = messageSearchStore != nil
+                case .favorites: isPresentingFavorites = true
+                case .preferences: isPresentingPreferenceActivity = true
                 }
-                ToolbarItemGroup(placement: .topBarTrailing) {
-                    Menu {
-                    Button("新建群聊", systemImage: "person.3") {
-                        newConversationSheet = .group
-                    }
-                    .accessibilityIdentifier("v2.conversation.new-group")
-                    if let groupInvitationStore {
-                        Button("加入群聊", systemImage: "qrcode.viewfinder") {
-                            groupInvitationStore.isPresentingJoin = true
-                        }
-                        .accessibilityIdentifier("v2.group-join.open")
-                    }
-                    Button("刷新", systemImage: "arrow.clockwise") {
-                        Task { await store.refresh() }
-                    }
-                    .accessibilityIdentifier("v2.conversation.refresh")
-                        Button(store.isShowingArchived ? "返回收件箱" : "已归档", systemImage: store.isShowingArchived ? "tray" : "archivebox") {
-                            Task { await store.toggleArchivedConversations() }
-                        }
-                        .accessibilityIdentifier("v2.conversation.archive-toggle")
-                        Button("搜索消息", systemImage: "magnifyingglass") {
-                            guard let searchStore = store.messageSearchStore() else { return }
-                            messageSearchStore = searchStore
-                            isPresentingMessageSearch = true
-                        }
-                        .accessibilityIdentifier("v2.message.search")
-                        if store.preferenceActivity != nil {
-                            Button("待同步设置", systemImage: "arrow.triangle.2.circlepath") { isPresentingPreferenceActivity = true }
-                        }
-                        Button("收藏", systemImage: "star") {
-                            isPresentingFavorites = true
-                        }
-                        .accessibilityIdentifier("v2.message.favorites")
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .accessibilityLabel("会话工具")
-                    .accessibilityHint("打开归档、搜索和收藏")
-                    .accessibilityIdentifier("v2.conversation.tools")
-                    Button("新建私聊", systemImage: "square.and.pencil") {
-                        newConversationSheet = .direct
-                    }
-                    .accessibilityIdentifier("v2.conversation.new-direct")
-
-                    if let accountMenu {
-                        accountMenu
-                    }
-                }
-            }
-            .navigationDestination(for: String.self) { roomID in
-                V2ConversationDetailView(
-                    store: store.detailStore(
-                        for: roomID,
-                        initialDraft: localE2EFixtureRoomID == roomID
-                            ? localE2EConversationLaunchFixture?.initialMessage
-                            : nil,
-                        initialMentionHandles: localE2EFixtureRoomID == roomID
-                            ? localE2EConversationLaunchFixture?.initialMentionHandles
-                            : nil
-                    ),
-                    groupInvitationStore: groupInvitationStore
-                )
-            }
-            .navigationDestination(for: SearchNavigationDestination.self) { destination in
-                V2ConversationDetailView(
-                    store: store.detailStore(for: destination.roomID),
-                    initiallyFocusedMessageID: destination.messageID,
-                    groupInvitationStore: groupInvitationStore
-                )
             }
             .sheet(isPresented: $isPresentingPreferenceActivity) {
                 if let activity = store.preferenceActivity {
                     V2PreferenceActivityView(store: activity, roomTitles: Dictionary(store.items.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })) { roomID, messageID in
                         isPresentingPreferenceActivity = false
-                        if let messageID { navigationPath.append(SearchNavigationDestination(roomID: roomID, messageID: messageID)) }
-                        else { navigationPath.append(roomID) }
+                        if let messageID { rootNavigation.path.append(V2ConversationRoute(roomID: roomID, messageID: messageID)) }
+                        else { rootNavigation.path.append(V2ConversationRoute(roomID: roomID)) }
                     }
                 }
             }
             .sheet(isPresented: $isPresentingFavorites) {
                 V2FavoriteMessagesSheet(store: store) { item in
                     isPresentingFavorites = false
-                    navigationPath.append(SearchNavigationDestination(roomID: item.roomID, messageID: item.id))
+                    rootNavigation.path.append(V2ConversationRoute(roomID: item.roomID, messageID: item.id))
                 }
             }
             .task { await store.observeGroupCreation() }
             .task { await store.observeDirectConversationRequests() }
         .task { await store.observeProjectionChanges() }
-            .onAppear { consumeRequestedConversationIfNeeded() }
-            .onChange(of: rootNavigation?.conversationRequest) { _, _ in
-                consumeRequestedConversationIfNeeded()
-            }
             .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
                 messageSearchStore = nil
             }) {
@@ -1339,7 +1280,7 @@ struct V2ConversationListView: View {
                     NavigationStack {
                         V2MessageSearchView(store: messageSearchStore) { hit in
                             isPresentingMessageSearch = false
-                            navigationPath.append(SearchNavigationDestination(roomID: hit.roomID.rawValue, messageID: hit.messageID.rawValue))
+                            rootNavigation.path.append(V2ConversationRoute(roomID: hit.roomID.rawValue, messageID: hit.messageID.rawValue))
                         }
                     }
                 }
@@ -1361,8 +1302,9 @@ struct V2ConversationListView: View {
                                 .foregroundStyle(.secondary)
                         }
                     }
-                    .v2PageSurface()
+                    .v2GroupedPageSurface()
                     .navigationTitle("新建私聊")
+                    .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("取消") { newConversationSheet = nil }
@@ -1376,9 +1318,9 @@ struct V2ConversationListView: View {
                                     if let roomID = await store.openDirectConversation(handle: target), !Task.isCancelled {
                                         directSubmissionTask = nil
                                         directTargetUserID = ""
-                                        localE2EFixtureRoomID = roomID
+                                        rootNavigation.fixtureRoomID = roomID
                                         newConversationSheet = nil
-                                        navigationPath.append(roomID)
+                                        rootNavigation.path.append(V2ConversationRoute(roomID: roomID))
                                     } else if !Task.isCancelled {
                                         directSubmissionTask = nil
                                     }
@@ -1437,8 +1379,9 @@ struct V2ConversationListView: View {
                                 .accessibilityIdentifier("v2.conversation.group-feedback")
                         }
                     }
-                    .v2PageSurface()
+                    .v2GroupedPageSurface()
                     .navigationTitle("新建群聊")
+                    .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) {
                             Button("取消") {
@@ -1471,9 +1414,9 @@ struct V2ConversationListView: View {
                                         // The local E2E fixture only supplies a draft to the
                                         // room created by this real UI action. Keep the same
                                         // state handoff as the direct-conversation path.
-                                        localE2EFixtureRoomID = roomID
+                                        rootNavigation.fixtureRoomID = roomID
                                         newConversationSheet = nil
-                                        navigationPath.append(roomID)
+                                        rootNavigation.path.append(V2ConversationRoute(roomID: roomID))
                                     } else if !Task.isCancelled {
                                         groupSubmissionTask = nil
                                     }
@@ -1514,15 +1457,7 @@ struct V2ConversationListView: View {
         }
     }
 
-    private func consumeRequestedConversationIfNeeded() {
-        guard let request = rootNavigation?.conversationRequest else { return }
-        rootNavigation?.consumeConversationRequest(id: request.id)
-        if let messageID = request.messageID {
-            navigationPath.append(SearchNavigationDestination(roomID: request.roomID, messageID: messageID))
-        } else {
-            navigationPath.append(request.roomID)
-        }
-    }
+
 }
 
 extension V2AccountKind {
@@ -1766,6 +1701,7 @@ struct V2FavoriteMessagesSheet: View {
                 }
             }
             .navigationTitle("收藏消息")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { dismiss() }
@@ -1834,6 +1770,10 @@ struct V2ConversationDetailView: View {
     @State private var showsMentionInput = false
     @State private var followsOwnSend = false
     @State private var lastMessageBeforeSend: String?
+    @State private var timelinePresentation = V2MessageTimelinePresentation()
+    @State private var timelinePosition = TiledScrollState<String>(
+        autoScrollsToBottomOnAppend: false, scrollsToBottomOnReplace: false
+    )
     private let groupInvitationStore: V2GroupInvitationStore?
 
     init(store: V2ConversationDetailStore, initiallyFocusedMessageID: String? = nil, groupInvitationStore: V2GroupInvitationStore? = nil) {
@@ -2006,14 +1946,46 @@ struct V2ConversationDetailView: View {
                             presentedDetailSheet = .groupAnnouncement
                         }
                     }
-                    if store.timeline.isEmpty {
+                    if store.timeline.isEmpty && store.pendingResourceSends.isEmpty {
                         V2ConversationEmptyState(title: "暂无消息", symbol: "bubble", description: "发送第一条消息，开始会话。")
                     } else {
-                        ScrollViewReader { proxy in
-                            ScrollView {
-                                LazyVStack(alignment: .leading, spacing: 16) {
-                                    // 服务端按保留窗口裁剪过这个房间：缺口是永久的，
-                                    // 必须显式告知，不能让用户以为往上滚就能看到全部历史。
+                        V2MessageTimelineEnvironment { environment in
+                        VStack(spacing: 0) {
+                            TiledView(dataSource: timelinePresentation.dataSource, scrollPosition: $timelinePosition) { item in
+                                Group {
+                                        switch item {
+                                        case .committed(.message(let message, _)):
+                                            V2ConversationMessageRow(
+                                                store: store,
+                                                message: message,
+                                                beginEditing: { presentedDetailSheet = .edit(message) },
+                                                showReadReceipts: { presentedDetailSheet = .groupReadReceipts(message) },
+                                                beginForward: {
+                                                    store.beginForwardSelection(with: message)
+                                                    presentedDetailSheet = .forward
+                                                },
+                                                beginCopyAttachments: { presentedDetailSheet = .copyAttachments(message) }
+                                            )
+                                        case .committed(.activity(let activity)):
+                                            V2ConversationTimelineActivityRow(activity: activity)
+                                        case .pending(let pending):
+                                            V2PendingMessageRow(pending: pending,
+                                                retry: { Task { await store.retryResourceSend(pending.id) } },
+                                                cancel: { Task { await store.cancelResourceSend(pending.id) } })
+                                            }
+                                }
+                                .environment(\.self, environment)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                            }
+                            .headerContent(.header {
+                                VStack(spacing: 8) {
+                                    if store.pendingResourceSendPage > 0 {
+                                        Button("较新的待处理发送") { store.previousPendingResourceSendPage() }
+                                    }
+                                    if store.hasNextPendingResourceSendPage {
+                                        Button("查看更多待处理发送") { store.nextPendingResourceSendPage() }
+                                    }
                                     if store.isHistoryIncomplete {
                                         Label("更早的消息已不可用", systemImage: "clock.badge.exclamationmark")
                                             .font(.footnote)
@@ -2037,29 +2009,41 @@ struct V2ConversationDetailView: View {
                                         .frame(maxWidth: .infinity)
                                         .accessibilityIdentifier("v2.message.load-older")
                                     }
-                                    ForEach(store.timeline) { item in
-                                        switch item {
-                                        case .message(let message, _):
-                                            V2ConversationMessageRow(
-                                                store: store,
-                                                message: message,
-                                                beginEditing: { presentedDetailSheet = .edit(message) },
-                                                showReadReceipts: { presentedDetailSheet = .groupReadReceipts(message) },
-                                                beginForward: {
-                                                    store.beginForwardSelection(with: message)
-                                                    presentedDetailSheet = .forward
-                                                },
-                                                beginCopyAttachments: { presentedDetailSheet = .copyAttachments(message) }
-                                            )
-                                            .id(item.id)
-                                        case .activity(let activity):
-                                            V2ConversationTimelineActivityRow(activity: activity)
-                                                .id(item.id)
-                                        }
-                                    }
+                                }.environment(\.self, environment).padding(.horizontal, 16)
+                            })
+                            .onTiledUserScrollInput { focusedMessageID = nil }
+                            .onScrollFailure { _ in focusedMessageID = nil }
+                            .onChange(of: store.timeline, initial: true) { _, items in
+                                let wasEmpty = timelinePresentation.dataSource.items.isEmpty
+                                guard timelinePresentation.apply(items, pending: store.pendingResourceSends) else { return }
+                                if focusedMessageID != nil { scrollToFocusedMessage() }
+                                else if wasEmpty { timelinePosition.scrollTo(edge: .bottom, animated: false) }
+                                if followsOwnSend, let message = store.messages.last,
+                                   message.isOutgoing, message.id != lastMessageBeforeSend {
+                                    timelinePosition.scrollTo(id: "message-" + message.id, anchor: .bottom)
+                                    followsOwnSend = false
+                                }
+                            }
+                            .onChange(of: store.pendingResourceSends, initial: true) { old, pending in
+                                guard timelinePresentation.apply(store.timeline, pending: pending) else { return }
+                                if followsOwnSend, pending.contains(where: { item in !old.contains(where: { $0.id == item.id }) }) {
+                                    timelinePosition.scrollTo(edge: .bottom)
+                                }
+                            }
+                            .onChange(of: focusedMessageID) { _, _ in scrollToFocusedMessage() }
+                            .accessibilityIdentifier("v2.message.list")
+                            if timelinePresentation.hasInvalidSnapshot {
+                                Text("消息列表暂时无法更新，请刷新重试。")
+                                    .font(.footnote).foregroundStyle(.secondary)
+                            }
                                     if store.isBrowsingHistoricalTimeline {
                                         Button {
-                                            Task { await store.returnToLatestTimeline() }
+                                            Task {
+                                                await store.returnToLatestTimeline()
+                                                if !store.isBrowsingHistoricalTimeline, timelinePresentation.apply(store.timeline, pending: store.pendingResourceSends) {
+                                                    timelinePosition.scrollTo(edge: .bottom)
+                                                }
+                                            }
                                         } label: {
                                             if store.isReturningToLatestTimeline {
                                                 ProgressView("正在返回最新消息…")
@@ -2072,28 +2056,8 @@ struct V2ConversationDetailView: View {
                                         .accessibilityHint("重新加载当前会话的最新消息")
                                         .accessibilityIdentifier("v2.message.return-latest")
                                     }
-                                }
-                                .padding()
-                            }
-                            .defaultScrollAnchor(.bottom, for: .initialOffset)
-                            .onAppear { scrollToFocusedMessage(with: proxy) }
-                            .onChange(of: focusedMessageID) { _, _ in
-                                scrollToFocusedMessage(with: proxy)
-                            }
-                            .onChange(of: store.timelineRevision) { _, _ in
-                                scrollToFocusedMessage(with: proxy)
-                                if followsOwnSend, let message = store.messages.last,
-                                   message.isOutgoing, message.id != lastMessageBeforeSend,
-                                   let target = store.timeline.first(where: {
-                                       if case .message(let value, _) = $0 { return value.id == message.id }
-                                       return false
-                                   }) {
-                                    proxy.scrollTo(target.id, anchor: .bottom)
-                                    followsOwnSend = false
-                                }
-                            }
                         }
-                        .accessibilityIdentifier("v2.message.list")
+                        }
                     }
                     if !store.attachments.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
@@ -2133,34 +2097,6 @@ struct V2ConversationDetailView: View {
                         .padding(.top, 8)
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("v2.message.reply.composer")
-                    }
-                    if store.isGroupConversation, !store.typingUserIDs.isEmpty {
-                        Text(store.typingUserIDs.count == 1 ? "有人正在输入…" : "多位成员正在输入…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
-                            .padding(.top, 6)
-                            .accessibilityLabel("会话状态")
-                            .accessibilityValue("有人正在输入")
-                            .accessibilityIdentifier("v2.conversation.typing")
-                    } else if !store.isGroupConversation, !store.typingUserIDs.isEmpty {
-                        Text("对方正在输入…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
-                            .padding(.top, 6)
-                            .accessibilityLabel("对方状态")
-                            .accessibilityValue("正在输入")
-                            .accessibilityIdentifier("v2.conversation.typing")
-                    } else if !store.isGroupConversation, let presence = store.peerPresence {
-                        Text(presence.isOnline ? "在线" : "离线")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .padding(.horizontal)
-                            .padding(.top, 6)
-                            .accessibilityLabel("对方状态")
-                            .accessibilityValue(presence.isOnline ? "在线" : "离线")
-                            .accessibilityIdentifier("v2.conversation.presence")
                     }
                     GlassEffectContainer(spacing: 12) {
                         HStack(alignment: .bottom, spacing: 12) {
@@ -2244,41 +2180,6 @@ struct V2ConversationDetailView: View {
                             .padding(.bottom, 8)
                             .accessibilityIdentifier("v2.message.sending-restricted")
                     }
-                    if !store.pendingResourceSends.isEmpty || store.pendingResourceSendPage > 0 || store.hasNextPendingResourceSendPage {
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 8) {
-                                ForEach(store.pendingResourceSends) { pending in
-                                    HStack {
-                                        VStack(alignment: .leading) {
-                                            if !pending.text.isEmpty {
-                                                Text(pending.text).font(.caption).lineLimit(2)
-                                            }
-                                            Text(pending.status).font(.caption)
-                                            if pending.total > 0 {
-                                                ProgressView(value: Double(pending.completed), total: Double(pending.total))
-                                                    .accessibilityLabel("附件已准备 \(pending.completed)/\(pending.total)")
-                                            }
-                                        }
-                                        if pending.canRetry { Button(pending.retryTitle) { Task { await store.retryResourceSend(pending.id) } } }
-                                        if pending.canCancel { Button("取消") { Task { await store.cancelResourceSend(pending.id) } } }
-                                    }.padding(.horizontal)
-                                }
-                                if store.pendingResourceSendPage > 0 || store.hasNextPendingResourceSendPage {
-                                    HStack {
-                                        if store.pendingResourceSendPage > 0 {
-                                            Button("较新的待处理发送") { store.previousPendingResourceSendPage() }
-                                        }
-                                        if store.hasNextPendingResourceSendPage {
-                                            Button("查看更多待处理发送") { store.nextPendingResourceSendPage() }
-                                        }
-                                    }.font(.caption).padding(.horizontal)
-                                }
-                            }
-                        }
-                        .frame(maxHeight: 200)
-                        .accessibilityLabel("待处理发送")
-                        .accessibilityIdentifier("v2.message.pending-sends")
-                    }
                     if let sendFeedback = store.sendFeedback {
                         Text(sendFeedback)
                             .font(.caption)
@@ -2308,21 +2209,28 @@ struct V2ConversationDetailView: View {
         }
         .v2PageSurface()
         .navigationTitle(store.isGroupConversation ? store.title : "会话")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if let key = store.presentationKey {
                 ToolbarItem(placement: .principal) {
                     Button { userProfile = .init(key: key) } label: {
                         HStack(spacing: 8) {
                             V2AuthorizedAvatarView(key: key, size: 32)
-                            V2AuthorizedProfileNameView(key: key).font(.headline).lineLimit(1)
+                            VStack(alignment: .leading, spacing: 1) {
+                                V2AuthorizedProfileNameView(key: key).font(.headline).lineLimit(1)
+                                headerActivity
+                            }
                         }
-                    }.buttonStyle(.plain).accessibilityLabel("查看对方资料").accessibilityIdentifier("v2.chat.peer-profile")
+                    }.buttonStyle(.plain).accessibilityLabel("查看对方资料").accessibilityValue(headerActivityText ?? "").accessibilityIdentifier("v2.chat.peer-profile")
                 }
             } else if store.isGroupConversation, let room = try? RoomID(store.roomID) {
                 ToolbarItem(placement: .principal) {
                     HStack(spacing: 8) {
                         V2AuthorizedGroupAvatarView(roomID: room, size: 32, fallbackTitle: store.title)
-                        Text(store.title).font(.headline).lineLimit(1)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(store.title).font(.headline).lineLimit(1)
+                            headerActivity
+                        }
                     }
                 }
             }
@@ -2456,6 +2364,30 @@ struct V2ConversationDetailView: View {
         }
     }
 
+    private var headerActivityText: String? {
+        if !store.typingUserIDs.isEmpty {
+            if store.isGroupConversation {
+                return store.typingUserIDs.count == 1 ? "有人正在输入…" : "多位成员正在输入…"
+            }
+            return "对方正在输入…"
+        }
+        guard !store.isGroupConversation, let presence = store.peerPresence else { return nil }
+        return presence.isOnline ? "在线" : "离线"
+    }
+
+    @ViewBuilder
+    private var headerActivity: some View {
+        if let text = headerActivityText {
+            Text(text)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .accessibilityLabel(store.isGroupConversation ? "会话状态" : "对方状态")
+                .accessibilityValue(text)
+                .accessibilityIdentifier(store.typingUserIDs.isEmpty ? "v2.conversation.presence" : "v2.conversation.typing")
+        }
+    }
+
     private var canSendDraft: Bool {
         !store.isSending
             && store.directAccountKind != .system
@@ -2522,13 +2454,13 @@ struct V2ConversationDetailView: View {
     }
 
 
-    private func scrollToFocusedMessage(with proxy: ScrollViewProxy) {
+    private func scrollToFocusedMessage() {
         guard let focusedMessageID,
               let target = store.timeline.first(where: { item in
                   guard case .message(let message, _) = item else { return false }
                   return message.id == focusedMessageID
               }) else { return }
-        withAnimation { proxy.scrollTo(target.id, anchor: .center) }
+        timelinePosition.scrollTo(id: target.id, anchor: .centered)
     }
 }
 
@@ -2849,11 +2781,11 @@ private struct V2ConversationMessageBubble: View {
             }
         }
         if store.canEditMessage(message) {
-            Button("编辑") { beginEditing() }
+            Button("编辑", systemImage: "pencil") { beginEditing() }
                 .accessibilityIdentifier("v2.message.edit.\(message.id)")
         }
         if store.canWithdrawMessage(message) {
-            Button("撤回", role: .destructive) {
+            Button("撤回", systemImage: "arrow.uturn.backward", role: .destructive) {
                 Task { await store.withdrawMessage(message) }
             }
             .disabled(!store.canWithdrawMessage(message))
@@ -3054,6 +2986,7 @@ private struct V2ForwardMessagesSheet: View {
                 }
             }
             .navigationTitle("转发到")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("返回") { dismiss() }
@@ -3117,6 +3050,7 @@ private struct V2CopyAttachmentsSheet: View {
                 if let feedback { Text(feedback).foregroundStyle(.secondary) }
             }
             .navigationTitle("复制附件到")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { dismiss() } } }
             .task(id: selectedTarget) {
                 guard let target = selectedTarget else { return }
@@ -3156,6 +3090,7 @@ private struct V2MessageEditSheet: View {
                 }
             }
             .navigationTitle("编辑消息")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("取消") { dismiss() }

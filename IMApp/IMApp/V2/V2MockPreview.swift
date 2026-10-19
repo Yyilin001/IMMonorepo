@@ -6,6 +6,7 @@ import IMV2Core
 /// Explicit, memory-only visual fixtures. No credentials or production storage are opened.
 @MainActor
 struct V2MockPreview: View {
+    @State private var appStore = V2AppStore(startupMode: .uiTestingSignedOut)
     @State private var conversations: V2ConversationListStore
     @State private var contacts: V2ContactsStore
     @State private var privacy: V2PrivacySettingsStore
@@ -73,6 +74,7 @@ struct V2MockPreview: View {
             }
         default:
             V2SignedInRootView(
+                appStore: appStore,
                 conversationStore: conversations,
                 contactsStore: contacts,
                 privacySettingsStore: privacy,

@@ -56,8 +56,9 @@ struct V2PendingGroupAvatarsView: View {
                 }
             }
             .navigationTitle("待处理群头像")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
+                ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }.accessibilityIdentifier("v2.group.avatar.pending.done")
                 }
             }

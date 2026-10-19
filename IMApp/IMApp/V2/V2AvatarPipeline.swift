@@ -168,25 +168,35 @@ private struct V2AuthorizedProfileView: View {
         guard let pageScope, pageScope.accepts(key) else { return nil }
         return pageScope
     }
-    private var canDisplay: Bool {
-        isVisible && phase == .active && snapshotGeneration == pipeline?.generation && snapshotRefresh == refresh
-            && snapshot.map { $0.key == key && $0.deadline > .now } == true
-            && (sharedPage == nil || (sharedPage?.activation != nil && snapshotActivation == sharedPage?.activation
-                && snapshotPageRevision == sharedPage?.revision(for: key)))
+    private var requestedPixels: Int? {
+        if case .avatar(let size, _) = appearance { min(512, max(1, Int(size * scale))) }
+        else { nil }
     }
+    private var displaySnapshot: V2AvatarPipeline.Snapshot? {
+        guard phase == .active, let pipeline, !pipeline.isSuspending else { return nil }
+        if let sharedPage {
+            if let cached = sharedPage.cachedSnapshot(key: key, pixels: requestedPixels, pipeline: pipeline) { return cached }
+            guard sharedPage.activation != nil, snapshotActivation == sharedPage.activation,
+                  snapshotPageRevision == sharedPage.revision(for: key) else { return nil }
+        }
+        guard isVisible, snapshotGeneration == pipeline.generation, snapshotRefresh == refresh,
+              let snapshot, snapshot.key == key, snapshot.deadline > .now else { return nil }
+        return snapshot
+    }
+    private var canDisplay: Bool { displaySnapshot != nil }
 
     var body: some View {
         VStack(spacing: 3) {
             switch appearance {
             case .avatar(let size, let showsName):
                 Group {
-                    if canDisplay, let image = snapshot?.image { Image(uiImage: image.image).resizable().scaledToFill() }
+                    if canDisplay, let image = displaySnapshot?.image { Image(uiImage: image.image).resizable().scaledToFill() }
                     else { V2AvatarPlaceholder(title: placeholderTitle, size: size) }
                 }
                 .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.32)).accessibilityHidden(true)
                 if showsName { Text(displayName).font(.caption2).lineLimit(1) }
             case .handle:
-                Text(canDisplay ? snapshot?.identity?.handle.description ?? placeholder : placeholder)
+                Text(canDisplay ? displaySnapshot?.identity?.handle.description ?? placeholder : placeholder)
                     .accessibilityIdentifier("v2.user.public-handle")
             case .name:
                 Text(displayName).fixedSize(horizontal: false, vertical: true)
@@ -194,10 +204,13 @@ private struct V2AuthorizedProfileView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(appearance == .handle ? (canDisplay ? snapshot?.identity?.handle.description ?? placeholder : placeholder) : displayName)
+        .accessibilityLabel(appearance == .handle ? (canDisplay ? displaySnapshot?.identity?.handle.description ?? placeholder : placeholder) : displayName)
         .task(id: TaskKey(key: key, phase: phase, generation: pipeline?.generation ?? 0, visible: isVisible, refresh: refresh,
                           activation: sharedPage?.activation, pageRevision: sharedPage?.revision(for: key), appearance: appearance)) {
-            snapshot = nil
+            // A restarted task may still own a valid presentation. Do not blank
+            // it while the replacement read is in flight; canDisplay continues
+            // to enforce expiry, generation and page-revision boundaries.
+            if !canDisplay { snapshot = nil }
             guard phase == .active, isVisible, let pipeline, !pipeline.isSuspending else { return }
             await load(pipeline)
         }
@@ -220,7 +233,7 @@ private struct V2AuthorizedProfileView: View {
         .onChange(of: phase) { _, newPhase in
             if newPhase != .active { snapshot = nil; if let pipeline { Task { await pipeline.suspend() } } }
         }
-        .onChange(of: canDisplay ? snapshot?.identity : nil) { _, identity in onIdentity?(identity) }
+        .onChange(of: canDisplay ? displaySnapshot?.identity : nil) { _, identity in onIdentity?(identity) }
         .onAppear { isVisible = true }
         .onScrollVisibilityChange(threshold: 0.1) { isVisible = $0; if !$0 { snapshot = nil } }
         .onDisappear { isVisible = false; snapshot = nil }
@@ -229,13 +242,13 @@ private struct V2AuthorizedProfileView: View {
         #if DEBUG
         if let name = mockProfileNames[key.userID.rawValue] { return name }
         #endif
-        return canDisplay ? snapshot?.name : nil
+        return canDisplay ? displaySnapshot?.name : nil
     }
     private var displayName: String {
         #if DEBUG
         if let name = mockProfileNames[key.userID.rawValue] { return name }
         #endif
-        return canDisplay ? snapshot?.name ?? placeholder : placeholder
+        return canDisplay ? displaySnapshot?.name ?? placeholder : placeholder
     }
     private func load(_ pipeline: V2AvatarPipeline) async {
         let activeGeneration = pipeline.generation, activeRefresh = refresh

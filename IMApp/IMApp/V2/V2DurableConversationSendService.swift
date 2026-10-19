@@ -150,7 +150,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         try await store.saveResourceImport(result, id: id)
     }
 
-    struct Pending: Identifiable, Sendable {
+    struct Pending: Identifiable, Hashable, Sendable {
         let id: UUID
         let text: String
         let completed: Int

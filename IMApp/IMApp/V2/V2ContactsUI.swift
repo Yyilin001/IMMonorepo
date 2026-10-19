@@ -1028,6 +1028,10 @@ final class V2RootNavigationStore {
         let messageID: String?
     }
 
+    enum ConversationAction { case newDirect, newGroup, search, favorites, preferences }
+    var conversationAction: ConversationAction?
+    var path = NavigationPath()
+    var fixtureRoomID: String?
     var selectedTab: Tab = .conversations
     private(set) var conversationRequest: ConversationRequest?
 
@@ -1043,7 +1047,7 @@ final class V2RootNavigationStore {
     }
 }
 
-private enum V2ContactsRoute: Hashable {
+enum V2ContactsRoute: Hashable {
     case requests
     case addFriend
     case contact(String)
@@ -1052,11 +1056,10 @@ private enum V2ContactsRoute: Hashable {
 struct V2ContactsRootView: View {
     @Bindable var store: V2ContactsStore
     let rootNavigation: V2RootNavigationStore
-    @State private var path = NavigationPath()
     @State private var profilePageID = UUID()
 
     var body: some View {
-        NavigationStack(path: $path) {
+        Group {
             Group {
                 switch store.state {
                 case .loading:
@@ -1067,27 +1070,9 @@ struct V2ContactsRootView: View {
                     contactList
                 }
             }
-            .v2PageSurface()
+            .v2GroupedPageSurface()
             .navigationTitle("联系人")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink(value: V2ContactsRoute.addFriend) {
-                        Label("添加好友", systemImage: "person.badge.plus")
-                    }
-                    .accessibilityIdentifier("v2.contacts.add")
-                }
-
-            }
-            .navigationDestination(for: V2ContactsRoute.self) { route in
-                switch route {
-                case .requests:
-                    V2FriendRequestsView(store: store)
-                case .addFriend:
-                    V2AddFriendView(store: store)
-                case .contact(let userID):
-                    if let user = try? UserID(userID) { V2UserProfileSheet(key: .init(userID: user, context: .relationship)) }
-                }
-            }
+            .navigationBarTitleDisplayMode(.inline)
             .safeAreaInset(edge:.bottom) { VStack { V2SocialProposalList(proposals:store.socialProposals,prepare:{await store.prepareSocialProposal($0)},discard:{await store.discardSocialProposal($0)})
                 V2SocialPendingStatusView(pending:store.socialPending) { id in await store.resumeSocialOperation(id) } } }
             .confirmationDialog("确认联系人操作",isPresented:Binding(get:{store.socialConfirmation != nil},set:{if !$0 {store.socialConfirmation=nil}})) { Button("确认") { Task {await store.confirmSocialOperation()} } } message: { Text(store.socialConfirmation?.description ?? "") }
@@ -1149,7 +1134,7 @@ struct V2ContactsRootView: View {
             }
         }
         .listStyle(.insetGrouped)
-        .v2PageSurface()
+        .v2GroupedPageSurface()
         .modifier(V2ListViewportContainer(viewport: store.friendsViewport, coordinateSpace: "v2.contacts.friends.viewport"))
         .searchable(text: $store.searchQuery, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索好友")
         .task(id: store.searchQuery) {
@@ -1247,8 +1232,9 @@ struct V2FriendRequestsView: View {
             }
         }
         .modifier(V2ListViewportContainer(viewport: store.requestsViewport, coordinateSpace: "v2.contacts.requests.viewport"))
-        .v2PageSurface()
+        .v2GroupedPageSurface()
         .navigationTitle("新的朋友")
+        .navigationBarTitleDisplayMode(.inline)
         .authorPresentationPage(context: .list(profilePageID))
         .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
         .onDisappear { actionTask?.cancel() }
@@ -1275,7 +1261,7 @@ struct V2FriendRequestsView: View {
     }
 }
 
-private struct V2AddFriendView: View {
+struct V2AddFriendView: View {
     @Bindable var store: V2ContactsStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var actionTask: Task<Void, Never>?
@@ -1317,8 +1303,9 @@ private struct V2AddFriendView: View {
                 Section { Text(feedback).foregroundStyle(.secondary) }
             }
         }
-        .v2PageSurface()
+        .v2GroupedPageSurface()
         .navigationTitle("添加好友")
+        .navigationBarTitleDisplayMode(.inline)
         .task(id: store.addFriendExpiration) {
             guard let deadline = store.addFriendExpiration else { return }
             do { try await ContinuousClock().sleep(until: deadline) } catch { return }

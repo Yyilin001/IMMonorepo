@@ -42,11 +42,32 @@ final class V2AuthorPresentationPageScope {
     private(set) var activation: V2ProfilePageActivation?
     private var revisions: [V2ProfileViewLookupKey: UUID] = [:]
     private var runID: UUID?
+    private struct SnapshotKey: Hashable {
+        let profile: V2ProfileViewLookupKey
+        let pixels: Int?
+    }
+    private struct CachedSnapshot {
+        let value: V2AvatarPipeline.Snapshot
+        let generation: UInt64
+        let revision: UUID?
+        let interest: V2ProfileVisibleInterest
+    }
+    private var snapshots: [SnapshotKey: CachedSnapshot] = [:]
 
     init(context: Context) { self.context = context }
     func accepts(_ key: V2ProfileViewLookupKey) -> Bool { context.accepts(key) }
     func revision(for key: V2ProfileViewLookupKey) -> UUID? { revisions[key] }
-    func hide() { activation = nil; revisions = [:] }
+    func hide() { activation = nil; revisions = [:]; snapshots = [:] }
+
+    /// Synchronous reuse is restricted to this active page and the original
+    /// authorization deadline. It never persists a private name or extends a lease.
+    func cachedSnapshot(key: V2ProfileViewLookupKey, pixels: Int?, pipeline: V2AvatarPipeline) -> V2AvatarPipeline.Snapshot? {
+        guard activation != nil, accepts(key), !pipeline.isSuspending,
+              let cached = snapshots[SnapshotKey(profile: key, pixels: pixels)],
+              cached.generation == pipeline.generation, cached.revision == revisions[key],
+              cached.value.deadline > .now else { return nil }
+        return cached.value
+    }
 
     func run(pipeline: V2AvatarPipeline) async {
         let id = UUID(); runID = id
@@ -55,7 +76,7 @@ final class V2AuthorPresentationPageScope {
             try Task.checkCancellation()
             let updates = try await pipeline.profiles.invalidations(for: active)
             guard runID == id, !Task.isCancelled else { throw CancellationError() }
-            activation = active; revisions = [:]
+            activation = active; revisions = [:]; snapshots = [:]
             await withTaskGroup(of: Void.self) { group in
                 if let roomID = context.authorRoomID, let authors = pipeline.authors {
                     group.addTask { try? await authors.run(roomID: roomID, activation: active) }
@@ -64,6 +85,8 @@ final class V2AuthorPresentationPageScope {
                     if Task.isCancelled || runID != id { break }
                     guard let next = try? await pipeline.profiles.invalidationRevisions(for: active),
                           !Task.isCancelled, runID == id, activation == active else { break }
+                    // Retain bounded interests while the tab container lives so hidden
+                    // rows still receive revocations. Revision mismatch hides old values.
                     revisions = next
                 }
                 group.cancelAll()
@@ -90,6 +113,28 @@ final class V2AuthorPresentationPageScope {
         let revision = revisions[key]
         let value = try await pipeline.snapshot(key: key, activation: activation, pixels: pixels)
         guard self.activation == activation, self.runID == runID, revisions[key] == revision else { return nil }
+        let cacheKey = SnapshotKey(profile: key, pixels: pixels)
+        if let value {
+            let interest = try await pipeline.profiles.retainVisibleInterest(for: key, activation: activation)
+            guard self.activation == activation, self.runID == runID, revisions[key] == revision,
+                  !Task.isCancelled else {
+                await pipeline.profiles.releaseVisibleInterest(interest)
+                return nil
+            }
+            var removed: [V2ProfileVisibleInterest] = []
+            for (key, cached) in snapshots where cached.value.deadline <= .now {
+                removed.append(cached.interest)
+                snapshots.removeValue(forKey: key)
+            }
+            if let previous = snapshots.removeValue(forKey: cacheKey) { removed.append(previous.interest) }
+            if snapshots.count >= 128,
+               let oldest = snapshots.min(by: { $0.value.value.deadline < $1.value.value.deadline })?.key,
+               let evicted = snapshots.removeValue(forKey: oldest) { removed.append(evicted.interest) }
+            snapshots[cacheKey] = .init(value: value, generation: pipeline.generation, revision: revision, interest: interest)
+            for token in removed { await pipeline.profiles.releaseVisibleInterest(token) }
+        } else if let previous = snapshots.removeValue(forKey: cacheKey) {
+            await pipeline.profiles.releaseVisibleInterest(previous.interest)
+        }
         return value
     }
 }

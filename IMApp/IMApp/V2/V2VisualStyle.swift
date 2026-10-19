@@ -58,6 +58,17 @@ private struct V2PageSurface: ViewModifier {
     }
 }
 
+/// Native grouped containers keep cards distinct from their surrounding canvas.
+private struct V2GroupedPageSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(Color(uiColor: .systemGroupedBackground))
+            .tint(V2VisualStyle.accent)
+    }
+}
+
 private struct V2InputSurface: ViewModifier {
     func body(content: Content) -> some View {
         content.padding(16).frame(minHeight: 54)
@@ -68,5 +79,6 @@ private struct V2InputSurface: ViewModifier {
 
 extension View {
     func v2PageSurface() -> some View { modifier(V2PageSurface()) }
+    func v2GroupedPageSurface() -> some View { modifier(V2GroupedPageSurface()) }
     func v2InputSurface() -> some View { modifier(V2InputSurface()) }
 }

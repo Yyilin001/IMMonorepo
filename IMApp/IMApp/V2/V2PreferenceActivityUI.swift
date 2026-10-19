@@ -104,6 +104,7 @@ struct V2PreferenceActivityView: View {
                 }
             }
             .navigationTitle("待同步设置")
+            .navigationBarTitleDisplayMode(.inline)
             .task(id: store.limit) { await store.observe() }
         }
     }

@@ -371,6 +371,7 @@ struct V2LocalMediaPlayerSheet: View {
             }
             .accessibilityIdentifier(accessibilityIdentifier)
             .navigationTitle(kind == .video ? "视频" : "音频")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("完成") { dismiss() }

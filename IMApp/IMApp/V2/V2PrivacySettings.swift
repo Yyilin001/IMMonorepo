@@ -596,7 +596,7 @@ struct V2PrivacySettingsView: View {
                 }
             }
         }
-        .v2PageSurface()
+        .v2GroupedPageSurface()
         .navigationTitle("消息与隐私")
         .navigationBarTitleDisplayMode(.inline)
         .safeAreaInset(edge:.bottom) { VStack { ForEach(store.accountPreferenceDrafts,id:\.id) { draft in HStack { Text(draft.patch.confirmationDescription + (draft.paused ? "；等待重新确认。" : "；已保存，正在准备原版本。"))

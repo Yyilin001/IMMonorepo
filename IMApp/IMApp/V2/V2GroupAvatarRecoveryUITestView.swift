@@ -24,6 +24,7 @@ struct V2GroupAvatarRecoveryUITestView: View {
             case .ready(let fixture):
                 Text("群已离开，原操作仍待确认")
                     .navigationTitle("资源恢复测试")
+                    .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
                             V2ConversationAccountMenu(canOpenPublicIdentity: false, canOpenDeviceSessions: false,

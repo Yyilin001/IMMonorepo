@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		C6A01A010000000000000001 /* MessagingUI in Frameworks */ = {isa = PBXBuildFile; productRef = C6A01A010000000000000002 /* MessagingUI */; };
 		C1D2E3F405162738495A6B01 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = C1D2E3F405162738495A6B02 /* GRDB */; };
 		1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC422F73859E00E89B24 /* IMV2ClientKit */; };
 		1BADBC432F73859E00E89B24 /* IMV2ClientKit in Frameworks */ = {isa = PBXBuildFile; productRef = 1BADBC442F73859E00E89B24 /* IMV2ClientKit */; };
@@ -90,6 +91,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1BADBC402F73859E00E89B24 /* IMV2ClientKit in Frameworks */,
+				C6A01A010000000000000001 /* MessagingUI in Frameworks */,
 				1BADBC452F73859E00E89B24 /* IMV2Core in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -177,6 +179,7 @@
 			name = IMApp;
 			packageProductDependencies = (
 				1BADBC422F73859E00E89B24 /* IMV2ClientKit */,
+				C6A01A010000000000000002 /* MessagingUI */,
 				1BADBC482F73859E00E89B24 /* IMV2Core */,
 			);
 			productName = IMApp;
@@ -323,6 +326,7 @@
 			mainGroup = 1BADBC052F73859D00E89B24;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
+				C6A01A010000000000000003 /* XCRemoteSwiftPackageReference "MessagingUI" */,
 				A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */,
 				1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */,
 				1BADBC472F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2Core" */,
@@ -900,6 +904,14 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+        C6A01A010000000000000003 /* XCRemoteSwiftPackageReference "MessagingUI" */ = {
+            isa = XCRemoteSwiftPackageReference;
+            repositoryURL = "https://github.com/Yyilin001/MessagingUI.git";
+            requirement = {
+                kind = revision;
+                revision = d2e72ffe0069ed9391186d13358558b96926e870;
+            };
+        };
 		A1E2E3E4F567891011121327 /* XCRemoteSwiftPackageReference "GRDB.swift" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/groue/GRDB.swift.git";
@@ -911,6 +923,11 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+        C6A01A010000000000000002 /* MessagingUI */ = {
+            isa = XCSwiftPackageProductDependency;
+            package = C6A01A010000000000000003 /* XCRemoteSwiftPackageReference "MessagingUI" */;
+            productName = MessagingUI;
+        };
 		1BADBC422F73859E00E89B24 /* IMV2ClientKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 1BADBC412F73859E00E89B24 /* XCLocalSwiftPackageReference "../IMV2ClientKit" */;

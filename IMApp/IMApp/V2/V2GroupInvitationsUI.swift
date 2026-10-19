@@ -475,7 +475,8 @@ struct V2GroupInvitationManagementSheet: View {
                 if let feedback = store.feedback { Text(feedback).foregroundStyle(.secondary).accessibilityIdentifier("v2.group-invite.feedback") }
             }
             .navigationTitle("群邀请与审批")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("完成") { dismiss() }.accessibilityIdentifier("v2.group-invite.done") } }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() }.accessibilityIdentifier("v2.group-invite.done") } }
             .refreshable { await store.loadManagement(roomID: roomID) }
             .task { await store.loadManagement(roomID: roomID) }
             .task { await store.observePending(roomID:roomID) }
@@ -525,6 +526,7 @@ struct V2GroupJoinSheet: View {
             }
             .task(id:store.preview?.roomID.rawValue) {if let room=store.preview?.roomID.rawValue {await store.observePending(roomID:room)}}
             .navigationTitle("加入群聊")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { store.dismissJoin() }.accessibilityIdentifier("v2.group-join.close") } }
             .sheet(isPresented: $store.isPresentingScanner) { V2GroupInviteScanner { value in store.isPresentingScanner = false; Task { await store.open(value) } } }
         }

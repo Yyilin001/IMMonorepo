@@ -114,6 +114,7 @@ struct V2OfflineRootView: View {
                 Section { Button("退出登录", role: .destructive) { Task { await signOut() } } }
             }
             .navigationTitle("本地内容")
+            .navigationBarTitleDisplayMode(.inline)
             .accessibilityIdentifier("v2.offline.root")
         }
     }
@@ -137,6 +138,7 @@ private struct V2OfflineMessagesView: View {
             if let feedback = presentation.feedback { Text(feedback).foregroundStyle(.secondary) }
         }
         .navigationTitle("本地消息")
+        .navigationBarTitleDisplayMode(.inline)
         .task(id: roomID) { await presentation.loadMessages(roomID: roomID) }
     }
 }

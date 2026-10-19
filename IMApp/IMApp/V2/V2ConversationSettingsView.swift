@@ -27,11 +27,13 @@ struct V2ConversationSettingsView: View {
                     }
                 }
                 if let item {
-                    Section("会话设置") {
+                    Section("会话整理") {
                         Toggle("置顶聊天", isOn: Binding(get: { item.isPinned }, set: { update(isPinned: $0) }))
                             .accessibilityIdentifier("v2.chat-settings.pin")
                         Toggle("归档会话", isOn: Binding(get: { item.isArchived }, set: { update(isArchived: $0) }))
                             .accessibilityIdentifier("v2.chat-settings.archive")
+                    }.disabled(isUpdating)
+                    Section("消息通知") {
                         Menu {
                             Button("1 小时") { mute(seconds: 3600) }
                             Button("8 小时") { mute(seconds: 28800) }
@@ -47,9 +49,10 @@ struct V2ConversationSettingsView: View {
                     Text(feedback).font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            .v2PageSurface()
+            .v2GroupedPageSurface()
             .navigationTitle("聊天详情")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
             .sheet(item: $profile) { V2UserProfileSheet(key: $0.key) }
             .task(id: context?.conversations.items) {
                 guard let context, let source = context.conversations.items.first(where: { $0.id == roomID }) ?? lastItem else { return }
