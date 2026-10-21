@@ -365,14 +365,14 @@ struct V2MessageSendWorkTests {
         #expect(try await f.store.preparingSendIntents().isEmpty)
         try await f.store.close()
     }
-    @Test("preparation does not renew the original 24 hour first submission deadline")
+    @Test("preparation does not renew the original bounded first submission deadline")
     func delayedPreparation() async throws {
         let f=try SendWorkFixture();defer { f.remove() }
         let created=Date().addingTimeInterval(-90_000),intent=try f.intent("stale draft")
         try await f.store.freezeSendIntent(intent,now:created)
         try await f.store.handOffSendIntent(intent.id)
         let work=try await f.head(),command=try await f.store.messageSendCommand(workID:work.id)
-        #expect(command.firstSubmissionDeadlineMilliseconds == UInt64(created.timeIntervalSince1970*1_000)+86_400_000)
+        #expect(command.firstSubmissionDeadlineMilliseconds == UInt64(created.timeIntervalSince1970*1_000)+86_395_000)
         let result=try await f.store.claimOperationWork(id:work.id,ownerID:UUID(),action:.submit,now:Date())
         guard case .expiredUnsubmitted=result else { Issue.record("stale draft received a submit claim"); return }
         #expect(await f.remote.submissions == 0)

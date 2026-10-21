@@ -22,8 +22,8 @@ public struct V2MembershipConfirmationWindow:Sendable {
             let timestamp=UInt64(exactly:milliseconds) else { throw V2OperationWorkError.invalidRecord }
         self.operationID = .init(uuid:UUID())
         self.roomID=roomID;self.action=action;self.expectedMembershipRevision=expectedMembershipRevision
-        self.activationID=activationID;self.confirmedUntilMilliseconds=timestamp+120_000
-        self.deadline=monotonicNow.advanced(by:.seconds(120))
+        self.activationID=activationID;self.confirmedUntilMilliseconds=timestamp+V2ClientSubmissionWindow.confirmationMilliseconds
+        self.deadline=monotonicNow.advanced(by:.seconds(V2ClientSubmissionWindow.confirmationSeconds))
     }
     func validates(activationID:UUID,now:ContinuousClock.Instant = .now) -> Bool {
         self.activationID==activationID && now<deadline

@@ -48,7 +48,7 @@ extension GRDBV2LocalSyncStore {
             guard try Int.fetchOne(db,sql:"SELECT count(*) FROM v2_account_preference_operations s JOIN v2_operation_work w USING(work_id) WHERE preference_kind=? AND w.scheduling_state<>'finished'",arguments:[patch.kind.rawValue])==0,
                   try Int.fetchOne(db,sql:"SELECT count(*) FROM v2_account_preference_intents WHERE preference_kind=? AND work_id IS NULL AND state<>'cancelled'",arguments:[patch.kind.rawValue])==0 else { throw V2OperationWorkError.invalidTransition }
             try Self.requireOperationCapacity(adding:Self.accountPreferenceDraftReservation,db:db)
-            try db.execute(sql:"INSERT INTO v2_account_preference_intents(intent_id,account_id,preference_kind,patch,activation_id,deadline,payload_bytes,state,next_at) VALUES(?,?,?,?,?,?,?,'ready',?)",arguments:[id.uuidString,accountID.rawValue,patch.kind.rawValue,bytes,activationID.uuidString,now.addingTimeInterval(120).timeIntervalSince1970,Self.accountPreferenceDraftReservation,now.timeIntervalSince1970]);return id
+            try db.execute(sql:"INSERT INTO v2_account_preference_intents(intent_id,account_id,preference_kind,patch,activation_id,deadline,payload_bytes,state,next_at) VALUES(?,?,?,?,?,?,?,'ready',?)",arguments:[id.uuidString,accountID.rawValue,patch.kind.rawValue,bytes,activationID.uuidString,now.addingTimeInterval(V2ClientSubmissionWindow.confirmationSeconds).timeIntervalSince1970,Self.accountPreferenceDraftReservation,now.timeIntervalSince1970]);return id
         }
     }
     static func decodeAccountPreferenceDraft(_ row:Row) throws -> V2AccountPreferenceDraft {
@@ -99,7 +99,7 @@ extension GRDBV2LocalSyncStore {
         try databasePool.write { db in
             guard let row=try Row.fetchOne(db,sql:"SELECT * FROM v2_account_preference_intents WHERE intent_id=? AND account_id=? AND state='paused' AND work_id IS NULL",arguments:[id.uuidString,accountID.rawValue]) else { throw V2OperationWorkError.invalidTransition }
             let floor=max(now.timeIntervalSince1970,row["next_at"] as Double)
-            try db.execute(sql:"UPDATE v2_account_preference_intents SET intent_id=?,activation_id=?,deadline=?,state='ready',attempts=0,next_at=?,round_deadline=NULL WHERE intent_id=?",arguments:[replacement.uuidString,activationID.uuidString,now.addingTimeInterval(120).timeIntervalSince1970,floor,id.uuidString]);return replacement
+            try db.execute(sql:"UPDATE v2_account_preference_intents SET intent_id=?,activation_id=?,deadline=?,state='ready',attempts=0,next_at=?,round_deadline=NULL WHERE intent_id=?",arguments:[replacement.uuidString,activationID.uuidString,now.addingTimeInterval(V2ClientSubmissionWindow.confirmationSeconds).timeIntervalSince1970,floor,id.uuidString]);return replacement
         }
     }
 }

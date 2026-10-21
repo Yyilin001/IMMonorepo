@@ -20,7 +20,8 @@ struct V2AuthorizedGroupAvatarView: View {
 
     var body: some View {
         Group {
-            if visible, phase == .active, snapshotGeneration == pipeline?.generation, snapshotRefresh == refresh, let image = snapshot?.image {
+            if visible, snapshotGeneration == pipeline?.generation, snapshotRefresh == refresh,
+               let snapshot, snapshot.deadline > .now, let image = snapshot.image {
                 Image(uiImage: image.image).resizable().scaledToFill()
             } else {
                 V2AvatarPlaceholder(symbol: "person.2.fill", title: fallbackTitle, size: size)
@@ -29,7 +30,7 @@ struct V2AuthorizedGroupAvatarView: View {
         .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.32))
         .accessibilityLabel("群头像")
         .accessibilityIdentifier("v2.group.avatar.image")
-        .task(id: LoadKey(room: roomID, visible: visible, phase: phase, generation: pipeline?.generation ?? 0, refresh: refresh)) {
+        .task(id: LoadKey(room: roomID, visible: visible, generation: pipeline?.generation ?? 0, refresh: refresh)) {
             snapshot = nil
             guard visible, phase == .active, let pipeline, !pipeline.isSuspending else { return }
             await load(pipeline)
@@ -51,7 +52,7 @@ struct V2AuthorizedGroupAvatarView: View {
             } catch { }
         }
         .onChange(of: phase) { _, value in
-            if value != .active { snapshot = nil; if let pipeline { Task { await pipeline.suspend() } } }
+            if value == .active, snapshot.map({ $0.deadline <= .now }) ?? true { refresh &+= 1 }
         }
         .onAppear { visible = true }
         .onScrollVisibilityChange(threshold: 0.1) { visible = $0; if !$0 { snapshot = nil } }
@@ -69,6 +70,7 @@ struct V2AuthorizedGroupAvatarView: View {
         catch { return }
         var failures = 0
         while !Task.isCancelled && failures < 5 {
+            guard phase == .active else { break }
             do {
                 let value = try await pipeline.groupSnapshot(activation: activation, pixels: min(512, max(1, Int(size * scale))))
                 try Task.checkCancellation()
@@ -91,7 +93,6 @@ struct V2AuthorizedGroupAvatarView: View {
     private struct LoadKey: Equatable {
         let room: RoomID
         let visible: Bool
-        let phase: ScenePhase
         let generation: UInt64
         let refresh: UInt64
     }

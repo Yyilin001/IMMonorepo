@@ -23,7 +23,7 @@ extension GRDBV2LocalSyncStore {
     public func enqueueNameOperation(accountID: UserID, target: V2NameTarget, name: String?, expectedRevision: V2ProfileRevision?, now: Date = Date()) throws -> UUID {
         let id = UUID()
         guard let window = V2CommandPolicy.registered(for: target.kind).firstSubmissionWindowMilliseconds else { throw V2OperationWorkError.invalidRecord }
-        let deadline = now.addingTimeInterval(Double(window) / 1000)
+        let deadline = now.addingTimeInterval(Double(V2ClientSubmissionWindow.milliseconds(maximum: window)) / 1000)
         let command = try V2FrozenNameOperation(accountID: accountID, target: target, name: name, revision: expectedRevision, id: id, deadline: deadline)
         let bytes = try JSONEncoder().encode(command)
         try databasePool.write { db in

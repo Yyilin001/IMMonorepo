@@ -18,7 +18,7 @@ public actor V2DirectRoomOperationService {
         let now=Date(),milliseconds=(now.timeIntervalSince1970*1000).rounded(.towardZero)
         guard milliseconds.isFinite,milliseconds>0,milliseconds<Double(Int64.max)-600_000,
               let time=UInt64(exactly:milliseconds) else { throw V2DirectRoomOperationValidationError.invalidCommand }
-        let command=try V2DirectRoomOperationCommand(actorUserID:accountID,operationID:.init(UUID().uuidString),targetUserID:publicIdentity.userID,firstSubmissionDeadlineMilliseconds:time+600_000)
+        let command=try V2DirectRoomOperationCommand(actorUserID:accountID,operationID:.init(UUID().uuidString),targetUserID:publicIdentity.userID,firstSubmissionDeadlineMilliseconds:time+V2ClientSubmissionWindow.milliseconds(maximum:600_000))
         let id=try await store.enqueueDirectRoomOperation(command,publicIdentity:publicIdentity,now:now)
         let original=try await store.directRoomCommand(workID:id)
         if original.operationID==command.operationID { deadlines[id]=monotonicDeadline }

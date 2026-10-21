@@ -151,19 +151,37 @@ extension EnvironmentValues {
 
 private struct V2AuthorPresentationPageModifier: ViewModifier {
     @Environment(\.v2AvatarPipeline) private var pipeline
+    @Environment(\.v2AuthorPresentationPageScope) private var inheritedScope
     @Environment(\.scenePhase) private var phase
     @State private var scope: V2AuthorPresentationPageScope
     init(context: V2AuthorPresentationPageScope.Context) { _scope = State(initialValue: .init(context: context)) }
+    @ViewBuilder
     func body(content: Content) -> some View {
+        if case .list = scope.context, let inheritedScope, case .list = inheritedScope.context {
+            // The signed-in navigation container owns list authority. A child
+            // tab, selector or profile must not replace it with a short-lived
+            // activation, otherwise every return starts with placeholders.
+            // Complete lookup keys still separate relationship/direct contexts;
+            // room author scopes deliberately keep their own lifecycle.
+            content
+        } else {
         content
             .environment(\.v2AuthorPresentationPageScope, scope)
-            .task(id: TaskKey(phase: phase, generation: pipeline?.generation ?? 0)) {
+            .task(id: TaskKey(phase: scope.context.authorRoomID == nil || phase != .background ? .active : .background, generation: pipeline?.generation ?? 0)) {
                 scope.hide()
-                guard phase == .active, let pipeline, !pipeline.isSuspending else { return }
+                // List scopes only observe local invalidations. Keep their
+                // original, bounded leases through inactive/background phases;
+                // row tasks stop fetching until the scene becomes active.
+                // Room author streams retain their foreground-only lifetime.
+                guard scope.context.authorRoomID == nil || phase != .background,
+                      let pipeline, !pipeline.isSuspending else { return }
                 await scope.run(pipeline: pipeline)
             }
-            .onChange(of: phase) { _, value in if value != .active { scope.hide() } }
+            .onChange(of: phase) { _, value in
+                if value == .background, scope.context.authorRoomID != nil { scope.hide() }
+            }
             .onDisappear { scope.hide() }
+        }
     }
     private struct TaskKey: Equatable { let phase: ScenePhase; let generation: UInt64 }
 }

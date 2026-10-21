@@ -39,7 +39,7 @@ public actor V2SocialOperationService {
     @discardableResult public func enqueue(action:V2SocialOperationAction,snapshot:V2SocialOperationSnapshot,proposalID:UUID?=nil,confirmedAt:Date=Date(),monotonicDeadline:ContinuousClock.Instant?=nil) async throws -> UUID {
         try Task.checkCancellation()
         guard snapshot.actorUserID==accountID else { throw V2OperationWorkError.accountMismatch }
-        let window=action.kind == .relationship ? 600_000 : 120_000
+        let window=Int(V2ClientSubmissionWindow.milliseconds(maximum:action.kind == .relationship ? 600_000 : 120_000))
         let timestamp=confirmedAt.timeIntervalSince1970*1000
         guard timestamp.isFinite,timestamp>0,timestamp<Double(Int64.max-Int64(window)) else { throw V2OperationWorkError.invalidRecord }
         let reference:V2OperationReference

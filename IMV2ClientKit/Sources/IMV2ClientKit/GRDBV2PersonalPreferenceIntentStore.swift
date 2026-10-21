@@ -77,7 +77,7 @@ extension GRDBV2LocalSyncStore {
                 deadline = Date(timeIntervalSince1970: existing["deadline"])
             } else {
                 id = UUID()
-                deadline = now.addingTimeInterval(Double(window) / 1000)
+                deadline = now.addingTimeInterval(Double(V2ClientSubmissionWindow.milliseconds(maximum: window)) / 1000)
             }
             let encoder = JSONEncoder()
             let bytes = try encoder.encode(target)

@@ -22,7 +22,7 @@ public actor V2MessageModerationOperationService {
     public func enqueue(baseline:V2MessageModerationBaseline,reason:V2ModerationReasonCode, confirmedUntil:Date? = nil) async throws -> UUID {
         try Task.checkCancellation()
         let now=Date()
-        let end=confirmedUntil ?? now.addingTimeInterval(120)
+        let end=confirmedUntil ?? now.addingTimeInterval(V2ClientSubmissionWindow.confirmationSeconds)
         guard end>now,end.timeIntervalSince(now)<=120 else { throw V2MessageModerationValidationError.invalidIntent }
         let monotonic=ContinuousClock.now.advanced(by:.seconds(end.timeIntervalSince(now)))
         let value=(now.timeIntervalSince1970*1000).rounded(.towardZero)

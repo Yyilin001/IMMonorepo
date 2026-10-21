@@ -173,7 +173,9 @@ private struct V2AuthorizedProfileView: View {
         else { nil }
     }
     private var displaySnapshot: V2AvatarPipeline.Snapshot? {
-        guard phase == .active, let pipeline, !pipeline.isSuspending else { return nil }
+        // Scene activity controls new I/O, not whether an unexpired grant may
+        // render. Inactive scenes are also used to capture app-switcher cards.
+        guard let pipeline, !pipeline.isSuspending else { return nil }
         if let sharedPage {
             if let cached = sharedPage.cachedSnapshot(key: key, pixels: requestedPixels, pipeline: pipeline) { return cached }
             guard sharedPage.activation != nil, snapshotActivation == sharedPage.activation,
@@ -230,10 +232,7 @@ private struct V2AuthorizedProfileView: View {
                 if snapshot?.deadline == deadline { snapshot = nil }
             } catch { }
         }
-        .onChange(of: phase) { _, newPhase in
-            if newPhase != .active { snapshot = nil; if let pipeline { Task { await pipeline.suspend() } } }
-        }
-        .onChange(of: canDisplay ? displaySnapshot?.identity : nil) { _, identity in onIdentity?(identity) }
+        .onChange(of: canDisplay ? displaySnapshot?.identity : nil, initial: true) { _, identity in onIdentity?(identity) }
         .onAppear { isVisible = true }
         .onScrollVisibilityChange(threshold: 0.1) { isVisible = $0; if !$0 { snapshot = nil } }
         .onDisappear { isVisible = false; snapshot = nil }

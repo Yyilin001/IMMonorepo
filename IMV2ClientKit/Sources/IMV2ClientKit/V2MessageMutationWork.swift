@@ -170,7 +170,7 @@ public actor V2MessageMutationOperationService {
         guard milliseconds.isFinite,milliseconds>0,milliseconds<Double(Int64.max),
             let window=V2CommandPolicy.registered(for:kind).firstSubmissionWindowMilliseconds,
             UInt64(milliseconds)<=UInt64(Int64.max)-window else { throw V2OperationWorkError.invalidRecord }
-        return UInt64(milliseconds)+window
+        return UInt64(milliseconds)+V2ClientSubmissionWindow.milliseconds(maximum:window)
     }
     @discardableResult public func enqueue(_ payload:V2MessageMutationPayload) async throws -> UUID {
         try Task.checkCancellation()

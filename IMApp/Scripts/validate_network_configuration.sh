@@ -60,6 +60,29 @@ PY
   expect_failure production_v2_push_environment_requires_production \
     env IM_V2_ACCOUNT_BASE_URL=https://account.prod-domain.com IM_V2_GATEWAY_HOST=gateway.prod-domain.com IM_V2_GATEWAY_PORT=7443 IM_V2_PUSH_ENVIRONMENT=development
 
+  INFO_PLIST="${test_plist}" \
+    IMAPP_NETWORK_CONFIG_SELF_TEST=false \
+    IMAPP_NETWORK_CONFIG_MODE=testflight \
+    IM_V2_ACCOUNT_BASE_URL=https://120.77.66.38 \
+    IM_V2_GATEWAY_HOST=120.77.66.38 \
+    IM_V2_GATEWAY_PORT=7443 \
+    IM_V2_PUSH_ENVIRONMENT=production \
+      bash "${BASH_SOURCE[0]}" >/dev/null
+
+  for test_url in http://120.77.66.38 https://127.0.0.1 https://10.0.0.1; do
+    if INFO_PLIST="${test_plist}" \
+      IMAPP_NETWORK_CONFIG_SELF_TEST=false \
+      IMAPP_NETWORK_CONFIG_MODE=testflight \
+      IM_V2_ACCOUNT_BASE_URL="${test_url}" \
+      IM_V2_GATEWAY_HOST=120.77.66.38 \
+      IM_V2_GATEWAY_PORT=7443 \
+      IM_V2_PUSH_ENVIRONMENT=production \
+        bash "${BASH_SOURCE[0]}" >/dev/null 2>&1; then
+      printf 'network-config-self-test result=fail reason=unsafe_testflight_url\n' >&2
+      exit 1
+    fi
+  done
+
   printf 'network-config-self-test result=pass\n'
   exit 0
 fi
@@ -75,7 +98,7 @@ from urllib.parse import urlsplit
 info_plist = Path(sys.argv[1])
 mode = (sys.argv[2] or "development").strip().lower()
 use_env_overrides = (sys.argv[3] or "true").strip().lower() in {"1", "true", "yes", "on"}
-production_modes = {"release", "production", "appstore", "app-store"}
+production_modes = {"release", "production", "appstore", "app-store", "testflight"}
 placeholder_hosts = {"im.example.com", "example.com", "example.net", "example.org"}
 placeholder_suffixes = (".example.com", ".example.net", ".example.org", ".test", ".invalid", ".localhost")
 local_hosts = {"127.0.0.1", "localhost", "::1"}
@@ -87,10 +110,12 @@ def public_host_policy_reason(host):
     if normalized in local_hosts or normalized.endswith(".local"):
         return "local_host"
     try:
-        ipaddress.ip_address(normalized)
+        address = ipaddress.ip_address(normalized)
     except ValueError:
         pass
     else:
+        if mode == "testflight" and address.is_global:
+            return "ok"
         return "ip_literal"
     if "." not in normalized:
         return "single_label"

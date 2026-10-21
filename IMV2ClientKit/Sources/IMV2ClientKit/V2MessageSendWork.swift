@@ -11,7 +11,7 @@ extension GRDBV2LocalSyncStore {
         let value=try commandRetryTimestamp(now)*1_000
         guard value>0,value<Double(Int64.max),let window=V2CommandPolicy.registered(for:.sendMessage).firstSubmissionWindowMilliseconds,
             UInt64(value)<=UInt64(Int64.max)-window else { throw V2OperationWorkError.invalidRecord }
-        return UInt64(value)+window
+        return UInt64(value)+V2ClientSubmissionWindow.milliseconds(maximum:window)
     }
     static func messageSendEnvelope(_ intent:V2SendIntent,media:[V2MediaReference],deadline:UInt64,db:Database) throws -> V2MessageSendOperationCommand {
         guard let raw=try String.fetchOne(db,sql:"SELECT user_id FROM v2_local_installation WHERE singleton=1") else { throw V2OperationWorkError.accountMismatch }

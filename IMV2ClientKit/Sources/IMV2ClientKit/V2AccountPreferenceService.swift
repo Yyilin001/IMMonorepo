@@ -95,7 +95,7 @@ public actor V2AccountPreferenceService {
         let identity=try V2OperationIdentity(accountID:accountID,scope:.account(accountID),operation:reference)
         let timestamp=confirmedAt.timeIntervalSince1970*1000
         guard timestamp.isFinite,timestamp>0,timestamp<Double(Int64.max-120_000) else { throw V2OperationWorkError.invalidRecord }
-        let command=try V2AccountPreferenceCommand(identity:identity,value:value,expectedRevision:snapshot.revision,firstSubmissionDeadlineMilliseconds:UInt64(timestamp)+120_000)
+        let command=try V2AccountPreferenceCommand(identity:identity,value:value,expectedRevision:snapshot.revision,firstSubmissionDeadlineMilliseconds:UInt64(timestamp)+V2ClientSubmissionWindow.confirmationMilliseconds)
         let id=try await store.enqueueAccountPreference(command);deadlines[id]=deadline;return id
     }
     public func resumeConfirmation(workID:UUID) async throws {

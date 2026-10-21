@@ -32,8 +32,8 @@ public struct V2GroupCapabilityConfirmationWindow: Sendable {
             operation = .groupRole(.init(uuid: UUID()))
             scope = .room(roomID)
         }
-        self.intent = try .init(identity: .init(accountID: accountID, scope: scope, operation: operation), action: action, confirmedUntilMilliseconds: timestamp + 120_000)
-        self.deadline = monotonicNow.advanced(by: .seconds(120))
+        self.intent = try .init(identity: .init(accountID: accountID, scope: scope, operation: operation), action: action, confirmedUntilMilliseconds: timestamp + V2ClientSubmissionWindow.confirmationMilliseconds)
+        self.deadline = monotonicNow.advanced(by: .seconds(V2ClientSubmissionWindow.confirmationSeconds))
         self.activationID = activationID
     }
 

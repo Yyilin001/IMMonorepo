@@ -9,9 +9,9 @@ struct V2MembershipConfirmationWindowTests {
     func lookupCannotRenew() throws {
         let activation=UUID(),start=ContinuousClock.now
         let click=try V2MembershipConfirmationWindow(roomID:.init(uuid:UUID()),action:.add,expectedMembershipRevision:0,activationID:activation,wallNow:Date(timeIntervalSince1970:1000),monotonicNow:start)
-        #expect(click.confirmedUntilMilliseconds==1_120_000)
+        #expect(click.confirmedUntilMilliseconds==1_115_000)
         #expect(click.validates(activationID:activation,now:start.advanced(by:.seconds(110))))
-        #expect(!click.validates(activationID:activation,now:start.advanced(by:.seconds(120))))
+        #expect(!click.validates(activationID:activation,now:start.advanced(by:.seconds(115))))
         #expect(!click.validates(activationID:UUID(),now:start))
         let copied=click
         #expect(copied.operationID==click.operationID)

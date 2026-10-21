@@ -16,7 +16,7 @@ public actor V2GroupCreationOperationService {
         guard let capacity=V2GroupCapacityPolicy().capacityClass(forInitialMemberCount:canonical.count+1) else { throw V2GroupCreationValidationError.invalidIntent }
         let milliseconds=(now.timeIntervalSince1970*1000).rounded(.towardZero)
         guard milliseconds.isFinite,milliseconds>0,milliseconds<Double(Int64.max)-600_000,let time=UInt64(exactly:milliseconds) else { throw V2GroupCreationValidationError.invalidIntent }
-        let intent=try V2GroupCreationIntent(identity:.init(accountID:accountID,scope:.account(accountID),operation:.groupRoom(.init(uuid:UUID()))),title:title,capacityClass:capacity,initialMemberCount:canonical.count,audienceDigest:V2GroupCreationAudience.digest(canonical),firstSubmissionDeadlineMilliseconds:time+600_000)
+        let intent=try V2GroupCreationIntent(identity:.init(accountID:accountID,scope:.account(accountID),operation:.groupRoom(.init(uuid:UUID()))),title:title,capacityClass:capacity,initialMemberCount:canonical.count,audienceDigest:V2GroupCreationAudience.digest(canonical),firstSubmissionDeadlineMilliseconds:time+V2ClientSubmissionWindow.milliseconds(maximum:600_000))
         return try await store.enqueueGroupCreationOperation(intent,members:canonical,now:now)
     }
     public func updates() -> AsyncThrowingStream<Void,any Error> { store.groupCreationUpdates() }

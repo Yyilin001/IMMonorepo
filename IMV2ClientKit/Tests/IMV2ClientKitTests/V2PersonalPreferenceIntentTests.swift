@@ -50,7 +50,7 @@ struct V2PersonalPreferenceIntentTests {
         let deadline = try await store.databasePool.read { db in
             try Double.fetchOne(db, sql: "SELECT deadline FROM v2_personal_preference_intents WHERE intent_id=?", arguments: [first.uuidString])
         }
-        #expect(deadline == now.addingTimeInterval(7 * 86400).timeIntervalSince1970)
+        #expect(deadline == now.addingTimeInterval(7 * 86400 - 5).timeIntervalSince1970)
         #expect(try await store.preparePersonalPreferences(accountID: user, now: now.addingTimeInterval(61)) == 1)
         let work = try #require(try await store.dueOperationWork(now: now.addingTimeInterval(61)).first)
         guard case .favorite(let command) = try await store.personalPreferenceCommand(workID: work.id) else { Issue.record("wrong command"); return }

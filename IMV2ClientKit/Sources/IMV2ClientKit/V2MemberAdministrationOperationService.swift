@@ -21,8 +21,8 @@ public actor V2MemberAdministrationOperationService {
     }
     @discardableResult public func enqueue(roomID:RoomID,targetUserID:UserID,action:V2MemberAdministrationAction,reasonCode:V2ModerationReasonCode,expectedMembershipRevision:UInt64) async throws -> UUID {
         try Task.checkCancellation()
-        let now=Date(),deadline=confirmationClock().advanced(by:.seconds(120))
-        let intent=try V2MemberAdministrationIntent(roomID:roomID,actorUserID:accountID,operationID:.init(uuid:UUID()),targetUserID:targetUserID,action:action,reasonCode:reasonCode,expectedMembershipRevision:expectedMembershipRevision,confirmedUntilMilliseconds:UInt64((now.timeIntervalSince1970+120)*1_000))
+        let now=Date(),deadline=confirmationClock().advanced(by:.seconds(V2ClientSubmissionWindow.confirmationSeconds))
+        let intent=try V2MemberAdministrationIntent(roomID:roomID,actorUserID:accountID,operationID:.init(uuid:UUID()),targetUserID:targetUserID,action:action,reasonCode:reasonCode,expectedMembershipRevision:expectedMembershipRevision,confirmedUntilMilliseconds:UInt64((now.timeIntervalSince1970+V2ClientSubmissionWindow.confirmationSeconds)*1_000))
         let identity=try intent.identity.storageKey
         confirmations[identity]=deadline
         do { return try await store.enqueueMemberAdministration(intent,activationID:activationID,now:now) }
@@ -47,9 +47,9 @@ public actor V2MemberAdministrationOperationService {
         let previous=try await store.memberAdministrationPending(id:id),now=Date()
         guard previous.intent.actorUserID==accountID else { throw V2OperationWorkError.accountMismatch }
         if case .mute(let until)=previous.intent.action,Double(until)/1000<=now.timeIntervalSince1970 { throw V2MemberAdministrationAdmissionError.confirmationRequired }
-        let intent=try V2MemberAdministrationIntent(roomID:previous.intent.roomID,actorUserID:accountID,operationID:.init(uuid:UUID()),targetUserID:previous.intent.targetUserID,action:previous.intent.action,reasonCode:previous.intent.reasonCode,expectedMembershipRevision:expectedMembershipRevision,confirmedUntilMilliseconds:UInt64((now.timeIntervalSince1970+120)*1000))
+        let intent=try V2MemberAdministrationIntent(roomID:previous.intent.roomID,actorUserID:accountID,operationID:.init(uuid:UUID()),targetUserID:previous.intent.targetUserID,action:previous.intent.action,reasonCode:previous.intent.reasonCode,expectedMembershipRevision:expectedMembershipRevision,confirmedUntilMilliseconds:UInt64((now.timeIntervalSince1970+V2ClientSubmissionWindow.confirmationSeconds)*1000))
         let key=try intent.identity.storageKey
-        confirmations[key] = confirmationClock().advanced(by:.seconds(120))
+        confirmations[key] = confirmationClock().advanced(by:.seconds(V2ClientSubmissionWindow.confirmationSeconds))
         do {
             let replacement=try await store.replaceMemberAdministrationDraft(id:id,intent:intent,activationID:activationID,now:now)
             confirmations.removeValue(forKey:try previous.intent.identity.storageKey)

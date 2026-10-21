@@ -37,7 +37,7 @@ public actor V2InvitationOperationService {
         let milliseconds=(Date().timeIntervalSince1970*1000).rounded(.towardZero)
         guard milliseconds>=0,milliseconds<Double(Int64.max)-120_000,let timestamp=UInt64(exactly:milliseconds) else {throw V2OperationWorkError.invalidRecord}
         let identity=try V2OperationIdentity(accountID:accountID,scope:.room(roomID),operation:reference)
-        return .init(intent:try .init(identity:identity,action:action,confirmedUntilMilliseconds:timestamp+120_000),deadline:.now.advanced(by:.seconds(120)),activationID:activationID)
+        return .init(intent:try .init(identity:identity,action:action,confirmedUntilMilliseconds:timestamp+V2ClientSubmissionWindow.confirmationMilliseconds),deadline:.now.advanced(by:.seconds(V2ClientSubmissionWindow.confirmationSeconds)),activationID:activationID)
     }
     @discardableResult public func enqueue(_ confirmation:V2InvitationConfirmationWindow,authorization:V2GroupInvitationSecretAuthorization?=nil) async throws -> UUID {
         try Task.checkCancellation()

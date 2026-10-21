@@ -436,7 +436,7 @@ struct V2SignedInRootView: View {
     @State private var signOutTask: Task<Void, Never>?
     @State private var presentedSettingsSheet: PresentedSettingsSheet?
     @State var rootNavigation = V2RootNavigationStore()
-    @State private var conversationProfilePageID = UUID()
+    @State private var signedInProfilePageID = UUID()
 
     var body: some View {
         @Bindable var rootNavigation = rootNavigation
@@ -643,7 +643,7 @@ struct V2SignedInRootView: View {
                 }
             }
         }
-        .authorPresentationPage(context: .list(conversationProfilePageID))
+        .authorPresentationPage(context: .list(signedInProfilePageID))
         .environment(\.v2UserInteractionContext, .init(contacts: contactsStore, conversations: conversationStore, navigation: rootNavigation))
     }
 }

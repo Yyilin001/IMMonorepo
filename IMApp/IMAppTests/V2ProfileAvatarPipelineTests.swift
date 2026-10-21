@@ -4,11 +4,62 @@ import IMV2ClientKit
 import IMV2Core
 import Testing
 import UIKit
+import SwiftUI
+import Observation
 @testable import IMApp
 
 @MainActor
 @Suite("Profile avatar pixels and display authority", .timeLimit(.minutes(1)))
 struct V2ProfileAvatarPipelineTests {
+    @Test("nested list pages reuse signed-in authority and render cached names on reentry")
+    func nestedListReentry() async throws {
+        let f = try ProfilePipelineFixture(direct: true)
+        defer { try? FileManager.default.removeItem(at: f.root) }
+        let thumbnails = V2LocalMediaThumbnailCache(directory: f.root), pipeline = f.pipeline(thumbnails)
+        let probe = ProfileListLifecycleProbe()
+        let scene = try #require(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = UIHostingController(rootView:
+            ProfileListLifecycleHost(probe: probe, key: f.key, pipeline: pipeline)
+                .environment(\.v2AvatarPipeline, pipeline))
+        window.isHidden = false
+        defer { window.isHidden = true; window.rootViewController = nil }
+        try await waitForProfilePage { probe.loadedPages.contains(0) }
+        let original = try #require(probe.scopes[0])
+        probe.page = 1
+        try await waitForProfilePage { probe.loadedPages.contains(1) }
+        #expect(probe.scopes[1] === original)
+        #expect(probe.initialNames[1] == "Original")
+        #expect(await f.reader.calls == 1)
+        probe.page = 2
+        try await waitForProfilePage { probe.loadedPages.contains(2) }
+        #expect(probe.scopes[2] === original)
+        #expect(probe.initialNames[2] == "Original")
+        let activation = original.activation
+        let deadline = try #require(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.deadline)
+        try await waitForProfilePage { probe.displayedIdentityName == "Original" }
+        probe.phase = .inactive
+        try await waitForProfilePage { probe.observedPhase == .inactive }
+        #expect(probe.displayedIdentityName == "Original")
+        probe.phase = .background
+        try await waitForProfilePage { probe.observedPhase == .background }
+        #expect(probe.displayedIdentityName == "Original")
+        #expect(original.activation == activation)
+        #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.deadline == deadline)
+        #expect(await f.reader.calls == 1)
+        probe.phase = .active
+        try await waitForProfilePage { probe.observedPhase == .active }
+        #expect(probe.displayedIdentityName == "Original")
+        #expect(original.activation == activation)
+        #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.name == "Original")
+        #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline)?.deadline == deadline)
+        // Sharing must not turn a revoked value into a stale-while-revalidate name.
+        await pipeline.profiles.invalidate([f.key])
+        try await waitForProfilePage { original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline) == nil }
+        await pipeline.suspend()
+        #expect(original.cachedSnapshot(key: f.key, pixels: nil, pipeline: pipeline) == nil)
+        await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
     @Test("recipient authorized alias takes precedence over nickname and clears to nickname")
     func aliasDisplay() async throws {
         let f = try ProfilePipelineFixture()
@@ -274,6 +325,66 @@ struct V2ProfileAvatarPipelineTests {
         for row in [own, peer] { await pipeline.profiles.releaseVisibleInterest(row.1) }
         scope.hide(); running.cancel(); await running.value
         await pipeline.close(); await thumbnails.close(); try await f.files.close()
+    }
+}
+
+@MainActor
+@Observable
+private final class ProfileListLifecycleProbe {
+    var page = 0
+    var phase = ScenePhase.active
+    var observedPhase = ScenePhase.active
+    var displayedIdentityName: String?
+    let rootID = UUID()
+    var scopes: [Int: V2AuthorPresentationPageScope] = [:]
+    var initialNames: [Int: String] = [:]
+    var loadedPages: Set<Int> = []
+}
+
+private struct ProfileListLifecycleHost: View {
+    let probe: ProfileListLifecycleProbe
+    let key: V2ProfileViewLookupKey
+    let pipeline: V2AvatarPipeline
+    var body: some View {
+        ProfileListLifecycleChild(probe: probe, key: key, pipeline: pipeline, page: probe.page)
+            .authorPresentationPage(context: .list(UUID()))
+            .id(probe.page)
+            .authorPresentationPage(context: .list(probe.rootID))
+            .environment(\.scenePhase, probe.phase)
+    }
+}
+
+private struct ProfileListLifecycleChild: View {
+    let probe: ProfileListLifecycleProbe
+    let key: V2ProfileViewLookupKey
+    let pipeline: V2AvatarPipeline
+    let page: Int
+    @Environment(\.v2AuthorPresentationPageScope) private var scope
+    @Environment(\.scenePhase) private var phase
+    var body: some View {
+        VStack {
+            Text("Profile lifecycle probe")
+            V2AuthorizedProfileNameView(key: key)
+            V2AuthorizedPublicHandleView(key: key) { identity in
+                guard probe.page == page else { return }
+                probe.displayedIdentityName = identity?.displayName
+            }
+        }
+            .onChange(of: phase, initial: true) { _, value in probe.observedPhase = value }
+            .onAppear {
+                if let name = scope?.cachedSnapshot(key: key, pixels: nil, pipeline: pipeline)?.name {
+                    probe.initialNames[page] = name
+                }
+            }
+            .task(id: scope?.activation) {
+                guard let scope, scope.activation != nil,
+                      let retained = try? await scope.retain(key, pipeline: pipeline) else { return }
+                defer { Task { await pipeline.profiles.releaseVisibleInterest(retained.1) } }
+                guard let value = try? await scope.snapshot(key: key, activation: retained.0, pipeline: pipeline, pixels: nil),
+                      value.name == "Original", !Task.isCancelled else { return }
+                probe.scopes[page] = scope
+                probe.loadedPages.insert(page)
+            }
     }
 }
 
