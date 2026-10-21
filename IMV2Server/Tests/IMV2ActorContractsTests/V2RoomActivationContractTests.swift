@@ -95,6 +95,19 @@ struct V2RoomActivationContractTests {
         #expect(unknown.retryAction(policy: .readOnly, hasStableOperationID: false) == .retryRead)
     }
 
+    @Test("temporary rollback retains location and respects the capability replay policy")
+    func unavailableRollbackDoesNotRefreshLocation() {
+        let failure = V2RoomCallFailure.rolledBack(.unavailable)
+        #expect(failure.retryAction(policy: .readOnly, hasStableOperationID: false) == .retryRead)
+        #expect(failure.retryAction(policy: .durableIdempotent, hasStableOperationID: true) == .retrySameOperation)
+        #expect(failure.retryAction(policy: .durableIdempotent, hasStableOperationID: false) == .returnFailure)
+        #expect(failure.retryAction(policy: .noAutomaticRetry, hasStableOperationID: true) == .returnFailure)
+        for failure in [V2RoomCallFailure.notAccepted(.unavailable), .rolledBack(.staleActivation),
+                        .rolledBack(.authorityLost), .rolledBack(.retired)] {
+            #expect(failure.retryAction(policy: .durableIdempotent, hasStableOperationID: true) == .refreshLocation)
+        }
+    }
+
     @Test("routing rejections differ from authorization, cancellation, and overload")
     func rejectionClassificationAndCoding() throws {
         for failure in [

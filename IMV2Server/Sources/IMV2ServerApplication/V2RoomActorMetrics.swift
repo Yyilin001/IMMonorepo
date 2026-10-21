@@ -33,6 +33,21 @@ func v2RoomActorMetricLines(_ snapshot: V2RoomRuntimeMetricsSnapshot) -> [String
         let name = "im_v2_room_actor_" + suffix
         return ["# HELP \(name) \(help)", "# TYPE \(name) gauge", "\(name) \(value)"]
     }
+    if let membership = snapshot.membership {
+        var observations: [(String, String)] = [
+            ("confirmed", membership.confirmed ? "1" : "0"),
+            ("configured_hosts", String(membership.configuredHosts)),
+            ("healthy_hosts", String(membership.healthyHosts)),
+        ]
+        if let revision = membership.revision { observations.append(("revision", String(revision))) }
+        if let revision = membership.realtimeRevision { observations.append(("realtime_revision", String(revision))) }
+        if let qualified = membership.realtimeQualified { observations.append(("realtime_qualified", qualified ? "1" : "0")) }
+        for (suffix, value) in observations {
+            let name = "im_v2_room_membership_" + suffix
+            lines += ["# HELP \(name) Runtime observation of certified membership; not a control commit receipt.",
+                      "# TYPE \(name) gauge", "\(name) \(value)"]
+        }
+    }
     if let host = snapshot.host {
         lines += ["# HELP im_v2_room_actor_completed_idle_retirements_total Rooms fully drained and closed after idle passivation since process startup.",
                   "# TYPE im_v2_room_actor_completed_idle_retirements_total counter",

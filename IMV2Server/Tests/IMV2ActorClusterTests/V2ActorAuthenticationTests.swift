@@ -453,6 +453,30 @@ struct V2ActorAuthenticationTests {
         _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: new), maximumBytes: 10_000))
     }
 
+    @Test("signed session close frees quota without revoking a replacement session")
+    func gracefulCloseReclaimsSessionQuota() async throws {
+        let fixture = try Fixture(limits: .init(maximumSessions: 2, maximumSessionsPerService: 1))
+        let old = try await fixture.open()
+        await failure(.forbidden) {
+            try fixture.auth.closeSession(fixture.worker.sign(old, maximumBytes: 10_000))
+        }
+        #expect(fixture.auth.sessionCount() == 1)
+        let close = try fixture.client.sign(old, maximumBytes: 10_000)
+        try fixture.auth.closeSession(close)
+        #expect(fixture.auth.sessionCount() == 0)
+        await failure(.sessionExpired) {
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: old), maximumBytes: 10_000))
+        }
+        for _ in 0..<20 {
+            let fresh = try await fixture.open()
+            try fixture.auth.closeSession(close)
+            #expect(fixture.auth.sessionCount() == 1)
+            _ = try fixture.auth.accept(fixture.client.sign(fixture.call(grant: fresh), maximumBytes: 10_000))
+            try fixture.auth.closeSession(fixture.client.sign(fresh, maximumBytes: 10_000))
+            #expect(fixture.auth.sessionCount() == 0)
+        }
+    }
+
     @Test("session admission is finite and retrying a hello does not allocate another session")
     func sessionCapacity() async throws {
         let fixture = try Fixture(limits: .init(maximumSessions: 2, maximumSessionsPerService: 1))

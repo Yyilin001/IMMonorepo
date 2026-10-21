@@ -185,6 +185,14 @@ public actor V2RoomClusterNode {
     /// 为配置的物理宿主启动有界且经签名的观察器。
     /// 调用方传入此节点创建的客户端，并将逻辑 RoomDirectory
     /// 与发现状态分开保留。
+    package func installRoomPeers(_ peers: [V2RoomDiscoveryPeer], revision: UInt64) async throws {
+        guard acceptingDiscoveries, !discoveries.isEmpty else { throw V2ActorAuthenticationError.invalidConfiguration }
+        for discovery in discoveries { try await discovery.installAuthorizedPeers(peers, revision: revision) }
+    }
+    package func suspendRoomDiscovery() async {
+        for discovery in discoveries { await discovery.suspendAuthorization() }
+    }
+
     public func startDiscovery(client: V2RoomClusterClient,
                                configuration: V2RoomDiscoveryConfiguration) async throws -> V2RoomClusterDiscovery {
         let clientID = ObjectIdentifier(client)

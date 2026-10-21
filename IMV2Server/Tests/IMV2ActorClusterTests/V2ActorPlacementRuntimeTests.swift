@@ -6,6 +6,69 @@ import Testing
 
 @Suite("Process placement registration replay")
 struct V2ActorPlacementRuntimeTests {
+    @Test func membershipSubmissionRetainsRequestAcrossLostResponse() async throws {
+        let host = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let initial = try V2ActorPlacementSnapshot(clusterID: UUID(), revision: 1,
+            slots: [.init(owner: .init(host: host, epoch: 1), transfer: nil)])
+        let log = RuntimePlacementLog(initial)
+        let runtime = try V2RoomActorPlacementRuntime(logs: ["rooms": log], snapshots: ["rooms": initial])
+        let record = try V2ActorServiceMembershipRecord(revision: 1, current: ["a"],
+            peers: [.init(nodeID: "a", serviceID: "a", address: "a.test", port: 7337)])
+        let request = UUID()
+        await log.loseNextResponse()
+        await #expect(throws: V2ActorPlacementError.unavailable) {
+            try await runtime.installServiceMembership(record, shard: "rooms", requestID: request,
+                originRevision: 1, deadline: .now + .seconds(2))
+        }
+        let committed = try await runtime.installServiceMembership(record, shard: "rooms", requestID: request,
+            originRevision: 1, deadline: .now + .seconds(2))
+        #expect(committed.serviceMembership == record)
+        #expect(await log.commitCount == 1)
+    }
+
+    @Test func membershipReadUsesFreshLogAndRejectsMissingState() async throws {
+        let host = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let initial = try V2ActorPlacementSnapshot(clusterID: UUID(), revision: 1,
+            slots: [.init(owner: .init(host: host, epoch: 1), transfer: nil)])
+        let log = RuntimePlacementLog(initial)
+        let runtime = try V2RoomActorPlacementRuntime(logs: ["rooms": log], snapshots: ["rooms": initial])
+        await #expect(throws: V2ActorPlacementError.unavailable) { try await runtime.loadServiceMembership(shard: "rooms") }
+        await #expect(throws: V2ActorPlacementError.invalidConfiguration) { try await runtime.loadServiceMembership(shard: "unknown") }
+        let record = try V2ActorServiceMembershipRecord(revision: 1, current: ["a"],
+            peers: [.init(nodeID: "a", serviceID: "a", address: "a.test", port: 7337)])
+        _ = try await log.append(.installServiceMembership(record), expected: initial, requestID: UUID())
+        #expect(try await runtime.loadServiceMembership(shard: "rooms") == record)
+    }
+
+    @Test("new logical hosts register without changing partition ownership", arguments: ["normal", "lost_ack", "expired", "concurrent"])
+    func newHostAdmission(mode: String) async throws {
+        let owner = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let newcomer = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let initial = try V2ActorPlacementSnapshot(clusterID: UUID(), revision: 1,
+            slots: [.init(owner: .init(host: owner, epoch: 9), transfer: nil)])
+        let log = RuntimePlacementLog(initial)
+        let runtime = try V2RoomActorPlacementRuntime(logs: ["room-a": log], snapshots: ["room-a": initial])
+        if mode == "lost_ack" {
+            await log.loseNextResponse()
+            await #expect(throws: V2ActorPlacementError.unavailable) { try await runtime.register(newcomer, shards: ["room-a"]) }
+            #expect(await log.load().registration(for: newcomer.hostID) == .reserved(newcomer.hostID))
+        }
+        if mode == "expired" { await log.expireNextSubmission() }
+        if mode == "concurrent" {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<16 { group.addTask { try await runtime.register(newcomer, shards: ["room-a"]) } }
+                try await group.waitForAll()
+            }
+        } else { try await runtime.register(newcomer, shards: ["room-a"]) }
+        let registered = await log.load()
+        #expect(registered.slots == initial.slots)
+        #expect(registered.registration(for: newcomer.hostID) == .init(host: newcomer, retired: false))
+        #expect(await log.commitCount == 2)
+        try await runtime.retireAfterDrain(.init(host: newcomer), shards: ["room-a"])
+        #expect(await log.load().registration(for: newcomer.hostID) == .init(host: newcomer, retired: true))
+        #expect(await log.load().slots == initial.slots)
+    }
+
     @Test("A host with no owned partitions can register, drain and restart without taking another host's rooms")
     func emptyHostLifecycle() async throws {
         let reserved = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())

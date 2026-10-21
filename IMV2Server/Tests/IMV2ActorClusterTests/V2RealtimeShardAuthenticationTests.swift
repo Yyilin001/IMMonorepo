@@ -27,6 +27,59 @@ struct V2RealtimeShardAuthenticationTests {
         #expect(V2RealtimeTopicKey(kind: .userSync, id: "Opaque-User") != .init(kind: .userSync, id: "opaque-user"))
     }
 
+    @Test func standbyRefreshesCommittedMembershipBeforeJoining() async throws {
+        let f = try Fixture()
+        let port = Int.random(in: 30_000...44_999)
+        var settings = ClusterSystemSettings(name: "standby-refresh", host: "127.0.0.1", port: port)
+        settings.threadPoolSize = 1; settings.downingStrategy = .none; settings.onDownAction = .none
+        let system = await ClusterSystem("standby-refresh", settings: settings)
+        let existing = V2RealtimeShardDiscoveryPeer(nodeID: f.token.host.nodeID,
+            serviceID: f.token.host.serviceID, address: "127.0.0.1", port: port + 1)
+        let local = V2RealtimeShardDiscoveryPeer(nodeID: f.gateway.nodeID,
+            serviceID: f.gateway.serviceID, address: "127.0.0.1", port: port)
+        let record = try V2ActorServiceMembershipRecord(revision: 1, current: [existing.nodeID], peers: [existing])
+        let qualification = try V2ActorServiceQualification(localNodeID: f.gateway.nodeID,
+            membership: record.membership, allowNonMember: true)
+        let transport = try buildRealtimeShardTransport(system: system, identity: f.gateway,
+            address: local.address, port: local.port, signer: f.caller, trust: f.trust,
+            serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]],
+            discoveryPeers: [existing], limits: .init(), serviceQualification: qualification)
+        do {
+            await transport.start()
+            try await transport.installCommittedMembership(record)
+            try await transport.installCommittedMembership(record)
+            #expect(qualification.snapshot() == nil)
+            #expect(await transport.metricsSnapshot().cachedPartitions == 0)
+            let moved = V2RealtimeShardDiscoveryPeer(nodeID: local.nodeID, serviceID: local.serviceID,
+                address: local.address, port: local.port + 2)
+            await #expect(throws: V2ActorAuthenticationError.self) {
+                try await transport.installCommittedMembership(.init(revision: 2, current: [existing.nodeID],
+                    next: [existing.nodeID, local.nodeID], peers: [existing, moved]))
+            }
+            #expect(qualification.membership.revision == 1)
+            // Allow the initial nonmember refresh to enter its one-second sleep.
+            // Joining must initiate evidence collection without a business miss.
+            try await Task.sleep(for: .milliseconds(100))
+            let before = await transport.metricsSnapshot().discoveryPasses
+            try await transport.installCommittedMembership(.init(revision: 2, current: [existing.nodeID],
+                next: [existing.nodeID, local.nodeID], peers: [existing, local]))
+            let discoveryDeadline = ContinuousClock.now + .milliseconds(500)
+            while await transport.metricsSnapshot().discoveryPasses == before,
+                  ContinuousClock.now < discoveryDeadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(await transport.metricsSnapshot().discoveryPasses > before)
+            #expect(qualification.membership.revision == 2)
+            #expect(qualification.snapshot() == nil) // The absent old voter still cannot authorize service.
+            #expect(await transport.stop(deadline: .now + .seconds(5)))
+            try await system.shutdown().wait()
+        } catch {
+            _ = await transport.stop(deadline: .now + .seconds(5))
+            try? await system.shutdown().wait()
+            throw error
+        }
+    }
+
     @Test func partitionEncodingIsStableAndOwnerIndependent() throws {
         #expect(V2RealtimeTopicKey(kind: .roomEvents, id: "room-1").partitionID() == 255)
         #expect(V2RealtimeTopicKey(kind: .userSync, id: "user-1").partitionID() == 27)
@@ -46,8 +99,8 @@ struct V2RealtimeShardAuthenticationTests {
         #expect(v2RealtimeShardDescriptorSnapshot(descriptor, expiresAt: began + .seconds(20), now: began + .seconds(3))?.remainingLeaseMilliseconds == 10_000)
     }
 
-    @Test func controlIdentityPublishAuthorityAndReplay() async throws {
-        let f = try Fixture()
+    @Test(arguments: [false, true]) func controlIdentityPublishAuthorityAndReplay(dynamic: Bool) async throws {
+        let f = try Fixture(dynamic: dynamic)
         let grant = try await f.open()
         let request = f.control()
         let packet = try f.packet(.control(request), grant: grant, sequence: 1)
@@ -99,21 +152,21 @@ struct V2RealtimeShardAuthenticationTests {
     @Test func fixedRosterQualificationRequiresMajorityAndPreservesOnlyLiveGenerations() throws {
         let two = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b"])
         let now = ContinuousClock.now
-        #expect(two.update(witnesses: ["a": now + .seconds(100), "outside": now + .seconds(100)]) == nil)
-        let first = try #require(two.update(witnesses: ["b": now + .seconds(10)]))
-        let refreshed = try #require(two.update(witnesses: ["b": now + .seconds(20)]))
+        #expect(two.update(witnesses: ["a": now + .seconds(100), "outside": now + .seconds(100)], membershipRevision: 1) == nil)
+        let first = try #require(two.update(witnesses: ["b": now + .seconds(10)], membershipRevision: 1))
+        let refreshed = try #require(two.update(witnesses: ["b": now + .seconds(20)], membershipRevision: 1))
         #expect(first.generation == refreshed.generation)
-        #expect(two.update(witnesses: ["b": now - .seconds(1)]) == nil)
-        let successor = try #require(two.update(witnesses: ["b": now + .seconds(20)]))
+        #expect(two.update(witnesses: ["b": now - .seconds(1)], membershipRevision: 1) == nil)
+        let successor = try #require(two.update(witnesses: ["b": now + .seconds(20)], membershipRevision: 1))
         #expect(successor.generation != first.generation)
         two.revoke(); #expect(two.snapshot() == nil)
-        #expect(try #require(two.update(witnesses: ["b": now + .seconds(20)])).generation != successor.generation)
+        #expect(try #require(two.update(witnesses: ["b": now + .seconds(20)], membershipRevision: 1)).generation != successor.generation)
         let three = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
         #expect(three.snapshot() == nil)
-        let majority = try #require(three.update(witnesses: ["b": now + .seconds(4), "c": now + .seconds(9)]))
+        let majority = try #require(three.update(witnesses: ["b": now + .seconds(4), "c": now + .seconds(9)], membershipRevision: 1))
         #expect(majority.validUntil == now + .seconds(9))
         let five = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c", "d", "e"])
-        let selected = try #require(five.update(witnesses: ["b": now + .seconds(4), "c": now + .seconds(9), "d": now + .seconds(7)]))
+        let selected = try #require(five.update(witnesses: ["b": now + .seconds(4), "c": now + .seconds(9), "d": now + .seconds(7)], membershipRevision: 1))
         #expect(selected.validUntil == now + .seconds(7))
         let standalone = V2ActorServiceQualification.standalone()
         #expect(standalone.snapshot()?.generation == standalone.snapshot()?.generation)
@@ -125,19 +178,40 @@ struct V2RealtimeShardAuthenticationTests {
         let roster = [f.gateway.nodeID: f.gateway.serviceID, f.token.host.nodeID: f.token.host.serviceID]
         func verify(_ request: ShardDiscoveryRequest, signer: V2ActorSigningIdentity) throws -> ShardDiscoveryRequest {
             try v2VerifyShardDiscoveryRequest(signer.sign(request, maximumBytes: 16_384), trust: f.trust,
-                recipient: f.token.host, roster: roster, rosterDigest: digest)
+                recipient: f.token.host, roster: roster, rosterDigest: digest, membershipRevision: 1)
         }
-        let request = ShardDiscoveryRequest(requester: f.gateway, recipientNodeID: f.token.host.nodeID, challenge: challenge, rosterDigest: digest)
+        let request = ShardDiscoveryRequest(requester: f.gateway, recipientNodeID: f.token.host.nodeID, challenge: challenge, rosterDigest: digest, membershipRevision: 1)
         let accepted = try verify(request, signer: f.caller)
         #expect(accepted.requester == f.gateway && accepted.challenge == challenge)
-        #expect(throws: V2ActorAuthenticationError.self) {
-            try verify(.init(requester: f.gateway, recipientNodeID: "other", challenge: challenge, rosterDigest: digest), signer: f.caller)
+        for revision in [UInt64(0), 2, UInt64.max] {
+            #expect(throws: V2ActorAuthenticationError.self) {
+                try verify(.init(requester: f.gateway, recipientNodeID: f.token.host.nodeID,
+                    challenge: challenge, rosterDigest: digest, membershipRevision: revision), signer: f.caller)
+            }
         }
         #expect(throws: V2ActorAuthenticationError.self) {
-            try verify(.init(requester: f.gateway, recipientNodeID: f.token.host.nodeID, challenge: challenge, rosterDigest: Data()), signer: f.caller)
+            try verify(.init(requester: f.gateway, recipientNodeID: "other", challenge: challenge, rosterDigest: digest, membershipRevision: 1), signer: f.caller)
         }
         #expect(throws: V2ActorAuthenticationError.self) {
-            try verify(.init(requester: f.token.host, recipientNodeID: f.token.host.nodeID, challenge: challenge, rosterDigest: digest), signer: f.caller)
+            try verify(.init(requester: f.gateway, recipientNodeID: f.token.host.nodeID, challenge: challenge, rosterDigest: Data(), membershipRevision: 1), signer: f.caller)
+        }
+        #expect(throws: V2ActorAuthenticationError.self) {
+            try verify(.init(requester: f.token.host, recipientNodeID: f.token.host.nodeID, challenge: challenge, rosterDigest: digest, membershipRevision: 1), signer: f.caller)
+        }
+    }
+
+    @Test func discoveryDigestBindsMembershipPhaseAndRevision() throws {
+        let roster = ["a": "service-a", "b": "service-b"]
+        let stable = try V2ActorServiceQualification.Membership(revision: 2, current: ["a", "b"])
+        let joint = try V2ActorServiceQualification.Membership(revision: 2, current: ["a"], next: ["a", "b"])
+        let next = try V2ActorServiceQualification.Membership(revision: 3, current: ["a", "b"])
+        let digest = try v2RealtimeMembershipDigest(roster: roster, membership: stable)
+        #expect(digest == (try v2RealtimeMembershipDigest(roster: ["b": "service-b", "a": "service-a"], membership: stable)))
+        #expect(digest != (try v2RealtimeMembershipDigest(roster: roster, membership: joint)))
+        #expect(digest != (try v2RealtimeMembershipDigest(roster: roster, membership: next)))
+        #expect(digest != (try v2RealtimeMembershipDigest(roster: ["a": "other", "b": "service-b"], membership: stable)))
+        #expect(throws: V2ActorAuthenticationError.self) {
+            try v2RealtimeMembershipDigest(roster: ["a": "service-a"], membership: stable)
         }
     }
 
@@ -185,7 +259,8 @@ struct V2RealtimeShardAuthenticationTests {
         try await system.shutdown().wait()
     }
 
-    @Test func samePartitionMissesShareSignedDiscoveryDespitePartialCancellation() async throws {
+    @Test(arguments: [UInt64(1), UInt64(7)])
+    func samePartitionMissesShareSignedDiscoveryDespitePartialCancellation(revision: UInt64) async throws {
         let f = try Fixture()
         let callerPort = Int.random(in: 30_000...44_999), peerPort = Int.random(in: 45_000...60_000)
         var callerSettings = ClusterSystemSettings(name: "shard-miss-caller", host: "127.0.0.1", port: callerPort)
@@ -199,20 +274,23 @@ struct V2RealtimeShardAuthenticationTests {
             .init(nodeID: f.token.host.nodeID, serviceID: f.token.host.serviceID, address: "127.0.0.1", port: peerPort)
         ]
         let roster = Dictionary(uniqueKeysWithValues: peers.map { ($0.nodeID, $0.serviceID) })
-        let digest = Data(SHA256.hash(data: try V2ActorProtobuf.encode(roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })))
+        let membership = try V2ActorServiceQualification.Membership(revision: revision, current: Set(roster.keys))
+        let qualification = try V2ActorServiceQualification(localNodeID: f.gateway.nodeID, membership: membership)
+        let digest = try v2RealtimeMembershipDigest(roster: roster, membership: membership)
         let inbound = V2RealtimeShardInbound(identity: f.token.host, signer: f.receiver, trust: f.trust,
             serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], limits: .init())
         let endpoint = V2RealtimeShardEndpoint(actorSystem: peerSystem, service: inbound)
         let reference = try V2ActorProtobuf.encode(endpoint.id); inbound.bindEndpointReference(reference)
         let publisher = V2RealtimeShardPublisher(identity: f.token.host, signer: f.receiver, endpointID: endpoint.id,
-            endpointReference: reference, trust: f.trust, roster: roster, rosterDigest: digest)
-        try await publisher.install([.init(token: f.token, remainingLeaseMilliseconds: 30_000)])
+            endpointReference: reference, trust: f.trust, roster: roster, rosterDigest: digest, membershipRevision: revision)
+        try await publisher.install([.init(token: f.token, remainingLeaseMilliseconds: 30_000)], membershipRevision: revision)
         let beacon = V2RealtimeShardDiscoveryBeacon(actorSystem: peerSystem, publisher: publisher)
         await peerSystem.receptionist.checkIn(beacon, with: V2RealtimeShardDiscoveryBeacon.key(nodeID: f.token.host.nodeID))
         callerSystem.cluster.join(host: "127.0.0.1", port: peerPort)
         let transport = try buildRealtimeShardTransport(system: callerSystem, identity: f.gateway,
             address: "127.0.0.1", port: callerPort, signer: f.caller, trust: f.trust,
-            serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], discoveryPeers: peers, limits: .init())
+            serving: f.serving, serviceOwnerAccess: [f.caller.serviceID: ["rooms"]], discoveryPeers: peers, limits: .init(),
+            serviceQualification: qualification)
         let barrier = SignedDiscoveryExecutorBarrier()
         var held: Task<Bool, Never>?
         var calls: [Task<V2RealtimeShardDescriptor, any Error>] = []
@@ -263,6 +341,55 @@ struct V2RealtimeShardAuthenticationTests {
             #expect(hot.cacheHits == result.cacheHits + 10_000)
             #expect(hot.cacheMisses == result.cacheMisses)
             #expect(await f.serving.calls == callsBefore + 10_000)
+            #expect(qualification.membership.revision == revision)
+            #expect(qualification.snapshot() != nil)
+            await transport.suspendMembershipConfirmation()
+            #expect(qualification.snapshot() == nil)
+            #expect(qualification.update(witnesses: [f.token.host.nodeID: .now + .seconds(10)], membershipRevision: revision) == nil)
+            #expect(await transport.metricsSnapshot().cachedPartitions == 0)
+            try await transport.installCommittedMembership(.init(revision: revision,
+                current: Array(roster.keys), peers: peers))
+            #expect(try await transport.resolve(partitionID: f.token.partitionID).token == f.token)
+            let survivor = revision == 7 ? f.token.host.nodeID : f.gateway.nodeID
+            let joint = try V2ActorServiceQualification.Membership(revision: revision + 1,
+                current: Set(roster.keys), next: [survivor])
+            let jointDigest = try v2RealtimeMembershipDigest(roster: roster, membership: joint)
+            try await transport.installMembership(joint, peers: peers)
+            #expect(qualification.snapshot() == nil)
+            #expect(await transport.metricsSnapshot().cachedPartitions == 0)
+            try await transport.installMembership(joint, peers: peers) // Exact retry.
+            try await publisher.installMembership(roster: roster, digest: jointDigest, revision: revision + 1)
+            await #expect(throws: V2ActorAuthenticationError.self) {
+                try await publisher.install([.init(token: f.token, remainingLeaseMilliseconds: 30_000)], membershipRevision: revision)
+            }
+            try await publisher.install([.init(token: f.token, remainingLeaseMilliseconds: 30_000)], membershipRevision: revision + 1)
+            #expect(try await transport.resolve(partitionID: f.token.partitionID).token == f.token)
+            #expect(qualification.snapshot() != nil)
+            // Commit removal of the peer. Its cached route and witness must
+            // disappear without declaring the still-running process dead.
+            let final = try V2ActorServiceQualification.Membership(revision: revision + 2, current: [survivor])
+            let finalPeers = peers.filter { $0.nodeID == survivor }
+            try await transport.installMembership(final, peers: finalPeers)
+            try await transport.installMembership(final, peers: finalPeers)
+            #expect(await transport.metricsSnapshot().cachedPartitions == 0)
+            if survivor == f.gateway.nodeID {
+                #expect(await transport.reachableNodeIDs() == [f.gateway.nodeID])
+            } else {
+                #expect(qualification.snapshot() == nil)
+                #expect(await transport.reachableNodeIDs().isEmpty)
+                await #expect(throws: V2ActorAuthenticationError.forbidden) {
+                    try await transport.installPartitions([.init(token: f.token, remainingLeaseMilliseconds: 30_000)])
+                }
+                try await transport.installPartitions([])
+            }
+            let caughtUp = try V2ActorServiceMembershipRecord(revision: revision + 4,
+                current: [survivor], peers: finalPeers)
+            try await transport.installCommittedMembership(caughtUp)
+            #expect(qualification.membership.revision == revision + 4)
+            try await transport.installCommittedMembership(caughtUp)
+            await #expect(throws: V2ActorServiceQualification.ConfigurationError.self) {
+                try await transport.installMembership(joint, peers: peers)
+            }
             // Periodic discovery runs independently; the exact hit/miss counts
             // establish that these calls did not enter cold discovery.
             #expect(await transport.stop(deadline: .now + .seconds(2)))
@@ -376,24 +503,31 @@ struct V2RealtimeShardAuthenticationTests {
         let room: RoomID
         let serving: Serving
         let inbound: V2RealtimeShardInbound
-        init(held: Bool = false) throws {
+        init(held: Bool = false, dynamic: Bool = false) throws {
             let room = RoomID(uuid: UUID()); self.room = room
             let callerKey = Curve25519.Signing.PrivateKey(), receiverKey = Curve25519.Signing.PrivateKey()
             caller = try .init(serviceID: V2ActorServiceID("gateway"), privateKey: callerKey.rawRepresentation)
             receiver = try V2ActorSigningIdentity(serviceID: V2ActorServiceID("partition"), privateKey: receiverKey.rawRepresentation)
-            trust = try .init(services: [
-                .init(serviceID: caller.serviceID, publicKey: callerKey.publicKey.rawRepresentation,
-                    permissions: [.realtimePublish, .realtimeReceive], gatewayNodeIDs: ["gateway-node"]),
-                .init(serviceID: receiver.serviceID, publicKey: receiverKey.publicKey.rawRepresentation,
-                    permissions: [.realtimePublish, .realtimeReceive], gatewayNodeIDs: ["partition-node"])
-            ])
+            let callerTrust = try V2ActorTrustedService(serviceID: caller.serviceID, publicKey: callerKey.publicKey.rawRepresentation,
+                permissions: [.realtimePublish, .realtimeReceive], gatewayNodeIDs: ["gateway-node"], sourceIDs: ["rooms"])
+            let authorityKey = Curve25519.Signing.PrivateKey(), authorityID = try V2ActorServiceID("authority"), deployment = UUID()
+            let authority = try V2ActorSigningIdentity(serviceID: authorityID, privateKey: authorityKey.rawRepresentation)
+            var services = [try V2ActorTrustedService(serviceID: receiver.serviceID, publicKey: receiverKey.publicKey.rawRepresentation,
+                permissions: [.realtimePublish, .realtimeReceive], gatewayNodeIDs: ["partition-node"]),
+                try V2ActorTrustedService(serviceID: authorityID, publicKey: authorityKey.publicKey.rawRepresentation, permissions: [])]
+            if !dynamic { services.append(callerTrust) }
+            trust = try .init(services: services, admissionAuthority: .init(deploymentID: deployment, serviceID: authorityID))
             gateway = .init(nodeID: "gateway-node", serviceID: "gateway", incarnationID: UUID())
             let identity = V2GatewayRealtimeIdentity(nodeID: "partition-node", serviceID: "partition", incarnationID: UUID())
             token = .init(partitionID: V2RealtimeTopicKey(kind: .roomEvents, id: room.rawValue).partitionID(), host: identity, epoch: 1, leaseToken: UUID())
             serving = Serving(held: held)
             inbound = .init(identity: identity, signer: receiver, trust: trust, serving: serving,
-                serviceOwnerAccess: [caller.serviceID: ["rooms"]], limits: .init())
+                serviceOwnerAccess: dynamic ? [:] : [caller.serviceID: ["rooms"]], limits: .init())
             inbound.bindEndpointReference(Data([7]))
+            if dynamic {
+                try trust.admitAuthorizedServices(authority.sign(V2ActorTrustAdmission(deploymentID: deployment,
+                    services: [callerTrust]), maximumBytes: 262_144))
+            }
         }
         func open() async throws -> RealtimeGrant {
             let hello = RealtimeHello(serviceID: caller.serviceID, version: 1, callerIncarnation: gateway.incarnationID,

@@ -1,4 +1,6 @@
 import Foundation
+import Crypto
+import IMV2ActorCluster
 import IMV2ActorContracts
 import IMV2ActorRuntime
 import IMV2Server
@@ -37,9 +39,20 @@ struct V2PlacementControlRuntimeTests {
         let files = FileManager.default.temporaryDirectory.appendingPathComponent("production-placement-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: files, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: files) }
+        let authorizations = files.appendingPathComponent("authorizations")
+        try FileManager.default.createDirectory(at: authorizations, withIntermediateDirectories: false)
+        let authorityKey = Curve25519.Signing.PrivateKey()
+        let authorityID = try V2ActorServiceID("trust-admission-root")
+        let authoritySigner = try V2ActorSigningIdentity(serviceID: authorityID, privateKey: authorityKey.rawRepresentation)
         func configuration(_ name: String, storage: Bool = false) throws -> V2RoomActorApplicationConfiguration {
             var object = try #require(JSONSerialization.jsonObject(with: Data(contentsOf:
                 URL(fileURLWithPath: root + "/" + name + "/configuration.json"))) as? [String: Any])
+            var trusted = try #require(object["services"] as? [[String: Any]])
+            trusted.append(["id": authorityID.rawValue, "publicKeyBase64": authorityKey.publicKey.rawRepresentation.base64EncodedString(),
+                            "permissions": [], "hostIDs": [], "gatewayNodeIDs": [], "shardIDs": ["rooms-primary"]])
+            object["services"] = trusted
+            object["trustAdmissionAuthorityServiceID"] = authorityID.rawValue
+            object["trustAdmissionDirectory"] = authorizations.path
             if storage {
                 var control = try #require(object["placementControl"] as? [String: Any])
                 control["storagePaths"] = ["rooms-primary": files.appendingPathComponent(name + ".pb").path]
@@ -61,9 +74,21 @@ struct V2PlacementControlRuntimeTests {
                 for service in services { group.addTask { try await service.start() } }
                 try await group.waitForAll()
             }
+            let newcomerKey = Curve25519.Signing.PrivateKey(), newcomerID = try V2ActorServiceID("admitted-at-runtime")
+            let newcomer = try V2ActorTrustedService(serviceID: newcomerID,
+                publicKey: newcomerKey.publicKey.rawRepresentation, permissions: [.userRoomCalls])
+            let authorization = V2ActorTrustAdmission(deploymentID: configs[0].placementControl.clusterID, services: [newcomer])
+            let packet = try authoritySigner.sign(authorization, maximumBytes: 262_144)
+            try V2ActorProtobuf.encode(packet).write(to: authorizations.appendingPathComponent("new-service.pb"), options: .atomic)
+            let admissionDeadline = ContinuousClock.now + .seconds(4)
+            while !configs.allSatisfy({ (try? $0.trust.configuredService(newcomerID)) != nil }), ContinuousClock.now < admissionDeadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(configs.allSatisfy { (try? $0.trust.configuredService(newcomerID)) != nil })
             let config = try configuration("gateway"), identity = try #require(config.hostIdentity)
             let runtime = V2PlacementControlRuntime(configuration: config); gateway = runtime
             let placement = try await runtime.start()
+            #expect(try config.trust.configuredService(newcomerID).permissions == [.userRoomCalls])
             try await placement.register(identity, shards: ["rooms-primary"])
             let room = RoomID(uuid: UUID()), owner = try V2RoomDataOwner(shardID: "rooms-primary", epoch: 0)
             #expect(try placement.grant(roomID: room, owner: owner).host == identity)

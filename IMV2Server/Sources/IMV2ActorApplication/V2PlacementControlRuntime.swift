@@ -21,6 +21,7 @@ package actor V2PlacementControlRuntime {
     private var started = false
     private var closing = false
     private var stopping = false
+    private var trustAdmissions: V2ActorTrustAdmissionSource?
 
     package init(configuration: V2RoomActorApplicationConfiguration) { self.configuration = configuration }
 
@@ -28,11 +29,17 @@ package actor V2PlacementControlRuntime {
         guard !started, !closing else { throw V2PlacementRaftError.closed }
         started = true; starting = true
         defer { starting = false }
+        if let directory = configuration.trustAdmissionDirectory {
+            let source = try V2ActorTrustAdmissionSource(directory: directory, trust: configuration.trust)
+            trustAdmissions = source
+            try await source.start()
+            guard !closing else { throw V2PlacementRaftError.closed }
+        }
         let control = configuration.placementControl
         let roster = Set(control.roles.values)
         var initial: [String: V2ActorPlacementSnapshot] = [:]
         for shard in control.shards {
-            initial[shard] = try V2RoomActorPlacementRuntime.initialSnapshot(shard: shard, peers: configuration.discovery.peers)
+            initial[shard] = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: control.clusterID, shard: shard, peers: configuration.discovery.peers)
         }
         let client: V2RoomClusterClient
         var leaders: [String: V2PlacementRaftLeaderLog] = [:]
@@ -84,7 +91,7 @@ package actor V2PlacementControlRuntime {
                 try Task.checkCancellation()
                 guard !closing, ContinuousClock.now < deadline else { throw V2ActorPlacementError.unavailable }
                 if let leader = leaders[shard], await voters[shard]!.inspection().role == .leader {
-                    do { _ = try await leader.bootstrap(genesis) }
+                    do { _ = try await leader.open(genesis) }
                     catch V2PlacementRaftError.notLeader {} catch V2PlacementRaftError.notReady {} catch V2ActorPlacementError.unavailable {}
                 }
                 // Allow one bounded contact per fixed voter. A 500 ms outer
@@ -111,6 +118,10 @@ package actor V2PlacementControlRuntime {
         guard !starting, !stopping else { return false }
         stopping = true
         defer { stopping = false }
+        if let trustAdmissions {
+            guard try await trustAdmissions.stop(deadline: deadline) else { return false }
+            self.trustAdmissions = nil
+        }
         for task in drivers { task.cancel() }
         // The RPC transport bounds cancellation while native remote persistence
         // remains owned by the receiving voter until it actually settles.

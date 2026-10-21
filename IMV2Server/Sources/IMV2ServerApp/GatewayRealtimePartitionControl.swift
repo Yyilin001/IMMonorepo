@@ -16,7 +16,6 @@ actor GatewayRealtimePartitionControl {
         }
     }
     private let identity: V2GatewayRealtimeIdentity
-    private let roster: Set<String>
     private let qualification: V2ActorServiceQualification
     private struct LeaseKey: Hashable { let partition: Int; let epoch: Int64; let token: UUID }
     private var owned: [LeaseKey: V2RealtimePartitionLease] = [:]
@@ -28,6 +27,9 @@ actor GatewayRealtimePartitionControl {
     private var installed: [Int: Installed] = [:]
     private var pendingClaim: (ids: [Int], token: UUID)?
     private var worker: Task<Void, Never>?
+    private var tickSleep: Task<Void, Never>?
+    private var reconciliationPending = false
+    private var observedGeneration: UUID?
     private var startup: Task<Void, any Error>?
     private var shutdownTask: Task<Void, any Error>?
     private var closed = false
@@ -41,11 +43,12 @@ actor GatewayRealtimePartitionControl {
          rotatePartitions: @escaping @Sendable () async -> Set<Int> = { [] },
          install: @escaping @Sendable ([Installed]) async throws -> Void) throws {
         guard qualification.matches(localNodeID: identity.nodeID, roster: roster),
-              roster.contains(identity.nodeID), roster.count <= 64,
+              !roster.isEmpty, roster.count <= 64,
               roster.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }) else {
             throw V2ActorContractError.invalidConfiguration("realtime partition roster")
         }
-        self.identity = identity; self.roster = roster; self.store = store; self.qualification = qualification
+        self.identity = identity; self.store = store; self.qualification = qualification
+        self.observedGeneration = qualification.snapshot()?.generation
         self.availableHosts = availableHosts; self.rotatePartitions = rotatePartitions; self.install = install
     }
 
@@ -70,8 +73,18 @@ actor GatewayRealtimePartitionControl {
 
     private func run() async {
         while !closed, !Task.isCancelled {
-            do { try await Task.sleep(for: .seconds(5)) } catch { break }
-            guard !closed else { break }
+            if !reconciliationPending {
+                let sleep = Task<Void, Never> {
+                    do { try await Task.sleep(for: .seconds(5)) } catch {}
+                }
+                // Only this delay is cancelled on a new proof. Actual SQL is
+                // owned by the serial worker and must settle before another tick.
+                tickSleep = sleep
+                await sleep.value
+                tickSleep = nil
+            }
+            reconciliationPending = false
+            guard !closed, !Task.isCancelled else { break }
             do { try await tick() }
             catch {
                 failedTicks &+= 1
@@ -92,6 +105,13 @@ actor GatewayRealtimePartitionControl {
     func qualificationDidChange() async {
         guard !closed else { return }
         let proof = qualification.snapshot()
+        if observedGeneration != proof?.generation {
+            observedGeneration = proof?.generation
+            if proof != nil {
+                reconciliationPending = true
+                tickSleep?.cancel()
+            }
+        }
         var next: [Int: Installed] = [:]
         if let proof {
             for (id, value) in installed where value.qualificationGeneration == proof.generation {
@@ -156,7 +176,7 @@ actor GatewayRealtimePartitionControl {
         // Cleanup is allowed without service permission; claim/renew are not.
         try await releaseRetired()
         guard let proof = qualification.snapshot(), !closed else { return }
-        let reachable = await availableHosts().intersection(roster).union([identity.nodeID])
+        let reachable = await availableHosts().intersection(qualification.membership.nodes).union([identity.nodeID])
         try await require(proof)
         let candidates = reachable.sorted()
         let desired = Set((0..<256).filter { partition in
@@ -227,6 +247,7 @@ actor GatewayRealtimePartitionControl {
     func shutdown() async throws {
         if let shutdownTask { try await shutdownTask.value; return }
         closed = true
+        tickSleep?.cancel()
         let task = Task { try await self.drain() }
         shutdownTask = task
         try await task.value

@@ -670,10 +670,18 @@ fileprivate final class V2RoomSubscriptionStateMachine {
             guard !value.closed, let room = value.rooms[id], room.fence == delivery.fence,
                   room.serviceID == authenticatedServiceID else { return .stale }
             let terminal = delivery.payload == .authorizationInvalidated
+            // Local retirement already denied every member of this exact fence.
+            // A delayed unsubscribe must still receive that denial receipt;
+            // rejecting it would retire the shared session of unrelated rooms.
+            // No baseline, grant or body can pass this exception.
+            let retiredRevoke: Bool
+            if case .revoke = delivery.payload { retiredRevoke = room.retired }
+            else { retiredRevoke = false }
+            let denial = terminal || retiredRevoke
             // Closing an exact, authenticated fence grants no authority. Its
             // actual receipt must remain possible after local expiry/retirement;
             // otherwise the Owner cannot finish this cut or issue a fresh fence.
-            guard terminal || (!room.retired && room.session.isReady()) else {
+            guard denial || (!room.retired && room.session.isReady()) else {
                 room.authorization.ready = false; room.authorization.members.removeAll()
                 return .stale
             }
@@ -698,7 +706,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                     }
                     return .applied(permits: [])
                 }
-                guard terminal || (room.authorization.sequence < UInt64.max &&
+                guard denial || (room.authorization.sequence < UInt64.max &&
                       delivery.authorizationSequence == room.authorization.sequence + 1) else {
                     room.authorization.ready = false; room.authorization.members.removeAll()
                     room.deliverySequence = max(1, room.deliverySequence)
@@ -754,7 +762,7 @@ fileprivate final class V2RoomSubscriptionStateMachine {
                     baselineSequence: baselineSequence, authorizationID: UUID())
                 room.authorization.revisionFloors[member.userID] = member.memberRevision
             case .revoke(let userID, let revision):
-                guard room.authorization.ready else { return .snapshotRequired }
+                guard room.authorization.ready || retiredRevoke else { return .snapshotRequired }
                 guard room.authorization.revisionFloors[userID].map({ revision >= $0 }) ?? true,
                       room.authorization.revisionFloors[userID] != nil || room.authorization.revisionFloors.count < maximumMembersPerRoom else { return .invalid }
                 room.authorization.members.removeValue(forKey: userID); room.authorization.revisionFloors[userID] = revision

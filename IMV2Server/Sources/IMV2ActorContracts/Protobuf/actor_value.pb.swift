@@ -8,11 +8,7 @@
 // For information on using the generated types, please see the documentation:
 //   https://github.com/apple/swift-protobuf/
 
-#if canImport(FoundationEssentials)
-import FoundationEssentials
-#else
 import Foundation
-#endif
 import SwiftProtobuf
 
 // If the compiler emits an error on this type, it is because this file
@@ -20,23 +16,23 @@ import SwiftProtobuf
 // incompatible with the version of SwiftProtobuf to which you are linking.
 // Please ensure that you are building against the same version of the API
 // that was used to generate this file.
-fileprivate nonisolated struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
+fileprivate struct _GeneratedWithProtocGenSwiftVersion: SwiftProtobuf.ProtobufAPIVersionCheck {
   struct _2: SwiftProtobuf.ProtobufAPIVersion_2 {}
   typealias Version = _2
 }
 
 /// Infrequent placement control records. They never carry message bodies.
-package nonisolated struct Im_Actor_V1_PlacementOwner: Sendable {
+package struct Im_Actor_V1_PlacementOwner: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var host: Im_Actor_V1_HostIdentity {
-    get {_host ?? Im_Actor_V1_HostIdentity()}
+    get {return _host ?? Im_Actor_V1_HostIdentity()}
     set {_host = newValue}
   }
   /// Returns true if `host` has been explicitly set.
-  package var hasHost: Bool {self._host != nil}
+  package var hasHost: Bool {return self._host != nil}
   /// Clears the value of `host`. Subsequent reads from it will return its default value.
   package mutating func clearHost() {self._host = nil}
 
@@ -49,7 +45,7 @@ package nonisolated struct Im_Actor_V1_PlacementOwner: Sendable {
   fileprivate var _host: Im_Actor_V1_HostIdentity? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementTransfer: Sendable {
+package struct Im_Actor_V1_PlacementTransfer: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -57,11 +53,11 @@ package nonisolated struct Im_Actor_V1_PlacementTransfer: Sendable {
   package var id: Data = Data()
 
   package var successor: Im_Actor_V1_HostIdentity {
-    get {_successor ?? Im_Actor_V1_HostIdentity()}
+    get {return _successor ?? Im_Actor_V1_HostIdentity()}
     set {_successor = newValue}
   }
   /// Returns true if `successor` has been explicitly set.
-  package var hasSuccessor: Bool {self._successor != nil}
+  package var hasSuccessor: Bool {return self._successor != nil}
   /// Clears the value of `successor`. Subsequent reads from it will return its default value.
   package mutating func clearSuccessor() {self._successor = nil}
 
@@ -72,26 +68,26 @@ package nonisolated struct Im_Actor_V1_PlacementTransfer: Sendable {
   fileprivate var _successor: Im_Actor_V1_HostIdentity? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementSlot: Sendable {
+package struct Im_Actor_V1_PlacementSlot: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var owner: Im_Actor_V1_PlacementOwner {
-    get {_owner ?? Im_Actor_V1_PlacementOwner()}
+    get {return _owner ?? Im_Actor_V1_PlacementOwner()}
     set {_owner = newValue}
   }
   /// Returns true if `owner` has been explicitly set.
-  package var hasOwner: Bool {self._owner != nil}
+  package var hasOwner: Bool {return self._owner != nil}
   /// Clears the value of `owner`. Subsequent reads from it will return its default value.
   package mutating func clearOwner() {self._owner = nil}
 
   package var transfer: Im_Actor_V1_PlacementTransfer {
-    get {_transfer ?? Im_Actor_V1_PlacementTransfer()}
+    get {return _transfer ?? Im_Actor_V1_PlacementTransfer()}
     set {_transfer = newValue}
   }
   /// Returns true if `transfer` has been explicitly set.
-  package var hasTransfer: Bool {self._transfer != nil}
+  package var hasTransfer: Bool {return self._transfer != nil}
   /// Clears the value of `transfer`. Subsequent reads from it will return its default value.
   package mutating func clearTransfer() {self._transfer = nil}
 
@@ -105,17 +101,17 @@ package nonisolated struct Im_Actor_V1_PlacementSlot: Sendable {
   fileprivate var _transfer: Im_Actor_V1_PlacementTransfer? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementHostRegistration: Sendable {
+package struct Im_Actor_V1_PlacementHostRegistration: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var host: Im_Actor_V1_HostIdentity {
-    get {_host ?? Im_Actor_V1_HostIdentity()}
+    get {return _host ?? Im_Actor_V1_HostIdentity()}
     set {_host = newValue}
   }
   /// Returns true if `host` has been explicitly set.
-  package var hasHost: Bool {self._host != nil}
+  package var hasHost: Bool {return self._host != nil}
   /// Clears the value of `host`. Subsequent reads from it will return its default value.
   package mutating func clearHost() {self._host = nil}
 
@@ -128,7 +124,7 @@ package nonisolated struct Im_Actor_V1_PlacementHostRegistration: Sendable {
   fileprivate var _host: Im_Actor_V1_HostIdentity? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementSnapshot: Sendable {
+package struct Im_Actor_V1_PlacementSnapshot: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -141,12 +137,14 @@ package nonisolated struct Im_Actor_V1_PlacementSnapshot: Sendable {
 
   package var hosts: [Im_Actor_V1_PlacementHostRegistration] = []
 
+  package var serviceMembership: Data = Data()
+
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
+package struct Im_Actor_V1_PlacementCommand: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -156,46 +154,50 @@ package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
   package var partition: UInt32 = 0
 
   package var expected: Im_Actor_V1_PlacementOwner {
-    get {_expected ?? Im_Actor_V1_PlacementOwner()}
+    get {return _expected ?? Im_Actor_V1_PlacementOwner()}
     set {_expected = newValue}
   }
   /// Returns true if `expected` has been explicitly set.
-  package var hasExpected: Bool {self._expected != nil}
+  package var hasExpected: Bool {return self._expected != nil}
   /// Clears the value of `expected`. Subsequent reads from it will return its default value.
   package mutating func clearExpected() {self._expected = nil}
 
   package var transfer: Im_Actor_V1_PlacementTransfer {
-    get {_transfer ?? Im_Actor_V1_PlacementTransfer()}
+    get {return _transfer ?? Im_Actor_V1_PlacementTransfer()}
     set {_transfer = newValue}
   }
   /// Returns true if `transfer` has been explicitly set.
-  package var hasTransfer: Bool {self._transfer != nil}
+  package var hasTransfer: Bool {return self._transfer != nil}
   /// Clears the value of `transfer`. Subsequent reads from it will return its default value.
   package mutating func clearTransfer() {self._transfer = nil}
 
   package var transferID: Data = Data()
 
   package var previousHost: Im_Actor_V1_HostIdentity {
-    get {_previousHost ?? Im_Actor_V1_HostIdentity()}
+    get {return _previousHost ?? Im_Actor_V1_HostIdentity()}
     set {_previousHost = newValue}
   }
   /// Returns true if `previousHost` has been explicitly set.
-  package var hasPreviousHost: Bool {self._previousHost != nil}
+  package var hasPreviousHost: Bool {return self._previousHost != nil}
   /// Clears the value of `previousHost`. Subsequent reads from it will return its default value.
   package mutating func clearPreviousHost() {self._previousHost = nil}
 
   package var successorHost: Im_Actor_V1_HostIdentity {
-    get {_successorHost ?? Im_Actor_V1_HostIdentity()}
+    get {return _successorHost ?? Im_Actor_V1_HostIdentity()}
     set {_successorHost = newValue}
   }
   /// Returns true if `successorHost` has been explicitly set.
-  package var hasSuccessorHost: Bool {self._successorHost != nil}
+  package var hasSuccessorHost: Bool {return self._successorHost != nil}
   /// Clears the value of `successorHost`. Subsequent reads from it will return its default value.
   package mutating func clearSuccessorHost() {self._successorHost = nil}
 
+  package var admittedHostID: String = String()
+
+  package var serviceMembership: Data = Data()
+
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum Kind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  package enum Kind: SwiftProtobuf.Enum, Swift.CaseIterable {
     package typealias RawValue = Int
     case unspecified // = 0
     case beginTransfer // = 1
@@ -203,6 +205,8 @@ package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
     case cancelTransfer // = 3
     case retireHost // = 4
     case registerHost // = 5
+    case admitHost // = 6
+    case installServiceMembership // = 7
     case UNRECOGNIZED(Int)
 
     package init() {
@@ -217,6 +221,8 @@ package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
       case 3: self = .cancelTransfer
       case 4: self = .retireHost
       case 5: self = .registerHost
+      case 6: self = .admitHost
+      case 7: self = .installServiceMembership
       default: self = .UNRECOGNIZED(rawValue)
       }
     }
@@ -229,6 +235,8 @@ package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
       case .cancelTransfer: return 3
       case .retireHost: return 4
       case .registerHost: return 5
+      case .admitHost: return 6
+      case .installServiceMembership: return 7
       case .UNRECOGNIZED(let i): return i
       }
     }
@@ -241,6 +249,8 @@ package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
       .cancelTransfer,
       .retireHost,
       .registerHost,
+      .admitHost,
+      .installServiceMembership,
     ]
 
   }
@@ -255,7 +265,7 @@ package nonisolated struct Im_Actor_V1_PlacementCommand: Sendable {
 
 /// Fixed-three-voter state lives on stable local storage, independently of rooms.
 /// A bootstrap or CAS command applied only from the committed Raft prefix.
-package nonisolated struct Im_Actor_V1_PlacementRaftOperation: Sendable {
+package struct Im_Actor_V1_PlacementRaftOperation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -277,7 +287,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftOperation: Sendable {
 
 /// A compact application checkpoint retains successful command identities.
 /// Replaying these commands from genesis reconstructs historical ACK results.
-package nonisolated struct Im_Actor_V1_PlacementRaftCheckpointReceipt: Sendable {
+package struct Im_Actor_V1_PlacementRaftCheckpointReceipt: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -295,7 +305,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftCheckpointReceipt: Sendable 
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftApplicationCheckpoint: Sendable {
+package struct Im_Actor_V1_PlacementRaftApplicationCheckpoint: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -317,7 +327,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftApplicationCheckpoint: Senda
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftEntry: Sendable {
+package struct Im_Actor_V1_PlacementRaftEntry: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -331,7 +341,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftEntry: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftState: Sendable {
+package struct Im_Actor_V1_PlacementRaftState: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -343,11 +353,11 @@ package nonisolated struct Im_Actor_V1_PlacementRaftState: Sendable {
   package var currentTerm: UInt64 = 0
 
   package var votedFor: String {
-    get {_votedFor ?? String()}
+    get {return _votedFor ?? String()}
     set {_votedFor = newValue}
   }
   /// Returns true if `votedFor` has been explicitly set.
-  package var hasVotedFor: Bool {self._votedFor != nil}
+  package var hasVotedFor: Bool {return self._votedFor != nil}
   /// Clears the value of `votedFor`. Subsequent reads from it will return its default value.
   package mutating func clearVotedFor() {self._votedFor = nil}
 
@@ -370,7 +380,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftState: Sendable {
   fileprivate var _votedFor: String? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftVoteRequest: Sendable {
+package struct Im_Actor_V1_PlacementRaftVoteRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -390,7 +400,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftVoteRequest: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftVoteReply: Sendable {
+package struct Im_Actor_V1_PlacementRaftVoteReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -406,7 +416,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftVoteReply: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftAppendRequest: Sendable {
+package struct Im_Actor_V1_PlacementRaftAppendRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -432,7 +442,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftAppendRequest: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftAppendReply: Sendable {
+package struct Im_Actor_V1_PlacementRaftAppendReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -453,7 +463,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftAppendReply: Sendable {
 }
 
 /// Portable lifecycle evidence signed only after native physical completion.
-package nonisolated struct Im_Actor_V1_PlacementDrainCertificate: Sendable {
+package struct Im_Actor_V1_PlacementDrainCertificate: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -465,11 +475,11 @@ package nonisolated struct Im_Actor_V1_PlacementDrainCertificate: Sendable {
   package var shardID: String = String()
 
   package var host: Im_Actor_V1_HostIdentity {
-    get {_host ?? Im_Actor_V1_HostIdentity()}
+    get {return _host ?? Im_Actor_V1_HostIdentity()}
     set {_host = newValue}
   }
   /// Returns true if `host` has been explicitly set.
-  package var hasHost: Bool {self._host != nil}
+  package var hasHost: Bool {return self._host != nil}
   /// Clears the value of `host`. Subsequent reads from it will return its default value.
   package mutating func clearHost() {self._host = nil}
 
@@ -480,11 +490,11 @@ package nonisolated struct Im_Actor_V1_PlacementDrainCertificate: Sendable {
   package var transferID: Data = Data()
 
   package var registrationPrevious: Im_Actor_V1_HostIdentity {
-    get {_registrationPrevious ?? Im_Actor_V1_HostIdentity()}
+    get {return _registrationPrevious ?? Im_Actor_V1_HostIdentity()}
     set {_registrationPrevious = newValue}
   }
   /// Returns true if `registrationPrevious` has been explicitly set.
-  package var hasRegistrationPrevious: Bool {self._registrationPrevious != nil}
+  package var hasRegistrationPrevious: Bool {return self._registrationPrevious != nil}
   /// Clears the value of `registrationPrevious`. Subsequent reads from it will return its default value.
   package mutating func clearRegistrationPrevious() {self._registrationPrevious = nil}
 
@@ -494,7 +504,7 @@ package nonisolated struct Im_Actor_V1_PlacementDrainCertificate: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum Kind: SwiftProtobuf.Enum, Swift.CaseIterable {
+  package enum Kind: SwiftProtobuf.Enum, Swift.CaseIterable {
     package typealias RawValue = Int
     case unspecified // = 0
     case partition // = 1
@@ -542,7 +552,7 @@ package nonisolated struct Im_Actor_V1_PlacementDrainCertificate: Sendable {
   fileprivate var _registrationPrevious: Im_Actor_V1_HostIdentity? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementSignedCertificate: Sendable {
+package struct Im_Actor_V1_PlacementSignedCertificate: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -558,7 +568,7 @@ package nonisolated struct Im_Actor_V1_PlacementSignedCertificate: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftWriteRequest: Sendable {
+package struct Im_Actor_V1_PlacementRaftWriteRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -566,11 +576,11 @@ package nonisolated struct Im_Actor_V1_PlacementRaftWriteRequest: Sendable {
   package var operation: Data = Data()
 
   package var evidence: Im_Actor_V1_PlacementSignedCertificate {
-    get {_evidence ?? Im_Actor_V1_PlacementSignedCertificate()}
+    get {return _evidence ?? Im_Actor_V1_PlacementSignedCertificate()}
     set {_evidence = newValue}
   }
   /// Returns true if `evidence` has been explicitly set.
-  package var hasEvidence: Bool {self._evidence != nil}
+  package var hasEvidence: Bool {return self._evidence != nil}
   /// Clears the value of `evidence`. Subsequent reads from it will return its default value.
   package mutating func clearEvidence() {self._evidence = nil}
 
@@ -581,7 +591,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftWriteRequest: Sendable {
   fileprivate var _evidence: Im_Actor_V1_PlacementSignedCertificate? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftWriteReply: Sendable {
+package struct Im_Actor_V1_PlacementRaftWriteReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -599,7 +609,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftWriteReply: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftReadRequest: Sendable {
+package struct Im_Actor_V1_PlacementRaftReadRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -613,7 +623,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftReadRequest: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftArchiveUsage: Sendable {
+package struct Im_Actor_V1_PlacementRaftArchiveUsage: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -632,7 +642,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftArchiveUsage: Sendable {
 }
 
 /// Local supervisor intent, never a process-exclusion certificate.
-package nonisolated struct Im_Actor_V1_RoomHostRecoveryOperation: Sendable {
+package struct Im_Actor_V1_RoomHostRecoveryOperation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -650,7 +660,7 @@ package nonisolated struct Im_Actor_V1_RoomHostRecoveryOperation: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_RoomHostRecoveryJournal: Sendable {
+package struct Im_Actor_V1_RoomHostRecoveryJournal: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -668,7 +678,7 @@ package nonisolated struct Im_Actor_V1_RoomHostRecoveryJournal: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_RoomHostRecoveryJournalFile: Sendable {
+package struct Im_Actor_V1_RoomHostRecoveryJournalFile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -682,7 +692,7 @@ package nonisolated struct Im_Actor_V1_RoomHostRecoveryJournalFile: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_DockerRoomHostBinding: Sendable {
+package struct Im_Actor_V1_DockerRoomHostBinding: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -700,7 +710,7 @@ package nonisolated struct Im_Actor_V1_DockerRoomHostBinding: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_DockerRoomHostInventory: Sendable {
+package struct Im_Actor_V1_DockerRoomHostInventory: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -722,7 +732,7 @@ package nonisolated struct Im_Actor_V1_DockerRoomHostInventory: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_DockerRoomHostInventoryFile: Sendable {
+package struct Im_Actor_V1_DockerRoomHostInventoryFile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -736,7 +746,7 @@ package nonisolated struct Im_Actor_V1_DockerRoomHostInventoryFile: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_RoomHostStartupHello: Sendable {
+package struct Im_Actor_V1_RoomHostStartupHello: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -758,7 +768,7 @@ package nonisolated struct Im_Actor_V1_RoomHostStartupHello: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_RoomHostStartupRelease: Sendable {
+package struct Im_Actor_V1_RoomHostStartupRelease: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -772,7 +782,7 @@ package nonisolated struct Im_Actor_V1_RoomHostStartupRelease: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_DockerRoomHostLaunch: Sendable {
+package struct Im_Actor_V1_DockerRoomHostLaunch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -808,7 +818,7 @@ package nonisolated struct Im_Actor_V1_DockerRoomHostLaunch: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_DockerRoomHostLaunchFile: Sendable {
+package struct Im_Actor_V1_DockerRoomHostLaunchFile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -822,7 +832,7 @@ package nonisolated struct Im_Actor_V1_DockerRoomHostLaunchFile: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftReadReply: Sendable {
+package struct Im_Actor_V1_PlacementRaftReadReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -834,11 +844,11 @@ package nonisolated struct Im_Actor_V1_PlacementRaftReadReply: Sendable {
   package var leaderHint: String = String()
 
   package var archiveUsage: Im_Actor_V1_PlacementRaftArchiveUsage {
-    get {_archiveUsage ?? Im_Actor_V1_PlacementRaftArchiveUsage()}
+    get {return _archiveUsage ?? Im_Actor_V1_PlacementRaftArchiveUsage()}
     set {_archiveUsage = newValue}
   }
   /// Returns true if `archiveUsage` has been explicitly set.
-  package var hasArchiveUsage: Bool {self._archiveUsage != nil}
+  package var hasArchiveUsage: Bool {return self._archiveUsage != nil}
   /// Clears the value of `archiveUsage`. Subsequent reads from it will return its default value.
   package mutating func clearArchiveUsage() {self._archiveUsage = nil}
 
@@ -849,7 +859,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftReadReply: Sendable {
   fileprivate var _archiveUsage: Im_Actor_V1_PlacementRaftArchiveUsage? = nil
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftSnapshotChunk: Sendable {
+package struct Im_Actor_V1_PlacementRaftSnapshotChunk: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -879,7 +889,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftSnapshotChunk: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftSnapshotReply: Sendable {
+package struct Im_Actor_V1_PlacementRaftSnapshotReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -903,7 +913,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftSnapshotReply: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftRequest: Sendable {
+package struct Im_Actor_V1_PlacementRaftRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -936,7 +946,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftRequest: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Body: Equatable, Sendable {
+  package enum OneOf_Body: Equatable, Sendable {
     case vote(Im_Actor_V1_PlacementRaftVoteRequest)
     case append(Im_Actor_V1_PlacementRaftAppendRequest)
     case snapshot(Im_Actor_V1_PlacementRaftSnapshotChunk)
@@ -946,7 +956,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftRequest: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftReply: Sendable {
+package struct Im_Actor_V1_PlacementRaftReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -979,7 +989,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftReply: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Body: Equatable, Sendable {
+  package enum OneOf_Body: Equatable, Sendable {
     case vote(Im_Actor_V1_PlacementRaftVoteReply)
     case append(Im_Actor_V1_PlacementRaftAppendReply)
     case snapshot(Im_Actor_V1_PlacementRaftSnapshotReply)
@@ -989,7 +999,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftReply: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_PlacementRaftFile: Sendable {
+package struct Im_Actor_V1_PlacementRaftFile: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1008,7 +1018,7 @@ package nonisolated struct Im_Actor_V1_PlacementRaftFile: Sendable {
 /// Closed Swift Codable contracts carried as typed Protobuf values. No JSON
 /// text or base64 is embedded. Keys preserve the domain's CodingKeys; changing
 /// an enum case or key is an internal protocol change requiring joint rollout.
-package nonisolated struct Im_Actor_V1_Value: Sendable {
+package struct Im_Actor_V1_Value: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1089,7 +1099,7 @@ package nonisolated struct Im_Actor_V1_Value: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Kind: Equatable, Sendable {
+  package enum OneOf_Kind: Equatable, Sendable {
     case nullValue(Bool)
     case boolValue(Bool)
     case signedValue(Int64)
@@ -1105,7 +1115,7 @@ package nonisolated struct Im_Actor_V1_Value: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_Field: Sendable {
+package struct Im_Actor_V1_Field: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1113,11 +1123,11 @@ package nonisolated struct Im_Actor_V1_Field: Sendable {
   package var name: String = String()
 
   package var value: Im_Actor_V1_Value {
-    get {_value ?? Im_Actor_V1_Value()}
+    get {return _value ?? Im_Actor_V1_Value()}
     set {_value = newValue}
   }
   /// Returns true if `value` has been explicitly set.
-  package var hasValue: Bool {self._value != nil}
+  package var hasValue: Bool {return self._value != nil}
   /// Clears the value of `value`. Subsequent reads from it will return its default value.
   package mutating func clearValue() {self._value = nil}
 
@@ -1128,7 +1138,7 @@ package nonisolated struct Im_Actor_V1_Field: Sendable {
   fileprivate var _value: Im_Actor_V1_Value? = nil
 }
 
-package nonisolated struct Im_Actor_V1_Object: Sendable {
+package struct Im_Actor_V1_Object: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1140,7 +1150,7 @@ package nonisolated struct Im_Actor_V1_Object: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_Array: Sendable {
+package struct Im_Actor_V1_Array: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1154,7 +1164,7 @@ package nonisolated struct Im_Actor_V1_Array: Sendable {
 
 /// The hot authenticated envelopes use fixed field numbers instead of named
 /// Codable fields. Domain bodies use HotRPCRequest/HotRPCResponse, decoded once.
-package nonisolated struct Im_Actor_V1_HostIdentity: Sendable {
+package struct Im_Actor_V1_HostIdentity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1168,7 +1178,7 @@ package nonisolated struct Im_Actor_V1_HostIdentity: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_AuthenticatedCall: Sendable {
+package struct Im_Actor_V1_AuthenticatedCall: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1180,11 +1190,11 @@ package nonisolated struct Im_Actor_V1_AuthenticatedCall: Sendable {
   package var callerIncarnation: Data = Data()
 
   package var recipient: Im_Actor_V1_HostIdentity {
-    get {_recipient ?? Im_Actor_V1_HostIdentity()}
+    get {return _recipient ?? Im_Actor_V1_HostIdentity()}
     set {_recipient = newValue}
   }
   /// Returns true if `recipient` has been explicitly set.
-  package var hasRecipient: Bool {self._recipient != nil}
+  package var hasRecipient: Bool {return self._recipient != nil}
   /// Clears the value of `recipient`. Subsequent reads from it will return its default value.
   package mutating func clearRecipient() {self._recipient = nil}
 
@@ -1221,7 +1231,7 @@ package nonisolated struct Im_Actor_V1_AuthenticatedCall: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Principal: Equatable, Sendable {
+  package enum OneOf_Principal: Equatable, Sendable {
     case userID(String)
     case service(Bool)
 
@@ -1232,7 +1242,7 @@ package nonisolated struct Im_Actor_V1_AuthenticatedCall: Sendable {
   fileprivate var _recipient: Im_Actor_V1_HostIdentity? = nil
 }
 
-package nonisolated struct Im_Actor_V1_AuthenticatedReply: Sendable {
+package struct Im_Actor_V1_AuthenticatedReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1240,11 +1250,11 @@ package nonisolated struct Im_Actor_V1_AuthenticatedReply: Sendable {
   package var version: Int64 = 0
 
   package var host: Im_Actor_V1_HostIdentity {
-    get {_host ?? Im_Actor_V1_HostIdentity()}
+    get {return _host ?? Im_Actor_V1_HostIdentity()}
     set {_host = newValue}
   }
   /// Returns true if `host` has been explicitly set.
-  package var hasHost: Bool {self._host != nil}
+  package var hasHost: Bool {return self._host != nil}
   /// Clears the value of `host`. Subsequent reads from it will return its default value.
   package mutating func clearHost() {self._host = nil}
 
@@ -1265,7 +1275,7 @@ package nonisolated struct Im_Actor_V1_AuthenticatedReply: Sendable {
 
 /// Fixed hot contracts. cold_value is reserved for low-frequency operations;
 /// hot branches must never be emitted or accepted through that escape hatch.
-package nonisolated struct Im_Actor_V1_HotEmpty: Sendable {
+package struct Im_Actor_V1_HotEmpty: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1275,7 +1285,7 @@ package nonisolated struct Im_Actor_V1_HotEmpty: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotOwner: Sendable {
+package struct Im_Actor_V1_HotOwner: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1289,7 +1299,7 @@ package nonisolated struct Im_Actor_V1_HotOwner: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotActivation: Sendable {
+package struct Im_Actor_V1_HotActivation: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1297,22 +1307,22 @@ package nonisolated struct Im_Actor_V1_HotActivation: Sendable {
   package var roomID: String = String()
 
   package var owner: Im_Actor_V1_HotOwner {
-    get {_owner ?? Im_Actor_V1_HotOwner()}
+    get {return _owner ?? Im_Actor_V1_HotOwner()}
     set {_owner = newValue}
   }
   /// Returns true if `owner` has been explicitly set.
-  package var hasOwner: Bool {self._owner != nil}
+  package var hasOwner: Bool {return self._owner != nil}
   /// Clears the value of `owner`. Subsequent reads from it will return its default value.
   package mutating func clearOwner() {self._owner = nil}
 
   package var activationEpoch: Int64 = 0
 
   package var host: Im_Actor_V1_HostIdentity {
-    get {_host ?? Im_Actor_V1_HostIdentity()}
+    get {return _host ?? Im_Actor_V1_HostIdentity()}
     set {_host = newValue}
   }
   /// Returns true if `host` has been explicitly set.
-  package var hasHost: Bool {self._host != nil}
+  package var hasHost: Bool {return self._host != nil}
   /// Clears the value of `host`. Subsequent reads from it will return its default value.
   package mutating func clearHost() {self._host = nil}
 
@@ -1324,7 +1334,7 @@ package nonisolated struct Im_Actor_V1_HotActivation: Sendable {
   fileprivate var _host: Im_Actor_V1_HostIdentity? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotGateway: Sendable {
+package struct Im_Actor_V1_HotGateway: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1340,17 +1350,17 @@ package nonisolated struct Im_Actor_V1_HotGateway: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotGatewayDescriptor: Sendable {
+package struct Im_Actor_V1_HotGatewayDescriptor: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var identity: Im_Actor_V1_HotGateway {
-    get {_identity ?? Im_Actor_V1_HotGateway()}
+    get {return _identity ?? Im_Actor_V1_HotGateway()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  package var hasIdentity: Bool {self._identity != nil}
+  package var hasIdentity: Bool {return self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   package mutating func clearIdentity() {self._identity = nil}
 
@@ -1367,17 +1377,17 @@ package nonisolated struct Im_Actor_V1_HotGatewayDescriptor: Sendable {
   fileprivate var _identity: Im_Actor_V1_HotGateway? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotFence: Sendable {
+package struct Im_Actor_V1_HotFence: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var activation: Im_Actor_V1_HotActivation {
-    get {_activation ?? Im_Actor_V1_HotActivation()}
+    get {return _activation ?? Im_Actor_V1_HotActivation()}
     set {_activation = newValue}
   }
   /// Returns true if `activation` has been explicitly set.
-  package var hasActivation: Bool {self._activation != nil}
+  package var hasActivation: Bool {return self._activation != nil}
   /// Clears the value of `activation`. Subsequent reads from it will return its default value.
   package mutating func clearActivation() {self._activation = nil}
 
@@ -1394,7 +1404,7 @@ package nonisolated struct Im_Actor_V1_HotFence: Sendable {
   fileprivate var _activation: Im_Actor_V1_HotActivation? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotMember: Sendable {
+package struct Im_Actor_V1_HotMember: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1408,7 +1418,7 @@ package nonisolated struct Im_Actor_V1_HotMember: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotMention: Sendable {
+package struct Im_Actor_V1_HotMention: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1433,7 +1443,7 @@ package nonisolated struct Im_Actor_V1_HotMention: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Target: Equatable, Sendable {
+  package enum OneOf_Target: Equatable, Sendable {
     case userID(String)
     case everyone(Bool)
 
@@ -1442,7 +1452,7 @@ package nonisolated struct Im_Actor_V1_HotMention: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotEntity: Sendable {
+package struct Im_Actor_V1_HotEntity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1454,11 +1464,11 @@ package nonisolated struct Im_Actor_V1_HotEntity: Sendable {
   package var kind: String = String()
 
   package var link: String {
-    get {_link ?? String()}
+    get {return _link ?? String()}
     set {_link = newValue}
   }
   /// Returns true if `link` has been explicitly set.
-  package var hasLink: Bool {self._link != nil}
+  package var hasLink: Bool {return self._link != nil}
   /// Clears the value of `link`. Subsequent reads from it will return its default value.
   package mutating func clearLink() {self._link = nil}
 
@@ -1469,7 +1479,7 @@ package nonisolated struct Im_Actor_V1_HotEntity: Sendable {
   fileprivate var _link: String? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSend: Sendable {
+package struct Im_Actor_V1_HotSend: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1489,11 +1499,11 @@ package nonisolated struct Im_Actor_V1_HotSend: Sendable {
   package var entities: [Im_Actor_V1_HotEntity] = []
 
   package var replyMessageID: String {
-    get {_replyMessageID ?? String()}
+    get {return _replyMessageID ?? String()}
     set {_replyMessageID = newValue}
   }
   /// Returns true if `replyMessageID` has been explicitly set.
-  package var hasReplyMessageID: Bool {self._replyMessageID != nil}
+  package var hasReplyMessageID: Bool {return self._replyMessageID != nil}
   /// Clears the value of `replyMessageID`. Subsequent reads from it will return its default value.
   package mutating func clearReplyMessageID() {self._replyMessageID = nil}
 
@@ -1506,7 +1516,7 @@ package nonisolated struct Im_Actor_V1_HotSend: Sendable {
   fileprivate var _replyMessageID: String? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSendIdentity: Sendable {
+package struct Im_Actor_V1_HotSendIdentity: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1522,7 +1532,7 @@ package nonisolated struct Im_Actor_V1_HotSendIdentity: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotFingerprint: Sendable {
+package struct Im_Actor_V1_HotFingerprint: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1536,7 +1546,7 @@ package nonisolated struct Im_Actor_V1_HotFingerprint: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotAccepted: Sendable {
+package struct Im_Actor_V1_HotAccepted: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1550,26 +1560,26 @@ package nonisolated struct Im_Actor_V1_HotAccepted: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotSendReceipt: Sendable {
+package struct Im_Actor_V1_HotSendReceipt: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var identity: Im_Actor_V1_HotSendIdentity {
-    get {_identity ?? Im_Actor_V1_HotSendIdentity()}
+    get {return _identity ?? Im_Actor_V1_HotSendIdentity()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  package var hasIdentity: Bool {self._identity != nil}
+  package var hasIdentity: Bool {return self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   package mutating func clearIdentity() {self._identity = nil}
 
   package var fingerprint: Im_Actor_V1_HotFingerprint {
-    get {_fingerprint ?? Im_Actor_V1_HotFingerprint()}
+    get {return _fingerprint ?? Im_Actor_V1_HotFingerprint()}
     set {_fingerprint = newValue}
   }
   /// Returns true if `fingerprint` has been explicitly set.
-  package var hasFingerprint: Bool {self._fingerprint != nil}
+  package var hasFingerprint: Bool {return self._fingerprint != nil}
   /// Clears the value of `fingerprint`. Subsequent reads from it will return its default value.
   package mutating func clearFingerprint() {self._fingerprint = nil}
 
@@ -1595,7 +1605,7 @@ package nonisolated struct Im_Actor_V1_HotSendReceipt: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Outcome: Equatable, Sendable {
+  package enum OneOf_Outcome: Equatable, Sendable {
     case accepted(Im_Actor_V1_HotAccepted)
     case rejected(String)
 
@@ -1607,37 +1617,37 @@ package nonisolated struct Im_Actor_V1_HotSendReceipt: Sendable {
   fileprivate var _fingerprint: Im_Actor_V1_HotFingerprint? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotRetry: Sendable {
+package struct Im_Actor_V1_HotRetry: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var identity: Im_Actor_V1_HotSendIdentity {
-    get {_identity ?? Im_Actor_V1_HotSendIdentity()}
+    get {return _identity ?? Im_Actor_V1_HotSendIdentity()}
     set {_identity = newValue}
   }
   /// Returns true if `identity` has been explicitly set.
-  package var hasIdentity: Bool {self._identity != nil}
+  package var hasIdentity: Bool {return self._identity != nil}
   /// Clears the value of `identity`. Subsequent reads from it will return its default value.
   package mutating func clearIdentity() {self._identity = nil}
 
   package var fingerprint: Im_Actor_V1_HotFingerprint {
-    get {_fingerprint ?? Im_Actor_V1_HotFingerprint()}
+    get {return _fingerprint ?? Im_Actor_V1_HotFingerprint()}
     set {_fingerprint = newValue}
   }
   /// Returns true if `fingerprint` has been explicitly set.
-  package var hasFingerprint: Bool {self._fingerprint != nil}
+  package var hasFingerprint: Bool {return self._fingerprint != nil}
   /// Clears the value of `fingerprint`. Subsequent reads from it will return its default value.
   package mutating func clearFingerprint() {self._fingerprint = nil}
 
   package var reason: String = String()
 
   package var retryAfterMs: UInt64 {
-    get {_retryAfterMs ?? 0}
+    get {return _retryAfterMs ?? 0}
     set {_retryAfterMs = newValue}
   }
   /// Returns true if `retryAfterMs` has been explicitly set.
-  package var hasRetryAfterMs: Bool {self._retryAfterMs != nil}
+  package var hasRetryAfterMs: Bool {return self._retryAfterMs != nil}
   /// Clears the value of `retryAfterMs`. Subsequent reads from it will return its default value.
   package mutating func clearRetryAfterMs() {self._retryAfterMs = nil}
 
@@ -1650,7 +1660,7 @@ package nonisolated struct Im_Actor_V1_HotRetry: Sendable {
   fileprivate var _retryAfterMs: UInt64? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSendResult: Sendable {
+package struct Im_Actor_V1_HotSendResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1691,7 +1701,7 @@ package nonisolated struct Im_Actor_V1_HotSendResult: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Outcome: Equatable, Sendable {
+  package enum OneOf_Outcome: Equatable, Sendable {
     case receipt(Im_Actor_V1_HotSendReceipt)
     case deferred(Im_Actor_V1_HotRetry)
     case unresolved(Im_Actor_V1_HotEmpty)
@@ -1702,47 +1712,47 @@ package nonisolated struct Im_Actor_V1_HotSendResult: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionCommand: @unchecked Sendable {
+package struct Im_Actor_V1_HotSubscriptionCommand: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var roomID: String {
-    get {_storage._roomID}
+    get {return _storage._roomID}
     set {_uniqueStorage()._roomID = newValue}
   }
 
   package var userID: String {
-    get {_storage._userID}
+    get {return _storage._userID}
     set {_uniqueStorage()._userID = newValue}
   }
 
   package var gateway: Im_Actor_V1_HotGatewayDescriptor {
-    get {_storage._gateway ?? Im_Actor_V1_HotGatewayDescriptor()}
+    get {return _storage._gateway ?? Im_Actor_V1_HotGatewayDescriptor()}
     set {_uniqueStorage()._gateway = newValue}
   }
   /// Returns true if `gateway` has been explicitly set.
-  package var hasGateway: Bool {_storage._gateway != nil}
+  package var hasGateway: Bool {return _storage._gateway != nil}
   /// Clears the value of `gateway`. Subsequent reads from it will return its default value.
   package mutating func clearGateway() {_uniqueStorage()._gateway = nil}
 
   /// 1 subscribe, 2 activate, 3 reset, 4 unsubscribe. Unrecognized kinds fail closed.
   package var kind: UInt32 {
-    get {_storage._kind}
+    get {return _storage._kind}
     set {_uniqueStorage()._kind = newValue}
   }
 
   package var fence: Im_Actor_V1_HotFence {
-    get {_storage._fence ?? Im_Actor_V1_HotFence()}
+    get {return _storage._fence ?? Im_Actor_V1_HotFence()}
     set {_uniqueStorage()._fence = newValue}
   }
   /// Returns true if `fence` has been explicitly set.
-  package var hasFence: Bool {_storage._fence != nil}
+  package var hasFence: Bool {return _storage._fence != nil}
   /// Clears the value of `fence`. Subsequent reads from it will return its default value.
   package mutating func clearFence() {_uniqueStorage()._fence = nil}
 
   package var memberRevision: UInt64 {
-    get {_storage._memberRevision}
+    get {return _storage._memberRevision}
     set {_uniqueStorage()._memberRevision = newValue}
   }
 
@@ -1753,26 +1763,26 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionCommand: @unchecked Sendab
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-package nonisolated struct Im_Actor_V1_HotDeliverySession: Sendable {
+package struct Im_Actor_V1_HotDeliverySession: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var host: Im_Actor_V1_HostIdentity {
-    get {_host ?? Im_Actor_V1_HostIdentity()}
+    get {return _host ?? Im_Actor_V1_HostIdentity()}
     set {_host = newValue}
   }
   /// Returns true if `host` has been explicitly set.
-  package var hasHost: Bool {self._host != nil}
+  package var hasHost: Bool {return self._host != nil}
   /// Clears the value of `host`. Subsequent reads from it will return its default value.
   package mutating func clearHost() {self._host = nil}
 
   package var gateway: Im_Actor_V1_HotGateway {
-    get {_gateway ?? Im_Actor_V1_HotGateway()}
+    get {return _gateway ?? Im_Actor_V1_HotGateway()}
     set {_gateway = newValue}
   }
   /// Returns true if `gateway` has been explicitly set.
-  package var hasGateway: Bool {self._gateway != nil}
+  package var hasGateway: Bool {return self._gateway != nil}
   /// Clears the value of `gateway`. Subsequent reads from it will return its default value.
   package mutating func clearGateway() {self._gateway = nil}
 
@@ -1786,36 +1796,36 @@ package nonisolated struct Im_Actor_V1_HotDeliverySession: Sendable {
   fileprivate var _gateway: Im_Actor_V1_HotGateway? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionGrant: @unchecked Sendable {
+package struct Im_Actor_V1_HotSubscriptionGrant: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var fence: Im_Actor_V1_HotFence {
-    get {_storage._fence ?? Im_Actor_V1_HotFence()}
+    get {return _storage._fence ?? Im_Actor_V1_HotFence()}
     set {_uniqueStorage()._fence = newValue}
   }
   /// Returns true if `fence` has been explicitly set.
-  package var hasFence: Bool {_storage._fence != nil}
+  package var hasFence: Bool {return _storage._fence != nil}
   /// Clears the value of `fence`. Subsequent reads from it will return its default value.
   package mutating func clearFence() {_uniqueStorage()._fence = nil}
 
   package var memberRevision: UInt64 {
-    get {_storage._memberRevision}
+    get {return _storage._memberRevision}
     set {_uniqueStorage()._memberRevision = newValue}
   }
 
   package var baseline: UInt64 {
-    get {_storage._baseline}
+    get {return _storage._baseline}
     set {_uniqueStorage()._baseline = newValue}
   }
 
   package var session: Im_Actor_V1_HotDeliverySession {
-    get {_storage._session ?? Im_Actor_V1_HotDeliverySession()}
+    get {return _storage._session ?? Im_Actor_V1_HotDeliverySession()}
     set {_uniqueStorage()._session = newValue}
   }
   /// Returns true if `session` has been explicitly set.
-  package var hasSession: Bool {_storage._session != nil}
+  package var hasSession: Bool {return _storage._session != nil}
   /// Clears the value of `session`. Subsequent reads from it will return its default value.
   package mutating func clearSession() {_uniqueStorage()._session = nil}
 
@@ -1826,7 +1836,7 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionGrant: @unchecked Sendable
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionResult: Sendable {
+package struct Im_Actor_V1_HotSubscriptionResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1867,7 +1877,7 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionResult: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Outcome: Equatable, Sendable {
+  package enum OneOf_Outcome: Equatable, Sendable {
     case granted(Im_Actor_V1_HotSubscriptionGrant)
     case activated(Im_Actor_V1_HotEmpty)
     case unsubscribed(Im_Actor_V1_HotEmpty)
@@ -1878,7 +1888,7 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionResult: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotLogPull: Sendable {
+package struct Im_Actor_V1_HotLogPull: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1896,7 +1906,7 @@ package nonisolated struct Im_Actor_V1_HotLogPull: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotLogSubscribe: Sendable {
+package struct Im_Actor_V1_HotLogSubscribe: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1910,7 +1920,7 @@ package nonisolated struct Im_Actor_V1_HotLogSubscribe: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotLogEntry: Sendable {
+package struct Im_Actor_V1_HotLogEntry: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1928,7 +1938,7 @@ package nonisolated struct Im_Actor_V1_HotLogEntry: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotLogPage: Sendable {
+package struct Im_Actor_V1_HotLogPage: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1948,7 +1958,7 @@ package nonisolated struct Im_Actor_V1_HotLogPage: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotLogSubscription: Sendable {
+package struct Im_Actor_V1_HotLogSubscription: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -1964,7 +1974,7 @@ package nonisolated struct Im_Actor_V1_HotLogSubscription: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotRoomRequest: Sendable {
+package struct Im_Actor_V1_HotRoomRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2013,7 +2023,7 @@ package nonisolated struct Im_Actor_V1_HotRoomRequest: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Operation: Equatable, Sendable {
+  package enum OneOf_Operation: Equatable, Sendable {
     case send(Im_Actor_V1_HotSend)
     case subscription(Im_Actor_V1_HotSubscriptionCommand)
     case logPull(Im_Actor_V1_HotLogPull)
@@ -2025,7 +2035,7 @@ package nonisolated struct Im_Actor_V1_HotRoomRequest: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotRoomResponse: Sendable {
+package struct Im_Actor_V1_HotRoomResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2082,7 +2092,7 @@ package nonisolated struct Im_Actor_V1_HotRoomResponse: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Result: Equatable, Sendable {
+  package enum OneOf_Result: Equatable, Sendable {
     case send(Im_Actor_V1_HotSendResult)
     case subscription(Im_Actor_V1_HotSubscriptionResult)
     case logPage(Im_Actor_V1_HotLogPage)
@@ -2095,26 +2105,26 @@ package nonisolated struct Im_Actor_V1_HotRoomResponse: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotInvoke: Sendable {
+package struct Im_Actor_V1_HotInvoke: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var token: Im_Actor_V1_HotActivation {
-    get {_token ?? Im_Actor_V1_HotActivation()}
+    get {return _token ?? Im_Actor_V1_HotActivation()}
     set {_token = newValue}
   }
   /// Returns true if `token` has been explicitly set.
-  package var hasToken: Bool {self._token != nil}
+  package var hasToken: Bool {return self._token != nil}
   /// Clears the value of `token`. Subsequent reads from it will return its default value.
   package mutating func clearToken() {self._token = nil}
 
   package var request: Im_Actor_V1_HotRoomRequest {
-    get {_request ?? Im_Actor_V1_HotRoomRequest()}
+    get {return _request ?? Im_Actor_V1_HotRoomRequest()}
     set {_request = newValue}
   }
   /// Returns true if `request` has been explicitly set.
-  package var hasRequest: Bool {self._request != nil}
+  package var hasRequest: Bool {return self._request != nil}
   /// Clears the value of `request`. Subsequent reads from it will return its default value.
   package mutating func clearRequest() {self._request = nil}
 
@@ -2126,17 +2136,17 @@ package nonisolated struct Im_Actor_V1_HotInvoke: Sendable {
   fileprivate var _request: Im_Actor_V1_HotRoomRequest? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotReady: Sendable {
+package struct Im_Actor_V1_HotReady: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var token: Im_Actor_V1_HotActivation {
-    get {_token ?? Im_Actor_V1_HotActivation()}
+    get {return _token ?? Im_Actor_V1_HotActivation()}
     set {_token = newValue}
   }
   /// Returns true if `token` has been explicitly set.
-  package var hasToken: Bool {self._token != nil}
+  package var hasToken: Bool {return self._token != nil}
   /// Clears the value of `token`. Subsequent reads from it will return its default value.
   package mutating func clearToken() {self._token = nil}
 
@@ -2149,7 +2159,7 @@ package nonisolated struct Im_Actor_V1_HotReady: Sendable {
   fileprivate var _token: Im_Actor_V1_HotActivation? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotRPCRequest: Sendable {
+package struct Im_Actor_V1_HotRPCRequest: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2182,7 +2192,7 @@ package nonisolated struct Im_Actor_V1_HotRPCRequest: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Operation: Equatable, Sendable {
+  package enum OneOf_Operation: Equatable, Sendable {
     case invoke(Im_Actor_V1_HotInvoke)
     case lookup(Im_Actor_V1_HotActivation)
     case coldValue(Data)
@@ -2192,7 +2202,7 @@ package nonisolated struct Im_Actor_V1_HotRPCRequest: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotRPCResponse: Sendable {
+package struct Im_Actor_V1_HotRPCResponse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2241,7 +2251,7 @@ package nonisolated struct Im_Actor_V1_HotRPCResponse: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Result: Equatable, Sendable {
+  package enum OneOf_Result: Equatable, Sendable {
     case response(Im_Actor_V1_HotRoomResponse)
     case ready(Im_Actor_V1_HotReady)
     case completed(Bool)
@@ -2253,7 +2263,7 @@ package nonisolated struct Im_Actor_V1_HotRPCResponse: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotEvent: Sendable {
+package struct Im_Actor_V1_HotEvent: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2273,29 +2283,29 @@ package nonisolated struct Im_Actor_V1_HotEvent: Sendable {
   package var recipientIds: [String] = []
 
   package var groupRevision: UInt64 {
-    get {_groupRevision ?? 0}
+    get {return _groupRevision ?? 0}
     set {_groupRevision = newValue}
   }
   /// Returns true if `groupRevision` has been explicitly set.
-  package var hasGroupRevision: Bool {self._groupRevision != nil}
+  package var hasGroupRevision: Bool {return self._groupRevision != nil}
   /// Clears the value of `groupRevision`. Subsequent reads from it will return its default value.
   package mutating func clearGroupRevision() {self._groupRevision = nil}
 
   package var acceptedRevision: UInt64 {
-    get {_acceptedRevision ?? 0}
+    get {return _acceptedRevision ?? 0}
     set {_acceptedRevision = newValue}
   }
   /// Returns true if `acceptedRevision` has been explicitly set.
-  package var hasAcceptedRevision: Bool {self._acceptedRevision != nil}
+  package var hasAcceptedRevision: Bool {return self._acceptedRevision != nil}
   /// Clears the value of `acceptedRevision`. Subsequent reads from it will return its default value.
   package mutating func clearAcceptedRevision() {self._acceptedRevision = nil}
 
   package var excludedConnection: Data {
-    get {_excludedConnection ?? Data()}
+    get {return _excludedConnection ?? Data()}
     set {_excludedConnection = newValue}
   }
   /// Returns true if `excludedConnection` has been explicitly set.
-  package var hasExcludedConnection: Bool {self._excludedConnection != nil}
+  package var hasExcludedConnection: Bool {return self._excludedConnection != nil}
   /// Clears the value of `excludedConnection`. Subsequent reads from it will return its default value.
   package mutating func clearExcludedConnection() {self._excludedConnection = nil}
 
@@ -2308,7 +2318,7 @@ package nonisolated struct Im_Actor_V1_HotEvent: Sendable {
   fileprivate var _excludedConnection: Data? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotMembers: Sendable {
+package struct Im_Actor_V1_HotMembers: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2320,7 +2330,7 @@ package nonisolated struct Im_Actor_V1_HotMembers: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotBaselinePage: Sendable {
+package struct Im_Actor_V1_HotBaselinePage: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2336,17 +2346,17 @@ package nonisolated struct Im_Actor_V1_HotBaselinePage: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotGrant: Sendable {
+package struct Im_Actor_V1_HotGrant: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var member: Im_Actor_V1_HotMember {
-    get {_member ?? Im_Actor_V1_HotMember()}
+    get {return _member ?? Im_Actor_V1_HotMember()}
     set {_member = newValue}
   }
   /// Returns true if `member` has been explicitly set.
-  package var hasMember: Bool {self._member != nil}
+  package var hasMember: Bool {return self._member != nil}
   /// Clears the value of `member`. Subsequent reads from it will return its default value.
   package mutating func clearMember() {self._member = nil}
 
@@ -2359,17 +2369,17 @@ package nonisolated struct Im_Actor_V1_HotGrant: Sendable {
   fileprivate var _member: Im_Actor_V1_HotMember? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotEventMembers: Sendable {
+package struct Im_Actor_V1_HotEventMembers: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var event: Im_Actor_V1_HotEvent {
-    get {_event ?? Im_Actor_V1_HotEvent()}
+    get {return _event ?? Im_Actor_V1_HotEvent()}
     set {_event = newValue}
   }
   /// Returns true if `event` has been explicitly set.
-  package var hasEvent: Bool {self._event != nil}
+  package var hasEvent: Bool {return self._event != nil}
   /// Clears the value of `event`. Subsequent reads from it will return its default value.
   package mutating func clearEvent() {self._event = nil}
 
@@ -2382,27 +2392,27 @@ package nonisolated struct Im_Actor_V1_HotEventMembers: Sendable {
   fileprivate var _event: Im_Actor_V1_HotEvent? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionDelivery: @unchecked Sendable {
+package struct Im_Actor_V1_HotSubscriptionDelivery: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var fence: Im_Actor_V1_HotFence {
-    get {_storage._fence ?? Im_Actor_V1_HotFence()}
+    get {return _storage._fence ?? Im_Actor_V1_HotFence()}
     set {_uniqueStorage()._fence = newValue}
   }
   /// Returns true if `fence` has been explicitly set.
-  package var hasFence: Bool {_storage._fence != nil}
+  package var hasFence: Bool {return _storage._fence != nil}
   /// Clears the value of `fence`. Subsequent reads from it will return its default value.
   package mutating func clearFence() {_uniqueStorage()._fence = nil}
 
   package var deliverySequence: UInt64 {
-    get {_storage._deliverySequence}
+    get {return _storage._deliverySequence}
     set {_uniqueStorage()._deliverySequence = newValue}
   }
 
   package var authorizationSequence: UInt64 {
-    get {_storage._authorizationSequence}
+    get {return _storage._authorizationSequence}
     set {_uniqueStorage()._authorizationSequence = newValue}
   }
 
@@ -2477,7 +2487,7 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionDelivery: @unchecked Senda
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Payload: Equatable, Sendable {
+  package enum OneOf_Payload: Equatable, Sendable {
     case baseline(Im_Actor_V1_HotMembers)
     case baselinePage(Im_Actor_V1_HotBaselinePage)
     case grant(Im_Actor_V1_HotGrant)
@@ -2494,7 +2504,7 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionDelivery: @unchecked Senda
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-package nonisolated struct Im_Actor_V1_HotDeliveryResult: Sendable {
+package struct Im_Actor_V1_HotDeliveryResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2527,7 +2537,7 @@ package nonisolated struct Im_Actor_V1_HotDeliveryResult: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Result: Equatable, Sendable {
+  package enum OneOf_Result: Equatable, Sendable {
     case appliedThrough(UInt64)
     case snapshotRequired(Im_Actor_V1_HotEmpty)
     case stale(Im_Actor_V1_HotEmpty)
@@ -2537,26 +2547,26 @@ package nonisolated struct Im_Actor_V1_HotDeliveryResult: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionReceipt: Sendable {
+package struct Im_Actor_V1_HotSubscriptionReceipt: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var fence: Im_Actor_V1_HotFence {
-    get {_fence ?? Im_Actor_V1_HotFence()}
+    get {return _fence ?? Im_Actor_V1_HotFence()}
     set {_fence = newValue}
   }
   /// Returns true if `fence` has been explicitly set.
-  package var hasFence: Bool {self._fence != nil}
+  package var hasFence: Bool {return self._fence != nil}
   /// Clears the value of `fence`. Subsequent reads from it will return its default value.
   package mutating func clearFence() {self._fence = nil}
 
   package var result: Im_Actor_V1_HotDeliveryResult {
-    get {_result ?? Im_Actor_V1_HotDeliveryResult()}
+    get {return _result ?? Im_Actor_V1_HotDeliveryResult()}
     set {_result = newValue}
   }
   /// Returns true if `result` has been explicitly set.
-  package var hasResult: Bool {self._result != nil}
+  package var hasResult: Bool {return self._result != nil}
   /// Clears the value of `result`. Subsequent reads from it will return its default value.
   package mutating func clearResult() {self._result = nil}
 
@@ -2568,7 +2578,7 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionReceipt: Sendable {
   fileprivate var _result: Im_Actor_V1_HotDeliveryResult? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotDeliveryBatch: Sendable {
+package struct Im_Actor_V1_HotDeliveryBatch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2580,7 +2590,7 @@ package nonisolated struct Im_Actor_V1_HotDeliveryBatch: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotDeliveryReceipts: Sendable {
+package struct Im_Actor_V1_HotDeliveryReceipts: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2592,7 +2602,7 @@ package nonisolated struct Im_Actor_V1_HotDeliveryReceipts: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotRealtimeHeader: Sendable {
+package struct Im_Actor_V1_HotRealtimeHeader: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2604,11 +2614,11 @@ package nonisolated struct Im_Actor_V1_HotRealtimeHeader: Sendable {
   package var callerIncarnation: Data = Data()
 
   package var recipient: Im_Actor_V1_HotGateway {
-    get {_recipient ?? Im_Actor_V1_HotGateway()}
+    get {return _recipient ?? Im_Actor_V1_HotGateway()}
     set {_recipient = newValue}
   }
   /// Returns true if `recipient` has been explicitly set.
-  package var hasRecipient: Bool {self._recipient != nil}
+  package var hasRecipient: Bool {return self._recipient != nil}
   /// Clears the value of `recipient`. Subsequent reads from it will return its default value.
   package mutating func clearRecipient() {self._recipient = nil}
 
@@ -2625,28 +2635,28 @@ package nonisolated struct Im_Actor_V1_HotRealtimeHeader: Sendable {
   fileprivate var _recipient: Im_Actor_V1_HotGateway? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionCall: Sendable {
+package struct Im_Actor_V1_HotSubscriptionCall: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
   package var sourceShardID: String = String()
 
   package var delivery: Im_Actor_V1_HotSubscriptionDelivery {
-    get {_delivery ?? Im_Actor_V1_HotSubscriptionDelivery()}
+    get {return _delivery ?? Im_Actor_V1_HotSubscriptionDelivery()}
     set {_delivery = newValue}
   }
   /// Returns true if `delivery` has been explicitly set.
-  package var hasDelivery: Bool {self._delivery != nil}
+  package var hasDelivery: Bool {return self._delivery != nil}
   /// Clears the value of `delivery`. Subsequent reads from it will return its default value.
   package mutating func clearDelivery() {self._delivery = nil}
 
@@ -2658,26 +2668,26 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionCall: Sendable {
   fileprivate var _delivery: Im_Actor_V1_HotSubscriptionDelivery? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionReply: Sendable {
+package struct Im_Actor_V1_HotSubscriptionReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
   package var result: Im_Actor_V1_HotDeliveryResult {
-    get {_result ?? Im_Actor_V1_HotDeliveryResult()}
+    get {return _result ?? Im_Actor_V1_HotDeliveryResult()}
     set {_result = newValue}
   }
   /// Returns true if `result` has been explicitly set.
-  package var hasResult: Bool {self._result != nil}
+  package var hasResult: Bool {return self._result != nil}
   /// Clears the value of `result`. Subsequent reads from it will return its default value.
   package mutating func clearResult() {self._result = nil}
 
@@ -2689,28 +2699,28 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionReply: Sendable {
   fileprivate var _result: Im_Actor_V1_HotDeliveryResult? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotSubscriptionBatchCall: Sendable {
+package struct Im_Actor_V1_HotSubscriptionBatchCall: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
   package var sourceShardID: String = String()
 
   package var batch: Im_Actor_V1_HotDeliveryBatch {
-    get {_batch ?? Im_Actor_V1_HotDeliveryBatch()}
+    get {return _batch ?? Im_Actor_V1_HotDeliveryBatch()}
     set {_batch = newValue}
   }
   /// Returns true if `batch` has been explicitly set.
-  package var hasBatch: Bool {self._batch != nil}
+  package var hasBatch: Bool {return self._batch != nil}
   /// Clears the value of `batch`. Subsequent reads from it will return its default value.
   package mutating func clearBatch() {self._batch = nil}
 
@@ -2724,17 +2734,17 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionBatchCall: Sendable {
 
 /// Results follow the validated request's first-occurrence room order. The
 /// authenticated header binds them to that exact request; fences stay local.
-package nonisolated struct Im_Actor_V1_HotSubscriptionBatchReply: Sendable {
+package struct Im_Actor_V1_HotSubscriptionBatchReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
@@ -2747,7 +2757,7 @@ package nonisolated struct Im_Actor_V1_HotSubscriptionBatchReply: Sendable {
   fileprivate var _header: Im_Actor_V1_HotRealtimeHeader? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotTopic: Sendable {
+package struct Im_Actor_V1_HotTopic: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2757,11 +2767,11 @@ package nonisolated struct Im_Actor_V1_HotTopic: Sendable {
   package var id: String = String()
 
   package var owner: Im_Actor_V1_HotOwner {
-    get {_owner ?? Im_Actor_V1_HotOwner()}
+    get {return _owner ?? Im_Actor_V1_HotOwner()}
     set {_owner = newValue}
   }
   /// Returns true if `owner` has been explicitly set.
-  package var hasOwner: Bool {self._owner != nil}
+  package var hasOwner: Bool {return self._owner != nil}
   /// Clears the value of `owner`. Subsequent reads from it will return its default value.
   package mutating func clearOwner() {self._owner = nil}
 
@@ -2772,7 +2782,7 @@ package nonisolated struct Im_Actor_V1_HotTopic: Sendable {
   fileprivate var _owner: Im_Actor_V1_HotOwner? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotRoomWake: Sendable {
+package struct Im_Actor_V1_HotRoomWake: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2786,7 +2796,7 @@ package nonisolated struct Im_Actor_V1_HotRoomWake: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotUserSync: Sendable {
+package struct Im_Actor_V1_HotUserSync: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2800,7 +2810,7 @@ package nonisolated struct Im_Actor_V1_HotUserSync: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotTyping: Sendable {
+package struct Im_Actor_V1_HotTyping: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2822,7 +2832,7 @@ package nonisolated struct Im_Actor_V1_HotTyping: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotEvents: Sendable {
+package struct Im_Actor_V1_HotEvents: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2834,7 +2844,7 @@ package nonisolated struct Im_Actor_V1_HotEvents: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotRealtimePayload: Sendable {
+package struct Im_Actor_V1_HotRealtimePayload: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2883,7 +2893,7 @@ package nonisolated struct Im_Actor_V1_HotRealtimePayload: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Payload: Equatable, Sendable {
+  package enum OneOf_Payload: Equatable, Sendable {
     case roomWake(Im_Actor_V1_HotRoomWake)
     case roomEvents(Im_Actor_V1_HotEvents)
     case userSync(Im_Actor_V1_HotUserSync)
@@ -2895,17 +2905,17 @@ package nonisolated struct Im_Actor_V1_HotRealtimePayload: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotRealtimeDelivery: Sendable {
+package struct Im_Actor_V1_HotRealtimeDelivery: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var topic: Im_Actor_V1_HotTopic {
-    get {_topic ?? Im_Actor_V1_HotTopic()}
+    get {return _topic ?? Im_Actor_V1_HotTopic()}
     set {_topic = newValue}
   }
   /// Returns true if `topic` has been explicitly set.
-  package var hasTopic: Bool {self._topic != nil}
+  package var hasTopic: Bool {return self._topic != nil}
   /// Clears the value of `topic`. Subsequent reads from it will return its default value.
   package mutating func clearTopic() {self._topic = nil}
 
@@ -2920,11 +2930,11 @@ package nonisolated struct Im_Actor_V1_HotRealtimeDelivery: Sendable {
   package var gatewayIncarnation: Data = Data()
 
   package var payload: Im_Actor_V1_HotRealtimePayload {
-    get {_payload ?? Im_Actor_V1_HotRealtimePayload()}
+    get {return _payload ?? Im_Actor_V1_HotRealtimePayload()}
     set {_payload = newValue}
   }
   /// Returns true if `payload` has been explicitly set.
-  package var hasPayload: Bool {self._payload != nil}
+  package var hasPayload: Bool {return self._payload != nil}
   /// Clears the value of `payload`. Subsequent reads from it will return its default value.
   package mutating func clearPayload() {self._payload = nil}
 
@@ -2936,7 +2946,7 @@ package nonisolated struct Im_Actor_V1_HotRealtimeDelivery: Sendable {
   fileprivate var _payload: Im_Actor_V1_HotRealtimePayload? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotRealtimeBatch: Sendable {
+package struct Im_Actor_V1_HotRealtimeBatch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -2944,11 +2954,11 @@ package nonisolated struct Im_Actor_V1_HotRealtimeBatch: Sendable {
   package var batchID: Data = Data()
 
   package var recipient: Im_Actor_V1_HotGateway {
-    get {_recipient ?? Im_Actor_V1_HotGateway()}
+    get {return _recipient ?? Im_Actor_V1_HotGateway()}
     set {_recipient = newValue}
   }
   /// Returns true if `recipient` has been explicitly set.
-  package var hasRecipient: Bool {self._recipient != nil}
+  package var hasRecipient: Bool {return self._recipient != nil}
   /// Clears the value of `recipient`. Subsequent reads from it will return its default value.
   package mutating func clearRecipient() {self._recipient = nil}
 
@@ -2961,26 +2971,26 @@ package nonisolated struct Im_Actor_V1_HotRealtimeBatch: Sendable {
   fileprivate var _recipient: Im_Actor_V1_HotGateway? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotRealtimeCall: Sendable {
+package struct Im_Actor_V1_HotRealtimeCall: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
   package var batch: Im_Actor_V1_HotRealtimeBatch {
-    get {_batch ?? Im_Actor_V1_HotRealtimeBatch()}
+    get {return _batch ?? Im_Actor_V1_HotRealtimeBatch()}
     set {_batch = newValue}
   }
   /// Returns true if `batch` has been explicitly set.
-  package var hasBatch: Bool {self._batch != nil}
+  package var hasBatch: Bool {return self._batch != nil}
   /// Clears the value of `batch`. Subsequent reads from it will return its default value.
   package mutating func clearBatch() {self._batch = nil}
 
@@ -2992,17 +3002,17 @@ package nonisolated struct Im_Actor_V1_HotRealtimeCall: Sendable {
   fileprivate var _batch: Im_Actor_V1_HotRealtimeBatch? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotRealtimeReply: Sendable {
+package struct Im_Actor_V1_HotRealtimeReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
@@ -3015,7 +3025,7 @@ package nonisolated struct Im_Actor_V1_HotRealtimeReply: Sendable {
   fileprivate var _header: Im_Actor_V1_HotRealtimeHeader? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalSource: Sendable {
+package struct Im_Actor_V1_HotJournalSource: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3031,7 +3041,7 @@ package nonisolated struct Im_Actor_V1_HotJournalSource: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalFence: Sendable {
+package struct Im_Actor_V1_HotJournalFence: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3059,7 +3069,7 @@ package nonisolated struct Im_Actor_V1_HotJournalFence: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalAuthorization: Sendable {
+package struct Im_Actor_V1_HotJournalAuthorization: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3081,7 +3091,7 @@ package nonisolated struct Im_Actor_V1_HotJournalAuthorization: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalHead: Sendable {
+package struct Im_Actor_V1_HotJournalHead: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3099,7 +3109,7 @@ package nonisolated struct Im_Actor_V1_HotJournalHead: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalChange: Sendable {
+package struct Im_Actor_V1_HotJournalChange: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3107,11 +3117,11 @@ package nonisolated struct Im_Actor_V1_HotJournalChange: Sendable {
   package var kind: UInt32 = 0
 
   package var authorization: Im_Actor_V1_HotJournalAuthorization {
-    get {_authorization ?? Im_Actor_V1_HotJournalAuthorization()}
+    get {return _authorization ?? Im_Actor_V1_HotJournalAuthorization()}
     set {_authorization = newValue}
   }
   /// Returns true if `authorization` has been explicitly set.
-  package var hasAuthorization: Bool {self._authorization != nil}
+  package var hasAuthorization: Bool {return self._authorization != nil}
   /// Clears the value of `authorization`. Subsequent reads from it will return its default value.
   package mutating func clearAuthorization() {self._authorization = nil}
 
@@ -3126,20 +3136,20 @@ package nonisolated struct Im_Actor_V1_HotJournalChange: Sendable {
   package var controlVersion: UInt64 = 0
 
   package var deviceID: Data {
-    get {_deviceID ?? Data()}
+    get {return _deviceID ?? Data()}
     set {_deviceID = newValue}
   }
   /// Returns true if `deviceID` has been explicitly set.
-  package var hasDeviceID: Bool {self._deviceID != nil}
+  package var hasDeviceID: Bool {return self._deviceID != nil}
   /// Clears the value of `deviceID`. Subsequent reads from it will return its default value.
   package mutating func clearDeviceID() {self._deviceID = nil}
 
   package var membershipRoomID: String {
-    get {_membershipRoomID ?? String()}
+    get {return _membershipRoomID ?? String()}
     set {_membershipRoomID = newValue}
   }
   /// Returns true if `membershipRoomID` has been explicitly set.
-  package var hasMembershipRoomID: Bool {self._membershipRoomID != nil}
+  package var hasMembershipRoomID: Bool {return self._membershipRoomID != nil}
   /// Clears the value of `membershipRoomID`. Subsequent reads from it will return its default value.
   package mutating func clearMembershipRoomID() {self._membershipRoomID = nil}
 
@@ -3152,7 +3162,7 @@ package nonisolated struct Im_Actor_V1_HotJournalChange: Sendable {
   fileprivate var _membershipRoomID: String? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalEntry: Sendable {
+package struct Im_Actor_V1_HotJournalEntry: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3160,11 +3170,11 @@ package nonisolated struct Im_Actor_V1_HotJournalEntry: Sendable {
   package var sequence: Int64 = 0
 
   package var change: Im_Actor_V1_HotJournalChange {
-    get {_change ?? Im_Actor_V1_HotJournalChange()}
+    get {return _change ?? Im_Actor_V1_HotJournalChange()}
     set {_change = newValue}
   }
   /// Returns true if `change` has been explicitly set.
-  package var hasChange: Bool {self._change != nil}
+  package var hasChange: Bool {return self._change != nil}
   /// Clears the value of `change`. Subsequent reads from it will return its default value.
   package mutating func clearChange() {self._change = nil}
 
@@ -3175,7 +3185,7 @@ package nonisolated struct Im_Actor_V1_HotJournalEntry: Sendable {
   fileprivate var _change: Im_Actor_V1_HotJournalChange? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalChanges: Sendable {
+package struct Im_Actor_V1_HotJournalChanges: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3191,7 +3201,7 @@ package nonisolated struct Im_Actor_V1_HotJournalChanges: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalSnapshot: Sendable {
+package struct Im_Actor_V1_HotJournalSnapshot: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3205,7 +3215,7 @@ package nonisolated struct Im_Actor_V1_HotJournalSnapshot: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalHeads: Sendable {
+package struct Im_Actor_V1_HotJournalHeads: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3217,7 +3227,7 @@ package nonisolated struct Im_Actor_V1_HotJournalHeads: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalBatch: Sendable {
+package struct Im_Actor_V1_HotJournalBatch: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3225,20 +3235,20 @@ package nonisolated struct Im_Actor_V1_HotJournalBatch: Sendable {
   package var batchID: Data = Data()
 
   package var source: Im_Actor_V1_HotJournalSource {
-    get {_source ?? Im_Actor_V1_HotJournalSource()}
+    get {return _source ?? Im_Actor_V1_HotJournalSource()}
     set {_source = newValue}
   }
   /// Returns true if `source` has been explicitly set.
-  package var hasSource: Bool {self._source != nil}
+  package var hasSource: Bool {return self._source != nil}
   /// Clears the value of `source`. Subsequent reads from it will return its default value.
   package mutating func clearSource() {self._source = nil}
 
   package var fence: Im_Actor_V1_HotJournalFence {
-    get {_fence ?? Im_Actor_V1_HotJournalFence()}
+    get {return _fence ?? Im_Actor_V1_HotJournalFence()}
     set {_fence = newValue}
   }
   /// Returns true if `fence` has been explicitly set.
-  package var hasFence: Bool {self._fence != nil}
+  package var hasFence: Bool {return self._fence != nil}
   /// Clears the value of `fence`. Subsequent reads from it will return its default value.
   package mutating func clearFence() {self._fence = nil}
 
@@ -3278,7 +3288,7 @@ package nonisolated struct Im_Actor_V1_HotJournalBatch: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Payload: Equatable, Sendable {
+  package enum OneOf_Payload: Equatable, Sendable {
     case baseline(Int64)
     case changes(Im_Actor_V1_HotJournalChanges)
     case snapshot(Im_Actor_V1_HotJournalSnapshot)
@@ -3292,7 +3302,7 @@ package nonisolated struct Im_Actor_V1_HotJournalBatch: Sendable {
   fileprivate var _fence: Im_Actor_V1_HotJournalFence? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalApplied: Sendable {
+package struct Im_Actor_V1_HotJournalApplied: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3300,20 +3310,20 @@ package nonisolated struct Im_Actor_V1_HotJournalApplied: Sendable {
   package var batchID: Data = Data()
 
   package var source: Im_Actor_V1_HotJournalSource {
-    get {_source ?? Im_Actor_V1_HotJournalSource()}
+    get {return _source ?? Im_Actor_V1_HotJournalSource()}
     set {_source = newValue}
   }
   /// Returns true if `source` has been explicitly set.
-  package var hasSource: Bool {self._source != nil}
+  package var hasSource: Bool {return self._source != nil}
   /// Clears the value of `source`. Subsequent reads from it will return its default value.
   package mutating func clearSource() {self._source = nil}
 
   package var fence: Im_Actor_V1_HotJournalFence {
-    get {_fence ?? Im_Actor_V1_HotJournalFence()}
+    get {return _fence ?? Im_Actor_V1_HotJournalFence()}
     set {_fence = newValue}
   }
   /// Returns true if `fence` has been explicitly set.
-  package var hasFence: Bool {self._fence != nil}
+  package var hasFence: Bool {return self._fence != nil}
   /// Clears the value of `fence`. Subsequent reads from it will return its default value.
   package mutating func clearFence() {self._fence = nil}
 
@@ -3329,7 +3339,7 @@ package nonisolated struct Im_Actor_V1_HotJournalApplied: Sendable {
   fileprivate var _fence: Im_Actor_V1_HotJournalFence? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalResult: Sendable {
+package struct Im_Actor_V1_HotJournalResult: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3386,7 +3396,7 @@ package nonisolated struct Im_Actor_V1_HotJournalResult: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Result: Equatable, Sendable {
+  package enum OneOf_Result: Equatable, Sendable {
     case applied(Im_Actor_V1_HotJournalApplied)
     case headsApplied(Im_Actor_V1_HotJournalApplied)
     case stale(Im_Actor_V1_HotEmpty)
@@ -3399,26 +3409,26 @@ package nonisolated struct Im_Actor_V1_HotJournalResult: Sendable {
   package init() {}
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalCall: @unchecked Sendable {
+package struct Im_Actor_V1_HotJournalCall: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_uniqueStorage()._header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {_storage._header != nil}
+  package var hasHeader: Bool {return _storage._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {_uniqueStorage()._header = nil}
 
   package var batch: Im_Actor_V1_HotJournalBatch {
-    get {_storage._batch ?? Im_Actor_V1_HotJournalBatch()}
+    get {return _storage._batch ?? Im_Actor_V1_HotJournalBatch()}
     set {_uniqueStorage()._batch = newValue}
   }
   /// Returns true if `batch` has been explicitly set.
-  package var hasBatch: Bool {_storage._batch != nil}
+  package var hasBatch: Bool {return _storage._batch != nil}
   /// Clears the value of `batch`. Subsequent reads from it will return its default value.
   package mutating func clearBatch() {_uniqueStorage()._batch = nil}
 
@@ -3429,26 +3439,26 @@ package nonisolated struct Im_Actor_V1_HotJournalCall: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-package nonisolated struct Im_Actor_V1_HotJournalReply: @unchecked Sendable {
+package struct Im_Actor_V1_HotJournalReply: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_uniqueStorage()._header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {_storage._header != nil}
+  package var hasHeader: Bool {return _storage._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {_uniqueStorage()._header = nil}
 
   package var result: Im_Actor_V1_HotJournalResult {
-    get {_storage._result ?? Im_Actor_V1_HotJournalResult()}
+    get {return _storage._result ?? Im_Actor_V1_HotJournalResult()}
     set {_uniqueStorage()._result = newValue}
   }
   /// Returns true if `result` has been explicitly set.
-  package var hasResult: Bool {_storage._result != nil}
+  package var hasResult: Bool {return _storage._result != nil}
   /// Clears the value of `result`. Subsequent reads from it will return its default value.
   package mutating func clearResult() {_uniqueStorage()._result = nil}
 
@@ -3459,7 +3469,7 @@ package nonisolated struct Im_Actor_V1_HotJournalReply: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-package nonisolated struct Im_Actor_V1_HotShardToken: Sendable {
+package struct Im_Actor_V1_HotShardToken: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
@@ -3467,11 +3477,11 @@ package nonisolated struct Im_Actor_V1_HotShardToken: Sendable {
   package var partitionID: Int64 = 0
 
   package var host: Im_Actor_V1_HotGateway {
-    get {_host ?? Im_Actor_V1_HotGateway()}
+    get {return _host ?? Im_Actor_V1_HotGateway()}
     set {_host = newValue}
   }
   /// Returns true if `host` has been explicitly set.
-  package var hasHost: Bool {self._host != nil}
+  package var hasHost: Bool {return self._host != nil}
   /// Clears the value of `host`. Subsequent reads from it will return its default value.
   package mutating func clearHost() {self._host = nil}
 
@@ -3486,35 +3496,35 @@ package nonisolated struct Im_Actor_V1_HotShardToken: Sendable {
   fileprivate var _host: Im_Actor_V1_HotGateway? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotPublish: Sendable {
+package struct Im_Actor_V1_HotPublish: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var token: Im_Actor_V1_HotShardToken {
-    get {_token ?? Im_Actor_V1_HotShardToken()}
+    get {return _token ?? Im_Actor_V1_HotShardToken()}
     set {_token = newValue}
   }
   /// Returns true if `token` has been explicitly set.
-  package var hasToken: Bool {self._token != nil}
+  package var hasToken: Bool {return self._token != nil}
   /// Clears the value of `token`. Subsequent reads from it will return its default value.
   package mutating func clearToken() {self._token = nil}
 
   package var topic: Im_Actor_V1_HotTopic {
-    get {_topic ?? Im_Actor_V1_HotTopic()}
+    get {return _topic ?? Im_Actor_V1_HotTopic()}
     set {_topic = newValue}
   }
   /// Returns true if `topic` has been explicitly set.
-  package var hasTopic: Bool {self._topic != nil}
+  package var hasTopic: Bool {return self._topic != nil}
   /// Clears the value of `topic`. Subsequent reads from it will return its default value.
   package mutating func clearTopic() {self._topic = nil}
 
   package var payload: Im_Actor_V1_HotRealtimePayload {
-    get {_payload ?? Im_Actor_V1_HotRealtimePayload()}
+    get {return _payload ?? Im_Actor_V1_HotRealtimePayload()}
     set {_payload = newValue}
   }
   /// Returns true if `payload` has been explicitly set.
-  package var hasPayload: Bool {self._payload != nil}
+  package var hasPayload: Bool {return self._payload != nil}
   /// Clears the value of `payload`. Subsequent reads from it will return its default value.
   package mutating func clearPayload() {self._payload = nil}
 
@@ -3527,17 +3537,17 @@ package nonisolated struct Im_Actor_V1_HotPublish: Sendable {
   fileprivate var _payload: Im_Actor_V1_HotRealtimePayload? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotShardCall: @unchecked Sendable {
+package struct Im_Actor_V1_HotShardCall: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_uniqueStorage()._header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {_storage._header != nil}
+  package var hasHeader: Bool {return _storage._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {_uniqueStorage()._header = nil}
 
@@ -3564,7 +3574,7 @@ package nonisolated struct Im_Actor_V1_HotShardCall: @unchecked Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Operation: Equatable, Sendable {
+  package enum OneOf_Operation: Equatable, Sendable {
     case publish(Im_Actor_V1_HotPublish)
     case coldControl(Data)
 
@@ -3575,17 +3585,17 @@ package nonisolated struct Im_Actor_V1_HotShardCall: @unchecked Sendable {
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-package nonisolated struct Im_Actor_V1_HotShardReply: Sendable {
+package struct Im_Actor_V1_HotShardReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
@@ -3609,7 +3619,7 @@ package nonisolated struct Im_Actor_V1_HotShardReply: Sendable {
 
   package var unknownFields = SwiftProtobuf.UnknownStorage()
 
-  package nonisolated enum OneOf_Result: Equatable, Sendable {
+  package enum OneOf_Result: Equatable, Sendable {
     case publish(String)
     case coldControl(Data)
 
@@ -3620,17 +3630,17 @@ package nonisolated struct Im_Actor_V1_HotShardReply: Sendable {
   fileprivate var _header: Im_Actor_V1_HotRealtimeHeader? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotDeliverySessionPulse: Sendable {
+package struct Im_Actor_V1_HotDeliverySessionPulse: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var session: Im_Actor_V1_HotDeliverySession {
-    get {_session ?? Im_Actor_V1_HotDeliverySession()}
+    get {return _session ?? Im_Actor_V1_HotDeliverySession()}
     set {_session = newValue}
   }
   /// Returns true if `session` has been explicitly set.
-  package var hasSession: Bool {self._session != nil}
+  package var hasSession: Bool {return self._session != nil}
   /// Clears the value of `session`. Subsequent reads from it will return its default value.
   package mutating func clearSession() {self._session = nil}
 
@@ -3645,36 +3655,36 @@ package nonisolated struct Im_Actor_V1_HotDeliverySessionPulse: Sendable {
   fileprivate var _session: Im_Actor_V1_HotDeliverySession? = nil
 }
 
-package nonisolated struct Im_Actor_V1_HotDeliverySessionCall: @unchecked Sendable {
+package struct Im_Actor_V1_HotDeliverySessionCall: @unchecked Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _storage._header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_uniqueStorage()._header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {_storage._header != nil}
+  package var hasHeader: Bool {return _storage._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {_uniqueStorage()._header = nil}
 
   package var sourceShardID: String {
-    get {_storage._sourceShardID}
+    get {return _storage._sourceShardID}
     set {_uniqueStorage()._sourceShardID = newValue}
   }
 
   package var pulse: Im_Actor_V1_HotDeliverySessionPulse {
-    get {_storage._pulse ?? Im_Actor_V1_HotDeliverySessionPulse()}
+    get {return _storage._pulse ?? Im_Actor_V1_HotDeliverySessionPulse()}
     set {_uniqueStorage()._pulse = newValue}
   }
   /// Returns true if `pulse` has been explicitly set.
-  package var hasPulse: Bool {_storage._pulse != nil}
+  package var hasPulse: Bool {return _storage._pulse != nil}
   /// Clears the value of `pulse`. Subsequent reads from it will return its default value.
   package mutating func clearPulse() {_uniqueStorage()._pulse = nil}
 
   package var sourceNode: Data {
-    get {_storage._sourceNode}
+    get {return _storage._sourceNode}
     set {_uniqueStorage()._sourceNode = newValue}
   }
 
@@ -3685,17 +3695,17 @@ package nonisolated struct Im_Actor_V1_HotDeliverySessionCall: @unchecked Sendab
   fileprivate var _storage = _StorageClass.defaultInstance
 }
 
-package nonisolated struct Im_Actor_V1_HotDeliverySessionReply: Sendable {
+package struct Im_Actor_V1_HotDeliverySessionReply: Sendable {
   // SwiftProtobuf.Message conformance is added in an extension below. See the
   // `Message` and `Message+*Additions` files in the SwiftProtobuf library for
   // methods supported on all messages.
 
   package var header: Im_Actor_V1_HotRealtimeHeader {
-    get {_header ?? Im_Actor_V1_HotRealtimeHeader()}
+    get {return _header ?? Im_Actor_V1_HotRealtimeHeader()}
     set {_header = newValue}
   }
   /// Returns true if `header` has been explicitly set.
-  package var hasHeader: Bool {self._header != nil}
+  package var hasHeader: Bool {return self._header != nil}
   /// Clears the value of `header`. Subsequent reads from it will return its default value.
   package mutating func clearHeader() {self._header = nil}
 
@@ -3710,9 +3720,9 @@ package nonisolated struct Im_Actor_V1_HotDeliverySessionReply: Sendable {
 
 // MARK: - Code below here is support for the SwiftProtobuf runtime.
 
-fileprivate nonisolated let _protobuf_package = "im.actor.v1"
+fileprivate let _protobuf_package = "im.actor.v1"
 
-nonisolated extension Im_Actor_V1_PlacementOwner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementOwner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementOwner"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}host\0\u{1}epoch\0")
 
@@ -3751,7 +3761,7 @@ nonisolated extension Im_Actor_V1_PlacementOwner: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementTransfer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementTransfer: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementTransfer"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}id\0\u{1}successor\0")
 
@@ -3790,7 +3800,7 @@ nonisolated extension Im_Actor_V1_PlacementTransfer: SwiftProtobuf.Message, Swif
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementSlot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementSlot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementSlot"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}owner\0\u{1}transfer\0\u{1}retired\0")
 
@@ -3834,7 +3844,7 @@ nonisolated extension Im_Actor_V1_PlacementSlot: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementHostRegistration: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementHostRegistration: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementHostRegistration"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}host\0\u{1}retired\0")
 
@@ -3873,9 +3883,9 @@ nonisolated extension Im_Actor_V1_PlacementHostRegistration: SwiftProtobuf.Messa
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementSnapshot"
-  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cluster_id\0\u{1}revision\0\u{1}slots\0\u{1}hosts\0")
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}cluster_id\0\u{1}revision\0\u{1}slots\0\u{1}hosts\0\u{3}service_membership\0")
 
   package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3887,6 +3897,7 @@ nonisolated extension Im_Actor_V1_PlacementSnapshot: SwiftProtobuf.Message, Swif
       case 2: try { try decoder.decodeSingularUInt64Field(value: &self.revision) }()
       case 3: try { try decoder.decodeRepeatedMessageField(value: &self.slots) }()
       case 4: try { try decoder.decodeRepeatedMessageField(value: &self.hosts) }()
+      case 5: try { try decoder.decodeSingularBytesField(value: &self.serviceMembership) }()
       default: break
       }
     }
@@ -3905,6 +3916,9 @@ nonisolated extension Im_Actor_V1_PlacementSnapshot: SwiftProtobuf.Message, Swif
     if !self.hosts.isEmpty {
       try visitor.visitRepeatedMessageField(value: self.hosts, fieldNumber: 4)
     }
+    if !self.serviceMembership.isEmpty {
+      try visitor.visitSingularBytesField(value: self.serviceMembership, fieldNumber: 5)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3913,14 +3927,15 @@ nonisolated extension Im_Actor_V1_PlacementSnapshot: SwiftProtobuf.Message, Swif
     if lhs.revision != rhs.revision {return false}
     if lhs.slots != rhs.slots {return false}
     if lhs.hosts != rhs.hosts {return false}
+    if lhs.serviceMembership != rhs.serviceMembership {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementCommand"
-  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}partition\0\u{1}expected\0\u{1}transfer\0\u{3}transfer_id\0\u{3}previous_host\0\u{3}successor_host\0")
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}partition\0\u{1}expected\0\u{1}transfer\0\u{3}transfer_id\0\u{3}previous_host\0\u{3}successor_host\0\u{3}admitted_host_id\0\u{3}service_membership\0")
 
   package mutating func decodeMessage<D: SwiftProtobuf.Decoder>(decoder: inout D) throws {
     while let fieldNumber = try decoder.nextFieldNumber() {
@@ -3935,6 +3950,8 @@ nonisolated extension Im_Actor_V1_PlacementCommand: SwiftProtobuf.Message, Swift
       case 5: try { try decoder.decodeSingularBytesField(value: &self.transferID) }()
       case 6: try { try decoder.decodeSingularMessageField(value: &self._previousHost) }()
       case 7: try { try decoder.decodeSingularMessageField(value: &self._successorHost) }()
+      case 8: try { try decoder.decodeSingularStringField(value: &self.admittedHostID) }()
+      case 9: try { try decoder.decodeSingularBytesField(value: &self.serviceMembership) }()
       default: break
       }
     }
@@ -3966,6 +3983,12 @@ nonisolated extension Im_Actor_V1_PlacementCommand: SwiftProtobuf.Message, Swift
     try { if let v = self._successorHost {
       try visitor.visitSingularMessageField(value: v, fieldNumber: 7)
     } }()
+    if !self.admittedHostID.isEmpty {
+      try visitor.visitSingularStringField(value: self.admittedHostID, fieldNumber: 8)
+    }
+    if !self.serviceMembership.isEmpty {
+      try visitor.visitSingularBytesField(value: self.serviceMembership, fieldNumber: 9)
+    }
     try unknownFields.traverse(visitor: &visitor)
   }
 
@@ -3977,16 +4000,18 @@ nonisolated extension Im_Actor_V1_PlacementCommand: SwiftProtobuf.Message, Swift
     if lhs.transferID != rhs.transferID {return false}
     if lhs._previousHost != rhs._previousHost {return false}
     if lhs._successorHost != rhs._successorHost {return false}
+    if lhs.admittedHostID != rhs.admittedHostID {return false}
+    if lhs.serviceMembership != rhs.serviceMembership {return false}
     if lhs.unknownFields != rhs.unknownFields {return false}
     return true
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementCommand.Kind: SwiftProtobuf._ProtoNameProviding {
-  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0UNSPECIFIED\0\u{1}BEGIN_TRANSFER\0\u{1}COMPLETE_TRANSFER\0\u{1}CANCEL_TRANSFER\0\u{1}RETIRE_HOST\0\u{1}REGISTER_HOST\0")
+extension Im_Actor_V1_PlacementCommand.Kind: SwiftProtobuf._ProtoNameProviding {
+  package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0UNSPECIFIED\0\u{1}BEGIN_TRANSFER\0\u{1}COMPLETE_TRANSFER\0\u{1}CANCEL_TRANSFER\0\u{1}RETIRE_HOST\0\u{1}REGISTER_HOST\0\u{1}ADMIT_HOST\0\u{1}INSTALL_SERVICE_MEMBERSHIP\0")
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftOperation"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}bootstrap_snapshot\0\u{3}request_id\0\u{3}expected_snapshot\0\u{1}command\0\u{3}origin_revision\0")
 
@@ -4036,7 +4061,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftOperation: SwiftProtobuf.Message,
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftCheckpointReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftCheckpointReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftCheckpointReceipt"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}request_id\0\u{1}command\0\u{1}revision\0\u{3}origin_revision\0")
 
@@ -4081,7 +4106,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftCheckpointReceipt: SwiftProtobuf.
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftApplicationCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftApplicationCheckpoint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftApplicationCheckpoint"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{3}applied_index\0\u{3}genesis_snapshot\0\u{1}receipts\0\u{3}bootstrap_digest\0\u{3}pinned_receipts\0")
 
@@ -4136,7 +4161,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftApplicationCheckpoint: SwiftProto
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftEntry"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}term\0\u{1}payload\0")
 
@@ -4171,7 +4196,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftEntry: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftState: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftState"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{3}voter_ids\0\u{3}current_term\0\u{3}voted_for\0\u{1}entries\0\u{3}commit_index\0\u{3}local_voter_id\0\u{3}snapshot_index\0\u{3}snapshot_term\0\u{3}application_checkpoint\0")
 
@@ -4250,7 +4275,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftState: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftVoteRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftVoteRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftVoteRequest"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}candidate\0\u{1}term\0\u{3}last_index\0\u{3}last_term\0")
 
@@ -4300,7 +4325,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftVoteRequest: SwiftProtobuf.Messag
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftVoteReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftVoteReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftVoteReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}term\0\u{1}granted\0")
 
@@ -4340,7 +4365,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftVoteReply: SwiftProtobuf.Message,
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftAppendRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftAppendRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftAppendRequest"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}leader\0\u{1}term\0\u{3}previous_index\0\u{3}previous_term\0\u{1}entries\0\u{3}leader_commit\0\u{3}read_id\0")
 
@@ -4405,7 +4430,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftAppendRequest: SwiftProtobuf.Mess
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftAppendReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftAppendReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftAppendReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}term\0\u{1}accepted\0\u{3}matched_index\0\u{3}read_id\0")
 
@@ -4455,7 +4480,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftAppendReply: SwiftProtobuf.Messag
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementDrainCertificate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementDrainCertificate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementDrainCertificate"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{3}group_id\0\u{3}shard_id\0\u{1}host\0\u{1}partition\0\u{1}epoch\0\u{3}transfer_id\0\u{3}registration_previous\0\u{3}registration_request_id\0\u{3}exclusion_request_id\0")
 
@@ -4534,11 +4559,11 @@ nonisolated extension Im_Actor_V1_PlacementDrainCertificate: SwiftProtobuf.Messa
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementDrainCertificate.Kind: SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementDrainCertificate.Kind: SwiftProtobuf._ProtoNameProviding {
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{2}\0UNSPECIFIED\0\u{1}PARTITION\0\u{1}HOST\0\u{1}EXCLUDED_HOST\0")
 }
 
-nonisolated extension Im_Actor_V1_PlacementSignedCertificate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementSignedCertificate: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementSignedCertificate"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}signer_id\0\u{1}body\0\u{1}signature\0")
 
@@ -4578,7 +4603,7 @@ nonisolated extension Im_Actor_V1_PlacementSignedCertificate: SwiftProtobuf.Mess
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftWriteRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftWriteRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftWriteRequest"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}operation\0\u{1}evidence\0")
 
@@ -4617,7 +4642,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftWriteRequest: SwiftProtobuf.Messa
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftWriteReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftWriteReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftWriteReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}snapshot\0\u{3}leader_hint\0\u{1}rejection\0")
 
@@ -4662,7 +4687,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftWriteReply: SwiftProtobuf.Message
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftReadRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftReadRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftReadRequest"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{3}include_archive_usage\0")
 
@@ -4697,7 +4722,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftReadRequest: SwiftProtobuf.Messag
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftArchiveUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftArchiveUsage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftArchiveUsage"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}receipts\0\u{1}bytes\0\u{3}reserved_receipts\0\u{3}reserved_bytes\0")
 
@@ -4742,7 +4767,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftArchiveUsage: SwiftProtobuf.Messa
   }
 }
 
-nonisolated extension Im_Actor_V1_RoomHostRecoveryOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_RoomHostRecoveryOperation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".RoomHostRecoveryOperation"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}incarnation_id\0\u{3}operation_id\0\u{1}completed\0")
 
@@ -4787,7 +4812,7 @@ nonisolated extension Im_Actor_V1_RoomHostRecoveryOperation: SwiftProtobuf.Messa
   }
 }
 
-nonisolated extension Im_Actor_V1_RoomHostRecoveryJournal: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_RoomHostRecoveryJournal: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".RoomHostRecoveryJournal"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}supervisor_id\0\u{3}host_ids\0\u{1}operations\0")
 
@@ -4832,7 +4857,7 @@ nonisolated extension Im_Actor_V1_RoomHostRecoveryJournal: SwiftProtobuf.Message
   }
 }
 
-nonisolated extension Im_Actor_V1_RoomHostRecoveryJournalFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_RoomHostRecoveryJournalFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".RoomHostRecoveryJournalFile"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}journal\0\u{1}sha256\0")
 
@@ -4867,7 +4892,7 @@ nonisolated extension Im_Actor_V1_RoomHostRecoveryJournalFile: SwiftProtobuf.Mes
   }
 }
 
-nonisolated extension Im_Actor_V1_DockerRoomHostBinding: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_DockerRoomHostBinding: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostBinding"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}incarnation_id\0\u{3}container_id\0\u{3}started_at\0")
 
@@ -4912,7 +4937,7 @@ nonisolated extension Im_Actor_V1_DockerRoomHostBinding: SwiftProtobuf.Message, 
   }
 }
 
-nonisolated extension Im_Actor_V1_DockerRoomHostInventory: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_DockerRoomHostInventory: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostInventory"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}supervisor_id\0\u{3}daemon_id\0\u{3}socket_path\0\u{3}host_ids\0\u{1}bindings\0")
 
@@ -4967,7 +4992,7 @@ nonisolated extension Im_Actor_V1_DockerRoomHostInventory: SwiftProtobuf.Message
   }
 }
 
-nonisolated extension Im_Actor_V1_DockerRoomHostInventoryFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_DockerRoomHostInventoryFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostInventoryFile"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}inventory\0\u{1}sha256\0")
 
@@ -5002,7 +5027,7 @@ nonisolated extension Im_Actor_V1_DockerRoomHostInventoryFile: SwiftProtobuf.Mes
   }
 }
 
-nonisolated extension Im_Actor_V1_RoomHostStartupHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_RoomHostStartupHello: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".RoomHostStartupHello"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}incarnation_id\0\u{3}launch_token\0\u{3}supervisor_id\0\u{3}service_id\0\u{3}process_id\0")
 
@@ -5057,7 +5082,7 @@ nonisolated extension Im_Actor_V1_RoomHostStartupHello: SwiftProtobuf.Message, S
   }
 }
 
-nonisolated extension Im_Actor_V1_RoomHostStartupRelease: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_RoomHostStartupRelease: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".RoomHostStartupRelease"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}hello_sha256\0\u{3}supervisor_id\0")
 
@@ -5092,7 +5117,7 @@ nonisolated extension Im_Actor_V1_RoomHostStartupRelease: SwiftProtobuf.Message,
   }
 }
 
-nonisolated extension Im_Actor_V1_DockerRoomHostLaunch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_DockerRoomHostLaunch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostLaunch"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}supervisor_id\0\u{3}daemon_id\0\u{3}socket_path\0\u{3}host_id\0\u{3}service_id\0\u{3}gate_directory\0\u{3}launch_token\0\u{3}create_request\0\u{3}container_id\0\u{3}started_at\0\u{3}incarnation_id\0\u{1}released\0")
 
@@ -5182,7 +5207,7 @@ nonisolated extension Im_Actor_V1_DockerRoomHostLaunch: SwiftProtobuf.Message, S
   }
 }
 
-nonisolated extension Im_Actor_V1_DockerRoomHostLaunchFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_DockerRoomHostLaunchFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".DockerRoomHostLaunchFile"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}launch\0\u{1}sha256\0")
 
@@ -5217,7 +5242,7 @@ nonisolated extension Im_Actor_V1_DockerRoomHostLaunchFile: SwiftProtobuf.Messag
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftReadReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftReadReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftReadReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}snapshot\0\u{3}leader_hint\0\u{3}archive_usage\0")
 
@@ -5266,7 +5291,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftReadReply: SwiftProtobuf.Message,
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftSnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftSnapshotChunk: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftSnapshotChunk"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}leader\0\u{1}term\0\u{3}transfer_id\0\u{3}snapshot_index\0\u{3}snapshot_term\0\u{1}digest\0\u{3}total_bytes\0\u{1}offset\0\u{1}chunk\0")
 
@@ -5341,7 +5366,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftSnapshotChunk: SwiftProtobuf.Mess
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftSnapshotReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftSnapshotReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftSnapshotReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}group_id\0\u{1}term\0\u{3}transfer_id\0\u{3}snapshot_index\0\u{1}accepted\0\u{3}next_offset\0\u{1}installed\0")
 
@@ -5401,7 +5426,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftSnapshotReply: SwiftProtobuf.Mess
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftRequest"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}vote\0\u{1}append\0\u{1}snapshot\0")
 
@@ -5485,7 +5510,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftRequest: SwiftProtobuf.Message, S
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}vote\0\u{1}append\0\u{1}snapshot\0")
 
@@ -5569,7 +5594,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftReply: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_PlacementRaftFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_PlacementRaftFile: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".PlacementRaftFile"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}format\0\u{1}state\0\u{1}digest\0")
 
@@ -5609,7 +5634,7 @@ nonisolated extension Im_Actor_V1_PlacementRaftFile: SwiftProtobuf.Message, Swif
   }
 }
 
-nonisolated extension Im_Actor_V1_Value: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_Value: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".Value"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}null_value\0\u{3}bool_value\0\u{3}signed_value\0\u{3}unsigned_value\0\u{3}double_value\0\u{3}string_value\0\u{3}bytes_value\0\u{3}object_value\0\u{3}array_value\0")
 
@@ -5760,7 +5785,7 @@ nonisolated extension Im_Actor_V1_Value: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
-nonisolated extension Im_Actor_V1_Field: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_Field: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".Field"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}name\0\u{1}value\0")
 
@@ -5799,7 +5824,7 @@ nonisolated extension Im_Actor_V1_Field: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
-nonisolated extension Im_Actor_V1_Object: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_Object: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".Object"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}fields\0")
 
@@ -5829,7 +5854,7 @@ nonisolated extension Im_Actor_V1_Object: SwiftProtobuf.Message, SwiftProtobuf._
   }
 }
 
-nonisolated extension Im_Actor_V1_Array: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_Array: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".Array"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}values\0")
 
@@ -5859,7 +5884,7 @@ nonisolated extension Im_Actor_V1_Array: SwiftProtobuf.Message, SwiftProtobuf._M
   }
 }
 
-nonisolated extension Im_Actor_V1_HostIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HostIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HostIdentity"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}host_id\0\u{3}incarnation_id\0")
 
@@ -5894,7 +5919,7 @@ nonisolated extension Im_Actor_V1_HostIdentity: SwiftProtobuf.Message, SwiftProt
   }
 }
 
-nonisolated extension Im_Actor_V1_AuthenticatedCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_AuthenticatedCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".AuthenticatedCall"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{3}service_id\0\u{3}caller_incarnation\0\u{1}recipient\0\u{3}session_id\0\u{1}sequence\0\u{3}attempt_id\0\u{3}trace_id\0\u{3}remaining_budget_ms\0\u{3}user_id\0\u{1}service\0\u{3}request_body\0")
 
@@ -6001,7 +6026,7 @@ nonisolated extension Im_Actor_V1_AuthenticatedCall: SwiftProtobuf.Message, Swif
   }
 }
 
-nonisolated extension Im_Actor_V1_AuthenticatedReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_AuthenticatedReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".AuthenticatedReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{1}host\0\u{3}session_id\0\u{1}sequence\0\u{3}attempt_id\0\u{3}response_body\0")
 
@@ -6060,7 +6085,7 @@ nonisolated extension Im_Actor_V1_AuthenticatedReply: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_HotEmpty: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotEmpty: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotEmpty"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap()
 
@@ -6079,7 +6104,7 @@ nonisolated extension Im_Actor_V1_HotEmpty: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotOwner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotOwner: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotOwner"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}shard_id\0\u{1}epoch\0")
 
@@ -6114,7 +6139,7 @@ nonisolated extension Im_Actor_V1_HotOwner: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotActivation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotActivation: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotActivation"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}owner\0\u{3}activation_epoch\0\u{1}host\0")
 
@@ -6163,7 +6188,7 @@ nonisolated extension Im_Actor_V1_HotActivation: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-nonisolated extension Im_Actor_V1_HotGateway: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotGateway: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotGateway"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}node_id\0\u{3}service_id\0\u{3}incarnation_id\0")
 
@@ -6203,7 +6228,7 @@ nonisolated extension Im_Actor_V1_HotGateway: SwiftProtobuf.Message, SwiftProtob
   }
 }
 
-nonisolated extension Im_Actor_V1_HotGatewayDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotGatewayDescriptor: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotGatewayDescriptor"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{3}endpoint_reference\0\u{1}address\0\u{1}port\0")
 
@@ -6252,7 +6277,7 @@ nonisolated extension Im_Actor_V1_HotGatewayDescriptor: SwiftProtobuf.Message, S
   }
 }
 
-nonisolated extension Im_Actor_V1_HotFence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotFence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotFence"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}activation\0\u{3}subscription_id\0\u{1}generation\0\u{3}baseline_sequence\0")
 
@@ -6301,7 +6326,7 @@ nonisolated extension Im_Actor_V1_HotFence: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotMember: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotMember"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}revision\0")
 
@@ -6336,7 +6361,7 @@ nonisolated extension Im_Actor_V1_HotMember: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-nonisolated extension Im_Actor_V1_HotMention: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotMention: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotMention"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}everyone\0")
 
@@ -6393,7 +6418,7 @@ nonisolated extension Im_Actor_V1_HotMention: SwiftProtobuf.Message, SwiftProtob
   }
 }
 
-nonisolated extension Im_Actor_V1_HotEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotEntity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotEntity"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}offset\0\u{1}length\0\u{1}kind\0\u{1}link\0")
 
@@ -6442,7 +6467,7 @@ nonisolated extension Im_Actor_V1_HotEntity: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSend: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSend: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSend"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}sender_id\0\u{3}client_message_id\0\u{1}text\0\u{3}media_ids\0\u{1}mentions\0\u{1}entities\0\u{3}reply_message_id\0\u{3}first_submission_deadline_ms\0")
 
@@ -6516,7 +6541,7 @@ nonisolated extension Im_Actor_V1_HotSend: SwiftProtobuf.Message, SwiftProtobuf.
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSendIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSendIdentity: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSendIdentity"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}account_id\0\u{3}room_id\0\u{3}client_message_id\0")
 
@@ -6556,7 +6581,7 @@ nonisolated extension Im_Actor_V1_HotSendIdentity: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotFingerprint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotFingerprint: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotFingerprint"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}version\0\u{1}digest\0")
 
@@ -6591,7 +6616,7 @@ nonisolated extension Im_Actor_V1_HotFingerprint: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension Im_Actor_V1_HotAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotAccepted: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotAccepted"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}message_id\0\u{3}room_sequence\0")
 
@@ -6626,7 +6651,7 @@ nonisolated extension Im_Actor_V1_HotAccepted: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSendReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSendReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSendReceipt"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{3}resolved_at_ms\0\u{1}accepted\0\u{1}rejected\0")
 
@@ -6703,7 +6728,7 @@ nonisolated extension Im_Actor_V1_HotSendReceipt: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRetry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRetry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRetry"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}identity\0\u{1}fingerprint\0\u{1}reason\0\u{3}retry_after_ms\0")
 
@@ -6752,7 +6777,7 @@ nonisolated extension Im_Actor_V1_HotRetry: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSendResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSendResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSendResult"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}receipt\0\u{1}deferred\0\u{1}unresolved\0\u{3}fingerprint_conflict\0")
 
@@ -6853,7 +6878,7 @@ nonisolated extension Im_Actor_V1_HotSendResult: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionCommand: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionCommand"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}user_id\0\u{1}gateway\0\u{1}kind\0\u{1}fence\0\u{3}member_revision\0")
 
@@ -6958,7 +6983,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionCommand: SwiftProtobuf.Message,
   }
 }
 
-nonisolated extension Im_Actor_V1_HotDeliverySession: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotDeliverySession: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotDeliverySession"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}host\0\u{1}gateway\0\u{1}generation\0")
 
@@ -7002,7 +7027,7 @@ nonisolated extension Im_Actor_V1_HotDeliverySession: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionGrant: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionGrant: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionGrant"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}fence\0\u{3}member_revision\0\u{1}baseline\0\u{1}session\0")
 
@@ -7093,7 +7118,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionGrant: SwiftProtobuf.Message, S
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionResult"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}granted\0\u{1}activated\0\u{1}unsubscribed\0\u{1}failure\0")
 
@@ -7189,7 +7214,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionResult: SwiftProtobuf.Message, 
   }
 }
 
-nonisolated extension Im_Actor_V1_HotLogPull: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotLogPull: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotLogPull"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}user_id\0\u{3}after_sequence\0\u{3}page_size\0")
 
@@ -7234,7 +7259,7 @@ nonisolated extension Im_Actor_V1_HotLogPull: SwiftProtobuf.Message, SwiftProtob
   }
 }
 
-nonisolated extension Im_Actor_V1_HotLogSubscribe: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotLogSubscribe: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotLogSubscribe"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}user_id\0")
 
@@ -7269,7 +7294,7 @@ nonisolated extension Im_Actor_V1_HotLogSubscribe: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotLogEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotLogEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotLogEntry"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}event_id\0\u{1}sequence\0\u{3}projection_kind\0\u{1}payload\0")
 
@@ -7314,7 +7339,7 @@ nonisolated extension Im_Actor_V1_HotLogEntry: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-nonisolated extension Im_Actor_V1_HotLogPage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotLogPage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotLogPage"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}events\0\u{3}next_sequence\0\u{3}has_more\0\u{3}trimmed_through\0")
 
@@ -7364,7 +7389,7 @@ nonisolated extension Im_Actor_V1_HotLogPage: SwiftProtobuf.Message, SwiftProtob
   }
 }
 
-nonisolated extension Im_Actor_V1_HotLogSubscription: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotLogSubscription: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotLogSubscription"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0\u{3}membership_revision\0")
 
@@ -7404,7 +7429,7 @@ nonisolated extension Im_Actor_V1_HotLogSubscription: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRoomRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRoomRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRoomRequest"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}send\0\u{1}subscription\0\u{3}log_pull\0\u{3}log_subscribe\0\u{4}`\u{1}cold_value\0")
 
@@ -7517,7 +7542,7 @@ nonisolated extension Im_Actor_V1_HotRoomRequest: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRoomResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRoomResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRoomResponse"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}send\0\u{1}subscription\0\u{3}log_page\0\u{3}log_subscription\0\u{3}log_failure\0\u{4}_\u{1}cold_value\0")
 
@@ -7642,7 +7667,7 @@ nonisolated extension Im_Actor_V1_HotRoomResponse: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotInvoke: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotInvoke: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotInvoke"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}token\0\u{1}request\0")
 
@@ -7681,7 +7706,7 @@ nonisolated extension Im_Actor_V1_HotInvoke: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-nonisolated extension Im_Actor_V1_HotReady: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotReady: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotReady"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}token\0\u{3}physical_reference\0")
 
@@ -7720,7 +7745,7 @@ nonisolated extension Im_Actor_V1_HotReady: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRPCRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRPCRequest: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRPCRequest"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}invoke\0\u{1}lookup\0\u{4}b\u{1}cold_value\0")
 
@@ -7799,7 +7824,7 @@ nonisolated extension Im_Actor_V1_HotRPCRequest: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRPCResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRPCResponse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRPCResponse"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}response\0\u{1}ready\0\u{2}\u{2}completed\0\u{1}acknowledged\0\u{4}_\u{1}cold_value\0")
 
@@ -7907,7 +7932,7 @@ nonisolated extension Im_Actor_V1_HotRPCResponse: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension Im_Actor_V1_HotEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotEvent: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotEvent"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}high_watermark\0\u{3}event_id\0\u{1}sequence\0\u{3}projection_kind\0\u{1}payload\0\u{3}recipient_ids\0\u{3}group_revision\0\u{3}accepted_revision\0\u{3}excluded_connection\0")
 
@@ -7986,7 +8011,7 @@ nonisolated extension Im_Actor_V1_HotEvent: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotMembers: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotMembers: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotMembers"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}members\0")
 
@@ -8016,7 +8041,7 @@ nonisolated extension Im_Actor_V1_HotMembers: SwiftProtobuf.Message, SwiftProtob
   }
 }
 
-nonisolated extension Im_Actor_V1_HotBaselinePage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotBaselinePage: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotBaselinePage"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}index\0\u{1}total\0\u{1}members\0")
 
@@ -8056,7 +8081,7 @@ nonisolated extension Im_Actor_V1_HotBaselinePage: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotGrant: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotGrant: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotGrant"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}member\0\u{1}baseline\0")
 
@@ -8095,7 +8120,7 @@ nonisolated extension Im_Actor_V1_HotGrant: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotEventMembers: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotEventMembers: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotEventMembers"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}event\0\u{1}members\0")
 
@@ -8134,7 +8159,7 @@ nonisolated extension Im_Actor_V1_HotEventMembers: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionDelivery: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionDelivery: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionDelivery"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}fence\0\u{3}delivery_sequence\0\u{3}authorization_sequence\0\u{1}baseline\0\u{3}baseline_page\0\u{1}grant\0\u{1}broadcast\0\u{1}event\0\u{1}head\0\u{1}invalidated\0\u{1}revoke\0")
 
@@ -8355,7 +8380,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionDelivery: SwiftProtobuf.Message
   }
 }
 
-nonisolated extension Im_Actor_V1_HotDeliveryResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotDeliveryResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotDeliveryResult"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}applied_through\0\u{3}snapshot_required\0\u{1}stale\0")
 
@@ -8434,7 +8459,7 @@ nonisolated extension Im_Actor_V1_HotDeliveryResult: SwiftProtobuf.Message, Swif
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionReceipt: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionReceipt"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}fence\0\u{1}result\0")
 
@@ -8473,7 +8498,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionReceipt: SwiftProtobuf.Message,
   }
 }
 
-nonisolated extension Im_Actor_V1_HotDeliveryBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotDeliveryBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotDeliveryBatch"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}deliveries\0")
 
@@ -8503,7 +8528,7 @@ nonisolated extension Im_Actor_V1_HotDeliveryBatch: SwiftProtobuf.Message, Swift
   }
 }
 
-nonisolated extension Im_Actor_V1_HotDeliveryReceipts: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotDeliveryReceipts: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotDeliveryReceipts"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}receipts\0")
 
@@ -8533,7 +8558,7 @@ nonisolated extension Im_Actor_V1_HotDeliveryReceipts: SwiftProtobuf.Message, Sw
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRealtimeHeader: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRealtimeHeader: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRealtimeHeader"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}service_id\0\u{1}version\0\u{3}caller_incarnation\0\u{1}recipient\0\u{3}session_id\0\u{1}sequence\0\u{3}attempt_id\0")
 
@@ -8597,7 +8622,7 @@ nonisolated extension Im_Actor_V1_HotRealtimeHeader: SwiftProtobuf.Message, Swif
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionCall"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{3}source_shard_id\0\u{1}delivery\0")
 
@@ -8641,7 +8666,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionCall: SwiftProtobuf.Message, Sw
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}result\0")
 
@@ -8680,7 +8705,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionReply: SwiftProtobuf.Message, S
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionBatchCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionBatchCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionBatchCall"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{3}source_shard_id\0\u{1}batch\0")
 
@@ -8724,7 +8749,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionBatchCall: SwiftProtobuf.Messag
   }
 }
 
-nonisolated extension Im_Actor_V1_HotSubscriptionBatchReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotSubscriptionBatchReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotSubscriptionBatchReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{2}\u{2}results\0\u{c}\u{2}\u{1}")
 
@@ -8763,7 +8788,7 @@ nonisolated extension Im_Actor_V1_HotSubscriptionBatchReply: SwiftProtobuf.Messa
   }
 }
 
-nonisolated extension Im_Actor_V1_HotTopic: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotTopic: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotTopic"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}id\0\u{1}owner\0")
 
@@ -8807,7 +8832,7 @@ nonisolated extension Im_Actor_V1_HotTopic: SwiftProtobuf.Message, SwiftProtobuf
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRoomWake: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRoomWake: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRoomWake"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}watermark\0")
 
@@ -8842,7 +8867,7 @@ nonisolated extension Im_Actor_V1_HotRoomWake: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-nonisolated extension Im_Actor_V1_HotUserSync: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotUserSync: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotUserSync"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}user_id\0\u{1}watermark\0")
 
@@ -8877,7 +8902,7 @@ nonisolated extension Im_Actor_V1_HotUserSync: SwiftProtobuf.Message, SwiftProto
   }
 }
 
-nonisolated extension Im_Actor_V1_HotTyping: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotTyping: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotTyping"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}user_id\0\u{3}is_typing\0\u{1}expires\0\u{3}connection_id\0\u{1}sequence\0")
 
@@ -8932,7 +8957,7 @@ nonisolated extension Im_Actor_V1_HotTyping: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-nonisolated extension Im_Actor_V1_HotEvents: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotEvents: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotEvents"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}events\0")
 
@@ -8962,7 +8987,7 @@ nonisolated extension Im_Actor_V1_HotEvents: SwiftProtobuf.Message, SwiftProtobu
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRealtimePayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRealtimePayload: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRealtimePayload"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_wake\0\u{3}room_events\0\u{3}user_sync\0\u{1}presence\0\u{1}typing\0")
 
@@ -9075,7 +9100,7 @@ nonisolated extension Im_Actor_V1_HotRealtimePayload: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRealtimeDelivery: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRealtimeDelivery: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRealtimeDelivery"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}topic\0\u{3}partition_id\0\u{3}partition_epoch\0\u{3}session_id\0\u{3}interest_generation\0\u{3}gateway_incarnation\0\u{1}payload\0")
 
@@ -9139,7 +9164,7 @@ nonisolated extension Im_Actor_V1_HotRealtimeDelivery: SwiftProtobuf.Message, Sw
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRealtimeBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRealtimeBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRealtimeBatch"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}batch_id\0\u{1}recipient\0\u{1}deliveries\0")
 
@@ -9183,7 +9208,7 @@ nonisolated extension Im_Actor_V1_HotRealtimeBatch: SwiftProtobuf.Message, Swift
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRealtimeCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRealtimeCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRealtimeCall"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}batch\0")
 
@@ -9222,7 +9247,7 @@ nonisolated extension Im_Actor_V1_HotRealtimeCall: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotRealtimeReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotRealtimeReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotRealtimeReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}acceptance\0")
 
@@ -9261,7 +9286,7 @@ nonisolated extension Im_Actor_V1_HotRealtimeReply: SwiftProtobuf.Message, Swift
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalSource: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalSource"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}source_id\0\u{3}incarnation_id\0\u{3}partition_id\0")
 
@@ -9301,7 +9326,7 @@ nonisolated extension Im_Actor_V1_HotJournalSource: SwiftProtobuf.Message, Swift
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalFence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalFence: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalFence"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}publisher_incarnation\0\u{3}source_epoch\0\u{3}source_token\0\u{3}source_expires\0\u{3}routing_epoch\0\u{3}routing_token\0\u{3}session_id\0\u{3}interest_generation\0\u{3}gateway_incarnation\0")
 
@@ -9371,7 +9396,7 @@ nonisolated extension Im_Actor_V1_HotJournalFence: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalAuthorization: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalAuthorization: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalAuthorization"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{3}owner_epoch\0\u{3}permission_version\0\u{3}control_version\0\u{1}viewers\0\u{1}watermark\0")
 
@@ -9426,7 +9451,7 @@ nonisolated extension Im_Actor_V1_HotJournalAuthorization: SwiftProtobuf.Message
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalHead: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalHead: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalHead"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}room_id\0\u{1}watermark\0\u{3}owner_epoch\0\u{3}control_version\0")
 
@@ -9471,7 +9496,7 @@ nonisolated extension Im_Actor_V1_HotJournalHead: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalChange: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalChange: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalChange"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}kind\0\u{1}authorization\0\u{3}subject_id\0\u{1}watermark\0\u{3}owner_epoch\0\u{3}permission_version\0\u{3}control_version\0\u{3}device_id\0\u{3}membership_room_id\0")
 
@@ -9545,7 +9570,7 @@ nonisolated extension Im_Actor_V1_HotJournalChange: SwiftProtobuf.Message, Swift
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalEntry: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalEntry"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}sequence\0\u{1}change\0")
 
@@ -9584,7 +9609,7 @@ nonisolated extension Im_Actor_V1_HotJournalEntry: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalChanges: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalChanges: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalChanges"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}from_exclusive\0\u{3}through_inclusive\0\u{1}entries\0")
 
@@ -9624,7 +9649,7 @@ nonisolated extension Im_Actor_V1_HotJournalChanges: SwiftProtobuf.Message, Swif
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalSnapshot: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalSnapshot"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}cut\0\u{1}rooms\0")
 
@@ -9659,7 +9684,7 @@ nonisolated extension Im_Actor_V1_HotJournalSnapshot: SwiftProtobuf.Message, Swi
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalHeads: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalHeads: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalHeads"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}heads\0")
 
@@ -9689,7 +9714,7 @@ nonisolated extension Im_Actor_V1_HotJournalHeads: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalBatch: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalBatch"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}batch_id\0\u{1}source\0\u{1}fence\0\u{1}baseline\0\u{1}changes\0\u{1}snapshot\0\u{1}heads\0")
 
@@ -9800,7 +9825,7 @@ nonisolated extension Im_Actor_V1_HotJournalBatch: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalApplied: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalApplied: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalApplied"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}batch_id\0\u{1}source\0\u{1}fence\0\u{3}applied_through\0\u{3}snapshot_installed\0")
 
@@ -9854,7 +9879,7 @@ nonisolated extension Im_Actor_V1_HotJournalApplied: SwiftProtobuf.Message, Swif
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalResult: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalResult"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}applied\0\u{3}heads_applied\0\u{1}stale\0\u{3}snapshot_required\0\u{1}overloaded\0\u{1}invalid\0")
 
@@ -9989,7 +10014,7 @@ nonisolated extension Im_Actor_V1_HotJournalResult: SwiftProtobuf.Message, Swift
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalCall"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}batch\0")
 
@@ -10066,7 +10091,7 @@ nonisolated extension Im_Actor_V1_HotJournalCall: SwiftProtobuf.Message, SwiftPr
   }
 }
 
-nonisolated extension Im_Actor_V1_HotJournalReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotJournalReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotJournalReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}result\0")
 
@@ -10143,7 +10168,7 @@ nonisolated extension Im_Actor_V1_HotJournalReply: SwiftProtobuf.Message, SwiftP
   }
 }
 
-nonisolated extension Im_Actor_V1_HotShardToken: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotShardToken: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotShardToken"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{3}partition_id\0\u{1}host\0\u{1}epoch\0\u{3}lease_token\0")
 
@@ -10192,7 +10217,7 @@ nonisolated extension Im_Actor_V1_HotShardToken: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-nonisolated extension Im_Actor_V1_HotPublish: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotPublish: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotPublish"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}token\0\u{1}topic\0\u{1}payload\0")
 
@@ -10236,7 +10261,7 @@ nonisolated extension Im_Actor_V1_HotPublish: SwiftProtobuf.Message, SwiftProtob
   }
 }
 
-nonisolated extension Im_Actor_V1_HotShardCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotShardCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotShardCall"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}publish\0\u{4}b\u{1}cold_control\0")
 
@@ -10341,7 +10366,7 @@ nonisolated extension Im_Actor_V1_HotShardCall: SwiftProtobuf.Message, SwiftProt
   }
 }
 
-nonisolated extension Im_Actor_V1_HotShardReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotShardReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotShardReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}publish\0\u{4}b\u{1}cold_control\0")
 
@@ -10403,7 +10428,7 @@ nonisolated extension Im_Actor_V1_HotShardReply: SwiftProtobuf.Message, SwiftPro
   }
 }
 
-nonisolated extension Im_Actor_V1_HotDeliverySessionPulse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotDeliverySessionPulse: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotDeliverySessionPulse"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}session\0\u{1}kind\0\u{1}sequence\0")
 
@@ -10447,7 +10472,7 @@ nonisolated extension Im_Actor_V1_HotDeliverySessionPulse: SwiftProtobuf.Message
   }
 }
 
-nonisolated extension Im_Actor_V1_HotDeliverySessionCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotDeliverySessionCall: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotDeliverySessionCall"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{3}source_shard_id\0\u{1}pulse\0\u{3}source_node\0")
 
@@ -10538,7 +10563,7 @@ nonisolated extension Im_Actor_V1_HotDeliverySessionCall: SwiftProtobuf.Message,
   }
 }
 
-nonisolated extension Im_Actor_V1_HotDeliverySessionReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
+extension Im_Actor_V1_HotDeliverySessionReply: SwiftProtobuf.Message, SwiftProtobuf._MessageImplementationBase, SwiftProtobuf._ProtoNameProviding {
   package static let protoMessageName: String = _protobuf_package + ".HotDeliverySessionReply"
   package static let _protobuf_nameMap = SwiftProtobuf._NameMap(bytecode: "\0\u{1}header\0\u{1}result\0")
 

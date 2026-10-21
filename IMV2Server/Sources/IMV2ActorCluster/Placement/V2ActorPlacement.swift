@@ -36,6 +36,9 @@ package struct V2ActorPlacementHostRegistration: Equatable, Sendable {
     package let host: V2ActorHostIdentity
     package let retired: Bool
     package init(host: V2ActorHostIdentity, retired: Bool) { self.host = host; self.retired = retired }
+    package static func reserved(_ hostID: V2ActorHostID) -> Self {
+        .init(host: .init(hostID: hostID, incarnationID: UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))), retired: true)
+    }
 }
 
 package struct V2ActorPlacementSnapshot: Equatable, Sendable {
@@ -43,11 +46,13 @@ package struct V2ActorPlacementSnapshot: Equatable, Sendable {
     package let revision: UInt64
     package let slots: [V2ActorPlacementSlot]
     package let hosts: [V2ActorPlacementHostRegistration]
+    package let serviceMembership: V2ActorServiceMembershipRecord?
 
     /// Fresh in-process fixtures may derive the initial roster from slots.
     /// Committed transitions and wire decoding always supply the full roster.
     package init(clusterID: UUID, revision: UInt64, slots: [V2ActorPlacementSlot],
-                 hosts: [V2ActorPlacementHostRegistration]? = nil) throws {
+                 hosts: [V2ActorPlacementHostRegistration]? = nil,
+                 serviceMembership: V2ActorServiceMembershipRecord? = nil) throws {
         guard revision > 0, !slots.isEmpty, slots.count <= 4096,
               slots.allSatisfy({ $0.owner.epoch > 0 && $0.owner.epoch <= V2RoomActorPlacementGrant.maximumEpoch && $0.transfer?.successor != $0.owner.host }) else {
             throw V2ActorPlacementError.invalidConfiguration
@@ -83,6 +88,7 @@ package struct V2ActorPlacementSnapshot: Equatable, Sendable {
             }
         }
         self.clusterID = clusterID; self.revision = revision; self.slots = slots
+        self.serviceMembership = serviceMembership
         self.hosts = registrations.sorted { $0.host.hostID.rawValue < $1.host.hostID.rawValue }
     }
 
@@ -109,6 +115,9 @@ package enum V2ActorPlacementCommand: Equatable, Sendable {
     case cancelTransfer(partition: Int, expected: V2ActorPlacementOwner, transferID: UUID)
     /// Emitted by the application's final stop, after every physical job drains.
     case retireHost(V2ActorHostIdentity)
+    /// Reserve a trusted new logical host without granting any partition.
+    case admitHost(V2ActorHostID)
+    case installServiceMembership(V2ActorServiceMembershipRecord)
     /// No expiry-based replacement: all of this predecessor's slots must be retired.
     case registerHost(previous: V2ActorHostIdentity, successor: V2ActorHostIdentity)
 
@@ -119,6 +128,8 @@ package enum V2ActorPlacementCommand: Equatable, Sendable {
         case .cancelTransfer: 3
         case .retireHost: 4
         case .registerHost: 5
+        case .admitHost: 6
+        case .installServiceMembership: 7
         }
     }
 }
@@ -136,6 +147,17 @@ package struct V2ActorPlacementStateMachine: Sendable {
         var slots = snapshot.slots
         var hosts = snapshot.hosts
         switch command {
+        case .installServiceMembership(let record):
+            try record.validateSuccessor(of: snapshot.serviceMembership)
+            snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts, serviceMembership: record)
+            return
+        case .admitHost(let hostID):
+            guard hosts.count < 64, !hosts.contains(where: { $0.host.hostID == hostID }) else {
+                throw V2ActorPlacementError.invalidTransition
+            }
+            hosts.append(.reserved(hostID))
+            snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts, serviceMembership: snapshot.serviceMembership)
+            return
         case .retireHost(let host):
             guard let registration = hosts.firstIndex(where: { $0.host == host }), !hosts[registration].retired else {
                 throw V2ActorPlacementError.staleOwner
@@ -145,7 +167,7 @@ package struct V2ActorPlacementStateMachine: Sendable {
                 slots[index] = .init(owner: slots[index].owner, transfer: slots[index].transfer, retired: true)
             }
             hosts[registration] = .init(host: host, retired: true)
-            snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts)
+            snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts, serviceMembership: snapshot.serviceMembership)
             return
         case .registerHost(let previous, let successor):
             guard previous.hostID == successor.hostID, previous != successor else {
@@ -164,7 +186,7 @@ package struct V2ActorPlacementStateMachine: Sendable {
                 slots[index] = .init(owner: .init(host: successor, epoch: slots[index].owner.epoch + 1), transfer: nil)
             }
             hosts[registration] = .init(host: successor, retired: false)
-            snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts)
+            snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts, serviceMembership: snapshot.serviceMembership)
             return
         default: break
         }
@@ -173,7 +195,7 @@ package struct V2ActorPlacementStateMachine: Sendable {
         switch command {
         case .beginTransfer(let p, let e, _), .completeTransfer(let p, let e, _), .cancelTransfer(let p, let e, _):
             partition = p; expected = e
-        case .retireHost, .registerHost: preconditionFailure("handled above")
+        case .retireHost, .registerHost, .admitHost, .installServiceMembership: preconditionFailure("handled above")
         }
         guard slots.indices.contains(partition) else { throw V2ActorPlacementError.invalidConfiguration }
         let current = slots[partition]
@@ -201,9 +223,9 @@ package struct V2ActorPlacementStateMachine: Sendable {
         case .cancelTransfer(_, _, let transferID):
             guard current.transfer?.id == transferID else { throw V2ActorPlacementError.invalidTransition }
             slots[partition] = .init(owner: current.owner, transfer: nil, retired: current.retired)
-        case .retireHost, .registerHost: preconditionFailure("handled above")
+        case .retireHost, .registerHost, .admitHost, .installServiceMembership: preconditionFailure("handled above")
         }
-        snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts)
+        snapshot = try .init(clusterID: snapshot.clusterID, revision: revision, slots: slots, hosts: hosts, serviceMembership: snapshot.serviceMembership)
     }
 }
 

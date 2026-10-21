@@ -87,7 +87,7 @@ struct V2ActorRealtimeRoutingTests {
     @Test func shardQualificationRevocationCannotResurrectInstalledToken() async throws {
         let host = descriptor("host"), gateway = descriptor("subscriber")
         let qualification = try V2ActorServiceQualification(localNodeID: "host", roster: ["host", "peer"])
-        let first = try #require(qualification.update(witnesses: ["peer": .now + .seconds(20)]))
+        let first = try #require(qualification.update(witnesses: ["peer": .now + .seconds(20)], membershipRevision: 1))
         let topic = V2RealtimeTopic(kind: .roomEvents, id: UUID().uuidString, owner: try .init(shardID: "rooms", epoch: 1))
         let token = V2RealtimeShardToken(partitionID: V2RealtimeTopicKey(topic).partitionID(), host: host.identity, epoch: 1, leaseToken: UUID())
         let service = V2RealtimeShardService(qualification: qualification, send: { _, _ in .accepted })
@@ -99,7 +99,7 @@ struct V2ActorRealtimeRoutingTests {
         qualification.revoke()
         #expect(try await service.control(heartbeat).status == .retiredEpoch)
         #expect(try await service.publish(publication) == .retiredEpoch)
-        let successor = try #require(qualification.update(witnesses: ["peer": .now + .seconds(20)]))
+        let successor = try #require(qualification.update(witnesses: ["peer": .now + .seconds(20)], membershipRevision: 1))
         #expect(successor.generation != first.generation)
         await service.install(token: token, deadline: .now + .seconds(30), qualificationGeneration: first.generation)
         await service.install(token: token, deadline: .now + .seconds(30), qualificationGeneration: successor.generation)

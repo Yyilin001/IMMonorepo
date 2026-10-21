@@ -6,6 +6,7 @@ import NIOSSL
 /// Mandatory, fixed three-voter deployment. Control endpoints are separate
 /// from room endpoints; readers neither open storage nor acquire voting roles.
 public struct V2PlacementControlConfiguration: Sendable {
+    package let clusterID: UUID
     package let node: V2RoomClusterClientNodeConfiguration
     package let identity: V2ActorHostIdentity?
     package let processIncarnation: UUID
@@ -72,6 +73,7 @@ public struct V2PlacementControlConfiguration: Sendable {
               roomPeers.allSatisfy({ writers[$0.serviceID]?.isSuperset(of: $0.accessibleShardIDs) == true }) else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
+        self.clusterID = document.clusterID
         self.node = try .init(name: name + "-placement", host: address, port: document.port,
                               tls: tls, threadPoolSize: document.threadPoolSize)
         self.identity = identity; self.processIncarnation = processIncarnation
@@ -85,6 +87,7 @@ public struct V2PlacementControlConfiguration: Sendable {
         }
     }
     struct Document: Decodable, Sendable {
+        let clusterID: UUID
         let port: Int
         let threadPoolSize: Int
         let localVoterID: UUID?

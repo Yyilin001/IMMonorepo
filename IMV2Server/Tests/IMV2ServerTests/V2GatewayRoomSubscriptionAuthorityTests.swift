@@ -8,6 +8,29 @@ import IMV2ServerContracts
 
 @Suite("Gateway local room subscription socket authority")
 struct V2GatewayRoomSubscriptionAuthorityTests {
+    @Test("retired fences acknowledge only exact authenticated denial and cannot revive grants")
+    func retiredRevokePreservesDenial() async throws {
+        let f = Fixture(), authority = f.authority()
+        await f.connect(authority); try await f.baseline(authority)
+        try #require(await authority.retire(fence: f.fence()))
+        let revoke = f.delivery(4, .revoke(userID: f.user, memberRevision: 1))
+        #expect(await authority.apply(revoke, authenticatedServiceID: "other") == .stale)
+        #expect(await authority.apply(revoke, authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(revoke, authenticatedServiceID: "owner") == .applied(permits: []))
+        #expect(await authority.apply(f.delivery(5, .grant(member: f.member, baselineSequence: 10)),
+                                      authenticatedServiceID: "owner") == .stale)
+        #expect(await authority.apply(f.delivery(1, .baseline(members: [f.member])),
+                                      authenticatedServiceID: "owner") == .stale)
+        #expect(await authority.apply(f.delivery(7, authorization: 4, .head(highWatermark: 20)),
+                                      authenticatedServiceID: "owner") == .stale)
+        #expect(await authority.authorizedMemberRevision(roomID: f.room, userID: f.user) == nil)
+        #expect(await authority.capturePermits(roomID: f.room).isEmpty)
+        let successor = f.fence(generation: 2)
+        try #require(await authority.installTestSession(fence: successor, serviceID: "owner"))
+        #expect(await authority.apply(revoke, authenticatedServiceID: "owner") == .stale)
+        await authority.shutdown()
+    }
+
     @Test("A late interest removal cannot revoke a successor generation of the same room")
     func lateInterestRemovalPreservesSuccessor() async throws {
         let f = Fixture(), authority = f.authority()

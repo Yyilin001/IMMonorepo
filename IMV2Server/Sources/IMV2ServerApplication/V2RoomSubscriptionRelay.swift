@@ -102,6 +102,7 @@ public actor V2RoomSubscriptionRelay {
     private var buffered: [UInt64: BufferedInput] = [:]
     private var bufferedInputBytes = 0
     private var applied: [UInt64: Data] = [:]
+    private var retirementWaiters: [UUID: (Set<V2GatewayRealtimeIdentity>, AsyncStream<Bool>.Continuation)] = [:]
 
     public init(activation: V2RoomActivationToken, baselineSequence: UInt64,
                 nextInputSequence: UInt64 = 1, members: [V2RoomSubscriptionMember] = [],
@@ -432,8 +433,8 @@ public actor V2RoomSubscriptionRelay {
     }
 
     /// Permission controls do not await or acknowledge message consumption.
-    private func invalidateAuthorizations() throws {
-        for gateway in Array(subscriptions.keys) {
+    private func invalidateAuthorizations(gateways: Set<V2GatewayRealtimeIdentity>? = nil) throws {
+        for gateway in gateways.map(Array.init) ?? Array(subscriptions.keys) {
             guard var subscription = subscriptions[gateway], !subscription.controlInvalidated else { continue }
             guard subscription.nextSequence < .max else { throw V2RoomSubscriptionRelayError.overloaded }
             // One reserved terminal slot beyond the bounded ordinary queue.
@@ -443,6 +444,39 @@ public actor V2RoomSubscriptionRelay {
             subscription.nextSequence += 1; subscription.controlInvalidated = true
             reportAuthorization(subscription)
             subscriptions[gateway] = subscription
+        }
+    }
+    package func prepareRetirement(gateways: Set<V2GatewayRealtimeIdentity>) throws {
+        try invalidateAuthorizations(gateways: gateways)
+    }
+
+    /// Keep the exact terminal prefix retryable until its receipt. Waiting is
+    /// driven by ACKs, with one owned deadline task rather than room polling.
+    package func awaitRetirement(gateways: Set<V2GatewayRealtimeIdentity>, deadline: ContinuousClock.Instant) async -> Bool {
+        guard gateways.contains(where: { controlInvalidationPending(gateway: $0) }) else { return true }
+        guard deadline > .now, !Task.isCancelled else { return false }
+        let id = UUID(), events = AsyncStream<Bool>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        retirementWaiters[id] = (gateways, events.continuation)
+        defer { retirementWaiters.removeValue(forKey: id); events.continuation.finish() }
+        return await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await acknowledged in events.stream { return acknowledged }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(until: deadline, clock: .continuous)
+                return false
+            }
+            let result = await group.next() ?? false
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func notifyRetirementReceipts() {
+        for (gateways, continuation) in retirementWaiters.values
+            where !gateways.contains(where: { controlInvalidationPending(gateway: $0) }) {
+            continuation.yield(true); continuation.finish()
         }
     }
     package func controlInvalidationPending(gateway: V2GatewayRealtimeIdentity? = nil) -> Bool {
@@ -488,6 +522,7 @@ public actor V2RoomSubscriptionRelay {
         }
         subscriptions[gateway] = subscription
         if lane == .message, subscription.members.isEmpty { reportAuthorization(subscription) }
+        if lane == .authorization { notifyRetirementReceipts() }
     }
 
     /// A receiver with a newer permission cut rejects old bodies. Retire only
@@ -574,7 +609,8 @@ public actor V2RoomSubscriptionRelay {
             issued: subscription.latestAuthoritySequence,
             applied: subscription.authorizationOutbox.first.map { $0.authorizationSequence - 1 } ?? subscription.latestAuthoritySequence,
             invalidated: invalidated, transmissionStarted: subscription.transmissionStarted,
-            isUnreferenced: subscription.members.isEmpty
+            isUnreferenced: (subscription.controlInvalidated && subscription.authorizationOutbox.isEmpty)
+                || subscription.members.isEmpty
                 && subscription.authorizationOutbox.isEmpty && subscription.messageOutbox.isEmpty
                 && subscription.deferredHighWatermark == nil), subscription.gateway)
     }

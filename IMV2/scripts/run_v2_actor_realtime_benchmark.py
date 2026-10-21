@@ -30,7 +30,11 @@ import time
 import uuid
 import urllib.request
 from v2_native_placement_processes import voter_arguments, start_controls
+import v2_benchmark_dynamic_membership as dynamic_membership
+import v2_benchmark_ingress as ingress
+from v2_benchmark_remote_process import endpoint, hostname, remote_command, gateway_metrics, management_endpoint, validate_deployment
 from v2_native_placement_inspection import decode_placement_inspection, room_placement, require_live_owner, same_owner
+from v2_benchmark_diagnostic_scope import loader_failure_guard_percent
 
 
 class LoaderFailureReportDrain:
@@ -70,13 +74,13 @@ LOADER_LOCAL_PORT_SPAN = 10_000
 LOADER_LOCAL_PORT_COUNT = ((PARTS + NODES - 1) // NODES) * LOADER_LOCAL_PORT_SPAN
 
 
-def configure_topology(nodes, loader_partitions):
+def configure_topology(nodes, loader_partitions, *, automatic_source_ports=False):
     """Explicit simulation topology; legacy six-node runs keep their defaults."""
     global NODES, PARTS, LOADER_LOCAL_PORT_COUNT
-    if nodes not in (1, 2, 4, 6) or not nodes <= loader_partitions <= 12 or loader_partitions % nodes:
-        raise ValueError('nodes must be 1/2/4/6 and evenly divide 1...12 loader partitions')
+    if nodes not in (1, 2, 4, 6, 8) or not nodes <= loader_partitions <= 16 or loader_partitions % nodes:
+        raise ValueError('nodes must be 1/2/4/6/8 and evenly divide 1...16 loader partitions')
     count = (loader_partitions // nodes) * LOADER_LOCAL_PORT_SPAN
-    if count > 64_512:
+    if not automatic_source_ports and count > 64_512:
         raise ValueError('loader source ranges exceed the available TCP ports; use fewer partitions')
     NODES, PARTS, LOADER_LOCAL_PORT_COUNT = nodes, loader_partitions, count
 
@@ -242,10 +246,12 @@ def gateway_env(args, kind, database, index, actors, manifest):
             key, value = line.split('=', 1)
             values[key] = value
     actor = actors/f'gateway-{index}'
+    public_tls = actors/'public-ingress' if ingress.enabled(args) else actor
+    database_host = json.loads(args.server_deployment.read_text())['postgresHost'] if getattr(args, 'server_deployment', None) else args.pg_host
     values.update(
-        IM_V2_DATABASE_URL=f'postgresql://{args.pg_user}@{args.pg_host}:{args.pg_port}/{database}?sslmode=disable',
-        IM_V2_TLS_HOST='127.0.0.1', IM_V2_TLS_PORT=str(args.gateway_port+index),
-        IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(actor/'tls.pem'), IM_V2_TLS_PRIVATE_KEY_PATH=str(actor/'tls.key'),
+        IM_V2_DATABASE_URL=f'postgresql://{args.pg_user}@{database_host}:{args.pg_port}/{database}?sslmode=disable',
+        IM_V2_TLS_HOST='0.0.0.0' if getattr(args, 'server_deployment', None) else '127.0.0.1', IM_V2_TLS_PORT=str(args.gateway_port+index),
+        IM_V2_TLS_CERTIFICATE_CHAIN_PATH=str(public_tls/'tls.pem'), IM_V2_TLS_PRIVATE_KEY_PATH=str(public_tls/'tls.key'),
         IM_V2_ACCESS_TOKEN_HMAC_KEY_BASE64=(args.fixture/'access-token-hmac-key.base64').read_text().strip(),
         IM_V2_GROUP_INVITE_TOKEN_HMAC_KEY_BASE64=base64.b64encode(bytes([7])*32).decode(),
         IM_V2_GATEWAY_NODE_ID=f'gateway-{index}', IM_V2_USER_SHARD_BUCKET=manifest['userBucket'],
@@ -262,7 +268,7 @@ def gateway_env(args, kind, database, index, actors, manifest):
         IM_V2_SYNC_DATABASE_WORK_MAX_QUEUED='1536', IM_V2_DATABASE_WORK_ADMISSION_TIMEOUT_MS='5000',
         IM_V2_LISTEN_BACKLOG='4096', IM_V2_ACCEPT_BATCH_SIZE='256', IM_V2_GATEWAY_REPLICA_COUNT=str(NODES),
         IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(actor/f'{kind}.json'),
-        IM_V2_IDLE_TIMEOUT_MS='600000', IM_V2_LOG_LEVEL='notice' if app_canary_enabled(args) else 'warning')
+        IM_V2_IDLE_TIMEOUT_MS='600000', IM_V2_LOG_LEVEL=getattr(args, 'server_log_level', None) or ('notice' if app_canary_enabled(args) else 'warning'))
     if kind == 'candidate':
         tcp_loops = getattr(args, 'candidate_tcp_event_loop_threads', None)
         if tcp_loops is not None: values['IM_V2_TCP_EVENT_LOOP_THREADS'] = str(tcp_loops)
@@ -350,7 +356,9 @@ def prepare(args, manifest):
                '--output-dir',str(actors),'--shards',manifest['shardID'],'--user-buckets',manifest['userBucket'],
                '--maximum-rooms-per-host',str(getattr(args, 'maximum_rooms_per_host', None)
                    or max(10000, (manifest['rooms'] * 5 + NODES * 4 - 1) // (NODES * 4))),
-               '--caller',f'account=localhost:{args.actor_port+NODES}']
+               '--caller',f'account={hostname(args, "account")}:{args.actor_port+NODES}']
+    if getattr(args, 'dynamic_membership', False):
+        command += dynamic_membership.configuration_arguments(args, manifest['shardID'])
     if getattr(args, 'actor_identity_seed', None):
         command += ['--identity-seed', args.actor_identity_seed]
     if getattr(args, 'actor_partition_canary', None) is not None:
@@ -359,10 +367,12 @@ def prepare(args, manifest):
     # entrypoint. Baseline files below retain their original authorization.
     command += ['--policy-partitions', '16']
     placement_port = args.placement_port if args.placement_port is not None else args.actor_port + 64
-    command += voter_arguments([placement_port + index for index in range(3)])
+    command += [value for index, name in enumerate(('placement-a', 'placement-b', 'placement-c'))
+                for value in ('--placement-voter', f'{name}={hostname(args, name)}:{placement_port+index}')]
     for index in range(NODES):
-        command += ['--host',f'gateway-{index}=localhost:{args.actor_port+index}']
+        command += ['--host',f'gateway-{index}={hostname(args, f"gateway-{index}")}:{args.actor_port+index}']
     run_command(command, args.output_dir/'prepare.log')
+    ingress.prepare(args, actors)
     for name in [f'gateway-{index}' for index in range(NODES)]+['account']:
         node = actors/name
         config = json.loads((node/'configuration.json').read_text())
@@ -377,8 +387,15 @@ def prepare(args, manifest):
     lines = (args.fixture/'credentials.jsonl').read_text().splitlines(True)
     if len(lines) != manifest['users']:
         raise ValueError('fixture credential cardinality mismatch')
-    for index, line in enumerate(lines):
-        parts[index%PARTS].append(line)
+    if getattr(args, 'continuous_user_growth', False):
+        from v2_benchmark_continuous_growth import partition_continuous_cohorts
+        parts = partition_continuous_cohorts(lines, PARTS)
+    elif getattr(args, 'live_user_growth', False):
+        from v2_benchmark_user_growth import partition_cohorts
+        parts = partition_cohorts(lines, PARTS)
+    else:
+        for index, line in enumerate(lines):
+            parts[index%PARTS].append(line)
     for index, part in enumerate(parts):
         path = args.output_dir/f'part-{index}.jsonl'
         with path.open('x') as stream:
@@ -1034,6 +1051,9 @@ def sample_owned_postgres(args, database):
         sample['statisticsFailureCategory'] = 'sampler_deadline' if isinstance(error, subprocess.TimeoutExpired) else 'sampler_error'
     sample['statisticsElapsedSeconds'] = time.monotonic() - statistics_started
     sample['blockerAnalysis'] = analyze_postgres_blockers(sample)
+    if args.owned_postgres_pid is None:
+        sample['processResourcesScope'] = 'remote PostgreSQL container sampled separately'
+        return sample
     try:
         # Follow the exact owned postmaster's descendants, including WAL/checkpoint
         # processes. Numeric columns avoid postgres process titles or SQL text.
@@ -1944,7 +1964,8 @@ def planned_reconnect_fact_proof(args, database, expected_acknowledged, *, initi
 
 
 def count_workload_tcp_tuples(text, gateway_port, *, system,
-                             local_port_base=DEFAULT_LOADER_LOCAL_PORT_BASE):
+                             local_port_base=DEFAULT_LOADER_LOCAL_PORT_BASE, all_source_ports=False,
+                             additional_destination_ports=()):
     if system not in ('Linux', 'Darwin'):
         raise ValueError('unsupported TCP inspection platform: ' + system)
     count = 0
@@ -1963,13 +1984,24 @@ def count_workload_tcp_tuples(text, gateway_port, *, system,
                 remote = int(columns[4].rsplit('.', 1)[1])
         except (ValueError, IndexError):
             continue
-        if (local_port_base <= local < local_port_base + LOADER_LOCAL_PORT_COUNT
-                and gateway_port <= remote < gateway_port + NODES):
+        if ((all_source_ports or local_port_base <= local < local_port_base + LOADER_LOCAL_PORT_COUNT)
+                and (gateway_port <= remote < gateway_port + NODES or remote in additional_destination_ports)):
             count += 1
     return count
 
 
-def workload_tcp_tuple_count(gateway_port, local_port_base):
+def workload_tcp_tuple_count(gateway_port, local_port_base, deployment=None):
+    if deployment:
+        configuration = json.loads(Path(deployment).read_text())
+        processes = configuration['processes']
+        profiles = {value['profile'] for name, value in processes.items() if name.startswith('load-')}
+        count = 0
+        for profile in profiles:
+            text = subprocess.check_output(['colima', '-p', profile, 'ssh', '--',
+                'cat', '/proc/net/tcp', '/proc/net/tcp6'], text=True, timeout=10)
+            count += count_workload_tcp_tuples(text, gateway_port, system='Linux', local_port_base=local_port_base,
+                all_source_ports=True, additional_destination_ports=(gateway_port+32,) if configuration.get('ingress') else ())
+        return count
     system = platform.system()
     if system == 'Linux':
         return sum(count_workload_tcp_tuples(Path('/proc/net/' + name).read_text(),
@@ -1989,7 +2021,7 @@ def run_revision(args, kind, actors, counts, manifest):
     # Observe only this workload's source range and Gateway destination ports.
     origin=time.monotonic()
     while True:
-        lingering=workload_tcp_tuple_count(args.gateway_port, args.loader_local_port_base)
+        lingering=workload_tcp_tuple_count(args.gateway_port, args.loader_local_port_base, getattr(args, 'server_deployment', None))
         if not lingering:break
         if time.monotonic()-origin>60:raise TimeoutError('previous owned workload TCP tuples have not retired')
         time.sleep(1)
@@ -2016,6 +2048,7 @@ def run_revision(args, kind, actors, counts, manifest):
     fixture_cleanup = None
     failure_stage = 'startup'
     partition_canary = None
+    expansion = None
     actor_proxy = None
     service_stop_deadline = None
     loader_report_drain = LoaderFailureReportDrain(getattr(args, 'loader_report_drain_seconds', 120))
@@ -2023,6 +2056,8 @@ def run_revision(args, kind, actors, counts, manifest):
     stop_monitor = threading.Event()
     def start(command, name, environment=None):
         stream=(directory/(name+'.log')).open('x'); streams.append(stream)
+        if getattr(args, 'server_deployment', None) is not None:
+            command = remote_command(args.server_deployment, name, command, environment, directory)
         if getattr(args, 'process_launcher_config', None) is not None:
             command = ['python3', str(ROOT/'IMV2/scripts/v2_benchmark_container_process.py'),
                        '--configuration', str(args.process_launcher_config), '--name', name, '--'] + command
@@ -2043,11 +2078,10 @@ def run_revision(args, kind, actors, counts, manifest):
                     stream.write(json.dumps(dict(time=time.time(),ps=output))+'\n');stream.flush()
                 samples=[]
                 sampling_started = time.time()
-                for index in range(NODES):
+                for index in range(len(gateways)):
                     node_started = time.time()
                     try:
-                        with urllib.request.urlopen(f'http://127.0.0.1:{args.metrics_port+index}/metrics',timeout=1) as response:
-                            body=response.read(4*1024*1024).decode('utf-8')
+                        body=gateway_metrics(args,index)
                         samples.append(dict(node=index,body=body,samplingStartedAtUnixSeconds=node_started,
                                             samplingCompletedAtUnixSeconds=time.time()))
                     except Exception as error:
@@ -2058,7 +2092,8 @@ def run_revision(args, kind, actors, counts, manifest):
                     metrics.write(json.dumps(dict(time=time.time(),samples=samples,
                         samplingStartedAtUnixSeconds=sampling_started,
                         samplingCompletedAtUnixSeconds=sampling_completed))+'\n')
-                if args.owned_postgres_pid is not None:
+                if args.owned_postgres_pid is not None or (args.server_deployment and
+                        json.loads(args.server_deployment.read_text()).get('postgres')):
                     current_postgres = sample_owned_postgres(args, database)
                     current_postgres['rates'] = derive_postgres_rates(current_postgres, previous_postgres)
                     previous_postgres = current_postgres
@@ -2072,12 +2107,10 @@ def run_revision(args, kind, actors, counts, manifest):
             while not stop_monitor.wait(2):
                 sampling_started = time.time()
                 samples = []
-                for index in range(NODES):
+                for index in range(len(gateways)):
                     node_started = time.time()
                     try:
-                        url = f'http://127.0.0.1:{args.metrics_port+index}/metrics/recovery-scheduling'
-                        with urllib.request.urlopen(url, timeout=1) as response:
-                            body = response.read(64*1024).decode('utf-8')
+                        body = gateway_metrics(args,index,'/recovery-scheduling')
                         samples.append(dict(node=index, body=body,
                             samplingStartedAtUnixSeconds=node_started,
                             samplingCompletedAtUnixSeconds=time.time()))
@@ -2091,13 +2124,22 @@ def run_revision(args, kind, actors, counts, manifest):
                 stream.flush()
     scheduling_thread = threading.Thread(target=monitor_recovery_scheduling, daemon=True) if getattr(args, 'recovery_scheduling_metrics', False) else None
     try:
+        if args.live_scale_out_at is not None:
+            failure_stage = 'expansion_prepare'
+            expansion = dynamic_membership.LiveExpansion(args, actors, directory, manifest, candidate_placement_binary(args))
         if args.actor_partition_canary is not None:
             failure_stage = 'partition_fixture'
         if kind == 'candidate':
             failure_stage = 'placement_startup'
             start_controls(binary=candidate_placement_binary(args), actors=actors,
                 shards=[manifest['shardID']], log_directory=directory, owned=placement_processes,
-                spawn=lambda name, binary, environment: start([str(binary)], name, environment))
+                spawn=lambda name, binary, environment: start([str(binary)], name, environment),
+                provision=(lambda name, binary, environment: run_command(
+                    remote_command(args.server_deployment, name, [str(binary), '--provision'], environment, directory),
+                    directory/(name+'-provision.log'))) if args.server_deployment else None)
+            if getattr(args, 'dynamic_membership', False):
+                failure_stage = 'membership_bootstrap'
+                dynamic_membership.bootstrap(args, actors, directory, candidate_placement_binary(args))
             failure_stage = 'startup'
         if kind=='baseline':
             start([str(args.nats_binary),'-a','127.0.0.1','-p',str(args.nats_port)],'nats')
@@ -2111,8 +2153,9 @@ def run_revision(args, kind, actors, counts, manifest):
         for i in range(NODES):
             edge_config=directory/f'edge-configuration-{i}.json'
             private_json(edge_config,dict(listenPort=args.https_port+i,upstreamPort=args.account_port,
-                         certificate=str(args.app_tls_certificate if app_canary_enabled(args) else actors/'gateway-0/tls.pem'),
-                         key=str(args.app_tls_key if app_canary_enabled(args) else actors/'gateway-0/tls.key'),
+                         listenHost='0.0.0.0' if args.server_deployment else '127.0.0.1',upstreamHost='127.0.0.1',
+                         certificate=str(args.app_tls_certificate if app_canary_enabled(args) else actors/('account' if args.server_deployment else 'gateway-0')/'tls.pem'),
+                         key=str(args.app_tls_key if app_canary_enabled(args) else actors/('account' if args.server_deployment else 'gateway-0')/'tls.key'),
                          edgeAuthorizationSecret=account_values['IM_V2_ACCOUNT_EDGE_AUTHORIZATION_SECRET_BASE64'],
                          maximumUpstreamConnections=128))
             start(['python3',str(ROOT/'IMV2/scripts/v2_benchmark_https_edge.py'),
@@ -2132,7 +2175,16 @@ def run_revision(args, kind, actors, counts, manifest):
             replacement = start([str(binary)], f'gateway-{index}-restarted', gateway_environments[index])
             service_processes.append(replacement)
             return replacement
+        ingress.start(args, directory, NODES, start)
         service_processes=list(processes)
+        def start_expanded_gateway(expanded, index):
+            environment = gateway_env(args,kind,database,index,expanded,manifest)
+            for key, value in environment.items():
+                if isinstance(value, str):
+                    environment[key] = value.replace(str(expanded/'public-ingress'), str(actors/'public-ingress'))
+            process = start([str(binary)], f'gateway-{index}', environment)
+            gateways.append(process)
+            service_processes.append(process)
         thread.start()
         if scheduling_thread is not None: scheduling_thread.start()
         deadline=time.monotonic()+120
@@ -2140,23 +2192,25 @@ def run_revision(args, kind, actors, counts, manifest):
             if any(p.poll() is not None for p in processes):
                 raise RuntimeError('Gateway/broker startup failed; logs retained')
             ready=0
-            ports=[args.gateway_port+i for i in range(NODES)]+[args.account_port]+[args.https_port+i for i in range(NODES)]
-            for number in ports:
+            ports=[(management_endpoint(args, f'gateway-{i}'), args.gateway_port+i) for i in range(NODES)]+([] if args.server_deployment else [(endpoint(args, 'account'), args.account_port)])+[(management_endpoint(args, f'edge-{i}'), args.https_port+i) for i in range(NODES)]
+            for address, number in ports:
                 try:
-                    socket.create_connection(('127.0.0.1',number),.2).close();ready+=1
+                    socket.create_connection((address,number),.2).close();ready+=1
                 except OSError:
                     pass
             if ready==len(ports):
-                if not partition_canary and not args.online_only: break
-                if args.online_only:
+                if not partition_canary and not args.online_only and not args.server_deployment: break
+                if args.online_only or args.server_deployment:
                     eligible = 0
                     for index in range(NODES):
                         try:
-                            with urllib.request.urlopen(f'http://127.0.0.1:{args.metrics_port+index}/metrics', timeout=1) as response:
-                                body = response.read().decode()
+                            body = gateway_metrics(args,index)
                             if re.search(r'^im_v2_actor_realtime_service_qualified 1$', body, re.M): eligible += 1
                         except (OSError, ValueError): pass
-                    if eligible == NODES: break
+                    if eligible == NODES and ingress.ready(args, directory, NODES):
+                        private_json(directory/'service-readiness.json', dict(qualifiedNodes=eligible,
+                            expectedNodes=NODES, checkedAt=time.time(), beforeClientAdmission=True))
+                        break
                     if time.monotonic() > deadline: raise TimeoutError('online service qualification readiness')
                     time.sleep(1)
                     continue
@@ -2205,25 +2259,44 @@ def run_revision(args, kind, actors, counts, manifest):
             private_json(directory/'result.json', result)
             private_json_snapshot(directory/app_canary_selection(args)[2], result)
             return result
-        print(f'{kind}: {NODES} Gateways ready; starting {manifest["users"]} connections',flush=True)
         barrier_path=directory/'scenario-start-barrier.json'
+        growth = None
+        if args.continuous_user_growth:
+            from v2_benchmark_continuous_growth import ContinuousUserGrowth
+            growth = ContinuousUserGrowth(args, directory, counts, expansion, manifest, candidate_placement_binary(args))
+        elif args.live_user_growth:
+            from v2_benchmark_user_growth import LiveUserGrowth
+            growth = LiveUserGrowth(args, directory, counts)
+        initial_indices = growth.initial_indices if growth else tuple(range(PARTS))
+        print(f'{kind}: {NODES} Gateways ready; starting {sum(counts[i] for i in initial_indices)} initial connections',flush=True)
         failure_stage = 'workload'
         def loader_command(i, count, *, prefill=False):
             client_gateway = i % NODES
-            command=[str(args.loader_binary),'--benchmark-wire-version',str(45 if kind=='baseline' else CANDIDATE_WIRE_VERSION),'--host','127.0.0.1','--port',str(args.gateway_port+client_gateway),
-                     '--account-base-url',f'https://localhost:{args.https_port+client_gateway}',
-                     '--server-name','localhost','--ca-path',str(actors/'ca/cert.pem'),
+            command=[str(args.loader_binary),'--benchmark-wire-version',str(45 if kind=='baseline' else CANDIDATE_WIRE_VERSION),'--host',endpoint(args, f'gateway-{client_gateway}'),'--port',str(args.gateway_port+client_gateway),
+                     '--account-base-url',f'https://{hostname(args, "account" if args.server_deployment else f"gateway-{client_gateway}")}:{args.https_port+client_gateway}',
+                     '--server-name',hostname(args, f'gateway-{client_gateway}'),'--ca-path',str(actors/'ca/cert.pem'),
                      '--credentials',str(args.output_dir/f'part-{i}.jsonl'),'--report',str(directory/f'prefill-report-{i}.json' if prefill else directory/f'report-{i}.json'),
-                     '--revision',kind,'--connections',str(count),'--ramp-per-second','200','--ramp-batch-size','32',
+                     '--revision',kind,'--connections',str(count),'--ramp-per-second',str(args.loader_ramp_per_second),'--ramp-batch-size',str(args.loader_ramp_batch_size),
                      '--workload-ramp-per-second','16',
                      '--hold-seconds','60','--event-loops','1','--messages-per-second','0',
                      '--recovery-burst-workers',str(min(128,count)), '--max-inflight-messages-per-connection',str(benchmark_message_send_window(args, kind)),
                      '--message-bytes','128','--targets-per-connection',str(benchmark_targets_per_connection(prefill=prefill)),'--sync-reads','1','--room-log-reads','1',
                      '--room-log-initial-cursor','tail','--room-log-read-trigger','availability_hint',
-                     '--peer-topology','ring','--max-rss-mb','1800','--max-failure-percent','0.1',
-                     '--scenario',str(prefill_scenario if prefill else args.scenario),'--scenario-rate-scale',str(1/PARTS),
+                     '--peer-topology','ring','--max-rss-mb','1800','--max-failure-percent',
+                     loader_failure_guard_percent(args.diagnostic_observe_through_failures, prefill=prefill),
+                     '--scenario',str(prefill_scenario if prefill else args.scenario),'--scenario-rate-scale',str(1/len(initial_indices) if growth else 1/PARTS),
                      '--scenario-ready-path',str(directory/f'prefill-part-{i}-ready.json' if prefill else directory/f'part-{i}-ready.json'),
                      '--scenario-start-barrier-path',str(prefill_barrier if prefill else barrier_path)]
+            if growth and i in growth.late_indices:
+                scenario_path, growth_barrier = growth.paths_for(i) if args.continuous_user_growth else (growth.scenario_path, growth.barrier_path)
+                command[command.index('--scenario')+1] = str(scenario_path)
+                command[command.index('--scenario-start-barrier-path')+1] = str(growth_barrier)
+            if ingress.enabled(args):
+                command[command.index('--host')+1] = endpoint(args, 'ingress')
+                command[command.index('--port')+1] = str(args.gateway_port+32)
+                command[command.index('--server-name')+1] = hostname(args, 'ingress')
+            if args.visibility_run_id is not None:
+                command += ['--visibility-run-id', str(args.visibility_run_id)]
             if args.online_only:
                 for option, value in {'--sync-reads': '0', '--room-log-reads': '0',
                                       '--room-log-initial-cursor': 'zero',
@@ -2231,7 +2304,7 @@ def run_revision(args, kind, actors, counts, manifest):
                                       '--max-failure-percent': '0'}.items():
                     command[command.index(option) + 1] = value
                 command += ['--online-only', '1']
-            if not partition_canary:
+            if not partition_canary and not args.server_deployment:
                 at = command.index('--hold-seconds')
                 command[at:at] = ['--local-port-base', str(
                     args.loader_local_port_base + (i // NODES) * LOADER_LOCAL_PORT_SPAN)]
@@ -2286,8 +2359,8 @@ def run_revision(args, kind, actors, counts, manifest):
             # Do not reuse explicit TCP tuples from the prefill channels. Main
             # canary uses ephemeral ports, still the same connection population.
             failure_stage = 'workload'
-        for i, count in enumerate(counts):
-            command = loader_command(i, count)
+        for i in initial_indices:
+            command = loader_command(i, counts[i])
             private_json(directory/f'command-{i}.json', command)
             loaders.append(start(command, f'load-{i}'))
         deadline=time.monotonic()+args.timeout_seconds
@@ -2304,16 +2377,23 @@ def run_revision(args, kind, actors, counts, manifest):
             if first_failure and loader_report_drain.started is not None:
                 print(f'{kind}: loader failed; collecting peer reports for at most {loader_report_drain.seconds}s; run remains failed', flush=True)
             if time.monotonic()>deadline: raise TimeoutError('workload timeout; evidence retained')
-            if not barrier_released and all((directory/f'part-{i}-ready.json').exists() for i in range(PARTS)):
-                ready_parts=[json.loads((directory/f'part-{i}-ready.json').read_text()) for i in range(PARTS)]
-                if any(r['activeConnections']!=count or r['requestedConnections']!=count for r,count in zip(ready_parts,counts)):
+            if not barrier_released and all((directory/f'part-{i}-ready.json').exists() for i in initial_indices):
+                ready_parts=[json.loads((directory/f'part-{i}-ready.json').read_text()) for i in initial_indices]
+                if any(r['activeConnections']!=count or r['requestedConnections']!=count for r,count in zip(ready_parts,[counts[i] for i in initial_indices])):
                     raise RuntimeError('scenario barrier requires every requested connection active')
                 release=int(time.time()*1000)+3000
                 temporary=directory/'scenario-start-barrier.tmp'
                 private_json(temporary,dict(releaseAtUnixMilliseconds=release))
                 temporary.rename(barrier_path)
                 barrier_released=True
-                print(f'{kind}: all {manifest["users"]} connections warm; common scenario barrier released',flush=True)
+                print(f'{kind}: all {sum(counts[i] for i in initial_indices)} initial connections warm; common scenario barrier released',flush=True)
+            if barrier_released and expansion:
+                if args.continuous_user_growth:
+                    growth.step(release/1000, loader_command, start, loaders, start_expanded_gateway)
+                else:
+                    expansion.step(release/1000, start_expanded_gateway)
+                    if growth:
+                        growth.step(release/1000, expansion, loader_command, start, loaders)
             if barrier_released and partition_canary:
                 partition_canary.step(release/1000, gateways)
             if args.preclose_recovery_witness and barrier_released and not preclose_terminal:
@@ -2332,6 +2412,8 @@ def run_revision(args, kind, actors, counts, manifest):
         if partition_canary and not partition_canary.recovered:
             partition_canary.persist()
             raise RuntimeError('partition_canary_did_not_complete')
+        if expansion and not expansion.done:
+            raise RuntimeError('live_expansion_did_not_complete_before_workload_ended')
         failure_stage = 'report_aggregation'
         loader_report_drain.observe([p.poll() for p in loaders], time.monotonic())
         reports=[json.loads((directory/f'report-{i}.json').read_text()) for i in range(PARTS) if (directory/f'report-{i}.json').exists()]
@@ -2341,6 +2423,11 @@ def run_revision(args, kind, actors, counts, manifest):
                report.get('algorithmSourceSHA256') != expected_algorithm for report in reports):
             raise RuntimeError('Loader report wire adapter/common algorithm identity mismatch; no capacity comparison')
         result=summarize(reports,[p.returncode for p in loaders],manifest['users'], args.planned_reconnect_inflight_canary, args.measurement_phase, online_only=args.online_only)
+        if growth:
+            result['userGrowth'] = growth.finish(result,reports,merge_latency_histograms)
+            result['qualityPassed'] = result['qualityPassed'] and result['userGrowth']['passed']
+        if expansion:
+            result['liveExpansion'] = json.loads((directory/'live-expansion.json').read_text())
         if args.planned_reconnect_inflight_canary:
             failure_stage = 'planned_reconnect_fact_drain'
             # Reports are complete; stop all real writers before the one fact
@@ -2365,6 +2452,7 @@ def run_revision(args, kind, actors, counts, manifest):
             private_json(directory/'fact-proof.json', facts)
             result['plannedReconnectFactProof'] = facts
             result['qualityPassed'] = result['qualityPassed'] and facts.get('passed') is True
+        ingress.capture(args, directory)
         failure_stage = 'delivery_proof'
         if args.online_only:
             result['foregroundDelivery'] = dict(checkedForegroundViewers=0, passed=True,
@@ -2528,10 +2616,22 @@ def run_revision(args, kind, actors, counts, manifest):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--nodes', type=int, choices=(1, 2, 4, 6), default=6)
+    parser.add_argument('--live-user-growth', action='store_true')
+    parser.add_argument('--continuous-user-growth', action='store_true')
+    parser.add_argument('--growth-measurement-seconds', type=int, default=120)
+    parser.add_argument('--live-scale-out-at', type=float, help='Seconds after scenario start to add a second gateway')
+    parser.add_argument('--live-scale-out-partitions', type=int, default=4)
+    parser.add_argument('--live-scale-out-rebalance', action='store_true',
+                        help='Migrate all surplus room partitions and verify the complete balanced assignment.')
+    parser.add_argument('--dynamic-membership', action='store_true',
+                        help='Commit the initial gateway roster before starting business processes')
+    parser.add_argument('--nodes', type=int, choices=(1, 2, 4, 6, 8), default=6)
     parser.add_argument('--loader-partitions', type=int, default=12)
     parser.add_argument('--maximum-rooms-per-host', type=int, metavar='128...65536')
     parser.add_argument('--actor-identity-seed', help='Test namespace UUID fixing logical Host/voter IDs across repeats')
+    parser.add_argument('--server-deployment', type=Path, help='explicit independent VM endpoints and owned process placement')
+    parser.add_argument('--server-log-level', choices=('trace','debug','info','notice','warning','error','critical'),
+                        help='explicit diagnostic log level; omitted preserves the workload default')
     parser.add_argument('--process-launcher-config', type=Path,
                         help='explicit Docker simulation resources; ordinary runs launch local processes')
     parser.add_argument('--fixture',required=True,type=Path)
@@ -2579,6 +2679,11 @@ def main():
     parser.add_argument('--candidate-authorization-mode', choices=('memory',), default='memory',
                         help='candidate requires memory policy owners')
     parser.add_argument('--scenario',type=Path,default=ROOT/'IMV2/load-scenarios/high-active-50000-uuid-ab-5000.json')
+    parser.add_argument('--visibility-run-id', type=uuid.UUID,
+                        help='opt-in peer-body latency on one shared Linux loader clock domain')
+    parser.add_argument('--loader-ramp-per-second', type=int, default=200,
+                        help='connection ramp per loader partition, not the cluster aggregate')
+    parser.add_argument('--loader-ramp-batch-size', type=int, default=32)
     parser.add_argument('--preclose-recovery-witness',action='store_true',help='candidate scaled diagnostic: bounded pre-close checkpoints and one read-only DB witness; never changes quality')
     parser.add_argument('--loader-excluded-local-ports', default='', help='comma-separated occupied source ports to skip within fixed loader ranges')
     parser.add_argument('--loader-local-port-base', type=int, default=DEFAULT_LOADER_LOCAL_PORT_BASE,
@@ -2597,6 +2702,8 @@ def main():
     parser.add_argument('--timeout-seconds',type=int,default=1800)
     parser.add_argument('--loader-report-drain-seconds', type=int, choices=range(1, 601), default=120,
                         help='bounded peer report collection after a loader fails; quality still fails')
+    parser.add_argument('--diagnostic-observe-through-failures', action='store_true',
+                        help='observe fault recovery without percentage-based early aborts; failures remain recorded, not capacity evidence')
     diagnostic_mode = parser.add_mutually_exclusive_group()
     diagnostic_mode.add_argument('--allow-small-canary',action='store_true',help='small population is expressly excluded from capacity acceptance')
     diagnostic_mode.add_argument('--allow-scaled-diagnostic',action='store_true',help='scaled iteration workload; quality checks remain enabled, never formal capacity acceptance')
@@ -2619,15 +2726,60 @@ def main():
     parser.add_argument('--app-tls-key', type=Path)
     parser.add_argument('--planned-reconnect-inflight-canary', action='store_true', help='explicit lost-ACK injection; requires small canary <=500 users; never capacity mode')
     args=parser.parse_args()
+    if args.live_scale_out_rebalance and args.live_scale_out_at is None:
+        parser.error('full partition redistribution requires live scale-out')
+    if not 1 <= args.loader_ramp_per_second <= 1000 or not 1 <= args.loader_ramp_batch_size <= 1000:
+        parser.error('invalid per-partition connection admission settings')
     if args.maximum_rooms_per_host is not None and not 128 <= args.maximum_rooms_per_host <= 65536:
         parser.error('maximum rooms per host must be 128...65536')
     try:
-        configure_topology(args.nodes, args.loader_partitions)
+        configure_topology(args.nodes, args.loader_partitions, automatic_source_ports=args.server_deployment is not None)
     except ValueError as error:
         parser.error(str(error))
     if args.nodes != 6 and (args.kind != 'candidate' or not args.allow_scaled_diagnostic
             or args.actor_partition_canary is not None or app_canary_enabled(args)):
         parser.error('variable topology requires candidate scaled simulation without fault/App modes')
+    if args.server_deployment is not None:
+        if args.kind != 'candidate' or not args.allow_scaled_diagnostic or not args.shared_postgres or args.process_launcher_config or args.actor_partition_canary is not None or app_canary_enabled(args):
+            parser.error('server deployment requires candidate scaled diagnostic and explicit shared test PG, without local fault/App modes')
+        args.server_deployment = args.server_deployment.resolve(strict=True)
+        try:
+            validate_deployment(json.loads(args.server_deployment.read_text()), args.nodes, args.loader_partitions)
+        except (KeyError, ValueError) as error:
+            parser.error('invalid server deployment: ' + str(error))
+        args.pg_bin_directory = Path(shutil.which('psql')).parent
+    if args.continuous_user_growth:
+        args.live_user_growth = True
+        if args.nodes != 1 or args.loader_partitions != 8 or args.live_scale_out_partitions < 4:
+            parser.error('continuous growth requires one initial node, eight load partitions and at least four migrated partitions')
+    if args.live_user_growth:
+        if (args.live_scale_out_at is None or args.loader_partitions < 2 or args.loader_partitions % 2
+                or args.growth_measurement_seconds < 60 or args.preclose_recovery_witness
+                or args.online_only or not ingress.enabled(args)):
+            parser.error('user growth requires live expansion, ingress, even loader partitions, >=60s growth measurement, and ordinary message scenario')
+    if args.live_scale_out_at is not None:
+        if not args.dynamic_membership or args.server_deployment is None or args.nodes not in (1, 2, 4) or args.live_scale_out_at < 1 or not args.nodes <= args.live_scale_out_partitions <= 128:
+            parser.error('live expansion requires dynamic membership, 1/2/4 initial gateways, positive offset and at least one partition per new gateway (maximum 128)')
+        expansion_roles = json.loads(args.server_deployment.read_text())['processes']
+        if any(f'gateway-{i}' not in expansion_roles for i in range(8 if args.continuous_user_growth else args.nodes * 2)):
+            parser.error('live expansion requires deployment entries for every target gateway')
+    if args.dynamic_membership:
+        if args.kind != 'candidate' or args.server_deployment is None:
+            parser.error('dynamic membership requires a remote candidate deployment')
+        roles = json.loads(args.server_deployment.read_text())['processes']
+        if any(name not in roles for name in ('membership-controller', 'placement-controller')):
+            parser.error('dynamic membership requires dedicated controller roles in the deployment map')
+        if args.live_scale_out_at is not None:
+            try:
+                dynamic_membership.authority_profile(json.loads(args.server_deployment.read_text()))
+            except ValueError as error:
+                parser.error(str(error))
+    if args.visibility_run_id is not None:
+        if args.kind != 'candidate' or args.server_deployment is None or args.online_only:
+            parser.error('visibility measurement requires remote candidate scenario with room reads')
+        roles = json.loads(args.server_deployment.read_text())['processes']
+        if len({roles[f'load-{i}']['profile'] for i in range(args.loader_partitions)}) != 1:
+            parser.error('visibility measurement currently requires one shared Linux loader clock')
     if args.process_launcher_config is not None:
         args.process_launcher_config = args.process_launcher_config.resolve(strict=True)
     if args.candidate_tcp_event_loop_threads is not None and not 1 <= args.candidate_tcp_event_loop_threads <= 256:
@@ -2652,7 +2804,7 @@ def main():
     for name in ('fixture','output_dir','baseline_checkout','baseline_binary','candidate_binary','loader_binary','baseline_account_binary','candidate_account_binary','scenario','nats_binary'):
         if getattr(args,name) is not None:
             setattr(args,name,getattr(args,name).resolve())
-    if not 1_024 <= args.loader_local_port_base <= 65_536 - LOADER_LOCAL_PORT_COUNT:
+    if args.server_deployment is None and not 1_024 <= args.loader_local_port_base <= 65_536 - LOADER_LOCAL_PORT_COUNT:
         parser.error('loader source-port ranges must fit in unprivileged TCP ports')
     for name in ('app_xctestrun','app_derived_data','app_trusted_ca','app_tls_certificate','app_tls_key'):
         if getattr(args,name) is not None: setattr(args,name,getattr(args,name).resolve())
@@ -2695,7 +2847,8 @@ def main():
         for phase in scenario_phases:
             args.preclose_measurement_end_offset += phase['durationSeconds']
             if phase['name'] == args.measurement_phase: break
-    non_capacity = args.allow_small_canary or args.allow_scaled_diagnostic
+    non_capacity = (args.allow_small_canary or args.allow_scaled_diagnostic
+                    or args.diagnostic_observe_through_failures)
     if manifest['users']!=50000 and not non_capacity:parser.error('capacity acceptance requires exactly 50000 users; use an explicit diagnostic mode for smaller workloads')
     if manifest['users']<PARTS:parser.error(f'fixture needs at least {PARTS} users')
     if args.planned_reconnect_inflight_canary and (not args.allow_small_canary or manifest['users'] > 500):
@@ -2713,7 +2866,8 @@ def main():
         # SwiftPM build systems can emit separate native/Xcode products.
         try:
             loader_contract = json.loads(subprocess.check_output(
-                [str(args.loader_binary), '--describe-message-transport'], text=True,
+                (remote_command(args.server_deployment, 'load-0', [str(args.loader_binary), '--describe-message-transport'], {}, args.output_dir.parent)
+                 if args.server_deployment else [str(args.loader_binary), '--describe-message-transport']), text=True,
                 stderr=subprocess.DEVNULL, timeout=10))
         except (subprocess.SubprocessError, ValueError):
             parser.error('loader executable does not describe its TCP message contract; check actual build output path')
@@ -2763,16 +2917,19 @@ def main():
                   candidateActorBinaryInvocations=args.candidate_actor_binary_invocations,
                   messageTransport='tcp',messageRecoveryTransport='tcp_query',
                   accountHTTPConnectionsPerHostSoftLimit=256,scenarioStartBarrier=not app_canary_enabled(args),
-                  explicitLocalSourcePorts=not app_canary_enabled(args) and args.actor_partition_canary is None,
+                  explicitLocalSourcePorts=not app_canary_enabled(args) and args.actor_partition_canary is None and args.server_deployment is None,
                   localSourcePortRange=[args.loader_local_port_base,
                       args.loader_local_port_base + LOADER_LOCAL_PORT_COUNT - 1]
-                      if not app_canary_enabled(args) and args.actor_partition_canary is None else None,
+                      if not app_canary_enabled(args) and args.actor_partition_canary is None and args.server_deployment is None else None,
                   candidateWorkingDiffSHA256=hashlib.sha256(subprocess.check_output(['git','-C',str(ROOT),'diff','--binary','HEAD'])).hexdigest(),
+                  receiverVisibilityRunID=str(args.visibility_run_id) if args.visibility_run_id else None,
                   candidateSourceFilesSHA256={str(p.relative_to(ROOT)):sha(p) for p in sorted((ROOT/'IMV2Server/Sources').rglob('*')) if p.is_file()},
                   baselineAccountBinarySHA256=sha(args.baseline_account_binary) if args.kind != 'candidate' else None,
                   candidateAccountBinarySHA256=sha(args.candidate_account_binary),
                   edgeSourceSHA256=sha(ROOT/'IMV2/scripts/v2_benchmark_https_edge.py'),canary=args.allow_small_canary,
                   scaledDiagnostic=args.allow_scaled_diagnostic,
+                  dynamicMembership=args.dynamic_membership,
+                  liveScaleOutAt=args.live_scale_out_at,
                   plannedReconnectInflightCanary=args.planned_reconnect_inflight_canary,
                   actorPartitionCanary=args.actor_partition_canary,
                   appOutboxCanary=args.app_outbox_canary,
@@ -2791,6 +2948,8 @@ def main():
                   configurationDefaultsSHA256=sha((args.baseline_checkout or ROOT)/'IMV2Server/.env.example'),
                   candidateRevision=subprocess.check_output(['git','-C',str(ROOT),'rev-parse','HEAD'],text=True).strip())
     private_json(args.output_dir/'evidence.json',evidence)
+    if args.server_deployment:
+        private_json(args.output_dir/'server-deployment.json', json.loads(args.server_deployment.read_text()))
     actors,counts=prepare(args,manifest)
     pg_started=False
     args.owned_postgres_pid=None

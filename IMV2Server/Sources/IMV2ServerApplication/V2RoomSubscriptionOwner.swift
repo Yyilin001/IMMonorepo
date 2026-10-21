@@ -57,6 +57,7 @@ public actor V2RoomSubscriptionOwner {
     private var closed = false
     private var changed = false
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
+    private var closeFlight: Task<Void, Never>?
 
     private init(source: any V2RoomSubscriptionSource, snapshot: V2RoomSubscriptionSourceSnapshot,
                  relay: V2RoomSubscriptionRelay, activation: V2RoomActivationToken, maximumTrackedUsers: Int, maximumGateways: Int,
@@ -402,12 +403,29 @@ public actor V2RoomSubscriptionOwner {
 
     package func hasGateway(_ gateway: V2GatewayRealtimeIdentity) -> Bool { gateways[gateway] != nil }
 
-    public func close() async throws {
+    public func close(deadline: ContinuousClock.Instant = .now + .seconds(5)) async throws {
+        if let closeFlight { await closeFlight.value; return }
+        closed = true
+        let flight = Task { await finishClose(deadline: deadline) }
+        closeFlight = flight
+        await flight.value
+    }
+
+    private func finishClose(deadline: ContinuousClock.Instant) async {
         // Close admission immediately, then join the actual in-flight database
         // owner before invalidating its delivery responsibility.
         closed = true
         if busy || activePermissionOperations > 0 { await withCheckedContinuation { closeWaiters.append($0) } }
-        await relay.invalidate()
+        let targets = Set(deliveryBindings.keys)
+        var acknowledged = false
+        do {
+            try await relay.prepareRetirement(gateways: targets)
+            for (gateway, pump) in deliveryBindings { await pump.signal(.init(roomID: roomID, gateway: gateway)) }
+            acknowledged = await relay.awaitRetirement(gateways: targets, deadline: deadline)
+        } catch { }
+        // Unreachable or failed peers retain the shared-session fail-closed
+        // path. Healthy retirement affects only this room's authorization.
+        if !acknowledged { await relay.invalidate() }
         for gateway in gateways.keys { notifyChanged(gateway) }
         for (gateway, pump) in deliveryBindings { await pump.unbindAndJoin(.init(roomID: roomID, gateway: gateway)) }
         deliveryBindings.removeAll(); activatedFences.removeAll()

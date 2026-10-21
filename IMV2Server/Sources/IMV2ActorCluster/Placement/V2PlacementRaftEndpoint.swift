@@ -48,7 +48,7 @@ package actor V2PlacementRaftEndpoint: V2PlacementRaftServing {
                                deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else { throw V2ActorPlacementError.unavailable }
-        guard request.isBounded, readers[serviceID]?.contains(request.shardID) == true,
+        guard request.isBounded, (readers[serviceID] ?? trust?.authorizedSources(for: serviceID, configured: nil, requiring: [.placementRead]) ?? []).contains(request.shardID),
               let voter = voters[request.shardID] else { throw V2ActorAuthenticationError.forbidden }
         let decoded = try V2PlacementRaftReadCodec.decodeRequest(request)
         let groupID = decoded.groupID
@@ -70,16 +70,32 @@ package actor V2PlacementRaftEndpoint: V2PlacementRaftServing {
                                 callerIncarnation: UUID, deadline: ContinuousClock.Instant) async throws -> V2PlacementRaftWire {
         try Task.checkCancellation()
         guard ContinuousClock.now < deadline else { throw V2ActorPlacementError.unavailable }
-        guard wire.isBounded, writers[serviceID]?.contains(wire.shardID) == true,
-              let trust, let voter = voters[wire.shardID], let log = logs?[wire.shardID] else {
+        guard wire.isBounded, let trust,
+              trust.authorizedSources(for: serviceID, configured: writers[serviceID], requiring: [.placementWrite]).contains(wire.shardID), let voter = voters[wire.shardID], let log = logs?[wire.shardID] else {
             throw V2ActorAuthenticationError.forbidden
         }
         let request = try V2PlacementRaftWriteCodec.decodeRequest(wire)
         guard try await voter.committedState().groupID == request.expected.clusterID else { throw V2PlacementRaftError.wrongGroup }
         func roomHost(_ host: V2ActorHostIdentity) throws {
-            guard roomHosts[host.hostID]?.contains(wire.shardID) == true else { throw V2ActorAuthenticationError.forbidden }
+            guard trust.authorizedSources(for: try trust.configuredHostServiceID(for: host.hostID), configured: roomHosts[host.hostID]).contains(wire.shardID) else { throw V2ActorAuthenticationError.forbidden }
         }
         switch request.command {
+        case .installServiceMembership(let membership):
+            guard request.certificate == nil,
+                  try trust.configuredService(serviceID).permissions.contains(.placementMembership) else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+            // Every proposed endpoint must already belong to an admitted
+            // realtime service. This controller need not be a serving member.
+            guard let first = membership.peers.first else { throw V2ActorAuthenticationError.invalidConfiguration }
+            try trust.validateRealtimeRoster(membership.peers,
+                local: .init(nodeID: first.nodeID, serviceID: first.serviceID, incarnationID: UUID()),
+                address: first.address, port: first.port)
+            try trust.validateRoomRoster(membership.roomPeers, configured: roomHosts)
+        case .admitHost(let hostID):
+            guard trust.authorizedSources(for: try trust.configuredHostServiceID(for: hostID), configured: roomHosts[hostID]).contains(wire.shardID),
+                  try trust.configuredHostServiceID(for: hostID) == serviceID,
+                  request.certificate == nil else { throw V2ActorAuthenticationError.forbidden }
         case .registerHost(let previous, let successor):
             try roomHost(successor)
             guard previous.hostID == successor.hostID, successor.incarnationID == callerIncarnation,

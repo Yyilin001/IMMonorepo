@@ -73,6 +73,17 @@ package actor V2PlacementRaftLeaderLog: V2ActorPlacementInspectableLog {
     }
 
     package func bootstrap(_ initial: V2ActorPlacementSnapshot) async throws -> V2ActorPlacementSnapshot {
+        try await ensureBootstrap(initial, requireMatchingGenesis: true)
+    }
+
+    /// Deployment startup may have a different host roster from genesis.
+    /// Existing ownership always comes from a fresh quorum read; the supplied
+    /// affinity is used only when the certified application is still empty.
+    package func open(_ initial: V2ActorPlacementSnapshot) async throws -> V2ActorPlacementSnapshot {
+        try await ensureBootstrap(initial, requireMatchingGenesis: false)
+    }
+
+    private func ensureBootstrap(_ initial: V2ActorPlacementSnapshot, requireMatchingGenesis: Bool) async throws -> V2ActorPlacementSnapshot {
         guard initial.clusterID == application.groupID, initial.revision == 1 else {
             throw V2ActorPlacementError.conflictingSnapshot
         }
@@ -82,7 +93,8 @@ package actor V2PlacementRaftLeaderLog: V2ActorPlacementInspectableLog {
         while true {
             try check(deadline)
             do {
-                if try await readApplicationSnapshot(deadline: deadline) != nil {
+                if let current = try await readApplicationSnapshot(deadline: deadline) {
+                    if !requireMatchingGenesis { return current }
                     guard let result = try application.bootstrapReceipt(initial) else { throw V2PlacementRaftError.invalidState }
                     return result
                 }

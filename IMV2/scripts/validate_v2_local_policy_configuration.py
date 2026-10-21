@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 from pathlib import Path
 
 
@@ -43,6 +44,10 @@ def validate(root: Path) -> None:
 
 def validate_placement(root: Path, documents: dict) -> None:
     names = ("placement-a", "placement-b", "placement-c")
+    try:
+        cluster_id = str(uuid.UUID(documents["gateway"].get("placementControl", {}).get("clusterID", "")))
+    except (ValueError, TypeError, AttributeError):
+        raise ValueError("placement requires a persistent deployment cluster ID") from None
     voters = documents["gateway"].get("placementControl", {}).get("voters")
     if not isinstance(voters, list) or len(voters) != 3:
         raise ValueError("local actors require three independent placement voters")
@@ -59,6 +64,8 @@ def validate_placement(root: Path, documents: dict) -> None:
         documents[name] = document
     for name, document in documents.items():
         control = document.get("placementControl", {})
+        if control.get("clusterID") != cluster_id:
+            raise ValueError(f"{name} uses a different placement cluster identity")
         if control.get("voters") != voters:
             raise ValueError(f"{name} uses a different placement quorum")
         if name in names:

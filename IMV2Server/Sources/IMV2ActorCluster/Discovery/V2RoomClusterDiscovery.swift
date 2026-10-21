@@ -3,9 +3,9 @@ import DistributedCluster
 import Foundation
 import IMV2ActorContracts
 
-/// 固定的部署条目。接待员只提供候选 ActorID，
+/// 经授权的部署条目。接待员只提供候选 ActorID，
 /// 不能授予宿主身份、服务角色、分片访问权或容量。
-public struct V2RoomDiscoveryPeer: Sendable {
+public struct V2RoomDiscoveryPeer: Codable, Equatable, Sendable {
     public let hostID: V2ActorHostID
     public let serviceID: V2ActorServiceID
     public let address: String
@@ -16,8 +16,10 @@ public struct V2RoomDiscoveryPeer: Sendable {
     public init(hostID: V2ActorHostID, serviceID: V2ActorServiceID,
                 address: String, port: Int, accessibleShardIDs: Set<String>,
                 maximumRooms: Int) throws {
-        guard !address.isEmpty, (1...65_535).contains(port),
-              !accessibleShardIDs.isEmpty, (1...65_536).contains(maximumRooms)
+        guard !address.isEmpty, address.utf8.count <= 253, address != "0.0.0.0", address != "::",
+              (1...65_535).contains(port), !accessibleShardIDs.isEmpty, accessibleShardIDs.count <= 256,
+              accessibleShardIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
+              (1...65_536).contains(maximumRooms)
         else { throw V2ActorAuthenticationError.invalidConfiguration }
         self.hostID = hostID
         self.serviceID = serviceID
@@ -25,6 +27,23 @@ public struct V2RoomDiscoveryPeer: Sendable {
         self.port = port
         self.accessibleShardIDs = accessibleShardIDs
         self.maximumRooms = maximumRooms
+    }
+    private enum CodingKeys: CodingKey { case hostID, serviceID, address, port, accessibleShardIDs, maximumRooms }
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let shards = try values.decode([String].self, forKey: .accessibleShardIDs)
+        guard Set(shards).count == shards.count else { throw V2ActorAuthenticationError.invalidConfiguration }
+        try self.init(hostID: values.decode(V2ActorHostID.self, forKey: .hostID),
+            serviceID: values.decode(V2ActorServiceID.self, forKey: .serviceID),
+            address: values.decode(String.self, forKey: .address), port: values.decode(Int.self, forKey: .port),
+            accessibleShardIDs: Set(shards), maximumRooms: values.decode(Int.self, forKey: .maximumRooms))
+    }
+    public func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(hostID, forKey: .hostID); try values.encode(serviceID, forKey: .serviceID)
+        try values.encode(address, forKey: .address); try values.encode(port, forKey: .port)
+        try values.encode(accessibleShardIDs.sorted(), forKey: .accessibleShardIDs)
+        try values.encode(maximumRooms, forKey: .maximumRooms)
     }
 }
 
@@ -137,6 +156,10 @@ public actor V2RoomClusterDiscovery {
     private let client: V2RoomClusterClient
     private let trust: V2ActorTrustStore
     private let configuration: V2RoomDiscoveryConfiguration
+    private var peers: [V2RoomDiscoveryPeer]
+    private var peerRevision: UInt64 = 0
+    private var updatingPeers = false
+    private var authorizationSuspended = false
     private var active: [V2ActorHostID: V2RoomClusterHostDescriptor] = [:]
     private var activeBeaconIDs: [V2ActorHostID: ClusterSystem.ActorID] = [:]
     private var lastVerifiedAt: [V2ActorHostID: ContinuousClock.Instant] = [:]
@@ -156,11 +179,12 @@ public actor V2RoomClusterDiscovery {
         self.client = client
         self.trust = trust
         self.configuration = configuration
+        self.peers = configuration.peers
     }
 
     public func start() {
         guard accepting, worker == nil else { return }
-        for peer in configuration.peers {
+        for peer in peers {
             system.cluster.join(host: peer.address, port: peer.port)
             nextJoinAllowed[peer.hostID] = .now + .seconds(5)
         }
@@ -175,15 +199,88 @@ public actor V2RoomClusterDiscovery {
         }
     }
 
+    /// Only a certified control-state consumer may call this entry point.
+    /// Endpoint, shard scopes and capacity must come from that authorized state;
+    /// authenticated advertisements alone cannot enlarge them.
+    package func installAuthorizedPeers(_ proposed: [V2RoomDiscoveryPeer], revision: UInt64) async throws {
+        guard accepting, !updatingPeers else { throw V2ActorAuthenticationError.overloaded }
+        guard revision > 0, proposed.count <= 64,
+              Set(proposed.map(\.hostID)).count == proposed.count else {
+            throw V2ActorAuthenticationError.invalidConfiguration
+        }
+        let normalized = proposed.sorted { $0.hostID.rawValue < $1.hostID.rawValue }
+        guard revision >= peerRevision else { throw V2ActorPlacementError.staleRevision }
+        if revision == peerRevision {
+            guard normalized == peers.sorted(by: { $0.hostID.rawValue < $1.hostID.rawValue }) else {
+                throw V2ActorPlacementError.invalidTransition
+            }
+            if !authorizationSuspended { return }
+        }
+        for peer in normalized {
+            guard try trust.configuredHostServiceID(for: peer.hostID) == peer.serviceID else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        }
+        let byID = Dictionary(uniqueKeysWithValues: normalized.map { ($0.hostID, $0) })
+        // Retained identities cannot silently move endpoints or gain scope.
+        guard peers.allSatisfy({ byID[$0.hostID] == nil || byID[$0.hostID] == $0 }) else {
+            throw V2ActorPlacementError.invalidTransition
+        }
+        updatingPeers = true
+        defer { updatingPeers = false }
+        // Join the old poll, including any awaited directory publication. This
+        // prevents an old successful probe from resurrecting a removed route.
+        while polling {
+            try Task.checkCancellation()
+            guard accepting else { throw V2ActorAuthenticationError.overloaded }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try Task.checkCancellation()
+        guard accepting else { throw V2ActorAuthenticationError.overloaded }
+        for peer in peers where byID[peer.hostID] == nil {
+            if let descriptor = active[peer.hostID] {
+                // Close new admission but allow existing grants to settle.
+                // Removal is not proof of process death: never down its Node.
+                _ = await client.suspendUnreachableHost(descriptor.identity)
+            }
+            active.removeValue(forKey: peer.hostID)
+            activeBeaconIDs.removeValue(forKey: peer.hostID)
+            lastVerifiedAt.removeValue(forKey: peer.hostID)
+            failedNodesSuspended.removeValue(forKey: peer.hostID)
+            nextJoinAllowed.removeValue(forKey: peer.hostID)
+        }
+        peers = normalized
+        peerRevision = revision
+        authorizationSuspended = false
+        guard accepting else { return }
+        for peer in peers where nextJoinAllowed[peer.hostID] == nil {
+            system.cluster.join(host: peer.address, port: peer.port)
+            nextJoinAllowed[peer.hostID] = .now + .seconds(5)
+        }
+    }
+
+    package func suspendAuthorization() async {
+        authorizationSuspended = true
+        while polling {
+            do { try await Task.sleep(for: .milliseconds(5)) } catch { return }
+        }
+        for peer in peers {
+            await markUnhealthy(peer)
+            if let descriptor = active[peer.hostID] {
+                _ = await client.suspendUnreachableHost(descriptor.identity)
+            }
+        }
+    }
+
     public func pollOnce() async {
-        guard accepting, !polling else { return }
+        guard accepting, !polling, !updatingPeers, !authorizationSuspended else { return }
         polling = true
         defer {
             polling = false
             completedPolls &+= 1
         }
         await reapRetiredNodes()
-        for peer in configuration.peers {
+        for peer in peers {
             guard accepting, !Task.isCancelled else { return }
             let found = await system.receptionist.lookup(V2RoomDiscoveryBeacon.key(for: peer.hostID))
             // 在排序、探测或创建子任务前先检查数量上限。
@@ -372,11 +469,11 @@ public actor V2RoomClusterDiscovery {
 
     public func quiesce(deadline: ContinuousClock.Instant) async -> Bool {
         stop()
-        while (worker != nil || polling || !probes.isEmpty) && ContinuousClock.now < deadline {
+        while (worker != nil || polling || updatingPeers || !probes.isEmpty) && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) }
             catch { break }
         }
-        return worker == nil && !polling && probes.isEmpty
+        return worker == nil && !polling && !updatingPeers && probes.isEmpty
     }
 
     private func workerFinished() { worker = nil }

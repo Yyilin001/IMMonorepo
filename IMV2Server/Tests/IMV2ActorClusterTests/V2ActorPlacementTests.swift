@@ -16,6 +16,28 @@ struct V2ActorPlacementTests {
         return (snapshot, .init(snapshot: snapshot), host)
     }
 
+    @Test("placement history identity survives host expansion but isolates shards and deployments")
+    func stableDeploymentIdentity() throws {
+        let deployment = UUID()
+        let a = try V2RoomDiscoveryPeer(hostID: .init(uuid: UUID()), serviceID: .init("host-a"),
+            address: "a.test", port: 7337, accessibleShardIDs: ["rooms", "other"], maximumRooms: 100)
+        let b = try V2RoomDiscoveryPeer(hostID: .init(uuid: UUID()), serviceID: .init("host-b"),
+            address: "b.test", port: 7337, accessibleShardIDs: ["rooms", "other"], maximumRooms: 100)
+        let original = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: deployment, shard: "rooms", peers: [a])
+        let expanded = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: deployment, shard: "rooms", peers: [a, b])
+        #expect(original.clusterID == expanded.clusterID)
+        #expect(original.clusterID == (try V2RoomActorPlacementRuntime.initialSnapshot(
+            deploymentID: deployment, shard: "rooms", peers: [b, a])).clusterID)
+        #expect(original.clusterID != (try V2RoomActorPlacementRuntime.initialSnapshot(
+            deploymentID: deployment, shard: "other", peers: [a])).clusterID)
+        #expect(original.clusterID != (try V2RoomActorPlacementRuntime.initialSnapshot(
+            deploymentID: UUID(), shard: "rooms", peers: [a])).clusterID)
+        // This is only genesis affinity; startup must still load committed
+        // history and must never overwrite it with the expanded genesis.
+        let allRetired = expanded.slots.allSatisfy { $0.retired }
+        #expect(allRetired)
+    }
+
     @Test("Committed transfer withdraws admission before publishing the successor")
     func transfer() throws {
         let (initial, directory, oldHost) = try fixture()

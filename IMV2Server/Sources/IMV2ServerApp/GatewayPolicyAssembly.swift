@@ -53,7 +53,13 @@ struct GatewayPolicyAssembly: Sendable {
             try .init(hostID: peer.hostID,
                 endpoint: document.owners.first { $0.hostID == peer.hostID.uuidValue }?.endpoint
                     ?? peer.accessibleShardIDs.sorted()[0])
-        }, identity: identity, cache: cache, maximumScopesPerRecipient: snapshotCapacity, validateRecipient: { target in
+        }, identity: identity, cache: cache, maximumScopesPerRecipient: snapshotCapacity, authorizeAdditionalTarget: { target in
+            let service = try configuration.trust.configuredHostServiceID(for: target.hostID,
+                requiring: [.policyRegistration])
+            let configured = configuration.discovery.peers.first { $0.hostID == target.hostID }?.accessibleShardIDs
+            return configuration.trust.authorizedSources(for: service, configured: configured,
+                requiring: [.policyRegistration]).contains(target.endpoint)
+        }, validateRecipient: { target in
             let client = try binding.client()
             guard try await client.resolvePolicyHost(hostID: target.hostID, endpoint: target.endpoint) == target.host else {
                 throw V2PolicyAuthorizationLifecycleError.ownerChanged

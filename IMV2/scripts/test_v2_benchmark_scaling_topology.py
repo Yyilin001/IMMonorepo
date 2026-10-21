@@ -26,6 +26,17 @@ class ScalingTopologyTests(unittest.TestCase):
     def test_rejects_overlapping_or_unrepresentable_source_ranges(self):
         for nodes,parts in [(1,12),(4,6),(4,2),(3,6)]:
             with self.assertRaises(ValueError): benchmark.configure_topology(nodes,parts)
+    def test_remote_automatic_ports_allow_fixed_eight_loaders_for_all_sizes(self):
+        for nodes in (1,2,4,8):
+            benchmark.configure_topology(nodes,8,automatic_source_ports=True)
+            self.assertEqual((benchmark.NODES,benchmark.PARTS),(nodes,8))
+        with self.assertRaises(ValueError): benchmark.configure_topology(1,8)
+        with self.assertRaises(ValueError): benchmark.configure_topology(4,6,automatic_source_ports=True)
+    def test_shared_ingress_tuples_are_included_in_remote_drain_audit(self):
+        rows = '\n'.join(f'0: 030500C0:88B8 0C0500C0:{port:04X} 06' for port in (20000,20032,21000))
+        self.assertEqual(benchmark.count_workload_tcp_tuples(rows,20000,system='Linux',all_source_ports=True),1)
+        self.assertEqual(benchmark.count_workload_tcp_tuples(rows,20000,system='Linux',all_source_ports=True,
+            additional_destination_ports=(20032,)),2)
     def test_each_gateway_keeps_the_same_budget_and_its_own_cpu(self):
         config=dict(image='test',runID='scale',familyID='family',networkContainer='controller',mounts=[],
             gatewayCPUs=[0,1,2,3],roles={'gateway':dict(cpuset='',cpus=1,memoryBytes=3*1024**3)})

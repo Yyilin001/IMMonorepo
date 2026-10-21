@@ -198,7 +198,7 @@ struct V2RoomActivationHostTests {
     @Test("a cached execution handle observes proof revocation before Host notification")
     func executionHandleSeesRevocationSynchronously() async throws {
         let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
-        _ = qualification.update(witnesses: ["b": .now + .seconds(5)])
+        _ = qualification.update(witnesses: ["b": .now + .seconds(5)], membershipRevision: 1)
         let fixture = try Fixture(qualification: qualification)
         await fixture.host.start()
         guard case .ready(let token) = try await fixture.activate().value else { throw TestFailure.restore }
@@ -241,7 +241,7 @@ struct V2RoomActivationHostTests {
     @Test("qualification deadline stops service without depending on membership callbacks")
     func qualificationWatchdogExpires() async throws {
         let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
-        _ = qualification.update(witnesses: ["b": .now + .milliseconds(150)])
+        _ = qualification.update(witnesses: ["b": .now + .milliseconds(150)], membershipRevision: 1)
         let fixture = try Fixture(qualification: qualification)
         await fixture.host.start()
         guard case .ready(let token) = try await fixture.activate().value else {
@@ -261,12 +261,12 @@ struct V2RoomActivationHostTests {
     func qualificationRefreshKeepsExactDeadline(shortens: Bool) async throws {
         let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
         let originalDeadline = ContinuousClock.now + (shortens ? .seconds(3) : .milliseconds(150))
-        let original = try #require(qualification.update(witnesses: ["b": originalDeadline]))
+        let original = try #require(qualification.update(witnesses: ["b": originalDeadline], membershipRevision: 1))
         let fixture = try Fixture(qualification: qualification)
         await fixture.host.start()
         guard case .ready(let token) = try await fixture.activate().value else { throw TestFailure.restore }
         let refreshedDeadline = ContinuousClock.now + .milliseconds(400)
-        let refreshed = try #require(qualification.update(witnesses: ["b": refreshedDeadline]))
+        let refreshed = try #require(qualification.update(witnesses: ["b": refreshedDeadline], membershipRevision: 1))
         #expect(refreshed.generation == original.generation)
         await fixture.host.qualificationDidChange()
         #expect(await fixture.host.isReady(token: token))
@@ -696,7 +696,7 @@ struct V2RoomActivationHostTests {
         let gate = Gate()
         let invalidations = ReadInvalidationProbe()
         let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
-        _ = qualification.update(witnesses: ["b": .now + .seconds(10)])
+        _ = qualification.update(witnesses: ["b": .now + .seconds(10)], membershipRevision: 1)
         let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
             placement: FakePlacement(host: identity), configuration: config, budget: budget,
             classify: { $0.turnSchedulingClass }, factory: .init(recoveryBatch: { items in
@@ -775,7 +775,7 @@ struct V2RoomActivationHostTests {
         let readGate = Gate(), lateGate = Gate()
         let laneExecutions = ReadInvalidationProbe(), invalidations = ReadInvalidationProbe()
         let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: ["a", "b", "c"])
-        _ = qualification.update(witnesses: ["b": .now + .seconds(10)])
+        _ = qualification.update(witnesses: ["b": .now + .seconds(10)], membershipRevision: 1)
         let host = V2RoomActivationHost<V2RoomRequest, V2RoomResponse>(identity: identity,
             placement: FakePlacement(host: identity), configuration: configuration, budget: budget,
             classify: { $0.turnSchedulingClass }, factory: .init(pureRoomLogPull: { token, request, _ in

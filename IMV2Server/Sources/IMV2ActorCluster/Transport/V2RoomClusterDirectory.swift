@@ -9,6 +9,12 @@ package struct V2RoomClusterRoutingSnapshot: Sendable {
     let descriptors: [V2ActorHostID: V2RoomClusterHostDescriptor]
     let suspended: Set<V2ActorHostIdentity>
 
+    package func healthyHostIDs() -> Set<V2ActorHostID> {
+        guard accepting else { return [] }
+        return Set(descriptors.values.filter { $0.isHealthy && !suspended.contains($0.identity) }
+            .map { $0.identity.hostID })
+    }
+
     package func resolvePolicyHost(hostID: V2ActorHostID, endpoint: String) throws -> V2ActorHostIdentity {
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
         guard let descriptor = descriptors[hostID], descriptor.isHealthy,

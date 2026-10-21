@@ -14,6 +14,37 @@ struct V2PolicyControlSessionTests {
         return try .init(scope: scope, version: version, facts: .account(.init(userID: user, isActive: active,
             specialKind: nil, specialStatus: nil, allowsServiceMessages: nil, allowsCustomerMessages: nil)))
     }
+    @Test("newly authorized room hosts can subscribe without restarting the policy owner")
+    func admittedRecipientCanSubscribeAndIsRevalidated() async throws {
+        let admitted = Mutex(false), live = Mutex(true)
+        let expected = recipient
+        let target = try V2PolicySnapshotSubscriberWire(host: expected, endpoint: "gateway")
+        let local = V2NodePolicyStateCache()
+        let publisher = V2PolicySnapshotPublisher(targets: [], identity: source, cache: local,
+            authorizeAdditionalTarget: { candidate in
+                admitted.withLock { $0 } && candidate.hostID == expected.hostID && candidate.endpoint == "gateway"
+            }, validateRecipient: { candidate in
+                guard live.withLock({ $0 }), candidate.host == expected else {
+                    throw V2PolicyAuthorizationLifecycleError.ownerChanged
+                }
+            }, send: { _, _ in })
+        let scope = V2PolicyAuthorizationScope.account(UUID())
+        await #expect(throws: V2RoomCallFailure.notAccepted(.forbidden)) {
+            try await publisher.subscribe(scopes: [scope], target: target)
+        }
+        admitted.withLock { $0 = true }
+        let session = try await publisher.subscribe(scopes: [scope], target: target)
+        #expect(try await publisher.subscribe(scopes: [scope], target: target) == session)
+        let wrongScope = try V2PolicySnapshotSubscriberWire(host: expected, endpoint: "unauthorized")
+        await #expect(throws: V2RoomCallFailure.notAccepted(.forbidden)) {
+            try await publisher.subscribe(scopes: [scope], target: wrongScope)
+        }
+        live.withLock { $0 = false }
+        await #expect(throws: V2PolicyAuthorizationLifecycleError.ownerChanged) {
+            try await publisher.subscribe(scopes: [scope], target: target)
+        }
+        await publisher.shutdown(); await local.shutdown()
+    }
     @Test("configured recipient capacity rejects an entire oversized registration and exact release restores capacity")
     func configuredRecipientCapacity() async throws {
         let local = V2NodePolicyStateCache(), delivered = Mutex<[V2PolicySnapshotUpdateWire]>([])

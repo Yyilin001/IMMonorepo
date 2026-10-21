@@ -61,7 +61,8 @@ async def body(reader, entries, *, response=False):
 
 class UpstreamPool:
     """Exclusive checkout; no request pipelining and no automatic body replay."""
-    def __init__(self, port, counters, maximum=128):
+    def __init__(self, port, counters, maximum=128, host='127.0.0.1'):
+        self.host=host
         self.port=port;self.counters=counters;self.maximum=maximum
         self.slots=asyncio.Semaphore(maximum)
         self.idle=asyncio.LifoQueue(maxsize=maximum)
@@ -79,7 +80,7 @@ class UpstreamPool:
                     await self.discard((reader,writer));continue
                 self.counters['upstreamReused']+=1
                 return reader,writer
-            connection=await asyncio.wait_for(asyncio.open_connection('127.0.0.1',self.port,limit=MAX_HEADER),timeout=5)
+            connection=await asyncio.wait_for(asyncio.open_connection(self.host,self.port,limit=MAX_HEADER),timeout=5)
             self.counters['upstreamCreated']+=1
             self.counters['upstreamOpen']+=1
             self.counters['upstreamPeakOpen']=max(self.counters['upstreamPeakOpen'],self.counters['upstreamOpen'])
@@ -124,7 +125,7 @@ async def main(args):
     stopped=asyncio.Event()
     clients={}
     busy_tasks=set()
-    pool=UpstreamPool(config['upstreamPort'],counters,config.get('maximumUpstreamConnections',128))
+    pool=UpstreamPool(config['upstreamPort'],counters,config.get('maximumUpstreamConnections',128),config.get('upstreamHost','127.0.0.1'))
     loop=asyncio.get_running_loop()
     for sig in (signal.SIGTERM,signal.SIGINT):loop.add_signal_handler(sig,stopped.set)
     async def serve(reader,writer):
@@ -187,7 +188,7 @@ async def main(args):
         finally:
             busy_tasks.discard(task);clients.pop(task,None)
             writer.close()
-    server=await asyncio.start_server(serve,'127.0.0.1',config['listenPort'],ssl=tls,limit=MAX_HEADER,backlog=4096,ssl_handshake_timeout=10)
+    server=await asyncio.start_server(serve,config.get('listenHost','127.0.0.1'),config['listenPort'],ssl=tls,limit=MAX_HEADER,backlog=4096,ssl_handshake_timeout=10)
     async def monitor():
         previous_time=time.monotonic();previous_count=0
         with args.metrics.open('x') as stream:

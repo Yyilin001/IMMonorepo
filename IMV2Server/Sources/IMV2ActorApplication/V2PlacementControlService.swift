@@ -79,7 +79,7 @@ public actor V2PlacementControlService {
         let pool = NIOThreadPool(numberOfThreads: 2); pool.start()
         do {
             for shard in control.shards.sorted() {
-                let initial = try V2RoomActorPlacementRuntime.initialSnapshot(shard: shard, peers: configuration.discovery.peers)
+                let initial = try V2RoomActorPlacementRuntime.initialSnapshot(deploymentID: control.clusterID, shard: shard, peers: configuration.discovery.peers)
                 guard let path = control.storagePaths[shard] else { throw V2PlacementRaftError.invalidConfiguration }
                 let store = try await V2PlacementRaftFileStorage.bootstrap(at: path,
                     initial: .init(groupID: initial.clusterID, voterID: identity.hostID, voters: Set(control.roles.values)), pool: pool)

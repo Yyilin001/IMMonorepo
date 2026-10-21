@@ -44,6 +44,30 @@ class LocalPolicyConfigurationTests(unittest.TestCase):
                 (directory / "configuration.json").write_text(json.dumps(document))
             validate(root)
 
+    def test_expansion_reuses_explicit_deployment_identity(self):
+        cluster_id = self.documents["gateway"]["placementControl"]["clusterID"]
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "expanded"
+            command = list(self.command)
+            command[command.index("--output-dir") + 1] = str(target)
+            command += ["--host", "gateway-2=gateway-2:7337", "--placement-cluster-id", cluster_id]
+            subprocess.run(command, check=True, capture_output=True)
+            for path in target.glob("*/configuration.json"):
+                self.assertEqual(json.loads(path.read_text())["placementControl"]["clusterID"], cluster_id)
+            self.assertEqual(json.loads((target / "topology.json").read_text())["placementClusterID"], cluster_id)
+
+    def test_missing_placement_identity_is_rejected(self):
+        documents = copy.deepcopy(self.documents)
+        documents["gateway"]["placementControl"].pop("clusterID")
+        with self.assertRaises(ValueError):
+            self.validate_documents(documents)
+
+    def test_different_placement_identity_is_rejected(self):
+        documents = copy.deepcopy(self.documents)
+        documents["account"]["placementControl"]["clusterID"] = "00000000-0000-0000-0000-000000000001"
+        with self.assertRaises(ValueError):
+            self.validate_documents(documents)
+
     def test_generated_readers_and_writers_share_gateway_owners(self):
         validate(self.generated)
         for name, document in self.documents.items():

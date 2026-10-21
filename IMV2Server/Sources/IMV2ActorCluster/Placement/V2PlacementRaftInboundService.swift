@@ -21,6 +21,11 @@ package actor V2PlacementRaftInboundService: V2ActorHostInboundServing {
         self.authenticator = .init(host: identity, trust: trust, limits: limits)
         self.signer = signer; self.limits = limits; self.endpoint = endpoint; self.maximumRequests = maximumRequests
     }
+    package func closeSession(_ packet: V2ActorSignedPacket) async throws {
+        try begin()
+        defer { finish() }
+        try authenticator.closeSession(packet)
+    }
     package func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try begin()
         defer { finish() }

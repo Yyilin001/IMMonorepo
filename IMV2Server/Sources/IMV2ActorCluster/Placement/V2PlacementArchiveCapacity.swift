@@ -49,6 +49,15 @@ package enum V2PlacementArchiveCapacity {
         func reserve(_ command: V2ActorPlacementCommand) throws -> Int {
             try recordBytes(.init(requestID: id, command: command, revision: UInt64.max, originRevision: UInt64.max - 1))
         }
+        if let membership = snapshot.serviceMembership, let target = membership.next {
+            let final = try V2ActorServiceMembershipRecord(revision: membership.revision + 1,
+                current: target, peers: membership.peers.filter { target.contains($0.nodeID) },
+                roomPeers: membership.roomPeers.filter { room in membership.peers.contains {
+                    target.contains($0.nodeID) && $0.serviceID == room.serviceID.rawValue
+                } })
+            count += 1
+            reserved += try reserve(.installServiceMembership(final))
+        }
         for registration in snapshot.hosts where !registration.retired {
             count += 1
             reserved += try reserve(.retireHost(registration.host))

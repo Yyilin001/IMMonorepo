@@ -20,6 +20,48 @@ import Vapor
 
 @Suite("Production realtime partition lease controller", .serialized, .timeLimit(.minutes(1)))
 struct GatewayRealtimePartitionControlTests {
+    @Test("A standby starts against the committed roster without claiming a lease")
+    func standbyControllerDoesNotAcquireAuthority() async throws {
+        let identity = V2GatewayRealtimeIdentity(nodeID: "b", serviceID: "b", incarnationID: UUID())
+        let roster: Set<String> = ["a"]
+        let qualification = try V2ActorServiceQualification(localNodeID: "b",
+            membership: .init(revision: 1, current: roster), allowNonMember: true)
+        let store = PartitionControllerControlledStore()
+        let installations = Mutex<[GatewayRealtimePartitionControl.Installed]>([])
+        let controller = try GatewayRealtimePartitionControl(identity: identity, roster: roster,
+            store: store, qualification: qualification, availableHosts: { ["a", "b"] },
+            install: { values in installations.withLock { $0 = values } })
+        try await controller.start()
+        #expect(qualification.snapshot() == nil)
+        #expect(await store.counts().claims == 0)
+        #expect(await store.counts().renewals == 0)
+        #expect(await controller.pressureSnapshot().installed == 0)
+        #expect(installations.withLock { $0.isEmpty })
+        try await controller.shutdown()
+    }
+
+    @Test("Qualification recovery wakes the serial lease worker before its periodic tick")
+    func qualificationRecoveryDoesNotWaitForPeriodicTick() async throws {
+        let identity = V2GatewayRealtimeIdentity(nodeID: "a", serviceID: "a", incarnationID: UUID())
+        let roster: Set<String> = ["a", "b", "c"]
+        let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: roster)
+        let store = PartitionControllerControlledStore()
+        let controller = try GatewayRealtimePartitionControl(identity: identity, roster: roster,
+            store: store, qualification: qualification, availableHosts: { roster }, install: { _ in })
+        try await controller.start()
+        #expect(await store.counts().claims == 0)
+        qualification.update(witnesses: ["b": .now + .seconds(30)], membershipRevision: 1)
+        await controller.qualificationDidChange()
+        let deadline = ContinuousClock.now + .seconds(1)
+        while await controller.pressureSnapshot().installed == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(await controller.pressureSnapshot().installed > 0)
+        #expect(await store.counts().claims == 1)
+        try await controller.shutdown()
+        #expect(await store.retainedCount() == 0)
+    }
+
     @Test("A fixed three-voter roster without a majority never claims or renews")
     func unqualifiedControllerDoesNotAcquireAuthority() async throws {
         let identity = V2GatewayRealtimeIdentity(nodeID: "a", serviceID: "a", incarnationID: UUID())
@@ -35,14 +77,15 @@ struct GatewayRealtimePartitionControlTests {
         try await controller.shutdown()
     }
 
-    @Test("Revocation withdraws service while an actual renewal is still pending")
-    func qualificationLossFencesLateRenewal() async throws {
+    @Test("Revocation or membership change withdraws service while an actual renewal is still pending", arguments: [false, true])
+    func qualificationLossFencesLateRenewal(membershipChange: Bool) async throws {
         let identity = V2GatewayRealtimeIdentity(nodeID: "a", serviceID: "a", incarnationID: UUID())
         let roster: Set<String> = ["a", "b", "c"]
         let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: roster)
-        qualification.update(witnesses: ["b": .now + .seconds(30)])
+        qualification.update(witnesses: ["b": .now + .seconds(30)], membershipRevision: 1)
         let gate = PartitionControllerGate()
-        let store = PartitionControllerControlledStore(renewGate: gate)
+        let recoveryGate = PartitionControllerGate()
+        let store = PartitionControllerControlledStore(renewGate: gate, recoveryClaimGate: recoveryGate)
         let installations = Mutex<[GatewayRealtimePartitionControl.Installed]>([])
         let controller = try GatewayRealtimePartitionControl(identity: identity, roster: roster, store: store,
             qualification: qualification, availableHosts: { roster },
@@ -51,25 +94,30 @@ struct GatewayRealtimePartitionControlTests {
             try await controller.start()
             #expect(!installations.withLock { $0.isEmpty })
             await gate.waitEntered() // The unchanged production five-second tick.
-            qualification.revoke()
+            if membershipChange {
+                try qualification.installMembership(.init(revision: 2, current: roster, next: ["a", "c", "d"]))
+            } else { qualification.revoke() }
             await controller.qualificationDidChange()
             #expect(installations.withLock { $0.isEmpty })
             #expect(await controller.pressureSnapshot().installed == 0)
             #expect(await store.counts().releases == 0) // No cleanup races actual renewal SQL.
             // A fresh proof must not authorize the response submitted by the old proof.
-            qualification.update(witnesses: ["c": .now + .seconds(30)])
+            qualification.update(witnesses: ["c": .now + .seconds(30)], membershipRevision: membershipChange ? 2 : 1)
             await controller.qualificationDidChange()
             await gate.release()
             let settleDeadline = ContinuousClock.now + .seconds(2)
             while await store.counts().releases == 0, ContinuousClock.now < settleDeadline { await Task.yield() }
+            await recoveryGate.waitEntered()
             #expect(await controller.pressureSnapshot().installed == 0)
+            #expect(installations.withLock { $0.isEmpty }) // Old renewal did not restore service.
+            await recoveryGate.release()
             try await controller.shutdown()
             #expect(installations.withLock { $0.isEmpty })
             let counts = await store.counts()
-            #expect(counts.claims == 1 && counts.renewals == 1 && counts.releases > 0)
+            #expect(counts.claims == 2 && counts.renewals == 1 && counts.releases > 0)
             #expect(await store.retainedCount() == 0)
         } catch {
-            await gate.release(); try? await controller.shutdown(); throw error
+            await gate.release(); await recoveryGate.release(); try? await controller.shutdown(); throw error
         }
     }
 
@@ -78,7 +126,7 @@ struct GatewayRealtimePartitionControlTests {
         let identity = V2GatewayRealtimeIdentity(nodeID: "a", serviceID: "a", incarnationID: UUID())
         let roster: Set<String> = ["a", "b", "c"]
         let qualification = try V2ActorServiceQualification(localNodeID: "a", roster: roster)
-        qualification.update(witnesses: ["b": .now + .seconds(30)])
+        qualification.update(witnesses: ["b": .now + .seconds(30)], membershipRevision: 1)
         let gate = PartitionControllerGate()
         let store = PartitionControllerControlledStore(claimGate: gate)
         let nonemptyInstalls = Mutex(0)
@@ -396,16 +444,19 @@ private actor PartitionControllerGate {
 private actor PartitionControllerControlledStore: V2RealtimePartitionLeaseStore {
     let claimGate: PartitionControllerGate?
     let renewGate: PartitionControllerGate?
+    let recoveryClaimGate: PartitionControllerGate?
     var claims = 0, renewals = 0, releases = 0
     var retained: [Int: V2RealtimePartitionLease] = [:]
-    init(claimGate: PartitionControllerGate? = nil, renewGate: PartitionControllerGate? = nil) {
-        self.claimGate = claimGate; self.renewGate = renewGate
+    init(claimGate: PartitionControllerGate? = nil, renewGate: PartitionControllerGate? = nil,
+         recoveryClaimGate: PartitionControllerGate? = nil) {
+        self.claimGate = claimGate; self.renewGate = renewGate; self.recoveryClaimGate = recoveryClaimGate
     }
     func counts() -> (claims: Int, renewals: Int, releases: Int) { (claims, renewals, releases) }
     func retainedCount() -> Int { retained.count }
     func claim(partitionIDs: [Int], identity: V2GatewayRealtimeIdentity, token: UUID,
         leaseDuration: TimeInterval) async throws -> [V2RealtimePartitionLease] {
         claims += 1
+        if claims > 1, let recoveryClaimGate { await recoveryClaimGate.enter() }
         let leases = partitionIDs.map { V2RealtimePartitionLease(partitionID: $0, identity: identity,
             epoch: 1, token: token, remainingLeaseSeconds: leaseDuration) }
         for lease in leases { retained[lease.partitionID] = lease }

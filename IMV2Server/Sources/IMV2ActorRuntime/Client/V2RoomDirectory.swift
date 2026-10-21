@@ -197,16 +197,18 @@ public actor V2RoomDirectory {
         counter = sum.overflow ? .max : sum.partialValue
     }
 
-    private func beginRecoveryStage(_ stage: V2RoomDirectoryRecoveryStage, items: Int) -> ContinuousClock.Instant {
+    private func beginRecoveryStage(_ stage: V2RoomDirectoryRecoveryStage, items: Int,
+                                    at start: ContinuousClock.Instant? = nil) -> ContinuousClock.Instant {
         var value = recoveryStages[stage] ?? .init()
         value.active += 1; count(&value.started); add(items, to: &value.itemsStarted)
         recoveryStages[stage] = value
-        let began = clock.now
+        let began = start ?? clock.now
         recoveryStageStarts[stage, default: [:]][began, default: 0] += 1
         return began
     }
 
-    private func finishRecoveryStage(_ stage: V2RoomDirectoryRecoveryStage, since start: ContinuousClock.Instant) {
+    private func finishRecoveryStage(_ stage: V2RoomDirectoryRecoveryStage, since start: ContinuousClock.Instant,
+                                     until end: ContinuousClock.Instant? = nil) {
         var value = recoveryStages[stage] ?? .init()
         precondition(value.active > 0)
         value.active -= 1; count(&value.completed)
@@ -214,7 +216,7 @@ public actor V2RoomDirectory {
         precondition(remaining > 0)
         if remaining == 1 { recoveryStageStarts[stage]?.removeValue(forKey: start) }
         else { recoveryStageStarts[stage]?[start] = remaining - 1 }
-        let elapsed = start.duration(to: clock.now).components
+        let elapsed = start.duration(to: end ?? clock.now).components
         let milliseconds = max(0, Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15)
         value.totalMilliseconds += milliseconds
         value.maxMilliseconds = max(value.maxMilliseconds, milliseconds)
@@ -908,7 +910,7 @@ public actor V2RoomDirectory {
                             recoveryEntry: entry.demandRecovery ? entry : nil)
                     }
                     let found: Bool
-                    do { found = try await transport.lookup(cached.token, deadline: locationLookupDeadline(deadline)) }
+                    do { found = try await measuredLocationProbe(cached.token, deadline: locationLookupDeadline(deadline)) }
                     catch {
                         switch error as? V2RoomCallFailure {
                         case .notAccepted(.notReady), .notAccepted(.staleActivation),
@@ -939,9 +941,32 @@ public actor V2RoomDirectory {
                 entry.recoveryPhase = .recovering
                 try checkDeadline(deadline)
                 cache.record(.recoveryWait)
-                try await clock.sleep(until: min(deadline, clock.now + backoff))
+                let began = beginRecoveryStage(.retryBackoff, items: 1)
+                defer { finishRecoveryStage(.retryBackoff, since: began) }
+                let sleepDeadline = min(deadline, clock.now + backoff)
+                let timerBegan = beginRecoveryStage(.retryTimerWait, items: 1)
+                let wake = await Self.waitForRecoveryRetry(until: sleepDeadline)
+                let actorResumed = clock.now
+                finishRecoveryStage(.retryTimerWait, since: timerBegan, until: wake.at)
+                let resumeBegan = beginRecoveryStage(.retryActorResume, items: 1, at: wake.at)
+                finishRecoveryStage(.retryActorResume, since: resumeBegan, until: actorResumed)
+                try wake.result.get()
                 backoff = min(backoff * 2, .seconds(1))
             }
+        }
+    }
+
+    // Keep the same task, deadline, cancellation and priority. A timestamp taken
+    // on this actor after sleep conflates timer/executor delay with actor re-entry.
+    // @concurrent guarantees the wake timestamp is captured before that re-entry;
+    // it does not claim to measure the kernel timer's raw firing time.
+    @concurrent private nonisolated static func waitForRecoveryRetry(until deadline: ContinuousClock.Instant) async
+        -> (at: ContinuousClock.Instant, result: Result<Void, any Error>) {
+        do {
+            try await ContinuousClock().sleep(until: deadline)
+            return (.now, .success(()))
+        } catch {
+            return (.now, .failure(error))
         }
     }
 
@@ -949,7 +974,11 @@ public actor V2RoomDirectory {
                                 hintEntry: Pending?, recoveryEntry: Pending? = nil) async throws -> Resolution {
         try checkDeadline(deadline)
         let owner: V2RoomDataOwner
-        do { owner = try await owners.owner(for: roomID) }
+        do {
+            let began = beginRecoveryStage(.ownerResolution, items: 1)
+            defer { finishRecoveryStage(.ownerResolution, since: began) }
+            owner = try await owners.owner(for: roomID)
+        }
         catch { throw mapBeforeDispatch(error) }
         try checkDeadline(deadline)
         if let cached = cache[roomID], cached.admission(), cached.owner == owner, recoveryEntry?.authoritativeRecovery != true,
@@ -967,7 +996,7 @@ public actor V2RoomDirectory {
                 }
             }
             do {
-                if try await transport.lookup(cached.token, deadline: locationLookupDeadline(deadline)), cacheMatches(cached) {
+                if try await measuredLocationProbe(cached.token, deadline: locationLookupDeadline(deadline)), cacheMatches(cached) {
                     return .confirmed(cached.token)
                 }
             } catch { /* 继续读取已提交归属；不可达不能授权抢占。 */ }
@@ -975,13 +1004,18 @@ public actor V2RoomDirectory {
             // this location hint until authoritative resolution replaces it.
         }
         let grant = try placement.grant(roomID: roomID, owner: owner)
-        let candidates = try await hosts.candidates(for: owner)
+        let candidates = try await measuredHostCandidates(for: owner)
         guard candidates.contains(where: {
             $0.identity == grant.host && $0.isHealthy && $0.accessibleShardIDs.contains(owner.shardID)
         }) else { throw V2RoomCallFailure.notAccepted(.unavailable) }
         try checkDeadline(deadline)
         recoveryEntry?.authoritativeRecovery = false
-        let resolution = try await transport.activate(on: grant.host, roomID: roomID, owner: owner, deadline: deadline)
+        let resolution: V2RoomActivationResolution
+        do {
+            let began = beginRecoveryStage(.activation, items: 1)
+            defer { finishRecoveryStage(.activation, since: began) }
+            resolution = try await transport.activate(on: grant.host, roomID: roomID, owner: owner, deadline: deadline)
+        }
         switch resolution {
         case .ready(let token):
             guard grant.matches(token) else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
@@ -1000,7 +1034,7 @@ public actor V2RoomDirectory {
         let probeDeadline = locationLookupDeadline(deadline)
         let admission = try placement.admission(for: token)
         guard admission() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
-        let found = try await transport.lookup(token, deadline: probeDeadline)
+        let found = try await measuredLocationProbe(token, deadline: probeDeadline)
         guard admission() else { throw V2RoomCallFailure.notAccepted(.staleActivation) }
         guard found else { throw V2RoomCallFailure.notAccepted(.notReady) }
         guard accepting else { throw V2RoomCallFailure.notAccepted(.retired) }
@@ -1017,6 +1051,19 @@ public actor V2RoomDirectory {
         }
         remember(token)
         return token
+    }
+
+    private func measuredHostCandidates(for owner: V2RoomDataOwner) async throws -> [V2RoomHostCandidate] {
+        let began = beginRecoveryStage(.hostCandidates, items: 1)
+        defer { finishRecoveryStage(.hostCandidates, since: began) }
+        return try await hosts.candidates(for: owner)
+    }
+
+    private func measuredLocationProbe(_ token: V2RoomActivationToken,
+                                       deadline: ContinuousClock.Instant) async throws -> Bool {
+        let began = beginRecoveryStage(.locationProbe, items: 1)
+        defer { finishRecoveryStage(.locationProbe, since: began) }
+        return try await transport.lookup(token, deadline: deadline)
     }
 
     private func locationLookupDeadline(_ deadline: ContinuousClock.Instant) -> ContinuousClock.Instant {

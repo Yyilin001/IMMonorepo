@@ -9,9 +9,10 @@ message PlacementHostRegistration { HostIdentity host = 1; bool retired = 2; }
 message PlacementSnapshot {
   bytes cluster_id = 1; uint64 revision = 2; repeated PlacementSlot slots = 3;
   repeated PlacementHostRegistration hosts = 4;
+  bytes service_membership = 5;
 }
 message PlacementCommand {
-  enum Kind { UNSPECIFIED = 0; BEGIN_TRANSFER = 1; COMPLETE_TRANSFER = 2; CANCEL_TRANSFER = 3; RETIRE_HOST = 4; REGISTER_HOST = 5; }
+  enum Kind { UNSPECIFIED = 0; BEGIN_TRANSFER = 1; COMPLETE_TRANSFER = 2; CANCEL_TRANSFER = 3; RETIRE_HOST = 4; REGISTER_HOST = 5; ADMIT_HOST = 6; INSTALL_SERVICE_MEMBERSHIP = 7; }
   Kind kind = 1;
   uint32 partition = 2;
   PlacementOwner expected = 3;
@@ -19,6 +20,8 @@ message PlacementCommand {
   bytes transfer_id = 5;
   HostIdentity previous_host = 6;
   HostIdentity successor_host = 7;
+  string admitted_host_id = 8;
+  bytes service_membership = 9;
 }
 // Fixed-three-voter state lives on stable local storage, independently of rooms.
 // A bootstrap or CAS command applied only from the committed Raft prefix.

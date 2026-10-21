@@ -6,6 +6,40 @@ import Testing
 
 @Suite("Logical room references resolve through committed placement")
 struct V2RoomDirectoryTests {
+    @Test("retry timing separates executor wake from actor re-entry and drains after caller cancellation",
+          arguments: [false, true])
+    func recoveryRetryTiming(cancel: Bool) async throws {
+        let fixture = try Fixture(activationFailure: .notAccepted(.unavailable))
+        let user = UserID(uuid: UUID())
+        let request = V2RoomRequest.recovery(.init(roomID: fixture.room, actorUserID: user, kind: .state))
+        let call = Task {
+            try await fixture.directory.room(fixture.room).call(request, principal: .user(user), deadline: .now + .seconds(2))
+        }
+        try await waitUntil {
+            await fixture.directory.callMetricsSnapshot().recoveryStages[.retryTimerWait]?.active == 1
+        }
+        if cancel { call.cancel() }
+        else { await fixture.transport.setActivationFailure(nil) }
+        if cancel {
+            await #expect(throws: V2RoomCallFailure.notAccepted(.cancelled)) { try await call.value }
+        } else {
+            #expect(try await call.value == .recovery(.failure(.invalidRequest)))
+        }
+        #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
+        let metrics = await fixture.directory.callMetricsSnapshot().recoveryStages
+        let total = try #require(metrics[.retryBackoff])
+        let timer = try #require(metrics[.retryTimerWait])
+        let resume = try #require(metrics[.retryActorResume])
+        #expect(total.completed == 1 && timer.completed == 1 && resume.completed == 1)
+        #expect(total.active == 0 && timer.active == 0 && resume.active == 0)
+        #expect(timer.oldestMilliseconds == 0 && resume.oldestMilliseconds == 0)
+        #expect(timer.totalMilliseconds >= 0 && resume.totalMilliseconds >= 0)
+        #expect(timer.totalMilliseconds + resume.totalMilliseconds <= total.totalMilliseconds)
+        // Caller cancellation removes its waiter, but the shared resolver owns
+        // its actual sleep until it settles; no new detached timer is introduced.
+        #expect(await fixture.transport.activations == (cancel ? 1 : 2))
+    }
+
     @Test("forward pair retries preserve command identity and prior unknown outcomes", arguments: [false, true])
     func forwardPairRetryIdentity(unknownThenForbidden: Bool) async throws {
         let fixture = try Fixture()
@@ -236,11 +270,12 @@ struct V2RoomDirectoryTests {
         #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
     }
 
-    @Test("cached operations preserve identity through unknown replies and drain actual hot calls")
-    func cachedOperationAvoidsLocationWork() async throws {
+    @Test("cached operations preserve identity through unknown replies or transient rollback without location work",
+          arguments: [V2RoomCallFailure.outcomeUnknown, .rolledBack(.unavailable)])
+    func cachedOperationAvoidsLocationWork(failure: V2RoomCallFailure) async throws {
         let fixture = try Fixture()
         await fixture.directory.remember(fixture.token)
-        await fixture.transport.configureCached(available: true, failures: [.outcomeUnknown])
+        await fixture.transport.configureCached(available: true, failures: [failure])
         let user = UserID(uuid: UUID()), command = try fixture.send(user: user)
         _ = try await fixture.directory.room(fixture.room).call(command, principal: .user(user),
             deadline: .now + .seconds(2))
@@ -251,7 +286,7 @@ struct V2RoomDirectoryTests {
             deadline: .now + .seconds(2))
         #expect(await fixture.transport.invoked == [command, command, recovery])
         #expect(await fixture.owners.calls == 0)
-
+        #expect(await fixture.transport.activations == 0)
         #expect(await fixture.transport.lookups.isEmpty)
         #expect(await fixture.directory.snapshot().pending == 0)
         let metrics = await fixture.directory.callMetricsSnapshot()
@@ -446,6 +481,8 @@ struct V2RoomDirectoryTests {
             successor = Task { try await fixture.directory.resolve(queuedRoom, deadline: .now + .seconds(2)) }
             try await waitUntil { await fixture.directory.snapshot().waiters == 2 }
             #expect(await fixture.directory.snapshot().pending == 2)
+            #expect(held.recoveryStages[.ownerResolution]?.active == 1)
+            #expect(held.recoveryStages[.ownerResolution]?.completed == 0)
             #expect(held.recoveryStages[.actualResolution]?.active == 1)
             #expect(held.recoveryStages[.actualResolution]?.completed == 0)
             #expect(await fixture.directory.quiesce(deadline: .now + .milliseconds(20)) == false)
@@ -456,6 +493,8 @@ struct V2RoomDirectoryTests {
             #expect(await fixture.directory.quiesce(deadline: .now + .seconds(1)))
             #expect(await fixture.directory.snapshot().active == 0)
             let settled = await fixture.directory.callMetricsSnapshot()
+            #expect(settled.recoveryStages[.ownerResolution]?.active == 0)
+            #expect(settled.recoveryStages[.ownerResolution]?.completed == 1)
             #expect(settled.recoveryStages[.actualResolution]?.active == 0)
             #expect(settled.recoveryStages[.actualResolution]?.completed == 1)
             #expect(settled.recoveryStages[.actualResolution]?.oldestMilliseconds == 0)
@@ -803,7 +842,8 @@ struct V2RoomDirectoryTests {
     private actor Transport: V2RoomClientTransport {
         let token: V2RoomActivationToken
         let unreachable: Bool
-        let activationFailure: V2RoomCallFailure?
+        var activationFailure: V2RoomCallFailure?
+        func setActivationFailure(_ failure: V2RoomCallFailure?) { activationFailure = failure }
         var failures: [V2RoomCallFailure]
         var failFirstLookup: Bool
         var activations = 0

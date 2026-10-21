@@ -1,24 +1,28 @@
 import Crypto
 import Foundation
 import IMV2ActorContracts
+import Synchronization
 
 public struct V2ActorTrustedService: Sendable {
     public let serviceID: V2ActorServiceID
     public let permissions: Set<V2ActorServicePermission>
     public let hostedIDs: Set<V2ActorHostID>
     public let gatewayNodeIDs: Set<String>
+    public let sourceIDs: Set<String>
     let publicKey: Curve25519.Signing.PublicKey
 
     public init(serviceID: V2ActorServiceID, publicKey: Data,
                 permissions: Set<V2ActorServicePermission>, hostedIDs: Set<V2ActorHostID> = [],
-                gatewayNodeIDs: Set<String> = []) throws {
-        guard gatewayNodeIDs.count <= 64, gatewayNodeIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }) else {
+                gatewayNodeIDs: Set<String> = [], sourceIDs: Set<String> = []) throws {
+        guard sourceIDs.count <= 513, sourceIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }),
+              hostedIDs.count <= 256, gatewayNodeIDs.count <= 64, gatewayNodeIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }) else {
             throw V2ActorAuthenticationError.invalidConfiguration
         }
         self.serviceID = serviceID
         self.permissions = permissions
         self.hostedIDs = hostedIDs
         self.gatewayNodeIDs = gatewayNodeIDs
+        self.sourceIDs = sourceIDs
         do { self.publicKey = try .init(rawRepresentation: publicKey) }
         catch { throw V2ActorAuthenticationError.invalidConfiguration }
     }
@@ -45,10 +49,32 @@ public struct V2ActorSigningIdentity: Sendable {
 }
 
 public struct V2ActorTrustStore: Sendable {
-    private let services: [V2ActorServiceID: V2ActorTrustedService]
+    private final class State: Sendable {
+        struct Entries: Sendable {
+            var services: [V2ActorServiceID: V2ActorTrustedService]
+            var admitted: Set<V2ActorServiceID> = []
+        }
+        let entries: Mutex<Entries>
+        init(_ services: [V2ActorServiceID: V2ActorTrustedService]) { entries = Mutex(Entries(services: services)) }
+    }
+    private let state: State
+    private let admissionAuthority: V2ActorTrustAdmissionAuthority?
+    private var services: [V2ActorServiceID: V2ActorTrustedService] { state.entries.withLock { $0.services } }
 
-    public init(services: [V2ActorTrustedService]) throws {
-        guard !services.isEmpty, Set(services.map(\.serviceID)).count == services.count else {
+    public init(services: [V2ActorTrustedService], admissionAuthority: V2ActorTrustAdmissionAuthority? = nil) throws {
+        try Self.validate(services)
+        if let admissionAuthority {
+            guard let authority = services.first(where: { $0.serviceID == admissionAuthority.serviceID }),
+                  authority.hostedIDs.isEmpty, authority.gatewayNodeIDs.isEmpty, authority.permissions.isEmpty else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+        }
+        state = State(Dictionary(uniqueKeysWithValues: services.map { ($0.serviceID, $0) }))
+        self.admissionAuthority = admissionAuthority
+    }
+
+    private static func validate(_ services: [V2ActorTrustedService]) throws {
+        guard !services.isEmpty, services.count <= 256, Set(services.map(\.serviceID)).count == services.count else {
             throw V2ActorAuthenticationError.invalidConfiguration
         }
         var hosts = Set<V2ActorHostID>()
@@ -62,10 +88,52 @@ public struct V2ActorTrustStore: Sendable {
                 gateways.formUnion(nodes)
             }
         }
-        self.services = Dictionary(uniqueKeysWithValues: services.map { ($0.serviceID, $0) })
     }
 
-    /// Resolves only statically configured unique host ownership. Discovery,
+    /// Add-only signed authorization. The authority and deployment binding come
+    /// from local bootstrap configuration, never from the incoming document.
+    /// This changes identity and source scopes, not membership or placement.
+    package func admitAuthorizedServices(_ packet: V2ActorSignedPacket) throws {
+        guard let authority = admissionAuthority, packet.signerID == authority.serviceID else {
+            throw V2ActorAuthenticationError.forbidden
+        }
+        let (authorization, _) = try verify(packet, as: V2ActorTrustAdmission.self, maximumBytes: 262_144)
+        guard authorization.deploymentID == authority.deploymentID,
+              !authorization.services.isEmpty, authorization.services.count <= 64,
+              Set(authorization.services.map(\.serviceID)).count == authorization.services.count else {
+            throw V2ActorAuthenticationError.invalidRequest
+        }
+        let additions = try authorization.services.map { try $0.trustedService() }
+        try state.entries.withLock { installed in
+            var next = installed.services
+            var admitted = installed.admitted
+            for service in additions {
+                if let current = next[service.serviceID] {
+                    guard current.publicKey.rawRepresentation == service.publicKey.rawRepresentation,
+                          current.permissions == service.permissions, current.hostedIDs == service.hostedIDs,
+                          current.gatewayNodeIDs == service.gatewayNodeIDs, current.sourceIDs == service.sourceIDs else {
+                        throw V2ActorAuthenticationError.forbidden
+                    }
+                } else { next[service.serviceID] = service; admitted.insert(service.serviceID) }
+            }
+            try Self.validate(Array(next.values))
+            installed.services = next; installed.admitted = admitted
+        }
+    }
+
+    /// Explicit local scopes remain authoritative for bootstrap services.
+    /// Only newly signed identities can supply scopes absent from that map.
+    package func authorizedSources(for serviceID: V2ActorServiceID, configured: Set<String>?,
+                                   requiring permissions: Set<V2ActorServicePermission> = []) -> Set<String> {
+        if let configured { return configured }
+        return state.entries.withLock { entries in
+            guard entries.admitted.contains(serviceID), let service = entries.services[serviceID],
+                  permissions.isSubset(of: service.permissions) else { return [] }
+            return service.sourceIDs
+        }
+    }
+
+    /// Resolves only explicitly authorized unique host ownership. Discovery,
     /// Actor references and payload-provided service labels cannot add trust.
     public func configuredHostServiceID(for hostID: V2ActorHostID,
                                         requiring permissions: Set<V2ActorServicePermission> = []) throws -> V2ActorServiceID {
@@ -75,6 +143,17 @@ public struct V2ActorTrustStore: Sendable {
             throw V2ActorAuthenticationError.forbidden
         }
         return service.serviceID
+    }
+
+    package func validateRoomRoster(_ peers: [V2RoomDiscoveryPeer],
+                                   configured: [V2ActorHostID: Set<String>]) throws {
+        for peer in peers {
+            guard try configuredHostServiceID(for: peer.hostID) == peer.serviceID,
+                  peer.accessibleShardIDs.isSubset(of: authorizedSources(for: peer.serviceID,
+                      configured: configured[peer.hostID])) else {
+                throw V2ActorAuthenticationError.forbidden
+            }
+        }
     }
 
     package func configuredService(_ id: V2ActorServiceID) throws -> V2ActorTrustedService {
@@ -107,12 +186,14 @@ public struct V2ActorTrustStore: Sendable {
 
     /// The realtime shard roster is explicit; service-name fallbacks do not
     /// create undeclared node identities or allow discovery to expand trust.
-    func validateRealtimeRoster(_ peers: [V2RealtimeShardDiscoveryPeer],
-                               local: V2GatewayRealtimeIdentity, address: String, port: Int) throws {
+    package func validateRealtimeRoster(_ peers: [V2RealtimeShardDiscoveryPeer],
+                               local: V2GatewayRealtimeIdentity, address: String, port: Int,
+                               requiresLocalMember: Bool = true) throws {
         guard !peers.isEmpty, peers.count <= 64,
               Set(peers.map(\.nodeID)).count == peers.count,
               Set(peers.map { "\($0.address):\($0.port)" }).count == peers.count,
-              peers.contains(where: { $0.nodeID == local.nodeID && $0.serviceID == local.serviceID && $0.address == address && $0.port == port }) else {
+              (peers.contains(where: { $0.nodeID == local.nodeID && $0.serviceID == local.serviceID && $0.address == address && $0.port == port })
+               || (!requiresLocalMember && !peers.contains(where: { $0.nodeID == local.nodeID }))) else {
             throw V2ActorAuthenticationError.invalidConfiguration
         }
         for peer in peers {

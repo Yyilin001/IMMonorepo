@@ -5,6 +5,55 @@ import Testing
 
 @Suite("Placement checkpoint retains exact successful command history")
 struct V2PlacementRaftCheckpointTests {
+    @Test("Pending host admission survives archive rolling until incarnation registration replaces it")
+    func pendingHostAdmission() throws {
+        var active = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let newcomer = V2ActorHostID(uuid: UUID()), admissionID = UUID()
+        let initial = try V2ActorPlacementSnapshot(clusterID: UUID(), revision: 1,
+            slots: [.init(owner: .init(host: active, epoch: 1), transfer: nil)])
+        var model = V2ActorPlacementStateMachine(snapshot: initial)
+        var records: [V2PlacementRaftCheckpoint.Record] = []
+        func append(_ command: V2ActorPlacementCommand, id: UUID = UUID()) throws {
+            let revision = model.snapshot.revision + 1
+            try model.apply(command, revision: revision)
+            records.append(.init(requestID: id, command: command, revision: revision))
+        }
+        let memberA = V2RealtimeShardDiscoveryPeer(nodeID: "a", serviceID: "a", address: "a.test", port: 7337)
+        let memberB = V2RealtimeShardDiscoveryPeer(nodeID: "b", serviceID: "b", address: "b.test", port: 7337)
+        let stable = try V2ActorServiceMembershipRecord(revision: 1, current: ["a"], peers: [memberA])
+        let joint = try V2ActorServiceMembershipRecord(revision: 2, current: ["a"], next: ["a", "b"], peers: [memberA, memberB])
+        let membershipRequest = UUID()
+        try append(.installServiceMembership(stable))
+        try append(.installServiceMembership(joint), id: membershipRequest)
+        let capacity = try V2PlacementArchiveCapacity.usage(snapshot: model.snapshot, receipts: 0, bytes: 0)
+        #expect(capacity.reservedReceipts == 2) // Active host retirement plus final membership.
+        try append(.admitHost(newcomer), id: admissionID)
+        for _ in 0..<(V2PlacementRaftCheckpoint.retainedReceipts / 2 + 1) {
+            let successor = V2ActorHostIdentity(hostID: active.hostID, incarnationID: UUID())
+            try append(.retireHost(active))
+            try append(.registerHost(previous: active, successor: successor))
+            active = successor
+        }
+        let archive = V2PlacementRaftCheckpoint(groupID: initial.clusterID,
+            appliedIndex: model.snapshot.revision, genesis: initial, receipts: records)
+        let rolled = try archive.rolling()
+        let restored = try V2PlacementRaftCheckpoint.decode(rolled.encode(), groupID: initial.clusterID)
+        #expect(restored.genesis.revision > 2)
+        #expect(restored.pinnedReceipts.contains { $0.requestID == admissionID })
+        #expect(restored.pinnedReceipts.contains { $0.requestID == membershipRequest })
+        #expect(try restored.replay().snapshot.serviceMembership == joint)
+        #expect(try restored.replay().snapshot == model.snapshot)
+        let successor = V2ActorHostIdentity(hostID: newcomer, incarnationID: UUID())
+        try append(.registerHost(previous: V2ActorPlacementHostRegistration.reserved(newcomer).host, successor: successor))
+        let updated = V2PlacementRaftCheckpoint(groupID: initial.clusterID,
+            appliedIndex: model.snapshot.revision, genesis: restored.genesis,
+            receipts: restored.receipts + [try #require(records.last)],
+            bootstrapDigest: restored.bootstrapDigest, pinnedReceipts: restored.pinnedReceipts)
+        let registered = try updated.rolling()
+        #expect(!registered.pinnedReceipts.contains { $0.requestID == admissionID })
+        #expect(try registered.replay().snapshot == model.snapshot)
+    }
+
     @Test("Rolling archive is independent of local compaction timing and preserves live operation proofs")
     func rollingArchive() throws {
         let a = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())

@@ -18,7 +18,9 @@ enum IMV2PlacementControlApp {
     static func main() async {
         do {
             let arguments = Array(CommandLine.arguments.dropFirst())
-            guard arguments.isEmpty || arguments == ["--provision"] || arguments == ["--inspect"] else {
+            let membershipCommand = arguments.count == 2 && arguments.first == "--install-membership"
+            let transferCommand = arguments.count == 2 && arguments.first == "--transfer-room-partition"
+            guard arguments.isEmpty || arguments == ["--provision"] || arguments == ["--inspect"] || membershipCommand || transferCommand else {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
             let environment = Environment()
@@ -30,6 +32,20 @@ enum IMV2PlacementControlApp {
                   Set(names).count == names.count else { throw V2RoomActorApplicationConfigurationError.invalidConfiguration }
             let configuration = try V2RoomActorApplicationConfiguration(environment: environment,
                 hostsRooms: false, configuredShardIDs: Set(names))
+            if membershipCommand || transferCommand {
+                LoggingSystem.bootstrap { label in StreamLogHandler.standardError(label: label) }
+                let file = try FileHandle(forReadingFrom: URL(fileURLWithPath: arguments[1]))
+                defer { try? file.close() }
+                let request = try file.read(upToCount: 65537) ?? Data()
+                var output: Data
+                if membershipCommand {
+                    output = try await V2PlacementControlService.installServiceMembership(configuration: configuration, request: request)
+                } else {
+                    output = try await V2PlacementControlService.transferRoomPartition(configuration: configuration, request: request)
+                }
+                output.append(10); FileHandle.standardOutput.write(output)
+                return
+            }
             if arguments == ["--inspect"] {
                 LoggingSystem.bootstrap { label in StreamLogHandler.standardError(label: label) }
                 let inspection = try await V2PlacementControlService.inspect(configuration: configuration)
@@ -53,7 +69,7 @@ enum IMV2PlacementControlApp {
                 throw V2RoomActorApplicationError.incompleteShutdown
             }
         } catch {
-            FileHandle.standardError.write(Data("Placement control startup, provisioning, inspection or shutdown failed.\n".utf8))
+            FileHandle.standardError.write(Data("Placement control startup, provisioning, control command, inspection or shutdown failed: \(String(reflecting: type(of: error))): \(String(describing: error))\n".utf8))
             exit(EXIT_FAILURE)
         }
     }

@@ -147,7 +147,7 @@ public protocol V2RealtimeShardServing: Sendable {
     func control(_ request: V2RealtimeShardControlRequest) async throws -> V2RealtimeShardControlReply
     func publish(_ request: V2RealtimeShardPublishRequest) async throws -> V2RealtimeShardPublishReply
 }
-public struct V2RealtimeShardDiscoveryPeer: Hashable, Sendable {
+public struct V2RealtimeShardDiscoveryPeer: Codable, Hashable, Sendable {
     public let nodeID: String
     public let serviceID: String
     public let address: String

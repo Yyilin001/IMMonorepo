@@ -94,6 +94,11 @@ public class ClusterSystem: DistributedActorSystem, @unchecked Sendable {
     }
 
     private let inFlightCallLock = Lock()
+    // Serializes RPC timer registration/cancellation and reply enqueue with shutdown.
+    // Separate from inFlightCallLock: cancelling a timer may synchronously run
+    // its failure callback, which removes the call continuation.
+    private let remoteCallTransportLock = Lock()
+    private var remoteCallTransportOpen = true
     private var _inFlightCalls: [CallID: CheckedContinuation<any AnyRemoteCallReply, Error>] = [:]
 
     // ==== ----------------------------------------------------------------------------------------------------------------
@@ -491,6 +496,10 @@ public class ClusterSystem: DistributedActorSystem, @unchecked Sendable {
         guard self.shutdownFlag.loadThenWrappingIncrement(by: 1, ordering: .relaxed) == 0 else {
             // shutdown already kicked off by someone else
             return Shutdown(receptacle: self.shutdownReceptacle)
+        }
+
+        self.remoteCallTransportLock.withLockVoid {
+            self.remoteCallTransportOpen = false
         }
 
         self.shutdownSemaphore.wait()
@@ -1326,19 +1335,32 @@ extension ClusterSystem {
             continuation.resume(throwing: error)
         }
         var timeoutTask: Scheduled<Void>?
-        defer { timeoutTask?.cancel() }
+        defer {
+            self.remoteCallTransportLock.withLockVoid {
+                // EventLoop shutdown owns remaining scheduled timers. Calling
+                // Scheduled.cancel after it closes would enqueue promise work
+                // on a dead EventLoop, even for an already completed timer.
+                if self.remoteCallTransportOpen { timeoutTask?.cancel() }
+            }
+        }
         let reply: any AnyRemoteCallReply = try await withCheckedThrowingContinuation { continuation in
-            self.inFlightCallLock.withLock {
-                self._inFlightCalls[callID] = continuation
+            self.remoteCallTransportLock.withLockVoid {
+                guard self.remoteCallTransportOpen else {
+                    continuation.resume(throwing: RemoteCallError(.clusterAlreadyShutDown, on: actorID, target: target))
+                    return
+                }
+                self.inFlightCallLock.withLock {
+                    self._inFlightCalls[callID] = continuation
+                }
+                let timer = self._eventLoopGroup.next().scheduleTask(in: .nanoseconds(timeout.nanoseconds)) {
+                    fail(false)
+                }
+                timeoutTask = timer
+                // EventLoop shutdown cancels scheduled work. Settle outstanding calls
+                // as well; normal cancellation after a reply finds no pending entry.
+                timer.futureResult.whenFailure { _ in fail(true) }
+                body(callID)
             }
-            let timer = self._eventLoopGroup.next().scheduleTask(in: .nanoseconds(timeout.nanoseconds)) {
-                fail(false)
-            }
-            timeoutTask = timer
-            // EventLoop shutdown cancels scheduled work. Settle outstanding calls
-            // as well; normal cancellation after a reply finds no pending entry.
-            timer.futureResult.whenFailure { _ in fail(true) }
-            body(callID)
         }
 
         if let binary = reply as? BinaryRemoteCallReply,
@@ -1468,6 +1490,17 @@ extension ClusterSystem {
 // MARK: Inbound Remote Calls
 
 extension ClusterSystem {
+    /// A distributed invocation may finish after system shutdown. Serialize
+    /// reply enqueue with closing transport admission, before the event loops
+    /// stop. A channel-active check alone would race the shutdown transition.
+    func writeInvocationReply(_ envelope: TransportEnvelope, on channel: Channel) async throws {
+        let future: EventLoopFuture<Void>? = self.remoteCallTransportLock.withLock {
+            guard self.remoteCallTransportOpen else { return nil }
+            return channel.writeAndFlush(envelope)
+        }
+        try await future?.get()
+    }
+
     func receiveInvocation(_ invocation: InvocationMessage, recipient: ActorID, on channel: Channel) {
         self.log.trace(
             "Receive invocation: \(invocation) to: \(recipient.detailedDescription)",
@@ -1639,11 +1672,11 @@ public struct ClusterInvocationResultHandler: DistributedTargetInvocationResultH
             if system.settings.serialization.binaryDistributedInvocations,
                let binary = value as? any ClusterBinaryInvocationArgument {
                 let reply = BinaryRemoteCallReply(callID: callID, value: try binary.encodeClusterInvocationArgument())
-                try await channel.writeAndFlush(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient))
+                try await system.writeInvocationReply(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient), on: channel)
                 return
             }
             let reply = RemoteCallReply<Success>(callID: callID, value: value)
-            try await channel.writeAndFlush(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient))
+            try await system.writeInvocationReply(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient), on: channel)
         }
     }
 
@@ -1661,7 +1694,7 @@ public struct ClusterInvocationResultHandler: DistributedTargetInvocationResultH
             )
 
             let reply = RemoteCallReply<_Done>(callID: callID, value: .done)
-            try await channel.writeAndFlush(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient))
+            try await system.writeInvocationReply(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient), on: channel)
         }
     }
 
@@ -1688,7 +1721,7 @@ public struct ClusterInvocationResultHandler: DistributedTargetInvocationResultH
             } else {
                 reply = .init(callID: callID, error: GenericRemoteCallError(errorType: errorType))
             }
-            try await channel.writeAndFlush(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient))
+            try await system.writeInvocationReply(TransportEnvelope(envelope: Payload(payload: .message(reply)), recipient: recipient), on: channel)
         }
     }
 }

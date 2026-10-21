@@ -173,6 +173,8 @@ private struct LoadConfiguration: Sendable {
     let maximumRSSMegabytes: Int
     let maximumFailurePercent: Double
     let scenario: LoadScenario?
+    let visibilityRunID: UUID?
+    let visibilityClockDomain: UUID?
     let scenarioRateScale: Double
     let scenarioReadyPath: String?
     let scenarioStartBarrierPath: String?
@@ -304,6 +306,21 @@ private struct LoadConfiguration: Sendable {
             scenario = loadedScenario
         } else {
             scenario = nil
+        }
+        let visibilityMessageBytes = messageBytes
+        if let requestedRun = values["--visibility-run-id"] {
+            guard let runID = UUID(uuidString: requestedRun), let scenario,
+                  let boot = try? String(contentsOfFile: "/proc/sys/kernel/random/boot_id", encoding: .utf8),
+                  let domain = UUID(uuidString: boot.trimmingCharacters(in: .whitespacesAndNewlines)),
+                  roomLogReads, messageBytes >= 128,
+                  scenario.phases.allSatisfy({ V2LoadVisibilityStamp(clockDomain: domain, runID: runID,
+                      scheduledNanoseconds: UInt64.max, cohort: $0.name)?.text(byteCount: visibilityMessageBytes) != nil })
+            else { throw LoadError.invalidScenario("visibility measurement needs Linux boot clock, scenario, room reads and >=128-byte messages") }
+            visibilityRunID = runID
+            visibilityClockDomain = domain
+        } else {
+            visibilityRunID = nil
+            visibilityClockDomain = nil
         }
         scenarioReadyPath = values["--scenario-ready-path"]
         scenarioStartBarrierPath = values["--scenario-start-barrier-path"]
@@ -600,6 +617,60 @@ private struct MessageSendCohortReport: Encodable {
 }
 
 private final class LoadStatistics: @unchecked Sendable {
+    let visibilityRunID: UUID?
+    let visibilityClockDomain: UUID?
+    private let visibilityAllowedCohorts: Set<String>
+    private final class VisibilityCohort {
+        var latency = LatencyHistogram()
+        var slowest: [ReceiverVisibilityTailSample] = []
+    }
+    private var visibilityCohorts: [String: VisibilityCohort] = [:]
+    private var visibilityEvents: [String: Int] = [:]
+    init(configuration: LoadConfiguration) {
+        visibilityRunID = configuration.visibilityRunID
+        visibilityClockDomain = configuration.visibilityClockDomain
+        visibilityAllowedCohorts = Set(configuration.scenario?.phases.map(\.name) ?? [])
+    }
+    func visibilityStamp(scheduledAt: NIODeadline) -> V2LoadVisibilityStamp? {
+        lock.withLock {
+            guard let runID = visibilityRunID, let domain = visibilityClockDomain,
+                  let cohort = cohortWindows.cohort(scheduledAt: scheduledAt.uptimeNanoseconds) else { return nil }
+            return .init(clockDomain: domain, runID: runID,
+                         scheduledNanoseconds: scheduledAt.uptimeNanoseconds, cohort: cohort)
+        }
+    }
+    func recordVisibilityEvent(_ event: String, count: Int = 1) {
+        guard count > 0 else { return }
+        lock.withLock { visibilityEvents[event, default: 0] += count }
+    }
+    func recordVisibilityApplied(_ applied: V2LoadVisibilityObservation.Applied, roomID: String) {
+        lock.withLock {
+            visibilityEvents["invalidClockSamples", default: 0] += applied.invalidClockSamples
+            for sample in applied.samples {
+                guard visibilityAllowedCohorts.contains(sample.cohort) else {
+                    visibilityEvents["unknownCohort", default: 0] += 1; continue
+                }
+                let cohort = visibilityCohorts[sample.cohort] ?? VisibilityCohort()
+                cohort.latency.record(sample.milliseconds)
+                // Retain only the 16 slowest samples per configured cohort.
+                // No message text, user identity or unbounded event stream.
+                if cohort.slowest.count < 16 || sample.milliseconds > cohort.slowest.last!.timing.milliseconds {
+                    cohort.slowest.append(.init(roomID: roomID, timing: sample))
+                    cohort.slowest.sort { $0.timing.milliseconds > $1.timing.milliseconds }
+                    if cohort.slowest.count > 16 { cohort.slowest.removeLast() }
+                }
+                visibilityCohorts[sample.cohort] = cohort
+            }
+        }
+    }
+    func visibilityReport() -> ReceiverVisibilityReport {
+        lock.withLock {
+            .init(enabled: visibilityRunID != nil, runID: visibilityRunID,
+                  clockDomain: visibilityClockDomain,
+                  cohorts: visibilityCohorts.mapValues { $0.latency.percentiles },
+                  slowestSamples: visibilityCohorts.mapValues(\.slowest), events: visibilityEvents)
+        }
+    }
     struct State {
         var attempted = 0
         var authenticated = 0
@@ -1265,7 +1336,7 @@ private struct LoadRun: Sendable {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: configuration.eventLoops)
         let eventLoopLagMetrics = V2EventLoopLagMetrics()
         eventLoopLagMetrics.start(on: group)
-        let statistics = LoadStatistics()
+        let statistics = LoadStatistics(configuration: configuration)
         let scenarioPhaseReports = ScenarioPhaseReportCollector()
         let startedAt = Date()
         var slots: [LoadConnectionSlot] = []
@@ -1448,7 +1519,7 @@ private struct LoadRun: Sendable {
         eventLoopLagMetrics.stop()
         let eventLoopLag = eventLoopLagMetrics.snapshot()
         try await group.shutdownGracefully()
-        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, messageSendCohorts: statistics.messageSendCohorts(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
+        let report = LoadReport(configuration: configuration, startedAt: startedAt, endedAt: Date(), state: statistics.snapshot(), eventLoopLag: eventLoopLag, messageSendCohorts: statistics.messageSendCohorts(), receiverVisibility: statistics.visibilityReport(), scenarioPhases: scenarioPhases, scenarioDrain: scenarioDrain, terminalError: terminalError, roomCursorSnapshots: roomCursorSnapshots, connectionCoverageSnapshots: connectionCoverageSnapshots, recoveryBurst: recoveryBurstReport)
         if let terminalError {
             let data = try JSONEncoder.loadReport.encode(report)
             try data.write(to: URL(fileURLWithPath: configuration.reportPath), options: .atomic)
@@ -2612,9 +2683,12 @@ private struct ScenarioRandom {
 
 private final class LoadConnectionHandler: ChannelInboundHandler {
     // SHA256 of this exact common algorithm source with the hash literal normalized.
-    static let algorithmSourceSHA256 = "a594a51032769acc47c66b7a92b85c2dddb8371386a42271224096accd653071"
+    static let algorithmSourceSHA256 = "a05cad5099147d927bf981bdec2526a2a0fd83bfb6d09b99eed1548b62d82b7c"
     static let messageAttemptTimeoutSeconds: Int64 = 20
     static let messageOperationTimeoutSeconds: Int64 = 60
+    // Keep the load operation inside the server's 24-hour admission ceiling even
+    // with ordinary cross-machine clock skew. Retries retain this same deadline.
+    static let firstSubmissionWindowMilliseconds: UInt64 = 600_000
     static let maximumMessageWireAttempts = 5
     static var messageTransportDescription: String {
         """
@@ -2659,6 +2733,7 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
     private let started: NIODeadline
     private let authenticatedPromise: EventLoopPromise<Void>
     private let statistics: LoadStatistics
+    private var visibilityObservations: [String: V2LoadVisibilityObservation] = [:]
     private let benchmarkWireVersion: UInt32
     private let limits: V2FrameLimits
     private var decoder: V2FrameDecoder
@@ -2986,12 +3061,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                               event.roomSequence <= UInt64(Int64.max),
                               !event.sourceEventID.isEmpty, !event.projectionKind.isEmpty,
                               !event.payload.isEmpty else { continue }
+                        observeVisibilityBody(event.payload, roomID: hint.roomID, sequence: event.roomSequence, source: .realtimePush)
                         receiveRoomLiveSequence(event.roomSequence, roomID: hint.roomID)
                     }
                 } else if hint.roomSequence > 0, hint.roomSequence <= hint.highWatermark,
                           hint.roomSequence <= UInt64(Int64.max),
                           !hint.sourceEventID.isEmpty, !hint.projectionKind.isEmpty,
                           !hint.eventPayload.isEmpty {
+                    observeVisibilityBody(hint.eventPayload, roomID: hint.roomID, sequence: hint.roomSequence, source: .realtimePush)
                     receiveRoomLiveSequence(hint.roomSequence, roomID: hint.roomID)
                 }
                 cancelRoomEventRecoveryGraceIfCaughtUp(roomID: hint.roomID)
@@ -3218,6 +3295,9 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                       (page.events.last?.roomSequence ?? requestedAfterRoomSequence) == page.nextRoomSequence
                 else { throw LoadError.unexpectedResponse }
                 let currentCursor = roomEventCursors[roomID, default: 0]
+                for event in page.events {
+                    observeVisibilityBody(event.payload, roomID: roomID, sequence: event.roomSequence, source: .recoveryPage)
+                }
                 if page.nextRoomSequence <= currentCursor {
                     statistics.recordRoomEventStalePageReceived()
                 } else {
@@ -3592,6 +3672,17 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         else { roomEventLiveSequences[roomID] = live }
         roomEventCursors[roomID] = drainAcceptedRoomSequences(roomID: roomID, through: through)
     }
+    private func observeVisibilityBody(_ data: Data, roomID: String, sequence: UInt64,
+                                      source: V2LoadVisibilityObservation.BodySource) {
+        guard let domain = statistics.visibilityClockDomain, let runID = statistics.visibilityRunID,
+              let stamp = V2LoadVisibilityStamp.fromMessagePayload(data, roomID: roomID,
+                  sequence: sequence, excludingSender: credential.userID) else { return }
+        var observed = visibilityObservations[roomID] ?? .init(clockDomain: domain, runID: runID)
+        let result = observed.remember(stamp, sequence: sequence,
+            after: roomEventCursors[roomID, default: 0], at: NIODeadline.now().uptimeNanoseconds, source: source)
+        visibilityObservations[roomID] = observed
+        statistics.recordVisibilityEvent(String(describing: result))
+    }
 
     private func drainAcceptedRoomSequences(roomID: String, through cursor: UInt64) -> UInt64 {
         var through = cursor
@@ -3611,7 +3702,14 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
                 for _ in 0..<progress.count { statistics.recordRoomEventLivePayloadApplied() }
                 through = progress.cursor
             }
-            if before == through { return through }
+            if before == through {
+                if var observed = visibilityObservations[roomID] {
+                    statistics.recordVisibilityApplied(
+                        observed.applied(through: through, at: NIODeadline.now().uptimeNanoseconds), roomID: roomID)
+                    visibilityObservations[roomID] = observed
+                }
+                return through
+            }
         }
     }
 
@@ -3857,14 +3955,22 @@ private final class LoadConnectionHandler: ChannelInboundHandler {
         let roomID: String
         if roomLogReadTrigger == .availabilityHint, let activeRoomLogRoomID { roomID = activeRoomLogRoomID }
         else { roomID = directRoomIDs[nextRoomIndex % directRoomIDs.count]; nextRoomIndex += 1 }
+        let sent = NIODeadline.now()
+        let originalSchedule = scheduledAt ?? sent
+        var text = messageText
+        if statistics.visibilityRunID != nil {
+            guard let stamp = statistics.visibilityStamp(scheduledAt: originalSchedule),
+                  let stamped = stamp.text(byteCount: messageText.utf8.count)
+            else { throw LoadError.invalidScenario("visibility send has no original scheduled cohort") }
+            text = stamped
+        }
         // An immutable identity and fingerprint survive every query/retry.
         let command = try V2MessageSendOperationCommand(command: .init(roomID: .init(roomID),
             senderUserID: .init(credential.userID), clientMessageID: .init(UUID().uuidString),
-            text: messageText, limits: .init(maxUTF8Bytes: 65_536)),
-            firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + 86_400_000)
+            text: text, limits: .init(maxUTF8Bytes: 65_536)),
+            firstSubmissionDeadlineMilliseconds: UInt64(Date().timeIntervalSince1970 * 1_000) + Self.firstSubmissionWindowMilliseconds)
         let operationID = takeRequestID()
-        let sent = NIODeadline.now()
-        let operation = try MessageOperation(command: command, sent: sent, scheduledAt: scheduledAt ?? sent)
+        let operation = try MessageOperation(command: command, sent: sent, scheduledAt: originalSchedule)
         messageOperations[operationID] = operation; messageRequestIDs.insert(operationID)
         statistics.recordMessageSent(scheduledAt: operation.scheduledAt)
         try emitMessageAttempt(operationID: operationID, action: .submit, context: context)
@@ -4609,7 +4715,23 @@ private struct RecoveryBatchReport: Encodable {
     }
 }
 
+private struct ReceiverVisibilityTailSample: Encodable {
+    let roomID: String
+    let timing: V2LoadVisibilityObservation.Sample
+}
+
+private struct ReceiverVisibilityReport: Encodable {
+    let enabled: Bool
+    let runID: UUID?
+    let clockDomain: UUID?
+    let semantics = "scheduled send to peer body continuously applied by simulated loader; same Linux boot clock only"
+    let cohorts: [String: Percentiles]
+    let slowestSamples: [String: [ReceiverVisibilityTailSample]]
+    let events: [String: Int]
+}
+
 private struct LoadReport: Encodable {
+    let receiverVisibility: ReceiverVisibilityReport
     let revision: String
     let host: String
     let port: Int
@@ -4740,7 +4862,8 @@ private struct LoadReport: Encodable {
     let terminalError: String?
     let recoveryBurst: RecoveryBurstReport?
 
-    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, messageSendCohorts: [String: MessageSendCohortReport], scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], connectionCoverageSnapshots: [ConnectionCoverageSnapshot], recoveryBurst: RecoveryBurstReport?) {
+    init(configuration: LoadConfiguration, startedAt: Date, endedAt: Date, state: LoadStatistics.State, eventLoopLag: V2RuntimeLatencyHistogramSnapshot, messageSendCohorts: [String: MessageSendCohortReport], receiverVisibility: ReceiverVisibilityReport, scenarioPhases: [ScenarioPhaseReport], scenarioDrain: ScenarioDrainReport?, terminalError: Error?, roomCursorSnapshots: [RoomCursorSnapshot], connectionCoverageSnapshots: [ConnectionCoverageSnapshot], recoveryBurst: RecoveryBurstReport?) {
+        self.receiverVisibility = receiverVisibility
         self.recoveryBurst = recoveryBurst
         self.connectionCoverageSnapshots = connectionCoverageSnapshots
         let requiresCoverageProof = configuration.benchmarkWireVersion >= 46

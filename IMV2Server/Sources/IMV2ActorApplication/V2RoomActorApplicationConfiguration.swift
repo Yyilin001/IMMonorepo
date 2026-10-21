@@ -25,6 +25,8 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
     public let hostIdentity: V2ActorHostIdentity?
     public let signer: V2ActorSigningIdentity
     public let trust: V2ActorTrustStore
+    package let trustAdmissionDirectory: String?
+    package let serviceMembershipShard: String?
     public let tls: TLSConfiguration
     public let discovery: V2RoomDiscoveryConfiguration
     public let allowedShards: Set<String>
@@ -102,7 +104,8 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
             let shards = Set(service.shardIDs)
-            guard !shards.isEmpty, shards.count == service.shardIDs.count,
+            let isAdmissionAuthority = service.id == document.trustAdmissionAuthorityServiceID
+            guard (!shards.isEmpty || isAdmissionAuthority), shards.count == service.shardIDs.count,
                   shards.isSubset(of: configuredShardIDs) else {
                 throw V2RoomActorApplicationConfigurationError.invalidConfiguration
             }
@@ -115,9 +118,6 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
                     throw V2RoomActorApplicationConfigurationError.invalidConfiguration
                 }
             }
-            trusted.append(try .init(serviceID: id, publicKey: publicKey,
-                permissions: Set(service.permissions), hostedIDs: hosts,
-                gatewayNodeIDs: Set(service.gatewayNodeIDs ?? [])))
             let buckets = service.userBucketIDs ?? []
             guard buckets.count <= 256, Set(buckets).count == buckets.count,
                   buckets.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 && !$0.contains(":") }) else {
@@ -129,6 +129,9 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
             // to a persistent DB identity, never to a publisher-supplied URL.
             if !buckets.isEmpty, !(service.gatewayNodeIDs ?? []).isEmpty,
                service.permissions.contains(.realtimePublish) { realtimeSources.insert("control") }
+            trusted.append(try .init(serviceID: id, publicKey: publicKey,
+                permissions: Set(service.permissions), hostedIDs: hosts,
+                gatewayNodeIDs: Set(service.gatewayNodeIDs ?? []), sourceIDs: realtimeSources))
             access[id] = realtimeSources
             keys[id] = publicKey
         }
@@ -204,7 +207,21 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         self.name = document.name; self.address = document.address; self.port = document.port
         self.threadPoolSize = document.threadPoolSize; self.hostIdentity = identity
         self.signer = try .init(serviceID: signingID, privateKey: key)
-        self.trust = try .init(services: trusted); self.tls = tls
+        let admissionAuthority = try document.trustAdmissionAuthorityServiceID.map {
+            V2ActorTrustAdmissionAuthority(deploymentID: document.placementControl.clusterID,
+                serviceID: try V2ActorServiceID($0))
+        }
+        self.trust = try .init(services: trusted, admissionAuthority: admissionAuthority); self.tls = tls
+        if let directory = document.trustAdmissionDirectory {
+            guard admissionAuthority != nil, directory.hasPrefix("/"), !directory.contains("\0") else {
+                throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+            }
+        }
+        self.trustAdmissionDirectory = document.trustAdmissionDirectory
+        if let shard = document.serviceMembershipShard, !configuredShardIDs.contains(shard) {
+            throw V2RoomActorApplicationConfigurationError.invalidConfiguration
+        }
+        self.serviceMembershipShard = document.serviceMembershipShard
         self.placementControl = try .init(document: document.placementControl, name: document.name,
             address: document.address, roomPort: document.port, tls: tls, signer: self.signer, trust: self.trust,
             processIncarnation: processIncarnation, shards: configuredShardIDs, roomPeers: peers, serviceAccess: access)
@@ -228,9 +245,12 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         // A dedicated exclusion caller starts only its control transport. It
         // must not acquire realtime publishing/receiving roles just to parse
         // the shared deployment configuration.
-        let exclusionOnly = try identity == nil && self.placementControl.identity == nil &&
+        let callerPermissions = try self.trust.configuredService(signingID).permissions
+        let exclusionOnly = identity == nil && self.placementControl.identity == nil &&
             document.policyPlacement == nil &&
-            self.trust.configuredService(signingID).permissions == Set([.placementRead, .placementWrite, .placementExclude])
+            (callerPermissions == Set([.placementRead, .placementWrite, .placementExclude]) ||
+             callerPermissions == Set([.placementRead, .placementWrite, .placementMembership]) ||
+             callerPermissions == Set([.placementRead, .placementWrite, .roomCoordination]))
         guard exclusionOnly || realtimePeers.contains(where: { $0.serviceID == document.serviceID && $0.address == document.address && $0.port == document.port }) else {
             throw V2RoomActorApplicationConfigurationError.invalidConfiguration
         }
@@ -281,6 +301,9 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
         let certificatePath: String
         let privateKeyPath: String
         let trustRootPath: String
+        let trustAdmissionAuthorityServiceID: String?
+        var trustAdmissionDirectory: String? = nil
+        var serviceMembershipShard: String? = nil
         let services: [Service]
         let peers: [Peer]
         let realtimePeers: [RealtimePeer]
@@ -308,5 +331,14 @@ public struct V2RoomActorApplicationConfiguration: Sendable {
             let shardIDs: [String]
             let maximumRooms: Int
         }
+    }
+}
+
+extension V2RoomActorApplicationConfiguration {
+    /// A caller's write authority is independent from the shards it hosts.
+    package var transferShardIDs: Set<String> {
+        guard let service = try? trust.configuredService(signer.serviceID),
+              service.permissions.isSuperset(of: [.placementRead, .placementWrite, .roomCoordination]) else { return [] }
+        return placementControl.writers[signer.serviceID] ?? []
     }
 }

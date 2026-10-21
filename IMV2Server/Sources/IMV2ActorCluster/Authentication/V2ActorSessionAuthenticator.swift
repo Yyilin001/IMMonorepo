@@ -102,6 +102,10 @@ public final class V2ActorSessionAuthenticator: Sendable {
         self.now = now
     }
 
+    package func authorizedSources(for serviceID: V2ActorServiceID, configured: Set<String>?) -> Set<String> {
+        trust.authorizedSources(for: serviceID, configured: configured)
+    }
+
     public func openSession(_ packet: V2ActorSignedPacket) throws -> V2ActorSessionGrant {
         let (hello, peer) = try trust.verify(packet, as: V2ActorSessionHello.self,
                                             maximumBytes: min(16_384, limits.maximumRequestBytes))
@@ -163,6 +167,26 @@ public final class V2ActorSessionAuthenticator: Sendable {
             value.serviceCounts[peer.serviceID, default: 0] += 1
             value.nextExpiry = min(value.nextExpiry ?? session.expires, session.expires)
             return try grant(session, id: id, at: instant)
+        }
+    }
+
+    /// A caller signs its exact issued grant to retire that session. Closing
+    /// an old session is idempotent and cannot revoke a newer incarnation.
+    public func closeSession(_ packet: V2ActorSignedPacket) throws {
+        let (grant, peer) = try trust.verify(packet, as: V2ActorSessionGrant.self, maximumBytes: 16_384)
+        guard grant.version == V2ActorSessionHello.protocolVersion, grant.host == host,
+              grant.serviceID == peer.serviceID else { throw V2ActorAuthenticationError.forbidden }
+        try catalog.withLock { value in
+            guard let session = value.sessions[grant.sessionID] else { return }
+            guard session.key.serviceID == peer.serviceID,
+                  session.key.incarnation == grant.callerIncarnation,
+                  session.key.handshake == grant.handshakeID else { throw V2ActorAuthenticationError.forbidden }
+            value.sessions.removeValue(forKey: grant.sessionID)
+            value.helloSessions.removeValue(forKey: session.key)
+            let remaining = value.serviceCounts[peer.serviceID, default: 1] - 1
+            if remaining == 0 { value.serviceCounts.removeValue(forKey: peer.serviceID) }
+            else { value.serviceCounts[peer.serviceID] = remaining }
+            value.nextExpiry = value.sessions.values.map(\.expires).min()
         }
     }
 

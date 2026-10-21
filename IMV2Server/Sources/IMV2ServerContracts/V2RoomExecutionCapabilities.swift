@@ -5,6 +5,8 @@ import IMV2Core
 /// A store-bound preparation capability. The captured executor retains the
 /// exact store, commands and activation; preparation alone grants no write
 /// authority. Concrete persistence handles stay below the application boundary.
+/// Preparation must not accept a message or persist its receipt; those effects
+/// begin only when the returned capability executes.
 public struct V2PreparedRoomSendOperationBatch: Sendable {
     private let operation: @Sendable () async throws -> [V2RoomMessagingResult]
 

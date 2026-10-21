@@ -129,6 +129,9 @@ public actor V2GatewayRoomSubscriptionCoordinator {
     private var cooldownDeadlines = V2IndexedDeadlines<RoomID>()
     private var repairFlights: [UUID: Task<Void, Never>] = [:]
     private var repairingRooms: Set<RoomID> = []
+    // A ready shared baseline can cover only the first member of a repair.
+    // Keep unfinished member registration separate from room authorization.
+    private var incompleteRoomRepairs: Set<RoomID> = []
     // At most one follow-up per executing room. Keep it outside the ready heap:
     // a spare maintenance slot must not consume a wake owned by a live flight.
     private var deferredRepairs: [RoomID: ContinuousClock.Instant] = [:]
@@ -663,6 +666,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                             routeRecovery.removeValue(forKey: key.roomID); cooldownDeadlines.remove(key.roomID)
                         }
                         sharedReceipts.removeValue(forKey: key.roomID); dueRooms.remove(key.roomID)
+                        incompleteRoomRepairs.remove(key.roomID)
                         deferredRepairs.removeValue(forKey: key.roomID)
                         roomRepresentatives.removeValue(forKey: key.roomID)
                         scheduleMaintenance()
@@ -847,7 +851,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
             scheduleMaintenance()
         }
         guard !closed else { return }
-        if let receipt = sharedReceipts[room] {
+        if !incompleteRoomRepairs.contains(room), let receipt = sharedReceipts[room] {
             let checkpoint = await ingress.authority.authorizationCheckpoint(fence: receipt.grant.fence,
                 serviceID: receipt.route.authenticatedServiceID)
             guard !closed else { return }
@@ -869,6 +873,7 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                   !relation.references.isEmpty else { return nil }
             return (member, relation.id)
         }
+        incompleteRoomRepairs.insert(room)
         for (member, id) in members {
             guard hasReferences(member, relationID: id) else { continue }
             if relations[member]?.refreshID != nil {
@@ -909,13 +914,14 @@ public actor V2GatewayRoomSubscriptionCoordinator {
                 return
             }
         }
+        incompleteRoomRepairs.remove(room)
     }
     public func shutdown() async {
         if closed {
             if !shutdownFinished { await withCheckedContinuation { shutdownJoiners.append($0) } }
             return
         }
-        closed = true; maintenance?.cancel(); dueRooms.removeAll(); deferredRepairs.removeAll()
+        closed = true; maintenance?.cancel(); dueRooms.removeAll(); deferredRepairs.removeAll(); incompleteRoomRepairs.removeAll()
 
         for receipt in sharedReceipts.values { _ = await ingress.authority.pause(fence: receipt.grant.fence) }
         references.removeAll()

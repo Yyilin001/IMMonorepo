@@ -15,7 +15,7 @@ def voter_arguments(ports):
             for value in ('--placement-voter', f'{name}=localhost:{port}')]
 
 
-def start_controls(*, binary, actors, shards, log_directory, spawn, owned, timeout=45):
+def start_controls(*, binary, actors, shards, log_directory, spawn, owned, timeout=45, provision=None):
     """Append ownership immediately so partial startup also drains in finally.
 
     spawn(name, binary, environment) must retain each child's log/process.
@@ -48,6 +48,9 @@ def start_controls(*, binary, actors, shards, log_directory, spawn, owned, timeo
         raise RuntimeError('partial placement history; refusing to initialize missing voters')
     if not present:
         for name, environment in zip(VOTERS, environments):
+            if provision is not None:
+                provision(name, binary, environment)
+                continue
             with (Path(log_directory) / (name + '-provision.log')).open('xb') as stream:
                 subprocess.run([str(binary), '--provision'], env=environment, stdout=stream,
                                stderr=subprocess.STDOUT, check=True, timeout=30)

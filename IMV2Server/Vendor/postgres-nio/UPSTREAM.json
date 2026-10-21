@@ -45,8 +45,9 @@
     "Sources/PostgresNIO/Connection/ConnectCancelHandler.swift": "8051d053dcc124a200391e9181058123bf2239a1fba5f200bdbc1c9938ca4bed",
     "Sources/PostgresNIO/Connection/PostgresConnection+Configuration.swift": "a238160bfee1fa35be7e97bf782ec4df3ecb35725e19550cdf75d7f33ccca3a2",
     "Sources/PostgresNIO/Connection/PostgresConnection+CopyFrom.swift": "85e7627c213ccf12a9a1d5ef3c47eee4e6be82e448b5ca88136625805c35cb9c",
-    "Sources/PostgresNIO/Connection/PostgresConnection.swift": "4a66442346c79208308f3b4863e77f027223d4bb27878947270bc8ae42d1d3f9",
+    "Sources/PostgresNIO/Connection/PostgresConnection.swift": "fec6514bf8659e7bf970c848f2c353a73331030d5a382e1c442d121bb5cd6cf9",
     "Sources/PostgresNIO/Connection/PostgresDatabase+PreparedQuery.swift": "c8afc823422ce32f931f5dc575f3d3ec5dbe92cd9cc4f5491cafc6ad07c5e4f1",
+    "Sources/PostgresNIO/Connection/PostgresIndependentQuery.swift": "d0a845148e8479ff6d428d574299f925f898192414f654eb4a34ef9c22989a11",
     "Sources/PostgresNIO/Data/PostgresData+Array.swift": "1a19639243dd04e00b1b6e4533e5c599dae450ca04ac0ce3d6a04ce3a28b9356",
     "Sources/PostgresNIO/Data/PostgresData+Bool.swift": "0de9d0dbe42cd28b0676a2e2b0f5c3db5ffac7a72f3799ca61862b899cd372a0",
     "Sources/PostgresNIO/Data/PostgresData+Bytes.swift": "560ab43004abff8bcff8b5824040c6d876bee3e7e352ce4c59de388712f260bc",
@@ -107,7 +108,7 @@
     "Sources/PostgresNIO/Message/PostgresMessageType.swift": "8e70afd2b213e827896ae63f78c08a358a1e416db8089dc4ed6cf8df996d5bcd",
     "Sources/PostgresNIO/New/Connection State Machine/AuthenticationStateMachine.swift": "bfffdd9bcf7c457fa392b9f98c0b96e198907339545ac5431035f2b868d55861",
     "Sources/PostgresNIO/New/Connection State Machine/CloseStateMachine.swift": "e5a6f582b48c541b0efaa753e0e931ad75fa3254e3e1c7b8af7b3c5836872d74",
-    "Sources/PostgresNIO/New/Connection State Machine/ConnectionStateMachine.swift": "5b732c5e2f46e35691edb7652ec1d5cdfcf2cbfd2ed8da2e68d116396d041a86",
+    "Sources/PostgresNIO/New/Connection State Machine/ConnectionStateMachine.swift": "337903ed19919acb906e222b514123f767856b63d8d7c825c8a5614c59c9ca1c",
     "Sources/PostgresNIO/New/Connection State Machine/ExtendedQueryStateMachine.swift": "60d66ee77e840a70c686431163ce14d75df04af8f54c59ba3d43837b42a28cde",
     "Sources/PostgresNIO/New/Connection State Machine/ListenStateMachine.swift": "f69e885050c25fd11dcbed5db8e71186adf09e9bf1989d761a7da36caa268f5e",
     "Sources/PostgresNIO/New/Connection State Machine/PreparedStatementStateMachine.swift": "ecac54c9a0685d86cedadbc3e7e6059f3f4a2a69266b41c4757bd9b60580323b",
@@ -127,6 +128,7 @@
     "Sources/PostgresNIO/New/Extensions/AnyErrorContinuation.swift": "947102532f92f9f0e03450630bbb6551b771651139b0e23abf6fecf4496a9a10",
     "Sources/PostgresNIO/New/Extensions/ByteBuffer+PSQL.swift": "37f4ca8142027e4725cea5068e10f0e0413f429747825a955297c24b5112d296",
     "Sources/PostgresNIO/New/Extensions/Logging+PSQL.swift": "60b8cb057886a8739644a2588590688e7f650ddebc8a006b53b82c6012f7cb06",
+    "Sources/PostgresNIO/New/IndependentQueryPipeline.swift": "0cf7a3985a4b2cefb978254dd95fcc7cfb6814d65c782b88b70ff9bca21fb61f",
     "Sources/PostgresNIO/New/Messages/Authentication.swift": "36ee801806f661534e4f9992d379f58a0cd82dc4ebce5ba755ea349b8725b2ee",
     "Sources/PostgresNIO/New/Messages/BackendKeyData.swift": "106828fb108cb0563903b011e791dbc0a8f887631b9dfae604a65f50810f34f8",
     "Sources/PostgresNIO/New/Messages/CopyInMessage.swift": "4697e891960353d30e2f084e7de9fb2a18c40894d106f00c701dc9e809d7e183",
@@ -142,11 +144,11 @@
     "Sources/PostgresNIO/New/PSQLEventsHandler.swift": "e62a884e4a5fe2675159179e21aadf6b7590db00668410c704180989643c7973",
     "Sources/PostgresNIO/New/PSQLPreparedStatement.swift": "61ed622f3cb4de3dbcc76510c2c8a5c9e099ddeb4c842dfe723b99c608a02bbe",
     "Sources/PostgresNIO/New/PSQLRowStream.swift": "eca2486297ed329d1a27f3d55ea8916df492868ba09133c13f82d1bc226ea911",
-    "Sources/PostgresNIO/New/PSQLTask.swift": "d053227da3e1e201a333a6d029430a903d3cb3667dd5b99c7c7b6925a6c0a379",
+    "Sources/PostgresNIO/New/PSQLTask.swift": "624fa430caa87a05b07c8e03038f20c8fb1793834c78231e2074be98f5875071",
     "Sources/PostgresNIO/New/PostgresBackendMessage.swift": "a3c6b184be11b0cd23c2c91c763bd3f0a4f17ea0660f612617bb4909398c3184",
     "Sources/PostgresNIO/New/PostgresBackendMessageDecoder.swift": "6ee6c35def0bb212b6837956470aa2b68e9a5906615d7438a421d65470684369",
     "Sources/PostgresNIO/New/PostgresCell.swift": "dabeb649b98831ab4a2468587cdaa4f5c9cebd9c2ff4f8ba656eaf78d47c3c77",
-    "Sources/PostgresNIO/New/PostgresChannelHandler.swift": "537a8ff105dc4cc0b0c86cb4780081af65cc6723e8bfa72bfb50c8d6399ca713",
+    "Sources/PostgresNIO/New/PostgresChannelHandler.swift": "b7c715274c3ba57232fd6a399b2491b70f803bba6ed0d0d6ee66b74c40b9472a",
     "Sources/PostgresNIO/New/PostgresCodable.swift": "da0112ac92d6694b4f69bd379a21ca0ea07179888a9438f1fc65d66fce11619f",
     "Sources/PostgresNIO/New/PostgresColumns.swift": "c067c34da3f7c9644327b85f84ac58f7f1d09843dd28794643e5ef0b7ba6d0af",
     "Sources/PostgresNIO/New/PostgresFrontendMessageEncoder.swift": "ae6353ad3e3a3507427fc94b95dac6973351516c7fd8fd68957d67ce9a3c7ed1",
@@ -253,5 +255,19 @@
     "Tests/PostgresNIOTests/New/PostgresRowTests.swift": "2830b6798da15f9f459d1c1e8ed9354a4a48c8dda3d7dd3c8359e7d07885bd27",
     "Tests/PostgresNIOTests/Utilities.swift": "384d6149f0baf948ed4643650e64637999cc68218ff12b296b1d827974574be4",
     "Tests/PostgresNIOTests/Utilities/PostgresJSONCodingTests.swift": "c553f44784f85597b6748525597781a3a562c8703726a05a6c3782f88b5fe917"
-  }
+  },
+  "additionalPatches": [
+    {
+      "commit": "e5a7f287e791dedb93f0829dfb00fae3edee9275",
+      "files": [
+        "Sources/PostgresNIO/Connection/PostgresConnection.swift",
+        "Sources/PostgresNIO/Connection/PostgresIndependentQuery.swift",
+        "Sources/PostgresNIO/New/Connection State Machine/ConnectionStateMachine.swift",
+        "Sources/PostgresNIO/New/IndependentQueryPipeline.swift",
+        "Sources/PostgresNIO/New/PSQLTask.swift",
+        "Sources/PostgresNIO/New/PostgresChannelHandler.swift"
+      ],
+      "reason": "Existing committed bounded independent-query pipeline; each query has its own Sync/ReadyForQuery completion and ordinary commands wait for the pipeline to drain. Checksums record the committed implementation without changing driver behavior."
+    }
+  ]
 }

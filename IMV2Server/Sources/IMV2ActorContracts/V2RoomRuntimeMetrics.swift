@@ -4,6 +4,16 @@ public enum V2RoomDirectoryRecoveryStage: String, CaseIterable, Sendable {
     case coldCallerWait = "cold_caller_wait"
     /// Shared actual resolver job, also used by ordinary send/read callers.
     case actualResolution = "actual_resolution"
+    /// Components of actualResolution; overlapping caller waits are separate.
+    case ownerResolution = "owner_resolution"
+    case hostCandidates = "host_candidates"
+    case activation = "activation"
+    case locationProbe = "location_probe"
+    case retryBackoff = "retry_backoff"
+    /// Includes the requested sleep and scheduling on the concurrent executor.
+    case retryTimerWait = "retry_timer_wait"
+    /// Concurrent-executor wake until execution resumes on the directory actor.
+    case retryActorResume = "retry_actor_resume"
     case hostCallerWait = "host_caller_wait"
     case settledCallback = "settled_callback"
 }
@@ -156,6 +166,21 @@ public struct V2RoomCommandBudgetSnapshot: Equatable, Sendable {
 
 /// 有界的进程内观测数据。不导出房间、宿主或操作标识；
 /// 各组件样本也不构成事务一致的快照。
+public struct V2RoomMembershipMetricsSnapshot: Equatable, Sendable {
+    public let revision: UInt64?
+    public let confirmed: Bool
+    public let configuredHosts: Int
+    public let healthyHosts: Int
+    public let realtimeRevision: UInt64?
+    public let realtimeQualified: Bool?
+    public init(revision: UInt64?, confirmed: Bool, configuredHosts: Int, healthyHosts: Int,
+                realtimeRevision: UInt64? = nil, realtimeQualified: Bool? = nil) {
+        self.revision = revision; self.confirmed = confirmed
+        self.configuredHosts = configuredHosts; self.healthyHosts = healthyHosts
+        self.realtimeRevision = realtimeRevision; self.realtimeQualified = realtimeQualified
+    }
+}
+
 public struct V2RoomRuntimeMetricsSnapshot: Equatable, Sendable {
     public let host: V2RoomActivationHostSnapshot?
     public let commands: V2RoomCommandBudgetSnapshot?
@@ -165,12 +190,14 @@ public struct V2RoomRuntimeMetricsSnapshot: Equatable, Sendable {
     public let resolutionWaiters: Int
     public let directoryCalls: V2RoomDirectoryCallMetricsSnapshot
     public let transportCalls: V2RoomTransportCallMetricsSnapshot
+    public let membership: V2RoomMembershipMetricsSnapshot?
 
     public init(host: V2RoomActivationHostSnapshot?, commands: V2RoomCommandBudgetSnapshot?,
                 cachedLocations: Int, pendingResolutions: Int,
                 activeResolutions: Int, resolutionWaiters: Int,
                 directoryCalls: V2RoomDirectoryCallMetricsSnapshot = .init(),
-                transportCalls: V2RoomTransportCallMetricsSnapshot = .init()) {
+                transportCalls: V2RoomTransportCallMetricsSnapshot = .init(),
+                membership: V2RoomMembershipMetricsSnapshot? = nil) {
         self.host = host
         self.commands = commands
         self.cachedLocations = cachedLocations
@@ -179,6 +206,7 @@ public struct V2RoomRuntimeMetricsSnapshot: Equatable, Sendable {
         self.resolutionWaiters = resolutionWaiters
         self.directoryCalls = directoryCalls
         self.transportCalls = transportCalls
+        self.membership = membership
     }
 }
 

@@ -118,7 +118,7 @@ actor V2RealtimeShardInbound {
         guard endpointDigest.withLock({ $0 == hello.endpointDigest }) else {
             diagnostic("hello_endpoint_digest"); throw V2ActorAuthenticationError.wrongRecipient
         }
-        guard peer.permissions.contains(.realtimePublish), serviceOwnerAccess[peer.serviceID] != nil else {
+        guard peer.permissions.contains(.realtimePublish), !trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID]).isEmpty else {
             throw V2ActorAuthenticationError.forbidden
         }
         let now = ContinuousClock.now
@@ -182,7 +182,7 @@ actor V2RealtimeShardInbound {
         case .publish(let request):
             guard request.token.host == identity,
                   V2RealtimeTopicKey(request.topic).partitionID() == request.token.partitionID else { throw V2ActorAuthenticationError.wrongRecipient }
-            guard serviceOwnerAccess[peer.serviceID]?.contains(request.topic.owner.shardID) == true else { throw V2ActorAuthenticationError.forbidden }
+            guard trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID]).contains(request.topic.owner.shardID) == true else { throw V2ActorAuthenticationError.forbidden }
             do {
                 try V2RealtimeBatch(recipient: identity, deliveries: [.init(topic: request.topic,
                     partitionID: request.token.partitionID, partitionEpoch: request.token.epoch, sessionID: request.token.leaseToken,

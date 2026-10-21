@@ -11,13 +11,14 @@ import Foundation
 /// `IM_V2_LOCAL_MEDIA_MODE` 必须为 `filesystem`；
 /// `IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY` 必须为 `1`；
 /// `IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY` 为绝对路径；
-/// `IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL` 为指向本机回环地址的 HTTPS 地址且不带查询与片段；
+/// `IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL` 为 HTTPS 地址且不带用户凭据、查询与片段；
+/// 默认仅允许回环地址，远程测试须用 `IM_V2_LOCAL_MEDIA_ALLOWED_TEST_HOST` 显式指定同一主机；
 /// `IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64` 为至少 32 字节的 Base64 密钥；
 /// `IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES` 为正的 `Int64` 且不超过 `Int.max`。
 public struct V2LocalFilesystemMediaRuntimeConfiguration: Sendable {
     /// 媒体对象落盘的根目录，已标准化。
     public let rootDirectory: URL
-    /// 对外发布的回环 HTTPS 基础地址。
+    /// 对外发布的 HTTPS 基础地址。
     public let publicBaseURL: URL
     /// 用于签名本地链接的密钥材料。
     public let signingKey: Data
@@ -43,13 +44,18 @@ public struct V2LocalFilesystemMediaRuntimeConfiguration: Sendable {
         guard environment.value(for: "IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY") == "1" else {
             throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY")
         }
+        let allowedTestHost = environment.value(for: "IM_V2_LOCAL_MEDIA_ALLOWED_TEST_HOST")?
+            .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard let rawDirectory = environment.value(for: "IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY")?.trimmingCharacters(in: .whitespacesAndNewlines),
               rawDirectory.hasPrefix("/"),
               let rawBaseURL = environment.value(for: "IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL")?.trimmingCharacters(in: .whitespacesAndNewlines),
               let publicBaseURL = URL(string: rawBaseURL),
               publicBaseURL.scheme?.lowercased() == "https",
               let publicHost = publicBaseURL.host?.lowercased(),
-              ["localhost", "127.0.0.1", "::1"].contains(publicHost),
+              !publicHost.isEmpty,
+              (["localhost", "127.0.0.1", "::1"].contains(publicHost) || publicHost == allowedTestHost),
+              publicBaseURL.user == nil,
+              publicBaseURL.password == nil,
               publicBaseURL.query == nil,
               publicBaseURL.fragment == nil,
               let encodedSigningKey = environment.value(for: "IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64")?.trimmingCharacters(in: .whitespacesAndNewlines),

@@ -48,7 +48,7 @@ struct V2GatewaySlowFanoutBenchmarkTests {
         clients.reserveCapacity(connectionCount)
         do {
             listener = try await ServerBootstrap(group: group)
-                .childChannelOption(ChannelOptions.socketOption(.so_sndbuf), value: Int32(socketBufferBytes))
+                .childChannelOption(ChannelOptions.socketOption(.so_sndbuf), value: ChannelOptions.Types.SocketOption.Value(socketBufferBytes))
                 .childChannelInitializer { channel in
                     channel.eventLoop.makeCompletedFuture {
                         try channel.pipeline.syncOperations.addHandler(
@@ -63,7 +63,7 @@ struct V2GatewaySlowFanoutBenchmarkTests {
             for index in 0..<connectionCount {
                 let paused = index < pausedCount
                 let channel = try await ClientBootstrap(group: group)
-                    .channelOption(ChannelOptions.socketOption(.so_rcvbuf), value: Int32(socketBufferBytes))
+                    .channelOption(ChannelOptions.socketOption(.so_rcvbuf), value: ChannelOptions.Types.SocketOption.Value(socketBufferBytes))
                     .channelInitializer { channel in
                         channel.eventLoop.makeCompletedFuture {
                             try channel.pipeline.syncOperations.addHandler(

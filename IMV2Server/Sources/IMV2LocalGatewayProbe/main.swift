@@ -36,7 +36,7 @@ enum IMV2LocalGatewayProbe {
                 .channelInitializer { channel in
                     channel.eventLoop.makeCompletedFuture {
                         try channel.pipeline.syncOperations.addHandler(
-                            NIOSSLClientHandler(context: sslContext, serverHostname: configuration.serverName)
+                            NIOSSLClientHandler(context: sslContext, serverHostname: configuration.sniServerName)
                         )
                         try channel.pipeline.syncOperations.addHandler(
                             GatewayProbeHandler(configuration: configuration, completion: completion, sendTasks: sendTasks)
@@ -102,6 +102,12 @@ private struct Configuration: Sendable {
     let serverName: String
     let accountBaseURL:URL
     let caPath: String
+
+    // IP endpoints are verified against the connected peer address. TLS SNI
+    // accepts DNS names only; keep full certificate verification enabled.
+    var sniServerName: String? {
+        (try? SocketAddress(ipAddress: serverName, port: port)) == nil ? serverName : nil
+    }
 
     static let messageText = "local-gateway-smoke-message"
 
@@ -202,6 +208,13 @@ private struct Configuration: Sendable {
         guard let port = Int(rawPort), (1...65_535).contains(port),
               !host.isEmpty, !serverName.isEmpty, !caPath.isEmpty
         else { throw ProbeError.invalidConfiguration }
+        if let expectedAddress = try? SocketAddress(ipAddress: serverName, port: port) {
+            // With no SNI name, NIOSSL checks the peer IP. Require that peer
+            // to be the explicitly requested certificate identity.
+            guard let hostAddress = try? SocketAddress(ipAddress: host, port: port),
+                  hostAddress == expectedAddress
+            else { throw ProbeError.invalidConfiguration }
+        }
         self.port = port
     }
 }

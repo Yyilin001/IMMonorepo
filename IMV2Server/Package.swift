@@ -17,6 +17,7 @@ let package = Package(
         .library(name: "IMV2ServerHTTP", targets: ["IMV2ServerHTTP"]),
         .executable(name: "IMV2ResourceImageWorker", targets: ["IMV2ResourceImageWorker"]),
         .executable(name: "IMV2PlacementControlApp", targets: ["IMV2PlacementControlApp"]),
+        .executable(name: "IMV2TrustAdmissionTool", targets: ["IMV2TrustAdmissionTool"]),
         .executable(name: "IMV2RoomHostSupervisorApp", targets: ["IMV2RoomHostSupervisorApp"]),
         .executable(name: "IMV2ServerApp", targets: ["IMV2ServerApp"]),
         .executable(name: "IMV2AccountServerApp", targets: ["IMV2AccountServerApp"]),
@@ -54,6 +55,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(name: "IMV2ResourceImageWorker"),
+        .executableTarget(name: "IMV2TrustAdmissionTool", dependencies: ["IMV2ActorCluster"]),
         .executableTarget(name: "IMV2PlacementControlApp",
             dependencies: ["IMV2ActorApplication", "IMV2Server", "IMV2ServerContracts", "IMV2ServerApplication",
                            .product(name: "Logging", package: "swift-log")]),

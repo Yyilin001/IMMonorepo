@@ -550,6 +550,84 @@ struct V2GatewayRoomSubscriptionRegistryTests {
         #expect(await coordinator.pendingRepairCount == 0)
         await f.authority.shutdown()
     }
+    @Test("partial room repair retries the missing member even after its sibling restores a ready baseline")
+    func partialRepairDoesNotMistakeRoomReadinessForMemberReadiness() async throws {
+        let f = try RegistryFixture(), other = UserID(uuid: UUID())
+        let members = [f.member, V2RoomSubscriptionMember(userID: other, memberRevision: 0)]
+        let state = Mutex((repairing: false, first: Optional<UserID>.none, failed: false, installed: false))
+        let gateway = V2GatewayRealtimeDescriptor(identity: .init(nodeID: "gateway", serviceID: "gateway",
+            incarnationID: UUID()), endpointReference: Data([1]), address: "127.0.0.1", port: 9000)
+        let ingress = V2GatewayRoomSubscriptionIngress(authority: f.authority, maximumRooms: 10,
+            offerEvent: { _, _ in }, offerHead: { _, _ in })
+        let session = V2RoomDeliverySession(host: f.fence.activation.host, gateway: gateway.identity, generation: 1)
+        let fresh = V2RoomDeliverySession(host: session.host, gateway: session.gateway, generation: 2)
+        let replacement = V2RoomSubscriptionFence(activation: f.fence.activation, subscriptionID: UUID(),
+            generation: 2, baselineSequence: 10)
+        let ports = V2GatewayRoomSubscriptionPorts(gateway: gateway, resolve: { _, _ in
+            .init(activation: f.fence.activation, authenticatedServiceID: "owner")
+        }, subscribe: { command, _, _ in
+            let decision = state.withLock { value -> (Bool, Bool, Bool) in
+                guard value.repairing else { return (false, false, false) }
+                if value.first == nil { value.first = command.actorUserID }
+                if command.actorUserID != value.first, !value.failed {
+                    value.failed = true
+                    return (true, true, value.installed)
+                }
+                return (true, false, value.installed)
+            }
+            if decision.1 { return .failure(.unavailable) }
+            let deliverySession = decision.0 ? fresh : session
+            _ = f.authority.applyDeliverySession(.init(session: deliverySession, kind: .open, sequence: 1), serviceID: "owner")
+            return .granted(.init(fence: decision.2 ? replacement : f.fence, memberRevision: 0,
+                userBaselineSequence: 10, deliverySession: deliverySession))
+        }, reset: { _, _, _ in
+            .granted(.init(fence: replacement, memberRevision: 0, userBaselineSequence: 10, deliverySession: fresh))
+        }, activate: { command, _, _ in
+            let payload: V2RoomSubscriptionPayload
+            let sequence: UInt64
+            if command.fence == f.fence {
+                payload = .baseline(members: members); sequence = 1
+            } else {
+                let first = state.withLock { value in
+                    let first = !value.installed; value.installed = true; return first
+                }
+                if first {
+                    payload = .baseline(members: [.init(userID: command.actorUserID, memberRevision: 0)])
+                    sequence = 1
+                } else if await f.authority.authorizedMemberRevision(roomID: f.room, userID: command.actorUserID) != nil {
+                    return .activated
+                } else {
+                    payload = .grant(member: .init(userID: command.actorUserID, memberRevision: 0), baselineSequence: 10)
+                    sequence = 2
+                }
+            }
+            let result = await ingress.applyRoomSubscription(.init(fence: command.fence,
+                deliverySequence: sequence, authorizationSequence: sequence, payload: payload),
+                authenticatedServiceID: "owner", sourceShardID: "rooms")
+            return result == .appliedThrough(sequence) ? .activated : .failure(.stale)
+        }, unsubscribe: { _, _, _ in .unsubscribed })
+        let coordinator = try V2GatewayRoomSubscriptionCoordinator(ports: ports, ingress: ingress,
+            maximumConcurrentCalls: 4)
+        _ = try await coordinator.acquire(roomID: f.room, userID: f.user, reference: UUID())
+        _ = try await coordinator.acquire(roomID: f.room, userID: other, reference: UUID())
+        state.withLock { $0.repairing = true }
+        await coordinator.start()
+        _ = f.authority.applyDeliverySession(.init(session: session, kind: .retire, sequence: 2), serviceID: "owner")
+        await coordinator.sessionChanged(host: session.host)
+        let until = ContinuousClock.now + .seconds(4)
+        var restored = false
+        while ContinuousClock.now < until {
+            let first = await f.authority.authorizedMemberRevision(roomID: f.room, userID: f.user)
+            let second = await f.authority.authorizedMemberRevision(roomID: f.room, userID: other)
+            restored = state.withLock { $0.failed } && first != nil && second != nil
+            if restored { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(state.withLock { $0.failed })
+        #expect(restored)
+        await coordinator.shutdown()
+        await f.authority.shutdown()
+    }
     @Test("queued subscriptions expire or retire without issuing an Owner call", arguments: [false, true])
     func queuedDeadlineAndRetirement(retire: Bool) async throws {
         let f = try RegistryFixture(), probe = SubscriptionAdmissionProbe()

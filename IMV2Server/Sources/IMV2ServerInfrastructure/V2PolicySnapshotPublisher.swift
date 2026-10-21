@@ -38,6 +38,7 @@ package actor V2PolicySnapshotPublisher {
         }
     }
     private let targets: Set<Target>
+    private let authorizeAdditionalTarget: (@Sendable (Target) throws -> Bool)?
     private let identity: V2ActorHostIdentity
     private let cache: V2NodePolicyStateCache
     private let maximumScopesPerRecipient: Int
@@ -57,12 +58,18 @@ package actor V2PolicySnapshotPublisher {
 
     package init(targets: [Target], identity: V2ActorHostIdentity, cache: V2NodePolicyStateCache,
                  maximumScopesPerRecipient: Int = 65_536,
+                 authorizeAdditionalTarget: (@Sendable (Target) throws -> Bool)? = nil,
                  validateRecipient: @escaping @Sendable (V2PolicySnapshotSubscriberWire) async throws -> Void,
                  send: @escaping Send) {
         precondition(maximumScopesPerRecipient > 0)
+        self.authorizeAdditionalTarget = authorizeAdditionalTarget
         self.targets = Set(targets); self.identity = identity; self.cache = cache; self.send = send
         self.maximumScopesPerRecipient = maximumScopesPerRecipient
         self.validateRecipient = validateRecipient
+    }
+    private func authorizedTarget(_ target: Target) throws -> Bool {
+        if targets.contains(target) { return true }
+        return try authorizeAdditionalTarget?(target) ?? false
     }
     package func start(qualified: @escaping @Sendable () async -> Bool) throws {
         guard !closed, !closing, worker == nil else { throw V2PolicyAuthorizationLifecycleError.closed }
@@ -76,13 +83,13 @@ package actor V2PolicySnapshotPublisher {
     package func subscribe(scopes: [V2PolicyAuthorizationScope], target: V2PolicySnapshotSubscriberWire, interestRevision: UInt64 = 1) async throws -> V2PolicyControlSessionWire {
         guard !closed, !closing, interestRevision > 0, !scopes.isEmpty, scopes.count <= 4, scopes.allSatisfy(\.isValid),
               Set(scopes.map(\.canonical)).count == scopes.count,
-              targets.contains(try .init(hostID: target.hostID, endpoint: target.endpoint)), target.host != identity else {
+              try authorizedTarget(.init(hostID: target.hostID, endpoint: target.endpoint)), target.host != identity else {
             throw V2RoomCallFailure.notAccepted(.forbidden)
         }
-        if entries[target.host] == nil {
-            try await validateRecipient(target)
-            guard !closed, !closing else { throw V2PolicyAuthorizationLifecycleError.closed }
-        }
+        // Revalidate live identity even for an existing session: membership
+        // withdrawal must not leave a cached recipient authorized indefinitely.
+        try await validateRecipient(target)
+        guard !closed, !closing else { throw V2PolicyAuthorizationLifecycleError.closed }
         // A restarted recipient supersedes its old incarnation's registrations.
         // Old tasks stay owned in roots until their actual calls settle.
         for (host, old) in entries where host.hostID == target.hostID && host != target.host {
@@ -122,7 +129,7 @@ package actor V2PolicySnapshotPublisher {
     }
     package func release(_ request: V2PolicyInterestReleaseWire) async throws {
         guard !closed, !closing, request.source == identity,
-              targets.contains(try .init(hostID: request.subscriber.hostID, endpoint: request.subscriber.endpoint)) else {
+              try authorizedTarget(.init(hostID: request.subscriber.hostID, endpoint: request.subscriber.endpoint)) else {
             throw V2PolicyAuthorizationLifecycleError.invalidTarget
         }
         let host = request.subscriber.host

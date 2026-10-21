@@ -42,6 +42,7 @@ public protocol V2RoomForwardPairServing: Sendable {
 /// Independent control and room services share only the authenticated endpoint
 /// shape. A control service owns its own admission and lifecycle budget.
 public protocol V2ActorHostInboundServing: Sendable {
+    func closeSession(_ packet: V2ActorSignedPacket) async throws
     func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket
     func exchange(_ packet: V2ActorSignedPacket, boundToken: V2RoomActivationToken?) async throws -> V2ActorSignedPacket
 }
@@ -56,6 +57,9 @@ public distributed actor V2RoomHostEndpoint {
         self.service = service
     }
 
+    public distributed func closeSession(_ packet: V2ActorSignedPacket) async throws {
+        try await service.closeSession(packet)
+    }
     public distributed func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try await service.openSession(packet)
     }
@@ -201,6 +205,12 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         return inFlightRequestCount() == 0
     }
 
+    public func closeSession(_ packet: V2ActorSignedPacket) async throws {
+        try beginRequest()
+        defer { endRequest() }
+        try authenticator.closeSession(packet)
+    }
+
     public func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
         try beginRequest()
         defer { endRequest() }
@@ -312,7 +322,7 @@ public actor V2RoomClusterInboundService: V2ActorHostInboundServing {
         if case .recoveryBatch(let items) = request { shards = Set(items.map { $0.token.owner.shardID }) }
         else { shards = [requestShard(request)] }
         guard shards.isSubset(of: allowedShards),
-              shards.isSubset(of: serviceShardAccess[verified.call.serviceID] ?? []) else {
+              shards.isSubset(of: authenticator.authorizedSources(for: verified.call.serviceID, configured: serviceShardAccess[verified.call.serviceID])) else {
             throw V2ActorAuthenticationError.forbidden
         }
         let batchKind: V2RoomBatchAdmission.Kind?

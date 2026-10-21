@@ -15,9 +15,11 @@ package final class V2RoomActorPlacementRuntime: V2RoomActorPlacementRouting, Se
         let requestID: UUID
         let originRevision: UInt64
     }
+    private struct AdmissionAttempt: Sendable { let requestID: UUID; let originRevision: UInt64 }
     private struct RegistrationState: Sendable {
         var host: V2ActorHostIdentity?
         var attempts: [String: RegistrationAttempt] = [:]
+        var admissions: [String: AdmissionAttempt] = [:]
     }
     // One application owns this runtime. Retain each exact command across lost
     // commit responses; deriving it again from the successor snapshot would
@@ -26,6 +28,34 @@ package final class V2RoomActorPlacementRuntime: V2RoomActorPlacementRouting, Se
     package init(logs: [String: any V2ActorPlacementLog], snapshots: [String: V2ActorPlacementSnapshot]) throws {
         guard !logs.isEmpty, Set(logs.keys) == Set(snapshots.keys) else { throw V2ActorPlacementError.invalidConfiguration }
         self.logs = logs; directories = Mutex(snapshots.mapValues { V2ActorPlacementDirectory(snapshot: $0) })
+    }
+
+    /// Fresh certified read, never the cached room-routing snapshot. A missing
+    /// committed roster is not permission to fall back to bootstrap affinity.
+    package func loadServiceMembership(shard: String) async throws -> V2ActorServiceMembershipRecord {
+        guard let log = logs[shard] else { throw V2ActorPlacementError.invalidConfiguration }
+        let committed = try await log.load()
+        try install(committed, shard: shard)
+        guard let membership = committed.serviceMembership else { throw V2ActorPlacementError.unavailable }
+        return membership
+    }
+
+    package func installServiceMembership(_ membership: V2ActorServiceMembershipRecord, shard: String,
+        requestID: UUID, originRevision: UInt64, deadline: ContinuousClock.Instant) async throws -> V2ActorPlacementSnapshot {
+        guard originRevision > 0, let log = logs[shard] else { throw V2ActorPlacementError.invalidConfiguration }
+        var current = try await log.load()
+        while true {
+            try Task.checkCancellation()
+            guard ContinuousClock.now < deadline else { throw V2ActorPlacementError.unavailable }
+            do {
+                let committed = try await log.append(.installServiceMembership(membership), expected: current,
+                    requestID: requestID, originRevision: originRevision)
+                try install(committed, shard: shard)
+                return committed
+            } catch V2ActorPlacementError.staleRevision {
+                current = try await log.load()
+            }
+        }
     }
 
     package func register(_ host: V2ActorHostIdentity, shards: Set<String>) async throws {
@@ -38,7 +68,7 @@ package final class V2RoomActorPlacementRuntime: V2RoomActorPlacementRouting, Se
         }
         for shard in shards.sorted() {
             let log = logs[shard]!
-            var current = try await log.load()
+            var current = try await admitIfAbsent(host.hostID, shard: shard, log: log)
             var attempt = try registrations.withLock { state in
                 if let existing = state.attempts[shard] { return existing }
                 guard let previous = current.registration(for: host.hostID)?.host else {
@@ -71,6 +101,32 @@ package final class V2RoomActorPlacementRuntime: V2RoomActorPlacementRouting, Se
                 break
             }
         }
+    }
+
+    private func admitIfAbsent(_ hostID: V2ActorHostID, shard: String, log: any V2ActorPlacementLog) async throws -> V2ActorPlacementSnapshot {
+        var current = try await log.load()
+        while current.registration(for: hostID) == nil {
+            try Task.checkCancellation()
+            let attempt = registrations.withLock { state in
+                if let existing = state.admissions[shard] { return existing }
+                let created = AdmissionAttempt(requestID: UUID(), originRevision: current.revision)
+                state.admissions[shard] = created; return created
+            }
+            do {
+                current = try await log.append(.admitHost(hostID), expected: current,
+                    requestID: attempt.requestID, originRevision: attempt.originRevision)
+            } catch V2ActorPlacementError.staleRevision {
+                current = try await log.load()
+            } catch V2ActorPlacementError.requestExpired {
+                current = try await log.load()
+                // Renewal is safe only after a certified read still finds no
+                // registration. Unknown replies keep the original request ID.
+                if current.registration(for: hostID) == nil {
+                    registrations.withLock { $0.admissions[shard] = nil }
+                }
+            }
+        }
+        return current
     }
 
     /// The caller MUST await Host/transport physical drain before this call.
@@ -364,12 +420,14 @@ package final class V2RoomActorPlacementRuntime: V2RoomActorPlacementRouting, Se
         return directory
     }
 
-    package static func initialSnapshot(shard: String, peers: [V2RoomDiscoveryPeer], partitionCount: Int = 256) throws -> V2ActorPlacementSnapshot {
+    package static func initialSnapshot(deploymentID: UUID, shard: String, peers: [V2RoomDiscoveryPeer], partitionCount: Int = 256) throws -> V2ActorPlacementSnapshot {
         let hosts = peers.filter { $0.accessibleShardIDs.contains(shard) }.map(\.hostID).sorted { $0.rawValue < $1.rawValue }
         guard !hosts.isEmpty, (1...4096).contains(partitionCount), partitionCount >= hosts.count else {
             throw V2ActorPlacementError.invalidConfiguration
         }
-        let topology = "IMV2.actor-placement.v1\u{0}" + shard + "\u{0}" + hosts.map(\.rawValue).joined(separator: "\u{0}")
+        // A control group survives changes to its room-host roster. Only the
+        // explicit deployment identity and shard identify persistent history.
+        let topology = "IMV2.actor-placement.v2\u{0}" + deploymentID.uuidString.lowercased() + "\u{0}" + shard
         let hash = Array(SHA256.hash(data: Array(topology.utf8)))
         let clusterID = UUID(uuid: (hash[0],hash[1],hash[2],hash[3],hash[4],hash[5],hash[6],hash[7],hash[8],hash[9],hash[10],hash[11],hash[12],hash[13],hash[14],hash[15]))
         let unregistered = UUID(uuid: (0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0))

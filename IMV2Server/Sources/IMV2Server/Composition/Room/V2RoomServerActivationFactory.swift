@@ -106,8 +106,8 @@ public struct V2RoomServerOwnerResources: Sendable, V2SendOperationOwnerMetricsR
         recovery.pressureSnapshot()
     }
 
-    public func shutdownRoomSubscriptionDelivery() async {
-        await subscriptionHost.close()
+    public func shutdownRoomSubscriptionDelivery(deadline: ContinuousClock.Instant = .now + .seconds(5)) async {
+        await subscriptionHost.close(deadline: deadline)
     }
 
     public func shutdownRoomReadQueries() async {
@@ -174,28 +174,7 @@ public struct V2RoomServerActivationFactory: Sendable {
         var seen: Set<UUID> = []
         for reference in owners.values where seen.insert(reference.value.durableOwner.id).inserted {
             let resource = reference.value
-            try await resource.subscriptionHost.configure(sendBatch: { batch, shard, gateway in
-                do {
-                    let result = try await sendBatch(batch, shard, gateway)
-                    if batch.deliveries.contains(where: { $0.payload.isAuthorizationControl }),
-                       result.receipts.contains(where: { receipt in
-                           if case .appliedThrough = receipt.result { return false }; return true
-                       }) {
-                        let rejected = Set(result.receipts.compactMap { receipt -> V2RoomSubscriptionFence? in
-                            if case .appliedThrough = receipt.result { return nil }; return receipt.fence
-                        })
-                        await sessions.controlDeliveryFailed(batch.deliveries.filter {
-                            $0.payload.isAuthorizationControl && rejected.contains($0.fence)
-                        }, gateway: gateway.identity)
-                    }
-                    return result
-                }
-                catch {
-                    let controls = batch.deliveries.filter { $0.payload.isAuthorizationControl }
-                    if !controls.isEmpty { await sessions.controlDeliveryFailed(controls, gateway: gateway.identity) }
-                    throw error
-                }
-            }, maximumCalls: maximumCalls)
+            try await resource.subscriptionHost.configure(sendBatch: sessions.guardedSender(sendBatch), maximumCalls: maximumCalls)
         }
     }
 
@@ -204,10 +183,11 @@ public struct V2RoomServerActivationFactory: Sendable {
     }
 
     public func shutdownRoomSubscriptionDelivery() async {
+        let deadline = ContinuousClock.now + .seconds(5)
         await deliverySessions.close()
         var seen: Set<UUID> = []
         for reference in owners.values where seen.insert(reference.value.durableOwner.id).inserted {
-            await reference.value.shutdownRoomSubscriptionDelivery()
+            await reference.value.shutdownRoomSubscriptionDelivery(deadline: deadline)
         }
     }
 
@@ -681,10 +661,12 @@ private actor V2RoomServerActivation {
     func close() async {
         guard !closed else { return }
         closed = true
-        for gateway in sessionGateways { await deliverySessions.release(activation: token, gateway: gateway) }
-        sessionGateways.removeAll()
         if restoringSubscription { await withCheckedContinuation { subscriptionRestoreWaiters.append($0) } }
         if let subscriptionOwner { try? await subscriptionOwner.close() }
+        // Keep session responsibility until the room terminal is acknowledged
+        // or its failure has invalidated the old shared generation.
+        for gateway in sessionGateways { await deliverySessions.release(activation: token, gateway: gateway) }
+        sessionGateways.removeAll()
         await ownerResources?.value.subscriptionHost.unregister(token: token)
         subscriptionOwner = nil
         handlers = nil
@@ -924,13 +906,16 @@ package actor V2RoomSubscriptionHost {
         }
     }
 
-    func close() async {
+    func close(deadline: ContinuousClock.Instant = .now + .seconds(5)) async {
         guard !closed else { return }; closed = true
         pending.withLock { $0.closed = true; $0.rooms.removeAll(); $0.deliveryRooms.removeAll(); $0.registeredRooms.removeAll() }
         wakes.continuation.finish()
         worker?.cancel()
         if let worker { await worker.value }; worker = nil
-        for entry in entries.values { try? await entry.owner.close() }
+        // The batch owns one terminal-ACK budget. Restarting a five-second
+        // wait for each disconnected room makes shutdown grow with room count.
+        // Expiry still invalidates authorization and joins actual owned calls.
+        for entry in entries.values { try? await entry.owner.close(deadline: deadline) }
         entries.removeAll()
         let feed = factsFeed.withLock { value in let feed = value; value = nil; return feed }
         feed?.finish()

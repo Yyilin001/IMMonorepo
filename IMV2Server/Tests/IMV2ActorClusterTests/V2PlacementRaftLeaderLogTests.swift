@@ -6,6 +6,68 @@ import Testing
 
 @Suite("Leader placement log requires fresh quorum")
 struct V2PlacementRaftLeaderLogTests {
+    @Test("Ordinary placement writers cannot change service membership")
+    func memberControllerAuthorization() async throws {
+        let (log, _, nodes, initial) = try await fixture()
+        _ = try await log.open(initial)
+        var ids: [V2ActorHostID] = []
+        for node in nodes { ids.append(await node.inspection().state.voterID) }
+        let member = try V2ActorServiceID("member"), controller = try V2ActorServiceID("controller")
+        var trusted: [V2ActorTrustedService] = [], roles: [V2ActorServiceID: V2ActorHostID] = [:]
+        for (index, id) in ids.enumerated() {
+            let service = try V2ActorServiceID("voter-\(index)"); roles[service] = id
+            trusted.append(try .init(serviceID: service, publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation,
+                permissions: [.placementVote, .placementRead], hostedIDs: [id]))
+        }
+        trusted.append(try .init(serviceID: member, publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation,
+            permissions: [.placementWrite, .realtimePublish, .realtimeReceive], gatewayNodeIDs: ["member"]))
+        trusted.append(try .init(serviceID: controller, publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation,
+            permissions: [.placementWrite, .placementMembership]))
+        let trust = try V2ActorTrustStore(services: trusted)
+        let endpoint = try await V2PlacementRaftEndpoint.open(voters: ["rooms": nodes[0]], localID: ids[0],
+            roles: roles, readers: [:], writers: [member: ["rooms"], controller: ["rooms"]], roomHosts: [:])
+        try await endpoint.bind(["rooms": log]); try await endpoint.validateTrust(trust)
+        let membership = try V2ActorServiceMembershipRecord(revision: 1, current: ["member"],
+            peers: [.init(nodeID: "member", serviceID: "member", address: "member.test", port: 7337)])
+        let wire = try V2PlacementRaftWriteCodec.request(.init(command: .installServiceMembership(membership),
+            expected: initial, requestID: UUID(), certificate: nil), shard: "rooms")
+        await #expect(throws: V2ActorAuthenticationError.forbidden) {
+            _ = try await endpoint.writePlacement(wire, serviceID: member, callerIncarnation: UUID(), deadline: .now + .seconds(2))
+        }
+        _ = try await endpoint.writePlacement(wire, serviceID: controller, callerIncarnation: UUID(), deadline: .now + .seconds(2))
+        #expect(try await log.load().serviceMembership == membership)
+        for node in nodes { await node.stop() }
+    }
+
+    @Test("Member versions require quorum and survive certified replay without changing ownership")
+    func committedServiceMembership() async throws {
+        let (log, transport, nodes, initial) = try await fixture()
+        _ = try await log.open(initial)
+        let a = V2RealtimeShardDiscoveryPeer(nodeID: "a", serviceID: "a", address: "a.test", port: 7337)
+        let b = V2RealtimeShardDiscoveryPeer(nodeID: "b", serviceID: "b", address: "b.test", port: 7337)
+        let first = try V2ActorServiceMembershipRecord(revision: 1, current: ["a"], peers: [a])
+        let joint = try V2ActorServiceMembershipRecord(revision: 2, current: ["a"], next: ["a", "b"], peers: [a, b])
+        let final = try V2ActorServiceMembershipRecord(revision: 3, current: ["a", "b"], peers: [a, b])
+        await transport.isolateOnePeer()
+        var current = try await log.append(.installServiceMembership(first), expected: initial, requestID: UUID())
+        let beforeJoint = current, request = UUID()
+        current = try await log.append(.installServiceMembership(joint), expected: current, requestID: request)
+        #expect(try await log.append(.installServiceMembership(joint), expected: beforeJoint, requestID: request) == current)
+        current = try await log.append(.installServiceMembership(final), expected: current, requestID: UUID())
+        #expect(current.slots == initial.slots && current.hosts == initial.hosts)
+        #expect(try await log.open(initial).serviceMembership == final)
+        current = try await log.append(.retireHost(initial.slots[0].owner.host), expected: current, requestID: UUID())
+        #expect(current.serviceMembership == final)
+        var recovered = V2PlacementRaftApplication(groupID: initial.clusterID)
+        try recovered.apply(await nodes[0].committedState())
+        #expect(recovered.snapshot?.serviceMembership == final)
+        let checkpoint = try V2PlacementRaftCheckpoint.decode(recovered.checkpoint(), groupID: initial.clusterID)
+        #expect(try checkpoint.replay().snapshot == current)
+        await transport.isolateAllPeers()
+        await #expect(throws: V2ActorPlacementError.unavailable) { _ = try await log.load() }
+        for node in nodes { await node.stop() }
+    }
+
     private func fixture() async throws -> (V2PlacementRaftLeaderLog, RaftLogTestTransport, [V2PlacementRaftVoter], V2ActorPlacementSnapshot) {
         let ids = (0..<3).map { _ in V2ActorHostID(uuid: UUID()) }, group = UUID(), roster = Set(ids)
         var nodes: [V2PlacementRaftVoter] = []
@@ -50,6 +112,80 @@ struct V2PlacementRaftLeaderLogTests {
         let startupIndex = await nodes[0].inspection().state.log.count
         #expect(try await log.bootstrap(initial) == retired)
         #expect(await nodes[0].inspection().state.log.count == startupIndex)
+        for node in nodes { await node.stop() }
+    }
+
+    @Test("startup with changed host affinity preserves committed history and still requires quorum")
+    func expandedStartupPreservesHistory() async throws {
+        let (log, transport, nodes, initial) = try await fixture()
+        #expect(try await log.open(initial) == initial)
+        let retired = try await log.append(.retireHost(initial.slots[0].owner.host), expected: initial, requestID: UUID())
+        let changed = try V2ActorPlacementSnapshot(clusterID: initial.clusterID, revision: 1,
+            slots: [.init(owner: .init(host: .init(hostID: .init(uuid: UUID()), incarnationID: UUID()), epoch: 1), transfer: nil)])
+        let before = await nodes[0].inspection().state.log.count
+        #expect(try await log.open(changed) == retired)
+        #expect(await nodes[0].inspection().state.log.count == before)
+        await #expect(throws: V2ActorPlacementError.conflictingSnapshot) { _ = try await log.bootstrap(changed) }
+        await transport.isolateAllPeers()
+        await #expect(throws: V2ActorPlacementError.unavailable) { _ = try await log.open(changed) }
+        for node in nodes { await node.stop() }
+    }
+
+    @Test("host admission requires authorized shard access and the exact trusted host service", arguments: [false, true])
+    func authenticatedHostAdmission(dynamic: Bool) async throws {
+        let (log, _, nodes, initial) = try await fixture()
+        _ = try await log.bootstrap(initial)
+        var ids: [V2ActorHostID] = []
+        for node in nodes { ids.append(await node.inspection().state.voterID) }
+        let newcomer = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let service = try V2ActorServiceID("new-host"), other = try V2ActorServiceID("other")
+        var roles: [V2ActorServiceID: V2ActorHostID] = [:], trusted: [V2ActorTrustedService] = []
+        for (index, id) in ids.enumerated() {
+            let voterService = try V2ActorServiceID("voter-\(index)"); roles[voterService] = id
+            trusted.append(try .init(serviceID: voterService, publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation,
+                permissions: [.placementVote, .placementRead], hostedIDs: [id]))
+        }
+        let newService = try V2ActorTrustedService(serviceID: service, publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation,
+            permissions: [.placementRead, .placementWrite], hostedIDs: [newcomer.hostID], sourceIDs: ["room-a"])
+        if !dynamic { trusted.append(newService) }
+        let authorityKey = Curve25519.Signing.PrivateKey(), authorityID = try V2ActorServiceID("authority")
+        trusted.append(try .init(serviceID: authorityID, publicKey: authorityKey.publicKey.rawRepresentation, permissions: []))
+        let authority = try V2ActorSigningIdentity(serviceID: authorityID, privateKey: authorityKey.rawRepresentation)
+        trusted.append(try .init(serviceID: other, publicKey: Curve25519.Signing.PrivateKey().publicKey.rawRepresentation,
+            permissions: [.placementWrite]))
+        let trust = try V2ActorTrustStore(services: trusted,
+            admissionAuthority: .init(deploymentID: initial.clusterID, serviceID: authorityID))
+        let endpoint = try await V2PlacementRaftEndpoint.open(voters: ["room-a": nodes[0]], localID: ids[0], roles: roles,
+            readers: dynamic ? [:] : [service: ["room-a"]],
+            writers: dynamic ? [other: ["room-a"]] : [service: ["room-a"], other: ["room-a"]],
+            roomHosts: dynamic ? [:] : [newcomer.hostID: ["room-a"]])
+        try await endpoint.bind(["room-a": log]); try await endpoint.validateTrust(trust)
+        if dynamic {
+            try trust.admitAuthorizedServices(authority.sign(V2ActorTrustAdmission(deploymentID: initial.clusterID,
+                services: [newService]), maximumBytes: 262_144))
+        }
+        _ = try await endpoint.readPlacement(V2PlacementRaftReadCodec.request(groupID: initial.clusterID, shard: "room-a"),
+            serviceID: service, deadline: .now + .seconds(2))
+        let command = V2ActorPlacementCommand.admitHost(newcomer.hostID), requestID = UUID()
+        let wire = try V2PlacementRaftWriteCodec.request(.init(command: command, expected: initial,
+            requestID: requestID, certificate: nil), shard: "room-a")
+        await #expect(throws: V2ActorAuthenticationError.forbidden) {
+            _ = try await endpoint.writePlacement(wire, serviceID: other, callerIncarnation: UUID(), deadline: .now + .seconds(2))
+        }
+        _ = try await endpoint.writePlacement(wire, serviceID: service, callerIncarnation: newcomer.incarnationID, deadline: .now + .seconds(2))
+        _ = try await endpoint.writePlacement(wire, serviceID: service, callerIncarnation: newcomer.incarnationID, deadline: .now + .seconds(2))
+        let admitted = try await log.load()
+        #expect(admitted.revision == 2 && admitted.slots == initial.slots)
+        #expect(admitted.registration(for: newcomer.hostID) == .reserved(newcomer.hostID))
+        let registration = try V2PlacementRaftWriteCodec.request(.init(command: .registerHost(
+            previous: V2ActorPlacementHostRegistration.reserved(newcomer.hostID).host, successor: newcomer),
+            expected: admitted, requestID: UUID(), certificate: nil), shard: "room-a")
+        await #expect(throws: V2ActorAuthenticationError.forbidden) {
+            _ = try await endpoint.writePlacement(registration, serviceID: service, callerIncarnation: UUID(), deadline: .now + .seconds(2))
+        }
+        _ = try await endpoint.writePlacement(registration, serviceID: service, callerIncarnation: newcomer.incarnationID, deadline: .now + .seconds(2))
+        #expect(try await log.load().registration(for: newcomer.hostID) == .init(host: newcomer, retired: false))
+        #expect(try await log.load().slots == initial.slots)
         for node in nodes { await node.stop() }
     }
 

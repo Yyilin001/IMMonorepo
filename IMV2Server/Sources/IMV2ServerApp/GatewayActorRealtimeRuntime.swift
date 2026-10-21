@@ -174,7 +174,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         let shardHandle = try await {
             do {
                 return try await actors.makeRealtimeShardTransport(identity: identity, serving: service,
-                    serviceOwnerAccess: actor.realtimeServiceOwnerAccess, discoveryPeers: actor.realtimePeers,
+                    serviceOwnerAccess: actor.realtimeServiceOwnerAccess, discoveryPeers: actors.realtimeDiscoveryPeers,
                     serviceQualification: serviceQualification)
             } catch {
                 await service.shutdown()
@@ -207,7 +207,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
                     throw V2RealtimeDirectoryError.invalidInput
                 }
                 return try GatewayRealtimePartitionControl(identity: identity,
-                    roster: Set(actor.realtimePeers.map(\.nodeID)).union([identity.nodeID]),
+                    roster: Set(actors.realtimeDiscoveryPeers.map(\.nodeID)),
                     store: GatewayObservedRealtimeLeaseStore(
                         underlying: try PostgresV2RealtimePartitionLeaseStore(database: database.usingLoanClass(.renewal)), metrics: metrics),
                     qualification: serviceQualification,
@@ -259,6 +259,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
         let publisher = V2ActorRealtimePublisher(interests: coordinator, fanout: fanout, topic: topic)
         let userInterests = V2SharedGroupEventWakeInterests(underlying: UserInterests(publisher: publisher))
         let stop: @Sendable () async -> Bool = {
+            guard await actors.stopMembershipUpdates(deadline: .now + .seconds(60)) else { return false }
             var success = true
             shutdownLogger.notice("Realtime component drain started", metadata: ["stage": "room_delivery"])
             await actorFactory?.shutdownRoomSubscriptionDelivery()
@@ -285,6 +286,7 @@ final class GatewayActorRealtimeRuntime: V2ActorRealtimeMetricsSource, Sendable 
             await journal.start()
             try await control.start()
             try await coordinator.start()
+            try await actors.startMembershipUpdates()
         } catch {
             await userInterests.shutdown(); await coordinator.shutdown()
             await fanout.shutdown(); await ingress.shutdown()

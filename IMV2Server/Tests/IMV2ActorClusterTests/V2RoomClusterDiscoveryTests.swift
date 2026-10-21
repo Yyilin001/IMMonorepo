@@ -304,6 +304,94 @@ struct V2RoomClusterDiscoveryTests {
         try await hostSystem.shutdown().wait()
     }
 
+    @Test("authorized live peers add, remove and rejoin without downing the process")
+    func updatesLivePeers() async throws {
+        let port = Int.random(in: 30_000...45_000)
+        let callerPort = Int.random(in: 45_001...60_000)
+        let hostID = try V2ActorHostID("live-discovery-host")
+        let hostKey = Curve25519.Signing.PrivateKey()
+        let callerKey = Curve25519.Signing.PrivateKey()
+        let hostSigner = try V2ActorSigningIdentity(serviceID: .init("live-host-service"), privateKey: hostKey.rawRepresentation)
+        let callerSigner = try V2ActorSigningIdentity(serviceID: .init("live-caller-service"), privateKey: callerKey.rawRepresentation)
+        let trust = try V2ActorTrustStore(services: [
+            .init(serviceID: hostSigner.serviceID, publicKey: hostKey.publicKey.rawRepresentation,
+                  permissions: [], hostedIDs: [hostID]),
+            .init(serviceID: callerSigner.serviceID, publicKey: callerKey.publicKey.rawRepresentation,
+                  permissions: [.roomCoordination]),
+        ])
+        let callerSystem = await makeSystem(port: callerPort)
+        let hostSystem = await makeSystem(port: port)
+        let caller = V2RoomClusterClient(system: callerSystem, signer: callerSigner,
+            trust: trust, limits: try .init(), configuration: try .init())
+        let peer = try V2RoomDiscoveryPeer(hostID: hostID, serviceID: hostSigner.serviceID,
+            address: "127.0.0.1", port: port, accessibleShardIDs: ["pinned-shard"], maximumRooms: 2)
+        let discovery = V2RoomClusterDiscovery(system: callerSystem, client: caller, trust: trust,
+            configuration: try .init(peers: [peer], pollInterval: .milliseconds(100)))
+        do {
+            // Start with a committed empty room roster, then admit the live host.
+            try await discovery.installAuthorizedPeers([], revision: 1)
+            await discovery.start()
+            let published = try await publish(hostID: hostID, signer: hostSigner,
+                system: hostSystem, port: port, availableRooms: 4)
+            defer { withExtendedLifetime(published) {} }
+            let owner = try V2RoomDataOwner(shardID: "pinned-shard", epoch: 0)
+            #expect(try await caller.candidates(for: owner).isEmpty)
+            try await discovery.installAuthorizedPeers([peer], revision: 2)
+            try await waitUntil(discovery: discovery) {
+                try await caller.candidates(for: owner).first(where: \.isHealthy)?.identity == published.descriptor.identity
+            }
+            #expect(try await caller.candidates(for: owner).first?.availableRooms == 2)
+            await discovery.suspendAuthorization()
+            for _ in 0..<3 { await discovery.pollOnce() }
+            #expect(try await caller.candidates(for: owner).allSatisfy { !$0.isHealthy })
+            // Fresh confirmation at the same revision must recover; probes alone cannot.
+            try await discovery.installAuthorizedPeers([peer], revision: 2)
+            try await waitUntil(discovery: discovery) {
+                try await caller.candidates(for: owner).first(where: \.isHealthy)?.identity == published.descriptor.identity
+            }
+            // Invalid revisions and retained endpoint changes leave the route intact.
+            await #expect(throws: V2ActorPlacementError.self) {
+                try await discovery.installAuthorizedPeers([], revision: 1)
+            }
+            await #expect(throws: V2ActorPlacementError.self) {
+                try await discovery.installAuthorizedPeers([], revision: 2)
+            }
+            let moved = try V2RoomDiscoveryPeer(hostID: hostID, serviceID: hostSigner.serviceID,
+                address: "127.0.0.1", port: port + 1, accessibleShardIDs: ["pinned-shard"], maximumRooms: 2)
+            await #expect(throws: V2ActorPlacementError.self) {
+                try await discovery.installAuthorizedPeers([moved], revision: 3)
+            }
+            #expect(try await caller.candidates(for: owner).count == 1)
+            // Race an explicit poll with removal. No old probe may restore the route.
+            let oldPoll = Task { await discovery.pollOnce() }
+            try await discovery.installAuthorizedPeers([], revision: 3)
+            await oldPoll.value
+            for _ in 0..<3 { await discovery.pollOnce() }
+            #expect(try await caller.candidates(for: owner).allSatisfy { !$0.isHealthy })
+            #expect(throws: V2RoomCallFailure.self) {
+                try caller.resolvePolicyHost(hostID: hostID, endpoint: "pinned-shard")
+            }
+            #expect(await discovery.snapshot().activeHosts == 0)
+            try await discovery.installAuthorizedPeers([], revision: 3) // exact retry
+            let member = try #require(await callerSystem.cluster.membershipSnapshot.member(published.beacon.id.node))
+            #expect(member.status < .down)
+            try await discovery.installAuthorizedPeers([peer], revision: 4)
+            try await waitUntil(discovery: discovery) {
+                try await caller.candidates(for: owner).first(where: \.isHealthy)?.identity == published.descriptor.identity
+            }
+            #expect(await discovery.quiesce(deadline: .now + .seconds(5)))
+            #expect(await caller.quiesce(deadline: .now + .seconds(5)))
+            try await callerSystem.shutdown().wait()
+            try await hostSystem.shutdown().wait()
+        } catch {
+            _ = await discovery.quiesce(deadline: .now + .seconds(5))
+            _ = await caller.quiesce(deadline: .now + .seconds(5))
+            try? await callerSystem.shutdown().wait()
+            try? await hostSystem.shutdown().wait()
+            throw error
+        }
+    }
+
     private func makeSystem(port: Int, address: String = "127.0.0.1") async -> ClusterSystem {
         var settings = ClusterSystemSettings(name: "v2-discovery-test", host: address, port: port)
         settings.threadPoolSize = 1

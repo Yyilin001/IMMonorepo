@@ -121,7 +121,11 @@ public actor V2RoomDeliverySessionHost {
     public func release(activation: V2RoomActivationToken, gateway: V2GatewayRealtimeIdentity) async {
         let key = Key(host: activation.host, gateway: gateway)
         guard let entry = entries[key] else { return }
-        entry.control.release(activation)
+        let exposed = entry.control.release(activation)
+        // Removing a room does not revoke the baseline already installed at
+        // the Gateway. Fail the old generation before forgetting that authority,
+        // even when other rooms keep this Host/Gateway session referenced.
+        if exposed { await controlFailed(host: key.host, gateway: key.gateway) }
         wakes.continuation.yield(())
         guard !entry.control.hasRooms else { return }
         if let opening = openings[key] { _ = await opening.result }
@@ -143,6 +147,35 @@ public actor V2RoomDeliverySessionHost {
         peerUnavailable(host: host, gateway: gateway)
         if let send { _ = try? await send(.init(session: entry.session, kind: .retire, sequence: 2), entry.shard, entry.descriptor) }
     }
+    /// Keep the production transport boundary and its failure policy together.
+    /// A missing authorization receipt cannot prove that a revoke reached the
+    /// peer, so it fails the current shared session closed. Room retirement
+    /// preserves siblings only when its terminal receipt is acknowledged.
+    public nonisolated func guardedSender(_ sendBatch: @escaping V2RoomSubscriptionDeliveryPump.SendBatch) -> V2RoomSubscriptionDeliveryPump.SendBatch {
+        { batch, shard, gateway in
+            do {
+                let result = try await sendBatch(batch, shard, gateway)
+                if batch.deliveries.contains(where: { $0.payload.isAuthorizationControl }),
+                   result.receipts.contains(where: { receipt in
+                       if case .appliedThrough = receipt.result { return false }; return true
+                   }) {
+                    let rejected = Set(result.receipts.compactMap { receipt -> V2RoomSubscriptionFence? in
+                        if case .appliedThrough = receipt.result { return nil }; return receipt.fence
+                    })
+                    await self.controlDeliveryFailed(batch.deliveries.filter {
+                        $0.payload.isAuthorizationControl && rejected.contains($0.fence)
+                    }, gateway: gateway.identity)
+                }
+                return result
+            }
+            catch {
+                let controls = batch.deliveries.filter { $0.payload.isAuthorizationControl }
+                if !controls.isEmpty { await self.controlDeliveryFailed(controls, gateway: gateway.identity) }
+                throw error
+            }
+        }
+    }
+
     /// A late transport result is not evidence against a replacement baseline
     /// or session. Only failure of a currently unacknowledged control may close
     /// the shared session; unrelated rooms must not inherit obsolete failures.
@@ -253,11 +286,16 @@ private final class V2RoomDeliveryControlProgress: Sendable {
     init(now: @escaping @Sendable () -> ContinuousClock.Instant) { self.now = now }
     var hasRooms: Bool { state.withLock { !$0.rooms.isEmpty } }
     func retain(_ token: V2RoomActivationToken) { state.withLock { $0.rooms.insert(token) } }
-    func release(_ token: V2RoomActivationToken) {
+    func release(_ token: V2RoomActivationToken) -> Bool {
         state.withLock { value in
+            let previous = value.latest[token]
+            let exposed = previous.map {
+                $0.transmissionStarted && !$0.isUnreferenced && !value.ignoredFences.contains($0.fence)
+            } ?? false
             value.rooms.remove(token); value.pending.removeValue(forKey: token)
             if let old = value.latest.removeValue(forKey: token) { value.ignoredFences.remove(old.fence) }
             value.compact()
+            return exposed
         }
     }
     func opened() {

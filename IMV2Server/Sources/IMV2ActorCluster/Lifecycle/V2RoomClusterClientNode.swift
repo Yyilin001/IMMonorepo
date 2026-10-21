@@ -134,6 +134,12 @@ public actor V2RoomClusterClientNode {
         return await discovery.snapshot().completedPolls > 0
     }
 
+    package func installRoomPeers(_ peers: [V2RoomDiscoveryPeer], revision: UInt64) async throws {
+        guard let discovery else { throw V2ActorAuthenticationError.invalidConfiguration }
+        try await discovery.installAuthorizedPeers(peers, revision: revision)
+    }
+    package func suspendRoomDiscovery() async { await discovery?.suspendAuthorization() }
+
     public func discoverySnapshot() async -> V2RoomDiscoverySnapshot? {
         await discovery?.snapshot()
     }

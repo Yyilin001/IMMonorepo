@@ -22,13 +22,28 @@ struct ShardDiscoveryRequest: Codable, Sendable {
     let recipientNodeID: String
     let challenge: UUID
     let rosterDigest: Data
+    let membershipRevision: UInt64
+}
+
+func v2RealtimeMembershipDigest(roster: [String: String], membership: V2ActorServiceQualification.Membership) throws -> Data {
+    guard Set(roster.keys) == membership.nodes else { throw V2ActorAuthenticationError.invalidConfiguration }
+    struct Binding: Encodable {
+        let revision: UInt64
+        let current: [String]
+        let next: [String]?
+        let services: [[String]]
+    }
+    let binding = Binding(revision: membership.revision, current: membership.current.sorted(),
+        next: membership.next?.sorted(), services: roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })
+    return Data(SHA256.hash(data: try V2ActorProtobuf.encode(binding)))
 }
 
 func v2VerifyShardDiscoveryRequest(_ packet: V2ActorSignedPacket, trust: V2ActorTrustStore,
-    recipient: V2GatewayRealtimeIdentity, roster: [String: String], rosterDigest: Data) throws -> ShardDiscoveryRequest {
+    recipient: V2GatewayRealtimeIdentity, roster: [String: String], rosterDigest: Data, membershipRevision: UInt64) throws -> ShardDiscoveryRequest {
     let (request, trusted) = try trust.verify(packet, as: ShardDiscoveryRequest.self, maximumBytes: 16_384)
     try trust.validateRealtimeReceiver(request.requester)
-    guard request.recipientNodeID == recipient.nodeID, request.rosterDigest == rosterDigest,
+    guard membershipRevision > 0, request.membershipRevision == membershipRevision,
+          request.recipientNodeID == recipient.nodeID, request.rosterDigest == rosterDigest,
           roster[request.requester.nodeID] == request.requester.serviceID,
           trusted.serviceID.rawValue == request.requester.serviceID else { throw V2ActorAuthenticationError.wrongRecipient }
     return request
@@ -37,6 +52,7 @@ func v2VerifyShardDiscoveryRequest(_ packet: V2ActorSignedPacket, trust: V2Actor
 struct ShardAdvertisement: Codable, Sendable {
     let requester: V2GatewayRealtimeIdentity
     let rosterDigest: Data
+    let membershipRevision: UInt64
     let version: Int
     let challenge: UUID
     let identity: V2GatewayRealtimeIdentity
@@ -51,16 +67,22 @@ actor V2RealtimeShardPublisher {
     let endpointID: ClusterSystem.ActorID
     let endpointReference: Data
     let trust: V2ActorTrustStore
-    let roster: [String: String]
-    let rosterDigest: Data
+    private var roster: [String: String]
+    private var rosterDigest: Data
+    private var membershipRevision: UInt64
     private var leases: [Int: (V2RealtimeShardToken, ContinuousClock.Instant)] = [:]
     private var accepting = true
-    init(identity: V2GatewayRealtimeIdentity, signer: V2ActorSigningIdentity, endpointID: ClusterSystem.ActorID, endpointReference: Data, trust: V2ActorTrustStore, roster: [String: String], rosterDigest: Data) {
-        self.trust = trust; self.roster = roster; self.rosterDigest = rosterDigest
+    init(identity: V2GatewayRealtimeIdentity, signer: V2ActorSigningIdentity, endpointID: ClusterSystem.ActorID, endpointReference: Data, trust: V2ActorTrustStore, roster: [String: String], rosterDigest: Data, membershipRevision: UInt64) {
+        self.trust = trust; self.roster = roster; self.rosterDigest = rosterDigest; self.membershipRevision = membershipRevision
         self.identity = identity; self.signer = signer; self.endpointID = endpointID; self.endpointReference = endpointReference
     }
-    func install(_ values: [V2RealtimeShardLeaseAdvertisement]) throws {
-        guard accepting, values.count <= 256, Set(values.map { $0.token.partitionID }).count == values.count,
+    func installMembership(roster: [String: String], digest: Data, revision: UInt64) throws {
+        guard accepting, revision > membershipRevision else { throw V2ActorAuthenticationError.invalidConfiguration }
+        self.roster = roster; rosterDigest = digest; membershipRevision = revision
+        leases.removeAll()
+    }
+    func install(_ values: [V2RealtimeShardLeaseAdvertisement], membershipRevision: UInt64) throws {
+        guard accepting, membershipRevision == self.membershipRevision, values.count <= 256, Set(values.map { $0.token.partitionID }).count == values.count,
               values.allSatisfy({ $0.token.host == identity && (0..<256).contains($0.token.partitionID) && $0.token.epoch > 0 && (1...300_000).contains($0.remainingLeaseMilliseconds) }) else {
             throw V2ActorAuthenticationError.invalidRequest
         }
@@ -69,7 +91,7 @@ actor V2RealtimeShardPublisher {
         leases = Dictionary(uniqueKeysWithValues: values.map { ($0.token.partitionID, ($0.token, now + .milliseconds($0.remainingLeaseMilliseconds))) })
     }
     func advertise(packet: V2ActorSignedPacket, beaconID: ClusterSystem.ActorID) throws -> V2ActorSignedPacket {
-        let request = try v2VerifyShardDiscoveryRequest(packet, trust: trust, recipient: identity, roster: roster, rosterDigest: rosterDigest)
+        let request = try v2VerifyShardDiscoveryRequest(packet, trust: trust, recipient: identity, roster: roster, rosterDigest: rosterDigest, membershipRevision: membershipRevision)
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let now = ContinuousClock.now
         let values = leases.values.compactMap { token, deadline -> V2RealtimeShardLeaseAdvertisement? in
@@ -78,7 +100,7 @@ actor V2RealtimeShardPublisher {
             guard milliseconds > 0 else { return nil }
             return .init(token: token, remainingLeaseMilliseconds: milliseconds)
         }.sorted { $0.token.partitionID < $1.token.partitionID }
-        return try signer.sign(ShardAdvertisement(requester: request.requester, rosterDigest: rosterDigest, version: 1, challenge: request.challenge, identity: identity,
+        return try signer.sign(ShardAdvertisement(requester: request.requester, rosterDigest: rosterDigest, membershipRevision: membershipRevision, version: 2, challenge: request.challenge, identity: identity,
             beaconID: beaconID, endpointID: endpointID, endpointReference: endpointReference, partitions: values), maximumBytes: 262_144)
     }
     func stop() { accepting = false; leases.removeAll() }
@@ -107,6 +129,10 @@ private distributed actor ShardReferenceWatcher: LifecycleWatch {
         endpoints[nodeID] = watchTermination(of: endpoint)
     }
     func clear() { for endpoint in endpoints.values { unwatchTermination(of: endpoint) }; endpoints.removeAll() }
+    func forget(nodeID: String, expected: ClusterSystem.ActorID) {
+        guard let endpoint = endpoints[nodeID], endpoint.id == expected else { return }
+        unwatchTermination(of: endpoint); endpoints.removeValue(forKey: nodeID)
+    }
     func terminated(actor id: ClusterSystem.ActorID) async {
         endpoints = endpoints.filter { $0.value.id != id }
         await notify(id)
@@ -118,12 +144,14 @@ private distributed actor ShardReferenceWatcher: LifecycleWatch {
 public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     public nonisolated let serviceQualification: V2ActorServiceQualification
     private let signer: V2ActorSigningIdentity
-    private let rosterDigest: Data
+    private var rosterDigest: Data
+    private var membershipRevision: UInt64
     private var qualificationObserver: (@Sendable () async -> Void)?
     public let identity: V2GatewayRealtimeIdentity
     private let system: ClusterSystem
     private let trust: V2ActorTrustStore
-    private let peers: [V2RealtimeShardDiscoveryPeer]
+    private var peers: [V2RealtimeShardDiscoveryPeer]
+    private let localPeer: V2RealtimeShardDiscoveryPeer
     private let resolutionTimeout: Duration
     private let sender: V2RealtimeShardSender
     private let endpoint: V2RealtimeShardEndpoint
@@ -133,6 +161,9 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     private struct Cached: Sendable { let descriptor: V2RealtimeShardDescriptor; let expires: ContinuousClock.Instant }
     private var cache: [Int: Cached] = [:]
     private var stopped = false
+    private var changingMembership = false
+    private var membershipReadSuspended = false
+    private var membershipChange: Task<Void, any Error>?
     private nonisolated let receptionistLookups = Mutex((background: UInt64(0), foreground: UInt64(0)))
     private var cacheHits: UInt64 = 0, cacheMisses: UInt64 = 0, invalidations: UInt64 = 0, discoveryPasses: UInt64 = 0
     private var watcher: ShardReferenceWatcher?
@@ -170,12 +201,13 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         let timer: Task<Void, Never>
     }
     private var resolutionWaiters: [UUID: ResolutionWaiter] = [:]
-    init(system: ClusterSystem, identity: V2GatewayRealtimeIdentity, trust: V2ActorTrustStore, signer: V2ActorSigningIdentity, rosterDigest: Data, qualification: V2ActorServiceQualification,
-         peers: [V2RealtimeShardDiscoveryPeer], sender: V2RealtimeShardSender,
+    init(system: ClusterSystem, identity: V2GatewayRealtimeIdentity, trust: V2ActorTrustStore, signer: V2ActorSigningIdentity, rosterDigest: Data, membershipRevision: UInt64, qualification: V2ActorServiceQualification,
+         localPeer: V2RealtimeShardDiscoveryPeer, peers: [V2RealtimeShardDiscoveryPeer], sender: V2RealtimeShardSender,
          endpoint: V2RealtimeShardEndpoint, inbound: V2RealtimeShardInbound,
          publisher: V2RealtimeShardPublisher, beacon: V2RealtimeShardDiscoveryBeacon, resolutionTimeout: Duration) {
-        self.serviceQualification = qualification; self.signer = signer; self.rosterDigest = rosterDigest
+        self.serviceQualification = qualification; self.signer = signer; self.rosterDigest = rosterDigest; self.membershipRevision = membershipRevision
         self.system = system; self.identity = identity; self.trust = trust; self.peers = peers; self.resolutionTimeout = resolutionTimeout
+        self.localPeer = localPeer
         self.sender = sender; self.endpoint = endpoint; self.inbound = inbound
         self.publisher = publisher; self.beacon = beacon
     }
@@ -185,8 +217,8 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         await notify()
     }
     private func publishQualification() async {
-        guard !stopped else { return }
-        serviceQualification.update(witnesses: reachable)
+        guard !stopped, !changingMembership, !membershipReadSuspended else { return }
+        serviceQualification.update(witnesses: reachable, membershipRevision: membershipRevision)
         await qualificationObserver?()
     }
     func start() async {
@@ -205,12 +237,86 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
     }
     private func workerFinished() { worker = nil }
     public func installPartitions(_ values: [V2RealtimeShardLeaseAdvertisement]) async throws {
+        guard !stopped, !changingMembership else { throw V2ActorAuthenticationError.overloaded }
+        guard values.isEmpty || (!membershipReadSuspended && serviceQualification.membership.nodes.contains(identity.nodeID)) else {
+            throw V2ActorAuthenticationError.forbidden
+        }
+        try await publisher.install(values, membershipRevision: membershipRevision)
+    }
+    /// Called only with control-plane-authorized membership. Peer reachability
+    /// cannot author a change. Cancellation of a caller does not abandon the
+    /// transition's owned discovery work halfway through.
+    package func installMembership(_ membership: V2ActorServiceQualification.Membership,
+                                   peers proposedPeers: [V2RealtimeShardDiscoveryPeer]) async throws {
+        let changed = membership.revision != membershipRevision
+        try await installMembership(membership, peers: proposedPeers, committed: false)
+        if changed { ensurePollStarted(foreground: false) }
+    }
+    package func installCommittedMembership(_ record: V2ActorServiceMembershipRecord) async throws {
+        let needsFreshEvidence = membershipReadSuspended || record.revision != membershipRevision
+        try await installMembership(record.membership, peers: record.peers, committed: true)
+        membershipReadSuspended = false
+        serviceQualification.confirmMembership()
+        // A certified transition needs fresh authenticated witnesses. Start the
+        // existing coalesced poll now instead of waiting for its periodic tick.
+        // An unchanged healthy read does not create additional discovery work.
+        if needsFreshEvidence { ensurePollStarted(foreground: false) }
+    }
+    package func suspendMembershipConfirmation() async {
+        guard !stopped else { return }
+        membershipReadSuspended = true
+        serviceQualification.suspendMembershipConfirmation()
+        cache.removeAll(); reachable.removeAll()
+        try? await publisher.install([], membershipRevision: membershipRevision)
+        await qualificationObserver?()
+        poll?.cancel()
+        if let poll { await poll.value }
+    }
+    private func installMembership(_ membership: V2ActorServiceQualification.Membership,
+                                   peers proposedPeers: [V2RealtimeShardDiscoveryPeer], committed: Bool) async throws {
+        guard !stopped, membershipChange == nil else { throw V2ActorAuthenticationError.overloaded }
+        let roster = Dictionary(proposedPeers.map { ($0.nodeID, $0.serviceID) }, uniquingKeysWith: { first, _ in first })
+        let local = localPeer
+        try trust.validateRealtimeRoster(proposedPeers, local: identity, address: local.address, port: local.port,
+            requiresLocalMember: membership.nodes.contains(identity.nodeID))
+        let digest = try v2RealtimeMembershipDigest(roster: roster, membership: membership)
+        if membership.revision == membershipRevision {
+            guard digest == rosterDigest, Set(proposedPeers) == Set(peers) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            return
+        }
+        if committed { try serviceQualification.installCommittedMembership(membership) }
+        else { try serviceQualification.installMembership(membership) }
+        changingMembership = true
+        cache.removeAll(); reachable.removeAll()
+        for id in Array(resolutionWaiters.keys) { finishResolution(id, error: V2ActorAuthenticationError.sessionExpired) }
+        let task = Task { try await self.changeMembership(membership, peers: proposedPeers, roster: roster, digest: digest) }
+        membershipChange = task
+        try await task.value
+    }
+    private func changeMembership(_ membership: V2ActorServiceQualification.Membership,
+                                  peers proposedPeers: [V2RealtimeShardDiscoveryPeer],
+                                  roster: [String: String], digest: Data) async throws {
+        defer { membershipChange = nil; changingMembership = false }
+        await qualificationObserver?()
+        poll?.cancel()
+        if let poll { await poll.value }
         guard !stopped else { throw V2ActorAuthenticationError.overloaded }
-        try await publisher.install(values)
+        try await publisher.installMembership(roster: roster, digest: digest, revision: membership.revision)
+        guard !stopped else { throw V2ActorAuthenticationError.overloaded }
+        peers = proposedPeers; rosterDigest = digest; membershipRevision = membership.revision; peerCursor = 0
+        // Route withdrawal never downs a physical node or grants ownership.
+        // Old sessions remain owned until their actual calls settle.
+        for (nodeID, id) in watchedReferences where !membership.nodes.contains(nodeID) {
+            if let oldIdentity = watchedIdentities[nodeID] { _ = enqueueRetirement(identity: oldIdentity, id: id) }
+        }
+        for peer in peers { system.cluster.join(host: peer.address, port: peer.port) }
     }
     public func reachableNodeIDs() -> Set<String> {
         guard !stopped else { return [] }
-        return Set(reachable.filter { $0.value > .now }.keys).union([identity.nodeID])
+        let members = serviceQualification.membership.nodes
+        return Set(reachable.filter { $0.value > .now }.keys).union([identity.nodeID]).intersection(members)
     }
     public func resolve(partitionID: Int) async throws -> V2RealtimeShardDescriptor {
         try Task.checkCancellation()
@@ -290,10 +396,12 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         await publishQualification()
     }
     private func ensurePollStarted(foreground: Bool) {
-        guard !stopped, poll == nil else { return }
+        guard !stopped, !changingMembership, !membershipReadSuspended, poll == nil,
+              serviceQualification.membership.nodes.contains(identity.nodeID) else { return }
         pollGeneration += 1
         let generation = pollGeneration
         let system = system, trust = trust, signer = signer, localIdentity = identity, rosterDigest = rosterDigest
+        let membershipRevision = membershipRevision
         // Rotating the bounded pass prevents an unavailable prefix in a large
         // roster from excluding the same later peers on every budget expiry.
         let peers = Array(self.peers[peerCursor...] + self.peers[..<peerCursor])
@@ -317,13 +425,13 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                             do {
                                 let started = ContinuousClock.now, challenge = UUID()
                                 let timeout = started.duration(to: peerDeadline)
-                                let request = try signer.sign(ShardDiscoveryRequest(requester: localIdentity, recipientNodeID: peer.nodeID, challenge: challenge, rosterDigest: rosterDigest), maximumBytes: 16_384)
+                                let request = try signer.sign(ShardDiscoveryRequest(requester: localIdentity, recipientNodeID: peer.nodeID, challenge: challenge, rosterDigest: rosterDigest, membershipRevision: membershipRevision), maximumBytes: 16_384)
                                 let packet = try await RemoteCall.with(timeout: timeout) { try await beacon.advertise(request) }
                                 let (advertisement, trusted) = try trust.verify(packet, as: ShardAdvertisement.self, maximumBytes: 262_144)
                                 let identity = advertisement.identity
                                 try trust.validateRealtimeReceiver(identity)
                                 guard trusted.serviceID.rawValue == peer.serviceID, identity.serviceID == peer.serviceID,
-                                      identity.nodeID == peer.nodeID, advertisement.version == 1,
+                                      identity.nodeID == peer.nodeID, advertisement.version == 2, advertisement.membershipRevision == membershipRevision,
                                       advertisement.requester == localIdentity, advertisement.rosterDigest == rosterDigest,
                                       advertisement.challenge == challenge, advertisement.beaconID == beacon.id,
                                       advertisement.endpointID.node == beacon.id.node,
@@ -387,7 +495,7 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference)) != id }
     }
     private func installDiscovered(_ result: DiscoveryResult) async {
-        guard !stopped, result.generation >= appliedPollGeneration else { return }
+        guard !stopped, !changingMembership, !membershipReadSuspended, result.generation >= appliedPollGeneration else { return }
         appliedPollGeneration = result.generation
         for (nodeID, id) in result.references {
             guard let discoveredIdentity = result.identities[nodeID],
@@ -405,35 +513,35 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
             // handshake openings settle. Drop old sessions before reopening.
             if softSuspendedReferences.contains(id) || retiringReferences[id]?.replaced == false {
                 guard await sender.beginRetirement(discoveredIdentity, reference: descriptor.endpointReference) else { continue }
-                guard !stopped, result.generation == appliedPollGeneration, retiredReferences[nodeID] != id,
+                guard !stopped, !changingMembership, !membershipReadSuspended, result.generation == appliedPollGeneration, retiredReferences[nodeID] != id,
                       retiringReferences[id]?.replaced != true else { continue }
                 retiringReferences.removeValue(forKey: id)
                 softSuspendedReferences.remove(id)
-                guard !stopped, retiredReferences[nodeID] != id else { continue }
+                guard !stopped, !changingMembership, !membershipReadSuspended, retiredReferences[nodeID] != id else { continue }
             }
-            guard !stopped, result.generation == appliedPollGeneration else { return }
+            guard !stopped, !changingMembership, !membershipReadSuspended, result.generation == appliedPollGeneration else { return }
             do { try await sender.installAuthenticatedReference(descriptor, observation: result.generation) } catch { continue }
-            guard !stopped, retiredReferences[nodeID] != id, result.generation == appliedPollGeneration else { continue }
+            guard !stopped, !changingMembership, !membershipReadSuspended, retiredReferences[nodeID] != id, result.generation == appliedPollGeneration else { continue }
             let sameReference = watchedReferences[nodeID] == id
             // Install the signed identity and its health evidence atomically BEFORE
             // the watch await. The periodic reaper may run during that await; a
             // partially installed new reference must never appear expired.
             reachable[nodeID] = sameReference ? max(reachable[nodeID] ?? healthDeadline, healthDeadline) : healthDeadline
-            serviceQualification.update(witnesses: reachable)
+            serviceQualification.update(witnesses: reachable, membershipRevision: membershipRevision)
             watchedReferences[nodeID] = id
             watchedIdentities[nodeID] = discoveredIdentity
             watchedDescriptors[nodeID] = descriptor
             await qualificationObserver?()
-            guard !stopped else { return }
+            guard !stopped, !changingMembership, !membershipReadSuspended else { return }
             await watcher.whenLocal { local in local.observe(nodeID: nodeID, endpoint: endpoint) }
-            guard !stopped, appliedPollGeneration == result.generation else { return }
+            guard !stopped, !changingMembership, !membershipReadSuspended, appliedPollGeneration == result.generation else { return }
         }
         let now = ContinuousClock.now
         // Keep the last authenticated deadline for watched roster entries. An
         // absent timestamp is not proof of expiry, and the map is roster-bounded.
         cache = cache.filter { $0.value.expires > now }
         for value in result.values where value.expires > now {
-            guard !stopped else { return }
+            guard !stopped, !changingMembership, !membershipReadSuspended else { return }
             if rejectedTokens[value.descriptor.token.partitionID] == value.descriptor.token { continue }
             guard let id = result.references[value.descriptor.token.host.nodeID],
                   retiredReferences[value.descriptor.token.host.nodeID] != id,
@@ -474,6 +582,16 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
                 cache = cache.filter { (try? V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: $0.value.descriptor.endpointReference))?.node != id.node }
                 softSuspendedReferences.insert(id)
                 retiringReferences.removeValue(forKey: id)
+                if !peers.contains(where: { $0.nodeID == retiring.identity.nodeID }),
+                   watchedReferences[retiring.identity.nodeID] == id {
+                    let nodeID = retiring.identity.nodeID
+                    watchedReferences.removeValue(forKey: nodeID)
+                    watchedIdentities.removeValue(forKey: nodeID)
+                    watchedDescriptors.removeValue(forKey: nodeID)
+                    reachable.removeValue(forKey: nodeID)
+                    softSuspendedReferences.remove(id)
+                    await watcher?.whenLocal { $0.forget(nodeID: nodeID, expected: id) }
+                }
                 // Keep exact watch/identity; a new authenticated challenge may
                 // reopen it with a new handshake. No membership down/blacklist.
                 continue
@@ -524,10 +642,10 @@ public actor V2RealtimeShardTransportHandle: V2RealtimeShardTransport {
         await publisher.stop()
         let inboundDone = await inbound.stop(deadline: deadline)
         let senderDone = await sender.stop(deadline: deadline)
-        while (worker != nil || poll != nil) && ContinuousClock.now < deadline {
+        while (worker != nil || poll != nil || membershipChange != nil) && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) } catch { break }
         }
-        guard inboundDone, senderDone, worker == nil, poll == nil else { return false }
+        guard inboundDone, senderDone, worker == nil, poll == nil, membershipChange == nil else { return false }
         qualificationObserver = nil
         if let watcher { await watcher.whenLocal { $0.clear() } }
         watcher = nil; cache.removeAll(); retiringReferences.removeAll(); softSuspendedReferences.removeAll(); return true
@@ -543,7 +661,8 @@ func buildRealtimeShardTransport(system: ClusterSystem, identity: V2GatewayRealt
           discoveryPeers.count <= 64, Set(discoveryPeers.map(\.nodeID)).count == discoveryPeers.count,
           discoveryPeers.allSatisfy({ !$0.nodeID.isEmpty && !$0.serviceID.isEmpty && !$0.address.isEmpty && (1...65_535).contains($0.port) }) else { throw V2ActorAuthenticationError.invalidConfiguration }
     try trust.validateRealtimeReceiver(identity)
-    try trust.validateRealtimeRoster(discoveryPeers, local: identity, address: address, port: port)
+    try trust.validateRealtimeRoster(discoveryPeers, local: identity, address: address, port: port,
+        requiresLocalMember: serviceQualification?.membership.nodes.contains(identity.nodeID) ?? true)
     let inbound = V2RealtimeShardInbound(identity: identity, signer: signer, trust: trust, serving: serving,
         serviceOwnerAccess: serviceOwnerAccess, limits: limits, diagnostic: { stage in
             system.log.warning("Realtime shard authentication rejected", metadata: ["realtime/authentication_stage": "\(stage)"])
@@ -552,13 +671,15 @@ func buildRealtimeShardTransport(system: ClusterSystem, identity: V2GatewayRealt
     let endpointReference = try V2ActorProtobuf.encode(endpoint.id)
     inbound.bindEndpointReference(endpointReference)
     let roster = Dictionary(uniqueKeysWithValues: discoveryPeers.map { ($0.nodeID, $0.serviceID) })
-    let rosterData = try V2ActorProtobuf.encode(roster.sorted { $0.key < $1.key }.map { [$0.key, $0.value] })
-    let digest = Data(SHA256.hash(data: rosterData))
     guard serviceQualification?.matches(localNodeID: identity.nodeID, roster: Set(roster.keys)) != false else { throw V2ActorAuthenticationError.invalidConfiguration }
     let qualification = try serviceQualification ?? V2ActorServiceQualification(localNodeID: identity.nodeID, roster: Set(roster.keys))
-    let publisher = V2RealtimeShardPublisher(identity: identity, signer: signer, endpointID: endpoint.id, endpointReference: endpointReference, trust: trust, roster: roster, rosterDigest: digest)
+    let membership = qualification.membership
+    let digest = try v2RealtimeMembershipDigest(roster: roster, membership: membership)
+    let membershipRevision = membership.revision
+    let publisher = V2RealtimeShardPublisher(identity: identity, signer: signer, endpointID: endpoint.id, endpointReference: endpointReference, trust: trust, roster: roster, rosterDigest: digest, membershipRevision: membershipRevision)
     let beacon = V2RealtimeShardDiscoveryBeacon(actorSystem: system, publisher: publisher)
-    return V2RealtimeShardTransportHandle(system: system, identity: identity, trust: trust, signer: signer, rosterDigest: digest, qualification: qualification, peers: discoveryPeers,
+    return V2RealtimeShardTransportHandle(system: system, identity: identity, trust: trust, signer: signer, rosterDigest: digest, membershipRevision: membershipRevision, qualification: qualification,
+        localPeer: .init(nodeID: identity.nodeID, serviceID: identity.serviceID, address: address, port: port), peers: discoveryPeers,
         sender: try V2RealtimeShardSender(system: system, signer: signer, trust: trust, limits: limits, incarnation: identity.incarnationID,
             initialReference: .init(identity: identity, endpointReference: endpointReference, address: address, port: port)),
         endpoint: endpoint, inbound: inbound, publisher: publisher, beacon: beacon, resolutionTimeout: limits.callTimeout)

@@ -9,6 +9,7 @@ package enum V2ActorPlacementProtobuf {
         var wire = Im_Actor_V1_PlacementSnapshot()
         wire.clusterID = V2HotPB.bytes(snapshot.clusterID)
         wire.revision = snapshot.revision
+        if let record = snapshot.serviceMembership { wire.serviceMembership = try V2ActorProtobuf.encode(record) }
         wire.hosts = snapshot.hosts.map { registration in
             var value = Im_Actor_V1_PlacementHostRegistration()
             value.host = .init(registration.host); value.retired = registration.retired
@@ -41,13 +42,17 @@ package enum V2ActorPlacementProtobuf {
             }, hosts: wire.hosts.map { registration in
                 try V2HotPB.check(registration, registration.hasHost)
                 return try .init(host: registration.host.model(), retired: registration.retired)
-            })
+            }, serviceMembership: wire.serviceMembership.isEmpty ? nil :
+                V2ActorProtobuf.decode(V2ActorServiceMembershipRecord.self, from: wire.serviceMembership))
     }
 
     package static func encode(_ command: V2ActorPlacementCommand) throws -> Data {
         var wire = Im_Actor_V1_PlacementCommand()
         let partition: Int
         switch command {
+        case .installServiceMembership(let record):
+            partition = 0; wire.kind = .installServiceMembership
+            wire.serviceMembership = try V2ActorProtobuf.encode(record)
         case .beginTransfer(let p, let expected, let transfer):
             partition = p; wire.kind = .beginTransfer; wire.expected = owner(expected)
             wire.transfer = self.transfer(transfer)
@@ -57,6 +62,8 @@ package enum V2ActorPlacementProtobuf {
         case .cancelTransfer(let p, let expected, let id):
             partition = p; wire.kind = .cancelTransfer; wire.expected = owner(expected)
             wire.transferID = V2HotPB.bytes(id)
+        case .admitHost(let hostID):
+            partition = 0; wire.kind = .admitHost; wire.admittedHostID = hostID.rawValue
         case .retireHost(let host):
             partition = 0; wire.kind = .retireHost; wire.previousHost = .init(host)
         case .registerHost(let previous, let successor):
@@ -68,9 +75,22 @@ package enum V2ActorPlacementProtobuf {
     }
 
     package static func decodeCommand(_ bytes: Data) throws -> V2ActorPlacementCommand {
-        guard bytes.count <= 4096 else { throw V2ActorPlacementError.invalidConfiguration }
+        guard bytes.count <= 65536 else { throw V2ActorPlacementError.invalidConfiguration }
         let wire = try Im_Actor_V1_PlacementCommand(serializedBytes: bytes)
         try V2HotPB.check(wire, wire.partition < 4096)
+        if wire.kind == .installServiceMembership {
+            try V2HotPB.check(wire, wire.partition == 0 && !wire.hasExpected && !wire.hasTransfer &&
+                wire.transferID.isEmpty && !wire.hasPreviousHost && !wire.hasSuccessorHost && wire.admittedHostID.isEmpty &&
+                !wire.serviceMembership.isEmpty)
+            return try .installServiceMembership(V2ActorProtobuf.decode(V2ActorServiceMembershipRecord.self, from: wire.serviceMembership))
+        }
+        guard wire.serviceMembership.isEmpty else { throw V2ActorPlacementError.invalidConfiguration }
+        if wire.kind == .admitHost {
+            try V2HotPB.check(wire, wire.partition == 0 && !wire.hasExpected && !wire.hasTransfer &&
+                wire.transferID.isEmpty && !wire.hasPreviousHost && !wire.hasSuccessorHost)
+            return try .admitHost(V2ActorHostID(wire.admittedHostID))
+        }
+        guard wire.admittedHostID.isEmpty else { throw V2ActorPlacementError.invalidConfiguration }
         if wire.kind == .retireHost || wire.kind == .registerHost {
             try V2HotPB.check(wire, wire.partition == 0 && !wire.hasExpected && !wire.hasTransfer &&
                 wire.transferID.isEmpty && wire.hasPreviousHost)

@@ -8,6 +8,170 @@ import IMV2ServerContracts
 @testable import IMV2ServerApplication
 
 struct V2RoomDeliverySessionTests {
+    @Test("releasing an exposed room invalidates its shared generation before a late owner close")
+    func retiringRoomCannotLeaveGatewayReady() async throws {
+        let (token, gateway, _) = try fixture()
+        let sibling = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: token.owner,
+            activationEpoch: token.activationEpoch, host: token.host)
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let host = V2RoomDeliverySessionHost()
+        await host.configure(send: { pulse, _, _ in
+            authority.applyDeliverySession(pulse, serviceID: "owner")
+        }, hostReady: { true })
+        let session = try await host.retain(activation: token, gateway: gateway)
+        _ = try await host.retain(activation: sibling, gateway: gateway)
+        let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+        host.observeAuthorization(.init(fence: fence, issued: 1, applied: 1,
+            invalidated: false, transmissionStarted: true), gateway: gateway.identity)
+        // The activation can disappear while another room keeps this shared
+        // session alive. An acknowledged baseline is still live authority.
+        await host.release(activation: token, gateway: gateway.identity)
+        #expect(authority.sessionGate(session, serviceID: "owner")?.isReady() == false)
+        host.observeAuthorization(.init(fence: fence, issued: 1, applied: 1,
+            invalidated: true, transmissionStarted: true), gateway: gateway.identity)
+        let successor = try await host.retain(activation: sibling, gateway: gateway)
+        #expect(successor.generation > session.generation)
+        #expect(authority.sessionGate(successor, serviceID: "owner")?.isReady() == true)
+        await host.close()
+        await authority.shutdown()
+    }
+
+    @Test("unexposed or fully revoked room releases preserve sibling sessions", arguments: [false, true])
+    func safeRoomReleasePreservesSession(revoked: Bool) async throws {
+        let (token, gateway, _) = try fixture()
+        let sibling = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: token.owner,
+            activationEpoch: token.activationEpoch, host: token.host)
+        let pulses = Mutex<[V2RoomDeliverySessionPulse]>([])
+        let host = V2RoomDeliverySessionHost()
+        await host.configure(send: { pulse, _, _ in pulses.withLock { $0.append(pulse) }; return .accepted }, hostReady: { true })
+        let old = try await host.retain(activation: token, gateway: gateway)
+        _ = try await host.retain(activation: sibling, gateway: gateway)
+        let fence = V2RoomSubscriptionFence(activation: token, subscriptionID: UUID(), generation: 1, baselineSequence: 0)
+        host.observeAuthorization(.init(fence: fence, issued: 1, applied: revoked ? 1 : 0,
+            invalidated: false, transmissionStarted: revoked, isUnreferenced: revoked), gateway: gateway.identity)
+        await host.release(activation: token, gateway: gateway.identity)
+        #expect(try await host.retain(activation: sibling, gateway: gateway) == old)
+        #expect(pulses.withLock { !$0.contains { $0.kind == .retire } })
+        await host.close()
+    }
+
+    @Test("room retirement preserves siblings after ACK and fails closed after its deadline", arguments: ["ack", "lost_ack", "timeout", "production_ack", "production_lost_ack"])
+    func terminalRetirementPreservesSibling(mode: String) async throws {
+        let (token, gateway, user) = try fixture()
+        let sibling = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: token.owner,
+            activationEpoch: token.activationEpoch, host: token.host)
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let sessions = V2RoomDeliverySessionHost()
+        await sessions.configure(send: { pulse, _, _ in
+            authority.applyDeliverySession(pulse, serviceID: "owner")
+        }, hostReady: { true })
+        let session = try await sessions.retain(activation: token, gateway: gateway)
+        _ = try await sessions.retain(activation: sibling, gateway: gateway)
+        let source = CommittedPermissionSource(token: token, user: user)
+        let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: token.roomID, owner: token.owner,
+            activation: token, deadline: .now + .seconds(5), trackedUserIDs: [],
+            observeAuthorization: { sessions.observeAuthorization($0, gateway: $1) })
+        let grant = try await owner.subscribe(gateway: gateway.identity, userID: user, token: token, deadline: .now + .seconds(5))
+        try #require(await authority.install(fence: grant.fence, serviceID: "owner", session: session))
+        let terminals = Mutex(0)
+        let send: V2RoomSubscriptionDeliveryPump.Send = { delivery, _, _ in
+            guard case .applied = await authority.apply(delivery, authenticatedServiceID: "owner") else { return .stale }
+            if delivery.payload == .authorizationInvalidated {
+                let attempt = terminals.withLock { $0 += 1; return $0 }
+                if mode == "timeout" || (["lost_ack", "production_lost_ack"].contains(mode) && attempt == 1) { throw V2RoomSubscriptionOwnerError.deadlineExceeded }
+            }
+            return .appliedThrough(delivery.deliverySequence)
+        }
+        let pump: V2RoomSubscriptionDeliveryPump
+        if mode.hasPrefix("production_") {
+            pump = .init(maximumCalls: 1, maximumBatchItems: 1, sendBatch: sessions.guardedSender { batch, shard, target in
+                let delivery = batch.deliveries[0]
+                return .init(receipts: [.init(fence: delivery.fence, result: try await send(delivery, shard, target))])
+            })
+        } else {
+            pump = .init(maximumCalls: 1, send: send)
+        }
+        await pump.start()
+        try #require(try await owner.activate(to: pump, descriptor: gateway, userID: user,
+            fence: grant.fence, token: token, deadline: .now + .seconds(5)))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await authority.authorizedMemberRevision(roomID: token.roomID, userID: user) == nil {
+            try #require(.now < deadline); try await Task.sleep(for: .milliseconds(1))
+        }
+        let failsClosed = mode == "timeout" || mode == "production_lost_ack"
+        let started = ContinuousClock.now
+        try await owner.close(deadline: .now + (failsClosed ? .milliseconds(100) : .seconds(3)))
+        await sessions.release(activation: token, gateway: gateway.identity)
+        #expect(terminals.withLock { $0 } == (mode == "lost_ack" ? 2 : 1))
+        #expect(await authority.requiresBaseline(fence: grant.fence))
+        if failsClosed {
+            #expect(started.duration(to: .now) < .seconds(2))
+            #expect(authority.sessionGate(session, serviceID: "owner")?.isReady() == false)
+            #expect(try await sessions.retain(activation: sibling, gateway: gateway).generation > session.generation)
+        } else {
+            #expect(authority.sessionGate(session, serviceID: "owner")?.isReady() == true)
+            #expect(try await sessions.retain(activation: sibling, gateway: gateway) == session)
+        }
+        await pump.close(); await sessions.close(); await authority.shutdown()
+    }
+
+    @Test("last user departure after local retirement preserves sibling delivery sessions")
+    func lastUserDepartureAfterLocalRetirement() async throws {
+        let (token, gateway, user) = try fixture()
+        let sibling = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: token.owner,
+            activationEpoch: token.activationEpoch, host: token.host)
+        let authority = V2GatewayRoomSubscriptionAuthority()
+        let sessions = V2RoomDeliverySessionHost()
+        await sessions.configure(send: { pulse, _, _ in
+            authority.applyDeliverySession(pulse, serviceID: "owner")
+        }, hostReady: { true })
+        let session = try await sessions.retain(activation: token, gateway: gateway)
+        _ = try await sessions.retain(activation: sibling, gateway: gateway)
+        let source = CommittedPermissionSource(token: token, user: user)
+        let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: token.roomID, owner: token.owner,
+            activation: token, deadline: .now + .seconds(5), trackedUserIDs: [],
+            observeAuthorization: { sessions.observeAuthorization($0, gateway: $1) })
+        let grant = try await owner.subscribe(gateway: gateway.identity, userID: user, token: token, deadline: .now + .seconds(5))
+        try #require(await authority.install(fence: grant.fence, serviceID: "owner", session: session))
+        let gate = RoomSessionRetirementGate(), receipts = Mutex(0)
+        let pump = V2RoomSubscriptionDeliveryPump(maximumCalls: 1, maximumBatchItems: 1,
+            sendBatch: sessions.guardedSender { batch, _, _ in
+                let delivery = batch.deliveries[0]
+                if delivery.authorizationSequence > 1 { await gate.hold() }
+                let result: V2RoomSubscriptionDeliveryResult
+                if case .applied = await authority.apply(delivery, authenticatedServiceID: "owner") {
+                    result = .appliedThrough(delivery.deliverySequence)
+                } else { result = .stale }
+                receipts.withLock { $0 += 1 }
+                return .init(receipts: [.init(fence: delivery.fence, result: result)])
+            })
+        await pump.start()
+        try #require(try await owner.activate(to: pump, descriptor: gateway, userID: user,
+            fence: grant.fence, token: token, deadline: .now + .seconds(5)))
+        let deadline = ContinuousClock.now + .seconds(3)
+        while await authority.authorizedMemberRevision(roomID: token.roomID, userID: user) == nil {
+            try #require(.now < deadline); try await Task.sleep(for: .milliseconds(1))
+        }
+        try await owner.unsubscribe(gateway: gateway.identity, userID: user, memberRevision: grant.memberRevision,
+            token: token, deadline: .now + .seconds(5))
+        await owner.signalDelivery(); await gate.waitUntilEntered()
+        try #require(await authority.retire(fence: grant.fence))
+        await gate.release()
+        while receipts.withLock({ $0 }) < 2 {
+            try #require(.now < deadline); try await Task.sleep(for: .milliseconds(1))
+        }
+        while await pump.snapshot().actualCalls > 0 {
+            try #require(.now < deadline); try await Task.sleep(for: .milliseconds(1))
+        }
+        await owner.signalDelivery()
+        await pump.close()
+        #expect(!(await owner.hasGateway(gateway.identity)))
+        #expect(authority.sessionGate(session, serviceID: "owner")?.isReady() == true)
+        #expect(await authority.authorizedMemberRevision(roomID: token.roomID, userID: user) == nil)
+        #expect(try await sessions.retain(activation: sibling, gateway: gateway) == session)
+        try await owner.close(); await sessions.close(); await authority.shutdown()
+    }
+
     private func fixture() throws -> (V2RoomActivationToken, V2GatewayRealtimeDescriptor, UserID) {
         let token = V2RoomActivationToken(roomID: .init(uuid: UUID()), owner: try .init(shardID: "rooms", epoch: 0),
             activationEpoch: try .init(1), host: .init(hostID: try .init("host"), incarnationID: UUID()))

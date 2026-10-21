@@ -21,6 +21,26 @@ struct V2RoomActorMetricsTests {
         #expect(!text.contains("outstanding_commands"))
     }
 
+    @Test("membership observations distinguish callers, pending state and qualified gateways")
+    func membershipObservations() {
+        func render(_ membership: V2RoomMembershipMetricsSnapshot?) -> String {
+            v2RoomActorMetricLines(.init(host: nil, commands: nil, cachedLocations: 0,
+                pendingResolutions: 0, activeResolutions: 0, resolutionWaiters: 0,
+                membership: membership)).joined(separator: "\n")
+        }
+        #expect(!render(nil).contains("im_v2_room_membership_"))
+        let pending = render(.init(revision: nil, confirmed: false, configuredHosts: 2, healthyHosts: 0))
+        #expect(pending.contains("im_v2_room_membership_confirmed 0"))
+        #expect(!pending.contains("im_v2_room_membership_revision"))
+        #expect(!pending.contains("im_v2_room_membership_realtime_"))
+        let qualified = render(.init(revision: 7, confirmed: true, configuredHosts: 2, healthyHosts: 2,
+            realtimeRevision: 7, realtimeQualified: true))
+        for sample in ["revision 7", "confirmed 1", "configured_hosts 2", "healthy_hosts 2", "realtime_revision 7", "realtime_qualified 1"] {
+            #expect(qualified.contains("im_v2_room_membership_" + sample))
+        }
+        #expect(!qualified.contains("hostID="))
+    }
+
     @Test("scraping after release preserves the process peak without retaining room identity")
     func releasedPermits() async throws {
         let budget = V2RoomCommandBudget(configuration: try .init())

@@ -281,7 +281,7 @@ actor V2GatewayRealtimeInbound {
         guard hello.serviceID == peer.serviceID else { throw V2ActorAuthenticationError.forbidden }
         guard hello.version == 1, hello.recipient == identity,
               endpointDigest.withLock({ $0 == hello.endpointDigest }) else { throw V2ActorAuthenticationError.wrongRecipient }
-        guard peer.permissions.contains(.realtimePublish), serviceOwnerAccess[peer.serviceID] != nil else {
+        guard peer.permissions.contains(.realtimePublish), !trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID]).isEmpty else {
             throw V2ActorAuthenticationError.forbidden
         }
         let now = ContinuousClock.now
@@ -335,7 +335,7 @@ actor V2GatewayRealtimeInbound {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let (call, peer) = try verifySessionPacket(packet, as: RoomSubscriptionBatchCall.self)
         guard call.serviceID == peer.serviceID, peer.permissions.contains(.realtimePublish),
-              serviceOwnerAccess[peer.serviceID]?.contains(call.sourceShardID) == true else {
+              trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID]).contains(call.sourceShardID) == true else {
             throw V2ActorAuthenticationError.forbidden
         }
         guard call.version == 1, call.recipient == identity else { throw V2ActorAuthenticationError.wrongRecipient }
@@ -357,7 +357,7 @@ actor V2GatewayRealtimeInbound {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let peer = try trust.configuredService(serviceID)
         guard peer.permissions.contains(.realtimePublish),
-              serviceOwnerAccess[serviceID]?.contains(sourceShardID) == true else {
+              trust.authorizedSources(for: serviceID, configured: serviceOwnerAccess[serviceID]).contains(sourceShardID) == true else {
             throw V2ActorAuthenticationError.forbidden
         }
         return try await applyRoomSubscriptionBatch(validated, serviceID: serviceID, sourceShardID: sourceShardID)
@@ -374,7 +374,7 @@ actor V2GatewayRealtimeInbound {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let (call, peer) = try verifySessionPacket(packet, as: RoomDeliverySessionCall.self)
         guard call.serviceID == peer.serviceID, peer.permissions.contains(.realtimePublish),
-              serviceOwnerAccess[peer.serviceID]?.contains(call.sourceShardID) == true,
+              trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID]).contains(call.sourceShardID) == true,
               call.pulse.session.gateway == identity else { throw V2ActorAuthenticationError.forbidden }
         guard call.version == 1, call.recipient == identity else { throw V2ActorAuthenticationError.wrongRecipient }
         guard let session = sessions[call.sessionID], session.expires > .now,
@@ -446,7 +446,7 @@ actor V2GatewayRealtimeInbound {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let (call, peer) = try verifySessionPacket(packet, as: RoomSubscriptionCall.self)
         guard call.serviceID == peer.serviceID, peer.permissions.contains(.realtimePublish),
-              serviceOwnerAccess[peer.serviceID]?.contains(call.sourceShardID) == true else {
+              trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID]).contains(call.sourceShardID) == true else {
             throw V2ActorAuthenticationError.forbidden
         }
         guard call.version == 1, call.recipient == identity else { throw V2ActorAuthenticationError.wrongRecipient }
@@ -468,7 +468,7 @@ actor V2GatewayRealtimeInbound {
         guard accepting else { throw V2ActorAuthenticationError.overloaded }
         let (call, peer) = try verifySessionPacket(packet, as: JournalProjectionCall.self)
         guard call.serviceID == peer.serviceID, peer.permissions.contains(.realtimePublish),
-              serviceOwnerAccess[peer.serviceID]?.contains(call.batch.source.sourceID) == true else {
+              trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID]).contains(call.batch.source.sourceID) == true else {
             throw V2ActorAuthenticationError.forbidden
         }
         guard call.version == 1, call.recipient == identity,
@@ -490,7 +490,8 @@ actor V2GatewayRealtimeInbound {
         let (call, peer) = try verifySessionPacket(packet, as: RealtimeCall.self)
         guard call.serviceID == peer.serviceID else { throw V2ActorAuthenticationError.forbidden }
         guard call.version == 1, call.recipient == identity, call.batch.recipient == identity else { throw V2ActorAuthenticationError.wrongRecipient }
-        guard peer.permissions.contains(.realtimePublish), let owners = serviceOwnerAccess[peer.serviceID],
+        let owners = trust.authorizedSources(for: peer.serviceID, configured: serviceOwnerAccess[peer.serviceID])
+        guard peer.permissions.contains(.realtimePublish), !owners.isEmpty,
               call.batch.deliveries.allSatisfy({ owners.contains($0.topic.owner.shardID) }) else { throw V2ActorAuthenticationError.forbidden }
         guard let session = sessions[call.sessionID], session.expires > .now,
               session.service == peer.serviceID, session.incarnation == call.callerIncarnation else { throw V2ActorAuthenticationError.sessionExpired }

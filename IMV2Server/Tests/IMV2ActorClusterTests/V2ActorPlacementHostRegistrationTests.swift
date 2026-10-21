@@ -5,6 +5,29 @@ import Testing
 
 @Suite("Host registration survives transfer of its last partition")
 struct V2ActorPlacementHostRegistrationTests {
+    @Test("logical admission grants no partitions and rejects duplicate or oversized host rosters")
+    func boundedAdmission() throws {
+        let owner = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        let initial = try V2ActorPlacementSnapshot(clusterID: UUID(), revision: 1,
+            slots: [.init(owner: .init(host: owner, epoch: 1), transfer: nil)])
+        var machine = V2ActorPlacementStateMachine(snapshot: initial)
+        let added = V2ActorHostID(uuid: UUID()), command = V2ActorPlacementCommand.admitHost(added)
+        #expect(try V2ActorPlacementProtobuf.decodeCommand(V2ActorPlacementProtobuf.encode(command)) == command)
+        try machine.apply(command, revision: 2)
+        #expect(machine.snapshot.slots == initial.slots)
+        #expect(machine.snapshot.registration(for: added) == .reserved(added))
+        #expect(throws: V2ActorPlacementError.invalidTransition) { try machine.apply(command, revision: 3) }
+        #expect(throws: V2ActorPlacementError.invalidTransition) { try machine.apply(.admitHost(owner.hostID), revision: 3) }
+        for revision in UInt64(3)...64 {
+            try machine.apply(.admitHost(.init(uuid: UUID())), revision: revision)
+        }
+        #expect(machine.snapshot.hosts.count == 64)
+        #expect(throws: V2ActorPlacementError.invalidTransition) {
+            try machine.apply(.admitHost(.init(uuid: UUID())), revision: 65)
+        }
+        #expect(machine.snapshot.slots == initial.slots)
+    }
+
     @Test("Recovered ownership and pending transfers must match the complete Host roster")
     func snapshotRegistrationIntegrity() throws {
         let owner = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())

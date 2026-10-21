@@ -56,6 +56,17 @@ extension V2RoomCallFailure {
                 hasStableOperationID ? .retrySameOperation : .reconcile
             case .noAutomaticRetry: .reconcile
             }
+        case .rolledBack(.unavailable):
+            // A completed rollback reports a temporary execution dependency
+            // failure, not evidence that the room's location became stale.
+            // Retry permitted work at the cached activation; its next response
+            // can still prove stale authority and trigger location recovery.
+            switch policy {
+            case .readOnly: .retryRead
+            case .durableIdempotent:
+                hasStableOperationID ? .retrySameOperation : .returnFailure
+            case .noAutomaticRetry: .returnFailure
+            }
         case .notAccepted(let reason), .rolledBack(let reason):
             switch reason {
             case .staleActivation, .notReady, .retired, .authorityLost, .unavailable:

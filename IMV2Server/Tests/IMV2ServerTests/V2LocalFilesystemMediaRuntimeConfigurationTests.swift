@@ -53,4 +53,31 @@ struct V2LocalFilesystemMediaRuntimeConfigurationTests {
             ]))
         }
     }
+    @Test("remote test media requires an exact explicit host and HTTPS")
+    func remoteTestHostIsExplicit() throws {
+        var values = [
+            "IM_V2_LOCAL_MEDIA_MODE": "filesystem",
+            "IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY": "1",
+            "IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY": "/var/lib/im-v2-media",
+            "IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL": "https://192.0.2.1",
+            "IM_V2_LOCAL_MEDIA_ALLOWED_TEST_HOST": "192.0.2.1",
+            "IM_V2_LOCAL_MEDIA_SIGNING_KEY_BASE64": Data(repeating: 1, count: 32).base64EncodedString(),
+            "IM_V2_LOCAL_MEDIA_MAXIMUM_BYTES": "1024",
+        ]
+        let optionalConfiguration = try V2LocalFilesystemMediaRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        let configuration = try #require(optionalConfiguration)
+        #expect(configuration.publicBaseURL.absoluteString == "https://192.0.2.1")
+        for invalidURL in ["https://192.0.2.2", "http://192.0.2.1", "https://user:password@192.0.2.1", "https://192.0.2.1?token=value", "https://192.0.2.1#fragment"] {
+            values["IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL"] = invalidURL
+            #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_LOCAL_MEDIA_*")) {
+                _ = try V2LocalFilesystemMediaRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+            }
+        }
+        values["IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL"] = "https://192.0.2.1"
+        values.removeValue(forKey: "IM_V2_LOCAL_MEDIA_ALLOWED_TEST_HOST")
+        #expect(throws: V2GatewayRuntimeConfigurationError.invalid("IM_V2_LOCAL_MEDIA_*")) {
+            _ = try V2LocalFilesystemMediaRuntimeConfiguration(environment: V2DictionaryRuntimeEnvironment(values))
+        }
+    }
+
 }

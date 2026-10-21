@@ -118,6 +118,7 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     private var suspendedHosts: Set<V2ActorHostIdentity> = []
     private var activeExchangesByHost: [V2ActorHostIdentity: Int] = [:]
     private var sessions: [V2ActorHostIdentity: Session] = [:]
+    private var sessionClosures: [UUID: Task<Void, Never>] = [:]
     private var handshakes: [V2ActorHostIdentity: Task<Session, any Error>] = [:]
     private var handshakeIDs: [V2ActorHostIdentity: UUID] = [:]
     private var handshakeWaiters: [V2ActorHostIdentity: [UUID: HandshakeWaiter]] = [:]
@@ -307,12 +308,43 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
     }
 
     private var isQuiescent: Bool {
-        handshakes.isEmpty && recoveryProbes.isEmpty && dispatchedCalls.isEmpty && activeExchanges == 0 &&
+        sessionClosures.isEmpty && handshakes.isEmpty && recoveryProbes.isEmpty && dispatchedCalls.isEmpty && activeExchanges == 0 &&
             pendingReservationSlots.isEmpty
     }
 
     private func finishStopIfIdle() {
-        if !accepting && isQuiescent { clearStoppedState() }
+        guard !accepting && isQuiescent else { return }
+        // All admitted calls have settled. Keep the transport alive until each
+        // bounded close RPC settles, then release local descriptors and keys.
+        let closing = sessions
+        sessions.removeAll()
+        for (host, session) in closing {
+            guard let descriptor = descriptors[host] ?? retiredDescriptors[host] else { continue }
+            let id = session.grant.sessionID
+            sessionClosures[id] = Task { [self] in
+                do {
+                    let packet = try signer.sign(session.grant, maximumBytes: 16_384)
+                    if let port = localPort, port.identity == host, port.endpointID == descriptor.endpointID {
+                        try await port.inbound.closeSession(packet)
+                    } else {
+                        let endpoint = try V2RoomHostEndpoint.resolve(id: descriptor.endpointID, using: system)
+                        try await RemoteCall.with(timeout: .seconds(2)) {
+                            try await endpoint.closeSession(packet)
+                        }
+                    }
+                } catch {
+                    // A departed recipient cannot ACK; its bounded TTL remains
+                    // the fallback. Never extend shutdown by retrying forever.
+                }
+                completeSessionClose(id)
+            }
+        }
+        if sessionClosures.isEmpty { clearStoppedState() }
+    }
+
+    private func completeSessionClose(_ id: UUID) {
+        sessionClosures.removeValue(forKey: id)
+        finishStopIfIdle()
     }
 
     public func callMetricsSnapshot() -> V2RoomTransportCallMetricsSnapshot {
@@ -775,10 +807,16 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         // 也不能回退为签名报文调用。
         let sessionStartedAt = ContinuousClock.now
         let session: Session
-        if let localInvocation { session = localInvocation.session }
-        else if recoveryBatch {
-            session = try await recoveryBatchSession(for: descriptor, deadline: deadline, request: request)
-        } else { session = try await self.session(for: descriptor, deadline: deadline) }
+        do {
+            if let localInvocation { session = localInvocation.session }
+            else if recoveryBatch {
+                session = try await recoveryBatchSession(for: descriptor, deadline: deadline, request: request)
+            } else { session = try await self.session(for: descriptor, deadline: deadline) }
+        } catch {
+            let local = localPort.map { descriptor.identity == $0.identity && descriptor.endpointID == $0.endpointID } == true
+            logSendFailure(error, request: request, stage: "session", local: local, deadline: deadline)
+            throw error
+        }
         sendTrace?.record("rpc_session", from: sessionStartedAt)
         guard accepting, (!suspendedHosts.contains(host) || permittedSuspendedCleanup), descriptorGenerations[host] == generation,
               (reservationControl || (reference.map({ !revokedReferences.contains($0.generation) }) ?? true)) else {
@@ -884,6 +922,10 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
                 }
             }
         } catch let failure as V2RoomCallFailure {
+            if failure == .outcomeUnknown {
+                logSendFailure(failure, request: request, stage: "dispatch", local: isLocal,
+                               deadline: deadline)
+            }
             if failure == .outcomeUnknown, !Task.isCancelled {
                 noteTransportFailure(reference: reference, host: host,
                     descriptorGeneration: generation, recoveryRevision: recoveryRevision)
@@ -891,9 +933,19 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             throw failure
         }
         catch {
+            logSendFailure(error, request: request, stage: "dispatch", local: isLocal,
+                           deadline: deadline)
+            let underlying = (error as? ErrorEnvelope)?.error ?? error
+            if underlying as? V2ActorAuthenticationError == .sessionExpired,
+               sessions[host]?.grant.sessionID == call.sessionID {
+                // Receiver expiry invalidates this grant even when our local
+                // deadline has not elapsed. A late error for an older grant
+                // must never remove the replacement installed by another call.
+                sessions.removeValue(forKey: host)
+            }
             // 激活也会写入租约。任一可写 RPC 开始后，
             // 网络故障都不能证明它没有提交。
-            if !(error is V2ActorAuthenticationError), !Task.isCancelled {
+            if !(underlying is V2ActorAuthenticationError), !Task.isCancelled {
                 noteTransportFailure(reference: reference, host: host,
                     descriptorGeneration: generation, recoveryRevision: recoveryRevision)
             }
@@ -914,6 +966,10 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
             // 节点替换不会使已分发调用的正确签名响应失效。
             // 旧令牌不能授权新激活，但调用方必须收到实际结果。
             if case .failure(let failure) = response {
+                if failure == .outcomeUnknown {
+                    logSendFailure(failure, request: request, stage: "authenticated_response", local: isLocal,
+                                   deadline: deadline)
+                }
                 if let reference, isExplicitlyStale(failure) { invalidateReference(reference) }
                 if roomToken == nil {
                     switch failure {
@@ -927,8 +983,42 @@ actor V2RoomClusterPeer: V2RoomClientTransport, V2RoomHostDiscovering {
         }
         catch let failure as V2RoomCallFailure { throw failure }
         catch {
+            logSendFailure(error, request: request, stage: "reply_verification", local: isLocal,
+                           deadline: deadline)
             throw transportFailure(for: request)
         }
+    }
+
+    // Keep the original conservative wire outcome. This observation distinguishes
+    // failures hidden by that mapping without logging payloads or remote error text.
+    private func logSendFailure(_ error: any Error, request: V2ActorRPCRequest,
+                                stage: String, local: Bool, deadline: ContinuousClock.Instant) {
+        guard case .invoke(_, .messaging(.sendOperation)) = request else { return }
+        system.log.warning("Room message send failed before outcome mapping", metadata: [
+            "send_failure_stage": .string(stage),
+            "send_failure_reason": .string(Self.sendFailureReason(error)),
+            "send_failure_transport": .string(local ? "local" : "remote"),
+            "send_failure_deadline_elapsed": .string(String(ContinuousClock.now >= deadline)),
+            "send_failure_cancelled": .string(String(Task.isCancelled)),
+        ])
+    }
+
+    nonisolated static func sendFailureReason(_ error: any Error) -> String {
+        let underlying = (error as? ErrorEnvelope)?.error ?? error
+        if let authentication = underlying as? V2ActorAuthenticationError {
+            return "authentication_" + String(describing: authentication)
+        }
+        if underlying is DeadLetterError { return "dead_letter" }
+        if underlying is RemoteCallError { return "remote_call" }
+        if underlying is CancellationError { return "cancelled" }
+        if let failure = underlying as? V2RoomCallFailure {
+            switch failure {
+            case .outcomeUnknown: return "outcome_unknown"
+            case .notAccepted: return "not_accepted"
+            case .rolledBack: return "rolled_back"
+            }
+        }
+        return "other"
     }
 
     @concurrent private nonisolated func signRequestOffloaded(_ call: V2ActorAuthenticatedCall, mac: V2ActorSessionMAC?,

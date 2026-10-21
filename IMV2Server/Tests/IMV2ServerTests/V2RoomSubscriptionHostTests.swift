@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Synchronization
 import IMV2Core
 import IMV2ActorContracts
 import IMV2ServerContracts
@@ -7,6 +8,48 @@ import IMV2ServerApplication
 @testable import IMV2Server
 
 struct V2RoomSubscriptionHostTests {
+    @Test func shutdownSharesOneReceiptDeadlineAcrossRooms() async throws {
+        try await withNativeSubscriptionTestHost { activations in
+            let user = try UserID("user"), host = V2RoomSubscriptionHost()
+            activations.own(host)
+            let baselines = Mutex(0)
+            try await host.configure(sendBatch: { batch, _, _ in
+                if batch.deliveries.contains(where: { $0.payload == .authorizationInvalidated }) {
+                    // A stopped peer rejects every terminal. Each room must
+                    // retain responsibility, but must not restart the budget.
+                    return .init(receipts: batch.deliveries.map { .init(fence: $0.fence, result: .stale) })
+                }
+                baselines.withLock { $0 += batch.deliveries.count }
+                return .init(receipts: batch.deliveries.map {
+                    .init(fence: $0.fence, result: .appliedThrough($0.deliverySequence))
+                })
+            }, maximumCalls: 1)
+            let gateway = V2GatewayRealtimeIdentity(nodeID: "gateway", serviceID: "realtime", incarnationID: UUID())
+            let pump = try #require(await host.currentPump())
+            for index in 0..<8 {
+                let room = try RoomID("shutdown-room-\(index)")
+                let (token, lifetime) = try await activations.activate(room)
+                let source = HostCheckSource(room: room, owner: token.owner, user: user)
+                let owner = try await V2RoomSubscriptionOwner.restore(source: source, roomID: room, owner: token.owner,
+                    activation: token, deadline: .now + .seconds(3), trackedUserIDs: [])
+                try await host.register(owner, token: token, lifetime: lifetime)
+                let grant = try await owner.subscribe(gateway: gateway, userID: user, token: token, deadline: .now + .seconds(3))
+                try #require(try await owner.activate(to: pump, descriptor: .init(identity: gateway,
+                    endpointReference: Data([1]), address: "127.0.0.1", port: 8443), userID: user,
+                    fence: grant.fence, token: token, deadline: .now + .seconds(3)))
+            }
+            let ready = ContinuousClock.now + .seconds(3)
+            while baselines.withLock({ $0 }) < 8 {
+                try #require(.now < ready); try await Task.sleep(for: .milliseconds(1))
+            }
+            let started = ContinuousClock.now
+            await host.close(deadline: started + .milliseconds(100))
+            #expect(started.duration(to: .now) < .seconds(1))
+            #expect(await host.currentPump() == nil)
+            #expect(await pump.snapshot().actualCalls == 0)
+        }
+    }
+
     @Test func stationaryRoomsReadOnlyWhenExplicitlySignalled() async throws {
         try await withNativeSubscriptionTestHost { activations in
             let user = try UserID("user")

@@ -96,7 +96,23 @@ package func v2ExecutePreparedRoomSendOperationBatch(
     prepare: @Sendable () async throws -> V2PreparedRoomSendOperationBatch
 ) async throws -> [V2RoomMessagingResult] {
     V2SendPathTrace.current?.mark("prepared_batch_enter")
-    let prepared = try await prepare()
+    let prepared: V2PreparedRoomSendOperationBatch
+    do {
+        prepared = try await prepare()
+    } catch {
+        // No message execution capability has run. A failed preparation read
+        // cannot make the message commit uncertain or poison the room lane.
+        // Preserve proven authority failures so stale activations still retire.
+        let completion: V2RoomTransactionCompletion<Void> = v2RoomDomainCompletion(error)
+        if case .rolledBack(let reason) = completion {
+            throw V2RoomCallFailure.notAccepted(reason)
+        }
+        if error is CancellationError || Task.isCancelled {
+            throw V2RoomCallFailure.notAccepted(.cancelled)
+        }
+        throw V2RoomCallFailure.notAccepted(.unavailable)
+    }
     V2SendPathTrace.current?.mark("prepared_batch_ready")
+    // Once execution begins, unknown outcomes must retain recovery semantics.
     return try await prepared.execute()
 }

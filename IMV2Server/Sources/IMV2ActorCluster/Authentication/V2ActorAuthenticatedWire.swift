@@ -15,6 +15,7 @@ public enum V2ActorServicePermission: String, Codable, Hashable, Sendable {
     case placementVote
     case placementRead
     case placementWrite
+    case placementMembership
     /// Dedicated deployment authority, separate from room Hosts and callers.
     case placementExclude
     case realtimePublish

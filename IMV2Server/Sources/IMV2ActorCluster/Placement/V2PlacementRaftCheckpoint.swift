@@ -58,6 +58,10 @@ package struct V2PlacementRaftCheckpoint: Sendable {
         var kept: [Record] = [], terminals: [Int: Record] = [:]
         for record in records {
             switch record.command {
+            case .installServiceMembership(let membership):
+                if snapshot.serviceMembership == membership { kept.append(record) }
+            case .admitHost(let hostID):
+                if snapshot.registration(for: hostID) == .reserved(hostID) { kept.append(record) }
             case .registerHost(_, let successor):
                 if snapshot.registration(for: successor.hostID)?.host == successor { kept.append(record) }
             case .retireHost(let host):

@@ -10,6 +10,124 @@ import Testing
 
 @Suite("Room Cluster bridge authenticates native distributed exchanges", .serialized)
 struct V2RoomClusterBridgeTests {
+    @Test("send failure diagnostics preserve authentication category without remote error text")
+    func sendFailureDiagnostics() {
+        #expect(V2RoomClusterPeer.sendFailureReason(V2ActorAuthenticationError.sessionExpired)
+            == "authentication_sessionExpired")
+        #expect(V2RoomClusterPeer.sendFailureReason(ErrorEnvelope(V2ActorAuthenticationError.replay))
+            == "authentication_replay")
+        #expect(V2RoomClusterPeer.sendFailureReason(ErrorEnvelope(description: "private payload")) == "other")
+        #expect(V2RoomClusterPeer.sendFailureReason(V2RoomCallFailure.outcomeUnknown) == "outcome_unknown")
+        #expect(V2RoomClusterPeer.sendFailureReason(CancellationError()) == "cancelled")
+    }
+
+    @Test("a receiver-expired session is replaced before the next TCP send")
+    func expiredSessionIsReplacedAcrossTCP() async throws {
+        let offset = Mutex<Duration>(.zero)
+        let fixture = try await Fixture(authenticationNow: { .now + offset.withLock { $0 } })
+        var settings = ClusterSystemSettings(name: "v2-expiry-caller", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remote = await ClusterSystem("v2-expiry-caller", settings: settings)
+        let caller = V2RoomClusterClient(system: remote, signer: fixture.client,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var failure: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: fixture.endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: [fixture.owner.shardID],
+                availableRooms: 2, isHealthy: true))
+            guard case .ready(let token) = try await caller.activate(on: fixture.identity,
+                roomID: fixture.room, owner: fixture.owner, deadline: .now + .seconds(3)) else {
+                throw V2ActorAuthenticationError.invalidConfiguration
+            }
+            let user = UserID(uuid: UUID())
+            let request = try V2RoomRequest.messaging(.sendOperation(try .init(command: .init(
+                roomID: fixture.room, senderUserID: user, clientMessageID: .init(uuid: UUID()),
+                text: "session expiry", limits: .init(maxUTF8Bytes: 64)),
+                firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)))
+            #expect(try await caller.lookup(token, deadline: .now + .seconds(3)))
+            // Expire only the receiver's session; do not wait five minutes or
+            // alter room ownership. The client still believes its grant is live.
+            offset.withLock { $0 = .seconds(301) }
+            do {
+                _ = try await caller.invoke(token, request: request, principal: .user(user),
+                                            deadline: .now + .seconds(3))
+                Issue.record("receiver accepted the expired session")
+            } catch {
+                #expect(error as? V2RoomCallFailure == .outcomeUnknown)
+            }
+            #expect(await fixture.executionCount.snapshot() == 0)
+            let response = try await caller.invoke(token, request: request, principal: .user(user),
+                                                   deadline: .now + .seconds(3))
+            #expect(response == .recovery(.failure(.invalidRequest)))
+            #expect(await fixture.executionCount.snapshot() == 1)
+        } catch { failure = error }
+        #expect(await caller.quiesce(deadline: .now + .seconds(3)))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
+        await fixture.inbound.stop()
+        try await remote.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
+    @Test("a delayed expiry response cannot evict a newer TCP session")
+    func delayedExpiryPreservesReplacementSession() async throws {
+        let offset = Mutex<Duration>(.zero)
+        let fixture = try await Fixture(authenticationNow: { .now + offset.withLock { $0 } })
+        let gate = RestoreGate()
+        let delayed = DelayedExpiryInbound(service: fixture.inbound, gate: gate)
+        let endpoint = V2RoomHostEndpoint(actorSystem: fixture.system, service: delayed)
+        var settings = ClusterSystemSettings(name: "v2-expiry-race", host: "127.0.0.1",
+            port: Int.random(in: 30_000...60_000))
+        settings.threadPoolSize = 1
+        settings.serialization.registerInbound(V2ActorAuthenticationError.self)
+        settings.remoteCall.codableErrorAllowance = .custom(allowedTypes: [V2ActorAuthenticationError.self])
+        let remote = await ClusterSystem("v2-expiry-race", settings: settings)
+        let caller = V2RoomClusterClient(system: remote, signer: fixture.client,
+            trust: fixture.trust, limits: fixture.limits, configuration: fixture.configuration)
+        var late: Task<V2RoomActivationResolution, any Error>?
+        var failure: (any Error)?
+        do {
+            try await caller.register(.init(identity: fixture.identity, endpointID: endpoint.id,
+                address: "127.0.0.1", port: fixture.port, accessibleShardIDs: [fixture.owner.shardID],
+                availableRooms: 2, isHealthy: true))
+            _ = try await caller.activate(on: fixture.identity, roomID: fixture.room,
+                owner: fixture.owner, deadline: .now + .seconds(3))
+            offset.withLock { $0 = .seconds(301) }
+            late = Task {
+                try await caller.activate(on: fixture.identity, roomID: fixture.room,
+                    owner: fixture.owner, deadline: .now + .seconds(3))
+            }
+            try await gate.waitForEntry()
+            do {
+                _ = try await caller.activate(on: fixture.identity, roomID: fixture.room,
+                    owner: fixture.owner, deadline: .now + .seconds(3))
+                Issue.record("expired grant was accepted")
+            } catch { #expect(error as? V2RoomCallFailure == .outcomeUnknown) }
+            _ = try await caller.activate(on: fixture.identity, roomID: fixture.room,
+                owner: fixture.owner, deadline: .now + .seconds(3))
+            #expect(await caller.sessionCount() == 1)
+            #expect(await delayed.openCount == 2)
+            await gate.openAndRemainOpen()
+            do { _ = try await late?.value; Issue.record("late expiry was accepted") }
+            catch { #expect(error as? V2RoomCallFailure == .outcomeUnknown) }
+            #expect(await caller.sessionCount() == 1)
+            _ = try await caller.activate(on: fixture.identity, roomID: fixture.room,
+                owner: fixture.owner, deadline: .now + .seconds(3))
+            #expect(await delayed.openCount == 2)
+        } catch { failure = error }
+        await gate.openAndRemainOpen()
+        _ = try? await late?.value
+        #expect(await caller.quiesce(deadline: .now + .seconds(3)))
+        #expect((await fixture.host.drain(deadline: .now + .seconds(3))).completed)
+        await fixture.inbound.stop()
+        try await remote.shutdown().wait()
+        try await fixture.system.shutdown().wait()
+        if let failure { throw failure }
+    }
+
     @Test("small and large authenticated sends use their codec executor policy across real TCP", arguments: [32, 32_768])
     func messageCodecExecutionAcrossTCP(textBytes: Int) async throws {
         let fixture = try await Fixture()
@@ -1183,7 +1301,8 @@ struct V2RoomClusterBridgeTests {
              coordinatorUserCalls: Bool = false, recoveryBatchGate: RecoveryBatchGate? = nil,
              maximumActivationWaitersPerHost: Int = 2, maximumConcurrentReservations: Int = 1,
              ownerShardID: String = "allowed", nativePlacement: Bool = false, raft: Bool = false,
-             watchChanges: Bool = true) async throws {
+             watchChanges: Bool = true,
+             authenticationNow: @escaping @Sendable () -> ContinuousClock.Instant = { .now }) async throws {
             owner = try .init(shardID: ownerShardID, epoch: 0)
             identity = .init(hostID: V2ActorHostID(uuid: UUID()), incarnationID: UUID())
             let clientKey = Curve25519.Signing.PrivateKey()
@@ -1272,7 +1391,7 @@ struct V2RoomClusterBridgeTests {
             } else { raftVoter = nil; raftEndpoint = nil }
             inbound = try .init(
                 identity: identity, host: host,
-                authenticator: .init(host: identity, trust: trust, limits: limits), signer: signer,
+                authenticator: .init(host: identity, trust: trust, limits: limits, now: authenticationNow), signer: signer,
                 limits: limits, allowedShards: [owner.shardID],
                 serviceShardAccess: [client.serviceID: [owner.shardID],
                                      coordinator.serviceID: [owner.shardID]],
@@ -1323,6 +1442,33 @@ struct V2RoomClusterBridgeTests {
             blocked = false
             let old = held; held.removeAll()
             for continuation in old { continuation.resume() }
+        }
+    }
+
+    private actor DelayedExpiryInbound: V2ActorHostInboundServing {
+        let service: V2RoomClusterInboundService
+        let gate: RestoreGate
+        private var delayNextExpiry = true
+        private(set) var openCount = 0
+        init(service: V2RoomClusterInboundService, gate: RestoreGate) {
+            self.service = service; self.gate = gate
+        }
+        func openSession(_ packet: V2ActorSignedPacket) async throws -> V2ActorSignedPacket {
+            openCount += 1
+            return try await service.openSession(packet)
+        }
+        func closeSession(_ packet: V2ActorSignedPacket) async throws {
+            try await service.closeSession(packet)
+        }
+        func exchange(_ packet: V2ActorSignedPacket, boundToken: V2RoomActivationToken?) async throws -> V2ActorSignedPacket {
+            do { return try await service.exchange(packet, boundToken: boundToken) }
+            catch {
+                if error as? V2ActorAuthenticationError == .sessionExpired, delayNextExpiry {
+                    delayNextExpiry = false
+                    await gate.wait()
+                }
+                throw error
+            }
         }
     }
 
