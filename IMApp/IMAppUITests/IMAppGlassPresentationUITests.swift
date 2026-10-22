@@ -101,6 +101,10 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         let message = app.buttons["v2.user.message"]
         XCTAssertTrue(message.waitForExistence(timeout: 5))
         XCTAssertTrue(message.isEnabled)
+        let profile = XCTAttachment(screenshot: app.screenshot())
+        profile.name = "Profile hierarchy with primary message action"
+        profile.lifetime = .keepAlways
+        add(profile)
         message.tap()
         XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["v2.user.message"].exists)
@@ -108,6 +112,23 @@ final class IMAppGlassPresentationUITests: XCTestCase {
         screenshot.name = "Contact opened chat from local identity"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+    }
+
+    @MainActor
+    func testAccountHierarchyKeepsSettingsReachable() {
+        let app = launch("me")
+        let privacy = app.buttons["v2.privacy.open"]
+        XCTAssertTrue(privacy.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["v2.message.favorites"].exists)
+        XCTAssertTrue(app.buttons["v2.sign-out"].exists)
+        let account = XCTAttachment(screenshot: app.screenshot())
+        account.name = "Account grouped settings hierarchy"
+        account.lifetime = .keepAlways
+        add(account)
+        privacy.tap()
+        XCTAssertTrue(app.switches["v2.privacy.allow-stranger-messages"].waitForExistence(timeout: 5))
+        app.buttons["v2.privacy.done"].tap()
+        XCTAssertTrue(privacy.waitForExistence(timeout: 5))
     }
 
     @MainActor

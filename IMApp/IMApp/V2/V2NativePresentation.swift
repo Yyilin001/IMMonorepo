@@ -114,8 +114,8 @@ struct V2SettingsLabel: View {
                 Image(systemName: symbol)
                     .font(.body.weight(.medium))
                     .foregroundStyle(tint)
-                    .frame(width: 36, height: 36)
-                    .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 12))
+                    .frame(width: 30, height: 30)
+                    .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
             }
             Spacer()
             Image(systemName: "chevron.right")
@@ -144,12 +144,12 @@ struct V2AccountHomeView: View {
 
     private var profileHeader: some View {
         HStack(spacing: 16) {
-            V2AvatarPlaceholder(size: 72)
+            V2AvatarPlaceholder(title: displayName, size: 64)
             VStack(alignment: .leading, spacing: 6) {
                 Text(displayName.isEmpty ? "我的资料" : displayName)
-                    .font(.title2.weight(.bold)).foregroundStyle(.primary)
+                    .font(.title3.weight(.semibold)).foregroundStyle(.primary)
                 if !handle.isEmpty { Text(handle).font(.subheadline).foregroundStyle(.secondary) }
-                Text(canOpenPublicIdentity ? "查看和编辑个人资料" : "个人空间")
+                Text(canOpenPublicIdentity ? "编辑个人资料" : "个人空间")
                     .font(.caption).foregroundStyle(V2VisualStyle.accent)
             }
             Spacer(minLength: 4)
@@ -157,7 +157,7 @@ struct V2AccountHomeView: View {
                 Image(systemName: "chevron.right").font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary).accessibilityHidden(true)
             }
-        }.padding(.vertical, 20)
+        }.padding(.vertical, 12)
     }
 
     var body: some View {
@@ -172,39 +172,36 @@ struct V2AccountHomeView: View {
                         profileHeader
                     }
                 }
-                Section("常用功能") {
-                    Button(action: openFavorites) { V2SettingsLabel(title: "收藏", symbol: "star.fill") }
+                Section("内容与管理") {
+                    Button(action: openFavorites) { V2SettingsLabel(title: "收藏", symbol: "star") }
                         .accessibilityIdentifier("v2.message.favorites")
-                }
-                if canOpenPendingAvatars {
-                    Section("群聊管理") {
-                        Button(action: openPendingAvatars) { V2SettingsLabel(title: "待处理群头像", symbol: "person.2.fill") }
+                    if canOpenPendingAvatars {
+                        Button(action: openPendingAvatars) { V2SettingsLabel(title: "待处理群头像", symbol: "person.2") }
                             .accessibilityIdentifier("v2.group.avatar.pending.open")
                     }
                 }
-                Section("偏好设置") {
-                    Button(action: openPrivacy) { V2SettingsLabel(title: "消息与隐私", symbol: "hand.raised.fill") }
+                Section("设置") {
+                    Button(action: openPrivacy) { V2SettingsLabel(title: "消息与隐私", symbol: "hand.raised") }
                         .accessibilityIdentifier("v2.privacy.open")
-                }
-                if canOpenDevices || canOpenSecurity {
-                    Section("账号与安全") {
-                        if canOpenDevices {
-                            Button(action: openDevices) { V2SettingsLabel(title: "登录设备", symbol: "iphone") }
-                                .accessibilityIdentifier("v2.device-sessions.open")
-                        }
-                        if canOpenSecurity {
-                            Button(action: openSecurity) { V2SettingsLabel(title: "账号安全", symbol: "lock.fill") }
-                                .accessibilityIdentifier("v2.security.open")
-                        }
+                    if canOpenDevices {
+                        Button(action: openDevices) { V2SettingsLabel(title: "登录设备", symbol: "iphone") }
+                            .accessibilityIdentifier("v2.device-sessions.open")
+                    }
+                    if canOpenSecurity {
+                        Button(action: openSecurity) { V2SettingsLabel(title: "账号安全", symbol: "lock") }
+                            .accessibilityIdentifier("v2.security.open")
                     }
                 }
                 Section {
-                    Button("退出登录", role: .destructive, action: signOut)
-                        .accessibilityIdentifier("v2.sign-out")
+                    Button(role: .destructive, action: signOut) {
+                        Text("退出登录").frame(maxWidth: .infinity, minHeight: 28)
+                    }
+                    .accessibilityIdentifier("v2.sign-out")
                 }
             }
             .listStyle(.insetGrouped)
             .listRowSpacing(0)
+            .listSectionSpacing(22)
             .v2GroupedPageSurface()
             .navigationTitle("我的")
             .navigationBarTitleDisplayMode(.inline)
