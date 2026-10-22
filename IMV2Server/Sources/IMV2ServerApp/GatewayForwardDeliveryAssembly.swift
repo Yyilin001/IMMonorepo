@@ -17,7 +17,8 @@ struct GatewayForwardDeliveryAssembly {
     /// 可选本地媒体提供者仅在配置存在时构造；文件暂存清理由账号边缘负责。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        localMediaConfiguration: V2LocalFilesystemMediaRuntimeConfiguration?,
+        resourceConfiguration: V2ResourceRuntimeConfiguration?,
+        storageAssembly: V2ResourceStorageAssembly?,
         prepared: GatewayPreparedAssembly,
         roomServices: GatewayRoomServicesAssembly,
         logger: Logger
@@ -25,28 +26,18 @@ struct GatewayForwardDeliveryAssembly {
         let topology = prepared.topology
         let forwardPort = roomServices.forwardPort
         let callTimeout = roomServices.callTimeout
-        var storageValues: [V2StorageBinding: V2LocalResourceStorage] = [:]
-        let registry: V2ResourceStorageRegistry?
+        let registry = storageAssembly?.registry
         let transformer: V2LocalResourceTransformer?
-        if let localMediaConfiguration {
-            let backends = try V2ResourceBackendConfiguration(environment: ProcessRuntimeEnvironment(),
-                defaultDirectory: localMediaConfiguration.rootDirectory)
-            for entry in backends.entries {
-                let binding = try entry.binding
-                storageValues[binding] = try .init(root: URL(fileURLWithPath: entry.directory, isDirectory: true)
-                    .appendingPathComponent("sealed-resources"), binding: binding)
-            }
-            registry = try .init(storages: Array(storageValues.values), defaultBinding: backends.defaultBinding)
+        if let resourceConfiguration {
             let path = ProcessInfo.processInfo.environment["IMV2_RESOURCE_IMAGE_WORKER"]
                 ?? URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
                     .appendingPathComponent("IMV2ResourceImageWorker").path
             if FileManager.default.isExecutableFile(atPath: path) {
                 transformer = try .init(executable: URL(fileURLWithPath: path),
-                    temporaryDirectory: localMediaConfiguration.rootDirectory.appendingPathComponent("forward-processing"))
+                    temporaryDirectory: resourceConfiguration.rootDirectory.appendingPathComponent("forward-processing"))
                 try await transformer?.verifyReadiness()
             } else { transformer = nil }
-        } else { registry = nil; transformer = nil }
-        let storages = storageValues
+        } else { transformer = nil }
         var forwardTargetEndpoints: [String: any V2ForwardExportDelivering] = [:]
         var forwardBackgroundDatabases: [String: any Database] = [:]
         for storage in configuration.roomShardStorage {
@@ -58,19 +49,18 @@ struct GatewayForwardDeliveryAssembly {
             guard let ownerDatabase = forwardBackgroundDatabases[storage.shardID]
             else { throw V2RoomWriteStoreError.corruptPersistenceState }
             let mediaWorker: V2ForwardMediaImportWorker?
-            if let localMediaConfiguration, let registry {
+            if let resourceConfiguration, let registry, let storageAssembly {
                 try await V2ResourceStorageReadiness.verify(database: ownerDatabase, registry: registry)
                 let store = try PostgresV2ForwardMediaImportStore(database: ownerDatabase)
                 let allocate: @Sendable (V2StorageBinding) throws -> V2StoredObjectReference = { binding in
-                    guard let storage = storages[binding] else { throw V2ResourceProviderError.configurationInvalid }
-                    return try storage.allocate()
+                    try storageAssembly.allocate(binding: binding)
                 }
                 let variants = transformer.map {
                     V2ResourceVariantProcessor(database: ownerDatabase, registry: registry, transformer: $0, allocate: allocate)
                 }
                 mediaWorker = try .init(store: store,
                     copier: V2ResourceForwardMediaCopier(sources: forwardBackgroundDatabases, target: store,
-                        registry: registry, maximumBytes: localMediaConfiguration.maximumBytes, allocate: allocate),
+                        registry: registry, maximumBytes: resourceConfiguration.maximumBytes, allocate: allocate),
                     scanner: V2PlacementMediaScanner(database: ownerDatabase, registry: registry,
                         scanner: V2LocalResourceScanner(),
                         variants: variants))

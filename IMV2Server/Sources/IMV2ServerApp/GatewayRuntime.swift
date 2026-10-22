@@ -27,7 +27,7 @@ enum GatewayRuntime {
     /// - Throws: 带故障阶段的 `V2StagedOperationalError`。
     static func run(logger: Logger) async throws {
         V2ProcessTerminationSignal.install()
-        let (configuration, localMediaConfiguration) = try loadConfigurations()
+        let (configuration, resourceConfiguration) = try loadConfigurations()
         logger.notice("IM V2 startup stage started", metadata: ["stage": "infrastructure"])
         let infrastructure = try await startInfrastructure(configuration: configuration, logger: logger)
         logger.notice("IM V2 startup stage completed", metadata: ["stage": "infrastructure"])
@@ -39,7 +39,7 @@ enum GatewayRuntime {
             logger.notice("IM V2 startup stage started", metadata: ["stage": "composition"])
             let composition = try await GatewayComposition.build(
                 configuration: configuration,
-                localMediaConfiguration: localMediaConfiguration,
+                resourceConfiguration: resourceConfiguration,
                 resources: infrastructure.databases,
                 app: infrastructure.application,
                 logger: logger
@@ -75,13 +75,13 @@ enum GatewayRuntime {
     /// 从同一进程环境读取网关与可选本地媒体配置。
     /// 配置解析失败时标记为 `gateway_configuration`，此时尚未创建运行时资源。
     private static func loadConfigurations() throws -> (
-        V2GatewayRuntimeConfiguration, V2LocalFilesystemMediaRuntimeConfiguration?
+        V2GatewayRuntimeConfiguration, V2ResourceRuntimeConfiguration?
     ) {
         let environment = ProcessRuntimeEnvironment()
         do {
             return (
                 try V2GatewayRuntimeConfiguration(environment: environment),
-                try V2LocalFilesystemMediaRuntimeConfiguration(environment: environment)
+                try V2ResourceRuntimeConfiguration(environment: environment)
             )
         } catch {
             throw V2StagedOperationalError(stage: "gateway_configuration", error: error)

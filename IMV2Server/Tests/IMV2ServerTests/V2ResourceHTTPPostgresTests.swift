@@ -4,6 +4,9 @@ import Crypto
 import FluentKit
 import FluentPostgresDriver
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import HTTPTypes
 import IMV2Core
 import IMV2ActorContracts
@@ -15,10 +18,22 @@ import VaporTesting
 @testable import IMV2Server
 @testable import IMV2ServerInfrastructure
 
+// Each scanner claims from the same isolated database, so fixtures must not race.
+@Suite(.serialized)
 struct V2ResourceHTTPPostgresTests {
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil && ProcessInfo.processInfo.environment["IM_V2_OSS_LIVE_TEST"] == "1"))
+    func realOSSHTTPPipeline() async throws {
+        try await pipeline(mode: .httpPut, cloud: true)
+    }
+
     @Test(.enabled(if:ProcessInfo.processInfo.environment["IMV2_RESOURCE_TEST_DATABASE_URL"] != nil), arguments: [V2ResourceTransferMode.httpPut, .httpPartPut])
     func persistentHTTPUploadRenewFinalizeAndHomeIsolation(mode: V2ResourceTransferMode) async throws {
+        try await pipeline(mode: mode, cloud: false)
+    }
+
+    private func pipeline(mode: V2ResourceTransferMode, cloud: Bool) async throws {
         let resources=makeV2DatabaseTestResources()
+        var cloudClient: V2OSSClient?
         let app=try await Application(.testing)
         let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer {try? FileManager.default.removeItem(at:root)}
@@ -27,12 +42,32 @@ struct V2ResourceHTTPPostgresTests {
             let database=resources.database(.psql)
             let user=UserID(uuid:UUID()),device=DeviceID(uuid:UUID()),room=RoomID(uuid:UUID())
             let binding=try V2StorageBinding(id:"http-test",configurationRevision:1)
-            let storage=try V2LocalResourceStorage(root:root.appendingPathComponent("sealed"),binding:binding)
+            let localStorage=try V2LocalResourceStorage(root:root.appendingPathComponent("sealed"),binding:binding)
+            if cloud {
+                let values = ProcessInfo.processInfo.environment
+                let bucket = try #require(values["IM_V2_OSS_BUCKET"])
+                let region = try #require(values["IM_V2_OSS_REGION"])
+                let config = try V2OSSConfiguration(bucket: bucket, region: region,
+                    endpoint: #require(URL(string: "https://\(bucket).oss-\(region).aliyuncs.com")),
+                    prefix: "validation/\(UUID().uuidString.lowercased())/", binding: binding)
+                cloudClient = V2OSSClient(configuration: config, credentials: .init(environment: V2DictionaryRuntimeEnvironment(values)))
+                try await cloudClient?.verifyReadiness()
+            }
+            let cloudStorage = cloudClient.map { V2OSSObjectStorage(client: $0) }
+            let storage: any V2ObjectStorage
+            if let cloudStorage { storage = cloudStorage } else { storage = localStorage }
+            let allocate: @Sendable () throws -> V2StoredObjectReference = {
+                if let cloudStorage { return try cloudStorage.allocate() }
+                return try localStorage.allocate()
+            }
             let provider=try V2LocalFilesystemMediaProvider(rootDirectory:root.appendingPathComponent("uploads"),targetBaseURL:URL(string:"https://resource.test")!,signingKey:Data(repeating:1,count:32))
             try await provider.prepare()
+            let transport: any V2UploadTransport
+            if let cloudClient { transport = V2OSSUploadTransport(client: cloudClient) }
+            else { transport = V2LocalResourceUploadTransport(binding: binding, provider: provider) }
             let registry=try V2ResourceStorageRegistry(storages:[storage],defaultBinding:binding)
             let service=try V2ResourceService(resolve:{_,_,_,_ in PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})},registry:registry,
-                transports:[V2LocalResourceUploadTransport(binding:binding,provider:provider)],maximumBytes:1_000_000,allocate:{_ in try storage.allocate()})
+                transports:[transport],maximumBytes:1_000_000,allocate:{_ in try allocate()})
             V2VaporResourceRoutes(authenticator:ResourceHTTPAuthentication(user:user),service:service).register(on:app)
             let byteDelivery=try V2LocalResourceDelivery(registry:registry,baseURL:URL(string:"https://resource.test")!,keyID:"test",keys:["test":Data(repeating:4,count:32)])
             V2VaporResourceByteRoutes(delivery:byteDelivery).register(on:app)
@@ -50,7 +85,7 @@ struct V2ResourceHTTPPostgresTests {
             let secondBinding=try V2StorageBinding(id:"replacement",configurationRevision:2)
             let secondStorage=try V2LocalResourceStorage(root:root.appendingPathComponent("second-sealed"),binding:secondBinding)
             let switchedRegistry=try V2ResourceStorageRegistry(storages:[storage,secondStorage],defaultBinding:secondBinding)
-            let transports:[any V2UploadTransport]=[V2LocalResourceUploadTransport(binding:binding,provider:provider),V2LocalResourceUploadTransport(binding:secondBinding,provider:provider)]
+            let transports:[any V2UploadTransport] = [transport,V2LocalResourceUploadTransport(binding:secondBinding,provider:provider)]
             let switched=try V2ResourceService(resolve:{_,_,_,_ in PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})},registry:switchedRegistry,
                 transports:transports,maximumBytes:1,allocate:{_ in try secondStorage.allocate()})
             #expect(try await switched.create(request,actor:user,device:device).locator==session.locator)
@@ -58,10 +93,22 @@ struct V2ResourceHTTPPostgresTests {
                 contentType:request.contentType,byteCount:request.byteCount,checksum:request.checksum,clientModes:request.clientModes)
             await #expect(throws:V2ResourceProviderError.unsupportedCapability) { _ = try await switched.create(newRequest,actor:user,device:device) }
             let plan=try #require(try await switched.targets(.init(locator:session.locator,generation:1),actor:user,device:device).first)
-            let providerID = try MediaID(plan.url.lastPathComponent)
-            try await provider.storeUploadedObject(mediaID:providerID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
-            // A successful upload whose response was lost safely replays identical bytes.
-            try await provider.storeUploadedObject(mediaID:providerID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
+            if cloud {
+                var upload = URLRequest(url: plan.url)
+                upload.httpMethod = plan.httpMethod
+                for header in plan.headers { upload.setValue(header.value, forHTTPHeaderField: header.name) }
+                // Never include a signed URL in a propagated transport error.
+                do {
+                    let (_, first) = try await URLSession.shared.upload(for: upload, from: bytes)
+                    #expect((first as? HTTPURLResponse)?.statusCode == 200)
+                    let (_, retry) = try await URLSession.shared.upload(for: upload, from: bytes)
+                    #expect((retry as? HTTPURLResponse)?.statusCode == 409)
+                } catch { throw V2ResourceProviderError.temporarilyUnavailable }
+            } else {
+                let providerID = try MediaID(plan.url.lastPathComponent)
+                try await provider.storeUploadedObject(mediaID:providerID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
+                try await provider.storeUploadedObject(mediaID:providerID,targetURL:plan.url,contentType:request.contentType,bytes:bytes)
+            }
             let uploaded = try await service.status(session.locator,actor:user,device:device)
             #expect(mode == .httpPut || uploaded.confirmedParts.count == 1)
             let completed=try await app.testing { client in
@@ -130,7 +177,7 @@ struct V2ResourceHTTPPostgresTests {
             let imports=V2ResourceImportService(resources:service,resolve:{_,_,_,_ in
                 PostgresV2ResourceLifecycleStore(database:database,authorize:{_ in})
             },persistence:importStore,registry:registry,
-                transports:[V2LocalResourceUploadTransport(binding:binding,provider:provider)])
+                transports:[transport])
             let imported=try V2ResourceImportRequest(operationID:.init(uuid:UUID()),
                 source:.message(location:.init(roomID:room,messageID:.init(uuid:UUID())),mediaID:request.mediaID,variantID:nil),
                 targetUsage:.messageAttachment(.init(uuid:UUID())),targetMediaID:.init(uuid:UUID()))
@@ -144,8 +191,16 @@ struct V2ResourceHTTPPostgresTests {
             #expect(copied.count==2)
             let held=try #require(try await sql.raw("SELECT COUNT(*)::bigint AS count FROM im_v2.resource_import_holds WHERE actor_user_id=\(bind: user.uuidValue!) AND operation_id=\(bind: imported.operationID.uuidValue!) AND released_at IS NULL").first(decoding:ResourceHTTPCount.self))
             #expect(held.count==0)
+            if cloud {
+                let rows = try await sql.raw("SELECT reference_json::text AS reference FROM im_v2.resource_blob_placements WHERE media_id IN (\(bind: request.mediaID.uuidValue!),\(bind: imported.targetMediaID.uuidValue!))").all(decoding: ResourceHTTPReference.self)
+                for row in rows {
+                    try await storage.delete(JSONDecoder().decode(V2StoredObjectReference.self, from: Data(row.reference.utf8)))
+                }
+                try await transport.abort(mediaID: imported.targetMediaID)
+            }
+            try await cloudClient?.shutdown()
             try await app.shutdown();try await resources.shutdown()
-        } catch {try? await app.shutdown();try? await resources.shutdown();throw error}
+        } catch {try? await cloudClient?.shutdown();try? await app.shutdown();try? await resources.shutdown();throw error}
     }
 }
 private struct ResourceHTTPAuthentication:V2GatewayAuthenticator {
@@ -157,3 +212,5 @@ private struct ResourceHTTPRoomRouter:V2RoomShardRouting {
     func route(for roomID:RoomID) async throws -> V2RoomShardRoute { try .init(shardID:"test",epoch:1) }
 }
 private struct ResourceHTTPCount:Decodable {let count:Int64}
+
+private struct ResourceHTTPReference: Decodable { let reference: String }

@@ -8,6 +8,28 @@ import Testing
 
 @Suite("Persistent resource steps")
 struct V2ResourceStepTests {
+    @Test(arguments: [false, true])
+    func immutableUploadConflictRequiresAuthoritativeFinalize(multipart: Bool) async throws {
+        let f = try Fixture(multipart: multipart); defer { f.remove() }
+        let control = try StepControl(request: f.request, multipart: multipart)
+        let engine = V2ResourceTransferEngine(store: f.store, control: control,
+            executor: SignatureDeniedExecutor(status: 409), directory: f.root)
+        _ = try await engine.prepare(id: f.id, request: f.request)
+        _ = try await engine.resume(id: f.id)
+        if multipart {
+            await #expect(throws: V2HTTPFailure.self) { _ = try await engine.resume(id: f.id) }
+            #expect(try await f.store.resourceTransfer(id: f.id)?.needsAttention == true)
+        } else {
+            let uncertain = try await engine.resume(id: f.id)
+            #expect(uncertain.nextAction == .finalize && uncertain.stage != .ready)
+            #expect(await control.calls == ["create", "target"])
+            let verified = try await engine.resume(id: f.id)
+            #expect(verified.stage == .processing)
+            #expect(await control.calls == ["create", "target", "finalize"])
+        }
+        await engine.close(); try await f.store.close()
+    }
+
     @Test(arguments: [0, 401, 403, -403]) func expiredUploadTargetReconcilesOriginalSessionWithinPersistedBudget(status: Int) async throws {
         let f = try Fixture(); defer { f.remove() }
         let clock = Mutex(Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970)))

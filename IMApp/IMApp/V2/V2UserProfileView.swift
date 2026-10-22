@@ -91,7 +91,7 @@ final class V2UserProfileActionStore {
                 pending = relevant.contains { $0.work.scheduling != .finished }
                 retryWorkID = relevant.first { $0.work.scheduling == .needsAttention }?.work.id
                 if let last = relevant.first, last.work.scheduling == .finished {
-                    feedback = last.work.execution == .committed ? "操作已完成。" : "操作未完成，请刷新后重试。"
+                    feedback = last.work.execution == .committed ? nil : "操作未完成，请刷新后重试。"
                     await refresh()
                 }
             }
@@ -157,43 +157,72 @@ struct V2UserProfileSheet: View {
         Group {
             List {
                 Section {
-                    VStack(spacing: 12) {
-                        V2AuthorizedAvatarView(key: key, size: 88)
-                        V2AuthorizedProfileNameView(key: key, placeholder: knownIdentity?.displayName ?? "资料暂不可用").font(.title2.bold())
-                        V2AuthorizedPublicHandleView(key: key, onIdentity: { identity = $0 }).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
-                    }.frame(maxWidth: .infinity).padding(.vertical, 22)
-                }.listRowBackground(Color.clear)
+                    HStack(alignment: .center, spacing: 16) {
+                        V2AuthorizedAvatarView(key: key, size: 72)
+                        VStack(alignment: .leading, spacing: 7) {
+                            V2AuthorizedProfileNameView(key: key, placeholder: knownIdentity?.displayName ?? "资料暂不可用")
+                                .font(.title3.weight(.semibold))
+                            V2AuthorizedPublicHandleView(key: key, onIdentity: { identity = $0 })
+                                .font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+                            if let actions, actions.relationship != nil {
+                                Text(actions.relationshipTitle)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("v2.user.relationship")
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.vertical, 12)
+                    .listRowSeparator(.hidden)
+                    if knownIdentity != nil, context != nil, actions?.relationship != .blocked {
+                        messageAction
+                            .listRowSeparator(.hidden)
+                    }
+                } footer: {
+                    if let messageFeedback {
+                        Text(messageFeedback).font(.footnote)
+                            .accessibilityIdentifier("v2.user.message.feedback")
+                    }
+                }
+                if let context, let item = context.contacts.item(userID: key.userID.rawValue), item.relationship == .friend {
+                    Section("资料设置") {
+                        Button { nameEditor = context.contacts.nameEditor(for: item) } label: {
+                            V2SettingsLabel(title: "编辑备注", symbol: "pencil")
+                        }.accessibilityIdentifier("v2.user.edit-note")
+                    }
+                }
                 if let actions {
-                    Section("关系") {
-                        Text(actions.relationshipTitle).accessibilityIdentifier("v2.user.relationship")
-                        if actions.pending { Label("正在处理…", systemImage: "clock") }
+                    Section {
                         relationshipActions(actions)
+                        if actions.relationship == .blocked {
+                            Button { Task { await actions.submit(.userBlock(.unblock)) } } label: {
+                                Label("解除屏蔽", systemImage: "person.crop.circle.badge.checkmark")
+                            }.accessibilityIdentifier("v2.user.unblock")
+                        } else if actions.relationship != nil {
+                            Button(role: .destructive) { confirmation = .userBlock(.block) } label: {
+                                Label("屏蔽此人", systemImage: "hand.raised")
+                            }.accessibilityIdentifier("v2.user.block")
+                        }
+                    } header: {
+                        Text("关系管理")
+                    } footer: {
+                        if actions.pending {
+                            Label("正在处理…", systemImage: "clock")
+                        } else if let feedback = actions.feedback {
+                            Text(feedback)
+                        }
                     }
                     .disabled(actions.isUpdating || actions.pending)
-                    Section {
-                        if actions.relationship == .blocked {
-                            Button("解除屏蔽") { Task { await actions.submit(.userBlock(.unblock)) } }
-                                .accessibilityIdentifier("v2.user.unblock")
-                        } else if actions.relationship != nil {
-                            Button("屏蔽此人", role: .destructive) { confirmation = .userBlock(.block) }
-                                .accessibilityIdentifier("v2.user.block")
-                        }
-                    }.disabled(actions.isUpdating || actions.pending)
                     if actions.retryWorkID != nil {
-                        Button("重试") { Task { await actions.retry() } }
+                        Button("重试操作") { Task { await actions.retry() } }
                             .disabled(actions.isUpdating)
                             .accessibilityIdentifier("v2.user.retry")
                     }
-                    if let feedback = actions.feedback { Text(feedback).font(.footnote).foregroundStyle(.secondary) }
-                }
-                if knownIdentity != nil, context != nil, actions?.relationship != .blocked {
-                    Section { messageAction }
-                }
-                if let context, let item = context.contacts.item(userID: key.userID.rawValue), item.relationship == .friend {
-                    Button("编辑备注") { nameEditor = context.contacts.nameEditor(for: item) }
                 }
             }
             .v2GroupedPageSurface()
+            .listRowSpacing(0)
+            .listSectionSpacing(22)
             .navigationTitle("用户资料")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -229,7 +258,9 @@ struct V2UserProfileSheet: View {
             Button("撤销好友申请") { Task { await actions.submit(.relationship(.remove)) } }
                 .accessibilityIdentifier("v2.user.cancel-request")
         case .friend:
-            Button("删除好友", role: .destructive) { confirmation = .relationship(.remove) }
+            Button(role: .destructive) { confirmation = .relationship(.remove) } label: {
+                Label("删除好友", systemImage: "person.badge.minus")
+            }.accessibilityIdentifier("v2.user.remove-friend")
         case .blocked, nil: EmptyView()
         }
     }
@@ -263,16 +294,14 @@ struct V2UserProfileSheet: View {
             }
         } label: {
             HStack {
-                Text("发消息")
-                if messageTask != nil { Spacer(); ProgressView() }
+                Label("发消息", systemImage: "bubble.left")
+                if messageTask != nil { ProgressView().tint(.white) }
             }
         }
+        .buttonStyle(V2PrimaryButtonStyle())
+        .padding(.bottom, 8)
         .disabled(knownIdentity == nil || context == nil || messageTask != nil)
         .accessibilityIdentifier("v2.user.message")
-        if let messageFeedback {
-            Text(messageFeedback).font(.footnote).foregroundStyle(.secondary)
-                .accessibilityIdentifier("v2.user.message.feedback")
-        }
     }
     private struct NameEditorPresentation: Identifiable { let store: V2NameEditorStore; var id: ObjectIdentifier { ObjectIdentifier(store) } }
 }

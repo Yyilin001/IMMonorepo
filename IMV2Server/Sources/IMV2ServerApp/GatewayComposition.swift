@@ -33,6 +33,7 @@ struct GatewayComposition {
     let durableOwnerResources: [V2RoomServerOwnerResources]
     private let policies: GatewayPolicyAssembly?
     private let databaseTopology: GatewayDatabaseTopology
+    private let resourceStorage: V2ResourceStorageAssembly?
 
     /// 按依赖顺序组装网关，并持有后续运行与停机所需的组件。
     ///
@@ -44,7 +45,7 @@ struct GatewayComposition {
     /// 若 Actor 无法在失败期限内排空，会以失败状态退出进程，避免释放仍被使用的数据库资源。
     static func build(
         configuration: V2GatewayRuntimeConfiguration,
-        localMediaConfiguration: V2LocalFilesystemMediaRuntimeConfiguration?,
+        resourceConfiguration: V2ResourceRuntimeConfiguration?,
         resources: V2DatabaseWorkloadResources,
         app: Application,
         logger: Logger
@@ -59,8 +60,9 @@ struct GatewayComposition {
         var databaseTopology: GatewayDatabaseTopology?
         var preparedConnectionRegistry: V2DeviceConnectionRegistry?
         var policies: GatewayPolicyAssembly?
+        var resourceStorage: V2ResourceStorageAssembly?
         do {
-            guard !configuration.authorPresentationsEnabled || localMediaConfiguration != nil else {
+            guard !configuration.authorPresentationsEnabled || resourceConfiguration != nil else {
                 throw V2GatewayRuntimeConfigurationError.invalid("IM_V2_AUTHOR_PRESENTATIONS_ENABLED")
             }
             // 1. 准备数据库拓扑、认证/限流、投影和房间归属资源，供后续装配阶段共享；
@@ -113,11 +115,17 @@ struct GatewayComposition {
             roomActorApplication = actors
             try await policies?.startMaintenance()
             await actors.qualificationDidChange()
-            if configuration.authorPresentationsEnabled, let localMediaConfiguration {
+            if let resourceConfiguration {
+                let backends = try V2ResourceBackendConfiguration(environment: ProcessRuntimeEnvironment(),
+                    defaultDirectory: resourceConfiguration.rootDirectory)
+                resourceStorage = try await V2ResourceStorageAssembly.build(configuration: backends,
+                    environment: ProcessRuntimeEnvironment())
+            }
+            if configuration.authorPresentationsEnabled, let resourceConfiguration, let resourceStorage {
                 // Use the configured delivery handle. With workload isolation
                 // enabled, optional SQL does not use foreground connections.
-                let delivery = try await GatewayAuthorPresentationAssembly.localDelivery(
-                    configuration: localMediaConfiguration, controlDatabase: prepared.topology.deliveryDatabase)
+                let delivery = try await GatewayAuthorPresentationAssembly.delivery(
+                    configuration: resourceConfiguration, storage: resourceStorage, controlDatabase: prepared.topology.deliveryDatabase)
                 let authors = try GatewayAuthorPresentationAssembly.build(controlDatabase: prepared.topology.deliveryDatabase,
                     actors: actors, delivery: delivery)
                 authorPresentations = authors
@@ -208,7 +216,8 @@ struct GatewayComposition {
             // runServices 会先绑定 TLS、再启动指标 HTTP，最后调用 backgroundWorkers.start()。
             let forwardDelivery = try await GatewayForwardDeliveryAssembly.build(
                 configuration: configuration,
-                localMediaConfiguration: localMediaConfiguration,
+                resourceConfiguration: resourceConfiguration,
+                storageAssembly: resourceStorage,
                 prepared: prepared,
                 roomServices: roomServices,
                 logger: logger
@@ -235,7 +244,7 @@ struct GatewayComposition {
                 authorPresentations: authorPresentations,
                 authorDrainTimeout: .milliseconds(configuration.shutdownGraceMilliseconds),
                 durableOwnerResources: durableOwnerResources,
-                policies: policies, databaseTopology: prepared.topology
+                policies: policies, databaseTopology: prepared.topology, resourceStorage: resourceStorage
             )
         } catch {
             logger.error("IM V2 gateway composition failed; cleaning up", metadata:
@@ -253,6 +262,7 @@ struct GatewayComposition {
             }
             await accountRoomChangeService?.shutdown()
             await Self.drainRoomReads(durableOwnerResources, logger: logger)
+            await resourceStorage?.shutdown()
             if let databaseTopology { await Self.drainDatabaseLoans(databaseTopology, logger: logger) }
             throw error
         }
@@ -286,6 +296,7 @@ struct GatewayComposition {
 
     /// Close borrow admission only after workers, connections and actors have drained.
     func shutdownDatabaseLoans(logger: Logger) async {
+        await resourceStorage?.shutdown()
         await Self.drainRoomReads(durableOwnerResources, logger: logger)
         await Self.drainDatabaseLoans(databaseTopology, logger: logger)
     }

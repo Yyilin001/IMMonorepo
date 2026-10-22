@@ -196,7 +196,14 @@ def main():
     parser.add_argument('--slow-resource', action='store_true', help='one opt-in slow signed-byte upload with concurrent typed control and TLS cursor progress')
     parser.add_argument('--extended-acceptance', action='store_true', help='also run typed message and group operation acceptance against the owned stack')
     parser.add_argument('--nickname-directory-only', action='store_true', help='real multi-page nickname reads with two independently issued devices')
+    parser.add_argument('--oss', action='store_true', help='use a private OSS bucket with runtime credentials for the owned resource stack')
     args = parser.parse_args()
+    if args.oss and (args.slow_resource or args.nickname_directory_only):
+        parser.error('--oss requires the resource lifecycle scenario')
+    if args.oss:
+        for required in ('BUCKET', 'REGION', 'ACCESS_KEY_ID', 'ACCESS_KEY_SECRET'):
+            if not os.environ.get('IM_V2_OSS_' + required):
+                parser.error('missing OSS runtime configuration: ' + required)
     if args.nickname_directory_only and (args.slow_resource or args.extended_acceptance):
         parser.error('--nickname-directory-only cannot combine with other scenario modes')
     if sys.platform != 'darwin':
@@ -437,7 +444,28 @@ def main():
                     IM_V2_LOCAL_MEDIA_MODE='filesystem', IM_V2_LOCAL_MEDIA_UNSAFE_TEST_ONLY='1',
                     IM_V2_LOCAL_MEDIA_ROOT_DIRECTORY=str(private / 'media'), IM_V2_LOCAL_MEDIA_PUBLIC_BASE_URL=base_url,
                     IMV2_RESOURCE_IMAGE_WORKER=str(binary / 'IMV2ResourceImageWorker'), IM_V2_LOG_LEVEL='warning')
+                if args.oss:
+                    bucket, region = os.environ['IM_V2_OSS_BUCKET'], os.environ['IM_V2_OSS_REGION']
+                    prefix = 'validation/native-' + uuid.uuid4().hex + '/'
+                    for config_key in list(shared):
+                        if config_key.startswith('IM_V2_LOCAL_MEDIA_'): shared.pop(config_key)
+                    shared.update(IM_V2_RESOURCE_MODE='enabled',
+                        IM_V2_RESOURCE_MAXIMUM_BYTES='268435456',
+                        IM_V2_RESOURCE_WORK_DIRECTORY=str(private / 'resource-work'),
+                        IM_V2_RESOURCE_PUBLIC_BASE_URL=base_url,
+                        IM_V2_RESOURCE_SIGNING_KEY_BASE64=base64.b64encode(os.urandom(32)).decode(),
+                        IM_V2_RESOURCE_DEFAULT_BINDING='oss-native', IM_V2_RESOURCE_DEFAULT_REVISION='1',
+                        IM_V2_RESOURCE_STORAGE_BINDINGS_JSON=json.dumps([dict(id='oss-native', revision=1, kind='oss',
+                            oss=dict(bucket=bucket, region=region,
+                                endpoint=f'https://{bucket}.oss-{region}.aliyuncs.com', prefix=prefix))]))
+                    for suffix in ('ACCESS_KEY_ID', 'ACCESS_KEY_SECRET', 'SECURITY_TOKEN', 'CREDENTIAL_EXPIRATION'):
+                        config_key = 'IM_V2_OSS_' + suffix
+                        if os.environ.get(config_key): shared[config_key] = os.environ[config_key]
+                    (output / 'oss-fixture.json').write_text(json.dumps(dict(bucket=bucket, region=region, prefix=prefix)) + '\n')
                 gateway = compose_defaults('gateway'); gateway.update(shared)
+                if args.oss:
+                    for config_key in list(gateway):
+                        if config_key.startswith('IM_V2_LOCAL_MEDIA_'): gateway.pop(config_key)
                 gateway.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(private / 'actors/gateway/configuration.json'),
                     IM_V2_AUTHOR_PRESENTATIONS_ENABLED='true', IM_V2_DATABASE_WORKLOAD_POOL_ISOLATION_ENABLED='true',
                     IM_V2_TLS_HOST='127.0.0.1', IM_V2_TLS_PORT=str(gateway_port),
@@ -445,6 +473,9 @@ def main():
                     IM_V2_METRICS_HOST='127.0.0.1', IM_V2_METRICS_PORT=str(metrics_port), IM_V2_GATEWAY_NODE_ID='gateway')
                 wait_listener(launch('IMV2ServerApp', gateway), gateway_port)
                 account = compose_defaults('account'); account.update(shared)
+                if args.oss:
+                    for config_key in list(account):
+                        if config_key.startswith('IM_V2_LOCAL_MEDIA_'): account.pop(config_key)
                 account.update(IMV2_ROOM_ACTOR_CONFIGURATION_FILE=str(private / 'actors/account/configuration.json'),
                                IM_V2_ACCOUNT_LISTEN_HOST='127.0.0.1', IM_V2_ACCOUNT_LISTEN_PORT=str(account_port))
                 wait_listener(launch('IMV2AccountServerApp', account), account_port)

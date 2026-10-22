@@ -269,7 +269,15 @@ public actor V2ResourceTransferEngine {
                     try await background.enqueue(job: job, resourceOwner: ownerID, plan: plan, source: file)
                     return
                 }
-                try await executor.upload(fileURL: file, plan: plan)
+                do {
+                    try await executor.upload(fileURL: file, plan: plan)
+                } catch let failure as V2HTTPFailure {
+                    // An immutable single-object upload may already exist after a
+                    // lost success response. Only the control plane can verify its
+                    // size and digest; a conflict itself is never proof of success.
+                    guard plan.mode == .httpPut, failure.kind == .httpStatus,
+                          failure.service == "mediaProvider", failure.statusCode == 409 else { throw failure }
+                }
                 try Task.checkCancellation()
                 try await store.finishResourceStep(id: id, owner: ownerID, next: plan.mode == .httpPartPut ? .status : .finalize, retryAt: now())
             case .finalize:

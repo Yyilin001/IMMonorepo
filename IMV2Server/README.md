@@ -4,6 +4,8 @@
 
 跨组件数据流，以及实现证据与发布证据的区别，见[当前系统架构](../docs/current-system-map.md)和 [V2 文档入口](../IMV2/docs/README.md)。
 
+阿里云对象存储的解耦装配、环境配置和真实验证入口，见 [OSS 接入与验证](../docs/proposals/aliyun-oss-integration.md)及 [oss.env.example](oss.env.example)。
+
 ## 部署准备
 
 服务端要求 Swift 6.4；macOS 环境要求 macOS 26.2 或更高版本，并固定使用 Vapor 5.0.0-beta.3。Linux 镜像与 CI 使用相同摘要的 Swift 6.4 Jammy 镜像。数据库所有权、关闭顺序、依赖边界与验证要求见 [Vapor 5 迁移合同](../IMV2/docs/00-foundation/vapor5-migration.md)。
