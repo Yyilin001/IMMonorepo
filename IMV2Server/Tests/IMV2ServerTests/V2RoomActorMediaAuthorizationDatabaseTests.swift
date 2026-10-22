@@ -27,18 +27,27 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             try await installSchema(on: sql)
             try await seedRoom(on: sql)
             let now = Date(timeIntervalSince1970: 1_750_000_000)
-            let mediaID = MediaID(uuid: UUID()), sessionID = UUID()
-            try await sql.raw("""
-                INSERT INTO im_v2.media_objects
-                    (media_id, owner_user_id, content_type, byte_count, state,
-                     upload_session_id, expires_at, state_updated_at, created_at)
-                VALUES (\(bind: mediaID.uuidValue!), \(bind: senderUUID), 'text/plain', 5,
-                    'available', \(bind: sessionID), \(bind: now.addingTimeInterval(600)),
-                    \(bind: now), \(bind: now))
-                """).run()
+            let mediaID = MediaID(uuid: UUID()), device = DeviceID(uuid: UUID())
+            let uploads = PostgresV2ResourceLifecycleStore(database: database, authorize: { _ in })
+            let input = try V2ResourceUploadRequest(operationID: .init(uuid: UUID()),
+                mediaID: mediaID, usage: .messageAttachment(roomID), contentType: "text/plain",
+                byteCount: 5, checksum: .init(value: String(repeating: "a", count: 64)))
+            let upload = try await createResourceUpload(input, device: device, store: uploads,
+                expiresAt: now.addingTimeInterval(600), now: now)
+            let sessionID = upload.sessionID
+            let claim = try await uploads.claimFinalize(session: sessionID, generation: 1,
+                actor: senderUUID, device: device.uuidValue!, now: now)
+            try await uploads.publish(claim, facts: .init(reference: claim.placement,
+                byteCount: 5, sha256: Data(repeating: 0xaa, count: 32)),
+                actor: senderUUID, device: device.uuidValue!, now: now)
+            let scans = PostgresV2MediaScanStore(database: database)
+            let scan = try #require(try await scans.claimPending(now: now, leaseDuration: 30, limit: 1).first)
+            try await scans.complete(scan, result: .passed, now: now)
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+                database: database, controlDatabase: database,
+                store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: profile, limits: try .init(maxUTF8Bytes: 128), now: { now })
             let room = RoomID(uuid: roomUUID)
             guard case .accepted(let message) = try await send.send(.init(roomID: room,

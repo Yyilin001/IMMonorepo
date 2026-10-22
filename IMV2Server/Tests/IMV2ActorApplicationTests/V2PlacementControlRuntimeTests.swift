@@ -138,7 +138,15 @@ struct V2PlacementControlRuntimeTests {
             await #expect(throws: V2RoomActorApplicationError.invalidRole) {
                 try await V2PlacementControlService.inspect(configuration: configs[0])
             }
-            #expect(try await runtime.stop(deadline: .now + .seconds(5)))
+            // Supervisor TERM arrives through cancellation of its owning task.
+            // A live trust-directory worker must still drain before the same
+            // listener and placement identity can be reused below.
+            let cancelledShutdown = Task {
+                withUnsafeCurrentTask { $0?.cancel() }
+                #expect(Task.isCancelled)
+                return try await runtime.stop(deadline: .now + .seconds(5))
+            }
+            #expect(try await cancelledShutdown.value)
             gateway = nil
             // Retirement did not stop any of the independent voters. A new
             // exact process incarnation can register using the same history.

@@ -3,6 +3,7 @@ import Foundation
 import IMV2ActorContracts
 import Testing
 @testable import IMV2ActorCluster
+@testable import IMV2ActorApplication
 
 @Suite("Deployment trust grant authoring")
 struct V2ActorTrustAdmissionAuthoringTests {

@@ -1521,7 +1521,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                     (SELECT capacity_class FROM im_v2.rooms WHERE room_id = \(bind: room)) AS capacity_class,
                     (SELECT COUNT(*) FROM im_v2.group_creation_owner_receipts WHERE actor_user_id = \(bind: ownerUUID) AND operation_id = \(bind: operationUUID)) AS operation_count,
                     (SELECT (receipt->'outcome'->'created'->>'memberCount')::bigint FROM im_v2.group_creation_owner_receipts WHERE actor_user_id = \(bind: ownerUUID) AND operation_id = \(bind: operationUUID)) AS operation_member_count,
-                    (SELECT cardinality(initial_member_user_ids) FROM im_v2.group_room_operations WHERE actor_user_id = \(bind: ownerUUID) AND operation_id = \(bind: operationUUID)) AS materialized_operation_member_count
+                    (SELECT COUNT(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = 'im_v2' AND c.relname = 'group_room_operations') AS retired_operation_table_count
                 """).first(decoding: GroupCreateScaleAccountingRow.self))
 
             #expect(group.capacityClass == .large)
@@ -1532,7 +1533,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(accounting.operationCount == 1)
             #expect(group.receipt.validates(intent: intent))
             #expect(accounting.operationMemberCount == 100_000)
-            #expect(accounting.materializedOperationMemberCount == 0)
+            #expect(accounting.retiredOperationTableCount == 0)
             print("V2_LOCAL_HYBRID_100K_GROUP_CREATE_TIMING total_wall_ms=\(v2LocalElapsedMilliseconds(since: startedAt)) schema_ms=\(schemaElapsed) create_ms=\(creationElapsed) members=\(accounting.memberCount) personal_discovery_events=\(accounting.targetCount)")
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
@@ -1750,14 +1751,14 @@ private struct GroupCreateScaleAccountingRow: Decodable {
     let capacityClass: String
     let operationCount: Int64
     let operationMemberCount: Int
-    let materializedOperationMemberCount: Int
+    let retiredOperationTableCount: Int
     enum CodingKeys: String, CodingKey {
         case memberCount = "member_count"
         case targetCount = "target_count"
         case capacityClass = "capacity_class"
         case operationCount = "operation_count"
         case operationMemberCount = "operation_member_count"
-        case materializedOperationMemberCount = "materialized_operation_member_count"
+        case retiredOperationTableCount = "retired_operation_table_count"
     }
 }
 

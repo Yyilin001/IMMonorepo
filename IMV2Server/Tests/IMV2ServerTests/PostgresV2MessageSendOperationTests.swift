@@ -253,46 +253,49 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let command = try V2MessageSendOperationCommand(command: .init(roomID: roomID,
                 senderUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "committed without push",
                 limits: .init(maxUTF8Bytes: 64)), firstSubmissionDeadlineMilliseconds: 1_750_000_060_000)
-            let before = try await withRoomActivationLifetime(database: database, roomID: roomID) { token, lifetime in
-                let source = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime)
-                let baseline = try await source.snapshot(roomID: roomID, owner: token.owner, trackedUserIDs: [senderID])
-                if actualCrash {
-                    try await crashCommittedSend(token: token)
+            try await V2DatabaseRoomActorTestRuntime.withReplacementHosts(shardID: "room-a") { runtime in
+                let owner = try V2RoomDataOwner(shardID: "room-a", epoch: 0)
+                let before = try await runtime.executeWithLifetime(roomID: roomID, owner: owner) { token, lifetime in
+                    let source = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime)
+                    let baseline = try await source.snapshot(roomID: roomID, owner: token.owner, trackedUserIDs: [senderID])
+                    if actualCrash {
+                        try await crashCommittedSend(token: token)
+                        return (baseline.highWatermark, token)
+                    }
+                    let result = try await store.send(command, token: token, capacityProfile: profile,
+                        identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())))
+                    guard case .receipt(let receipt) = result, case .accepted = receipt.outcome else {
+                        throw V2RoomWriteStoreError.corruptPersistenceState
+                    }
+                    // Deliberately omit every in-memory commit notification.
                     return (baseline.highWatermark, token)
                 }
-                let result = try await store.send(command, token: token, capacityProfile: profile,
-                    identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())))
-                guard case .receipt(let receipt) = result, case .accepted = receipt.outcome else {
-                    throw V2RoomWriteStoreError.corruptPersistenceState
+                try await runtime.executeWithLifetime(roomID: roomID, owner: owner) { token, lifetime in
+                    let replacement = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime)
+                    let snapshot = try await replacement.snapshot(roomID: roomID, owner: token.owner, trackedUserIDs: [senderID])
+                    let page = try await replacement.read(roomID: roomID, owner: token.owner,
+                        afterRoomSequence: before.0, trackedUserIDs: [senderID], limit: 64)
+                    #expect(snapshot.highWatermark == before.0 + 1)
+                    #expect(page.highWatermark == snapshot.highWatermark)
+                    #expect(page.records.count == 1)
+                    #expect(page.records.first?.hasOnlineBody == true)
+                    #expect(page.records.first?.event.highWatermark == snapshot.highWatermark)
+                    let record = try #require(page.records.first)
+                    let member = try #require(snapshot.members.first { $0.userID == senderID && $0.authorized })
+                    let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 71, count: 32))
+                    let authenticatedUser = senderID
+                    try await V2AccountDeliveryTCPTests().exercise(
+                        store: PostgresV2DeviceRoomProgressStore(database: database), user: senderID, rooms: [roomID],
+                        committed: (token, record.event, .init(userID: member.userID, memberRevision: member.memberRevision)),
+                        separateGateways: true, actorRouting: true, retiredActivation: actualCrash ? before.1 : nil,
+                        authenticator: V2PostgresGatewayAuthenticator(database: database, tokenKey: key),
+                        credentials: { device in
+                            let token = UUID().uuidString, issued = Date(), expires = issued.addingTimeInterval(3_600)
+                            try await sql.raw("INSERT INTO im_v2.auth_devices(user_id,device_id,created_at,last_active_at,session_expires_at) VALUES(\(bind: authenticatedUser.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: issued),\(bind: expires))").run()
+                            try await sql.raw("INSERT INTO im_v2.device_access_tokens(token_hmac,user_id,device_id,issued_at,expires_at) VALUES(\(bind: key.digest(token)),\(bind: authenticatedUser.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: expires))").run()
+                            return token
+                        })
                 }
-                // Deliberately omit every in-memory commit notification.
-                return (baseline.highWatermark, token)
-            }
-            try await withRoomActivationLifetime(database: database, roomID: roomID) { token, lifetime in
-                let replacement = try PostgresV2RoomSubscriptionSource(database: database, activation: token, lifetime: lifetime)
-                let snapshot = try await replacement.snapshot(roomID: roomID, owner: token.owner, trackedUserIDs: [senderID])
-                let page = try await replacement.read(roomID: roomID, owner: token.owner,
-                    afterRoomSequence: before.0, trackedUserIDs: [senderID], limit: 64)
-                #expect(snapshot.highWatermark == before.0 + 1)
-                #expect(page.highWatermark == snapshot.highWatermark)
-                #expect(page.records.count == 1)
-                #expect(page.records.first?.hasOnlineBody == true)
-                #expect(page.records.first?.event.highWatermark == snapshot.highWatermark)
-                let record = try #require(page.records.first)
-                let member = try #require(snapshot.members.first { $0.userID == senderID && $0.authorized })
-                let key = try V2AccessTokenHMACKey(rawBytes: Data(repeating: 71, count: 32))
-                let authenticatedUser = senderID
-                try await V2AccountDeliveryTCPTests().exercise(
-                    store: PostgresV2DeviceRoomProgressStore(database: database), user: senderID, rooms: [roomID],
-                    committed: (token, record.event, .init(userID: member.userID, memberRevision: member.memberRevision)),
-                    separateGateways: true, actorRouting: true, retiredActivation: actualCrash ? before.1 : nil,
-                    authenticator: V2PostgresGatewayAuthenticator(database: database, tokenKey: key),
-                    credentials: { device in
-                        let token = UUID().uuidString, issued = Date(), expires = issued.addingTimeInterval(3_600)
-                        try await sql.raw("INSERT INTO im_v2.auth_devices(user_id,device_id,created_at,last_active_at,session_expires_at) VALUES(\(bind: authenticatedUser.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: issued),\(bind: expires))").run()
-                        try await sql.raw("INSERT INTO im_v2.device_access_tokens(token_hmac,user_id,device_id,issued_at,expires_at) VALUES(\(bind: key.digest(token)),\(bind: authenticatedUser.uuidValue!),\(bind: device.uuidValue!),\(bind: issued),\(bind: expires))").run()
-                        return token
-                    })
             }
         }
     }

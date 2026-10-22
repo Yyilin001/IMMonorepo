@@ -18,17 +18,17 @@ struct V2RoomHostPostgresReservationTests {
     @Test("a granted B recovery flushes while A waits behind an A-to-B pair reservation",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_IS_DISPOSABLE"] == "1"))
     func grantedReadDoesNotWaitForUnadmittedRoom() async throws {
-        try await withPairDatabase { database, sql, seed in
+        try await withPairDatabase { database, sql, seed, policies in
             let identity = V2ActorHostIdentity(hostID: try .init("pair-pg-host"), incarnationID: UUID())
             try await withNativePlacementTestControl(host: identity, shardID: "room-a") { control in
                 let placement = try await control.register(identity, shard: "room-a")
-                let hosted = try makePairHost(database: database, profile: seed.profile, identity: identity, placement: placement)
+                let hosted = try makePairHost(database: database, profile: seed.profile, identity: identity, placement: placement, policies: policies)
                 let host = hosted.host
                 let trace = PairReservationTrace()
                 let coordinator = pairCoordinator(host: host, configuration: hosted.configuration,
                     tokens: hosted.tokens, trace: trace)
                 let executor = try pairExecutor(database: database, profile: seed.profile,
-                    admission: hosted.admission)
+                    admission: hosted.admission, policies: policies)
                 let forward = pairWire(sourceRoom: seed.a, targetRoom: seed.b,
                     sourceMessage: seed.aSource.messageID)
                 let rowLock = PairPhaseGate()
@@ -103,17 +103,17 @@ struct V2RoomHostPostgresReservationTests {
     @Test("opposite pairs acquire A then B; cancelled waiter releases capacity and post-SQL unknown retires both",
           .enabled(if: ProcessInfo.processInfo.environment["IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_IS_DISPOSABLE"] == "1"))
     func opposingPairCancellationAndUnknown() async throws {
-        try await withPairDatabase { database, sql, seed in
+        try await withPairDatabase { database, sql, seed, policies in
             let identity = V2ActorHostIdentity(hostID: try .init("pair-pg-host"), incarnationID: UUID())
             try await withNativePlacementTestControl(host: identity, shardID: "room-a") { control in
                 let placement = try await control.register(identity, shard: "room-a")
-                let hosted = try makePairHost(database: database, profile: seed.profile, identity: identity, placement: placement)
+                let hosted = try makePairHost(database: database, profile: seed.profile, identity: identity, placement: placement, policies: policies)
                 let host = hosted.host
                 let trace = PairReservationTrace()
                 let coordinator = pairCoordinator(host: host, configuration: hosted.configuration,
                     tokens: hosted.tokens, trace: trace)
                 let executor = try pairExecutor(database: database, profile: seed.profile,
-                    admission: hosted.admission)
+                    admission: hosted.admission, policies: policies)
                 let firstWire = pairWire(sourceRoom: seed.a, targetRoom: seed.b,
                     sourceMessage: seed.aSource.messageID)
                 let unknownWire = pairWire(sourceRoom: seed.b, targetRoom: seed.a,
@@ -257,7 +257,8 @@ private actor PairTokenRegistry {
 }
 
 private func makePairHost(database: any Database, profile: V2CapacityProfile,
-    identity: V2ActorHostIdentity, placement: V2RoomActorPlacementRuntime) throws -> PairHosted {
+    identity: V2ActorHostIdentity, placement: V2RoomActorPlacementRuntime,
+    policies: V2RoomPolicyAuthorizationService) throws -> PairHosted {
     // Four reservation permits allow one pair to hold two barriers while an
     // opposing pair queues on A; only two rooms are actually activated.
     let config = try V2RoomRuntimeConfiguration(maximumActiveRooms: 4,
@@ -278,7 +279,7 @@ private func makePairHost(database: any Database, profile: V2CapacityProfile,
         messageLimits: .init(maxUTF8Bytes: 64), maximumEditBytes: 64,
         contentReviewMode: .disabled, queryBatchConfiguration: .init(),
         databaseWorkAdmission: admission)
-    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingFixturePolicyAuthorizations(endpoint: "room-a")],
+    let factory = try V2RoomServerActivationFactory(owners: ["room-a": resources.usingPolicyAuthorizations(policies)],
         safetyActorUserID: senderID).runtimeFactory()
     return .init(host: .init(identity: identity, placement: placement,
         configuration: config, budget: budget,
@@ -315,8 +316,9 @@ private func pairCoordinator(host: V2RoomActivationHost<V2RoomRequest, V2RoomRes
 }
 
 private func pairExecutor(database: any Database, profile: V2CapacityProfile,
-    admission: V2DatabaseWorkAdmissionController) throws -> V2ActorForwardPairDomainExecutor {
-    .init(database: database, write: .init(database: database), capacityProfile: profile,
+    admission: V2DatabaseWorkAdmissionController,
+    policies: V2RoomPolicyAuthorizationService) throws -> V2ActorForwardPairDomainExecutor {
+    .init(database: database, write: PostgresV2RoomWriteStore(database: database).usingPolicyAuthorizations(policies), capacityProfile: profile,
         limits: try .init(maxUTF8Bytes: 64), databaseWorkAdmission: admission, now: Date.init)
 }
 
@@ -440,7 +442,7 @@ private struct PairProjectionDelivery: V2UserShardProjectionDelivering {
         projectionKinds: Set<String>) async throws -> UInt64? { nil }
 }
 
-private func withPairDatabase(_ operation: (any Database, any SQLDatabase, PairSeed) async throws -> Void) async throws {
+private func withPairDatabase(_ operation: (any Database, any SQLDatabase, PairSeed, V2RoomPolicyAuthorizationService) async throws -> Void) async throws {
     guard ProcessInfo.processInfo.environment["IMV2_ACTOR_PAIR_INTERLEAVE_DATABASE_IS_DISPOSABLE"] == "1" else {
         throw PairTestFailure.schemaAlreadyExists
     }
@@ -491,7 +493,9 @@ private func withPairDatabase(_ operation: (any Database, any SQLDatabase, PairS
         try await sql.raw("UPDATE im_v2.rooms SET membership_revision = 1").run()
         try await sql.raw("UPDATE im_v2.room_memberships SET joined_revision = 1").run()
         let profile = try fixture.forwardImportTestProfile()
-        let sender = V2SendMessageService(store: PostgresV2RoomWriteStore(database: database),
+        let sender = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+            database: database, controlDatabase: database,
+            store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
             capacityProfile: profile, limits: try .init(maxUTF8Bytes: 64), now: { at })
         let b = RoomID(uuid: pairRoomBUUID)
         guard case .accepted(let sourceA) = try await sender.send(.init(roomID: roomID,
@@ -505,8 +509,18 @@ private func withPairDatabase(_ operation: (any Database, any SQLDatabase, PairS
             SET valid_until = clock_timestamp() + INTERVAL '1 hour'
             WHERE room_shard_id = 'room-a'
             """).run()
-        try await operation(database, sql, .init(a: roomID, b: b,
-            aSource: sourceA, bSource: sourceB, profile: profile))
+        try await withFixturePolicyOwners(database: database, projectionDelivery: PairProjectionDelivery()) { owners in
+            let policies = V2RoomPolicyAuthorizationService(roomDatabase: database,
+                policyOwners: owners, endpoint: "pair-reservation-test", maximumRooms: 2)
+            do {
+                try await operation(database, sql, .init(a: roomID, b: b,
+                    aSource: sourceA, bSource: sourceB, profile: profile), policies)
+                await policies.shutdown()
+            } catch {
+                await policies.shutdown()
+                throw error
+            }
+        }
         try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()
         installed = false
         try await resources.shutdown()

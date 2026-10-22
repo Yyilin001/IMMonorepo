@@ -59,9 +59,10 @@ struct V2RoomActivationCommitAckLossTests {
             // recovers the same durable operation from PostgreSQL.
             await #expect(throws: V2RoomTransactionOutcomeUnknown.self) {
                 try await withRoomActivation(database: database, roomID: roomID) { token in
-                    let scope = try V2RoomActivationWriteScope(tokens: [token])
-                    let throughProxy = PostgresV2RoomWriteStore(database: proxied.database(.psql))
-                        .usingActivationScope(scope)
+                    let throughProxy = V2PolicyAuthorizedTestWriteStore(database: database,
+                        controlDatabase: database,
+                        store: PostgresV2RoomWriteStore(database: proxied.database(.psql)),
+                        shardID: "room-a", epoch: 0, activationToken: token)
                     _ = try await V2RoomSQLDeadline.withDeadline(.now + .seconds(5)) {
                         try await throughProxy.accept(command: command, capacityProfile: profile,
                             identifiers: identifiers, now: now)
@@ -83,8 +84,9 @@ struct V2RoomActivationCommitAckLossTests {
             // A fresh independent client replays the same durable operation ID.
             // New executor-minted IDs cannot create a second message or event.
             let replay = try await withRoomActivation(database: database, roomID: roomID) { token in
-                try await PostgresV2RoomWriteStore(database: database)
-                    .usingActivationScope(.init(tokens: [token])).accept(command: command, capacityProfile: profile,
+                try await V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0,
+                    activationToken: token).accept(command: command, capacityProfile: profile,
                         identifiers: .init(messageID: .init(uuid: UUID()), eventID: .init(uuid: UUID())),
                         now: now.addingTimeInterval(1))
             }

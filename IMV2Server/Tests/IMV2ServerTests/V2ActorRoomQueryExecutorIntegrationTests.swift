@@ -126,7 +126,7 @@ struct V2ActorRoomQueryExecutorIntegrationTests {
                 let missing = try await receipt.query(.readerCandidates(readers), token: old)
                 #expect(missing == .readersFailure(.messageNotFound))
                 try await sql.raw("UPDATE im_v2.rooms SET owner_epoch=1 WHERE room_id=\(bind: room)").run()
-                await #expect(throws: V2RoomActorStateError.ownerChanged) {
+                await #expect(throws: V2RoomActorStateError.activationChanged) {
                     _ = try await receipt.command(.record(request), token: old, ingressAt: now)
                 }
             }

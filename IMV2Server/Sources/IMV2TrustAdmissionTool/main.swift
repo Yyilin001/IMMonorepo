@@ -1,5 +1,5 @@
 import Foundation
-import IMV2ActorCluster
+import IMV2ActorApplication
 
 // Offline output only. Publish the completed file with an atomic rename into
 // each node's admission directory; never distribute this tool's private input.

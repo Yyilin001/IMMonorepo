@@ -19,21 +19,42 @@ private struct DatabaseRoomTestResult: Sendable {
 /// final physical stop are owned tasks; a cancelled caller cannot abandon them.
 actor V2DatabaseRoomActorTestRuntime {
     static let shared = V2DatabaseRoomActorTestRuntime()
+    private let retainedPlacement: (control: V2NativePlacementTestControl, hostID: V2ActorHostID)?
+
+    private init(retainedPlacement: (V2NativePlacementTestControl, V2ActorHostID)? = nil) {
+        self.retainedPlacement = retainedPlacement
+    }
+
+    /// Each completed call drains its physical Host. Successive calls register
+    /// a new incarnation against the same durable placement quorum.
+    static func withReplacementHosts<Value: Sendable>(shardID: String,
+        _ body: (V2DatabaseRoomActorTestRuntime) async throws -> Value) async throws -> Value {
+        let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
+        return try await withNativePlacementTestControl(host: identity, shardID: shardID) { control in
+            try await body(V2DatabaseRoomActorTestRuntime(retainedPlacement: (control, identity.hostID)))
+        }
+    }
     private struct Session: Sendable {
         let id: UUID
         let shardID: String
         let host: V2RoomActivationHost<DatabaseRoomTestCall, DatabaseRoomTestResult>
+        let budget: V2RoomCommandBudget
         let placement: V2RoomActorPlacementRuntime
         let control: V2NativePlacementTestControl
+        let ownsControl: Bool
 
-        static func open(shardID: String) async throws -> Self {
-            let identity = V2ActorHostIdentity(hostID: .init(uuid: UUID()), incarnationID: UUID())
-            let control = try await V2NativePlacementTestControl.open(host: identity, shardID: shardID)
+        static func open(shardID: String,
+            retainedPlacement: (control: V2NativePlacementTestControl, hostID: V2ActorHostID)?) async throws -> Self {
+            let identity = V2ActorHostIdentity(hostID: retainedPlacement?.hostID ?? .init(uuid: UUID()), incarnationID: UUID())
+            let control: V2NativePlacementTestControl
+            if let retainedPlacement { control = retainedPlacement.control }
+            else { control = try await V2NativePlacementTestControl.open(host: identity, shardID: shardID) }
             do {
                 let placement = try await control.register(identity, shard: shardID)
                 let configuration = try V2RoomRuntimeConfiguration()
+                let budget = V2RoomCommandBudget(configuration: configuration)
                 let host = V2RoomActivationHost<DatabaseRoomTestCall, DatabaseRoomTestResult>(identity: identity,
-                    placement: placement, configuration: configuration, budget: .init(configuration: configuration),
+                    placement: placement, configuration: configuration, budget: budget,
                     classify: { _ in .barrier }, factory: .init { token in
                         let lifetime = Mutex<V2RoomActivationLifetime?>(nil)
                         return .init(restore: { context in
@@ -62,8 +83,12 @@ actor V2DatabaseRoomActorTestRuntime {
                         }, invalidateReservation: { _ in }, close: {})
                     })
                 await host.start()
-                return .init(id: UUID(), shardID: shardID, host: host, placement: placement, control: control)
-            } catch { try? await control.close(); throw error }
+                return .init(id: UUID(), shardID: shardID, host: host, budget: budget,
+                    placement: placement, control: control, ownsControl: retainedPlacement == nil)
+            } catch {
+                if retainedPlacement == nil { try? await control.close() }
+                throw error
+            }
         }
 
         func close() async throws {
@@ -74,7 +99,7 @@ actor V2DatabaseRoomActorTestRuntime {
                 throw V2RoomCallFailure.notAccepted(.unavailable)
             }
             try await placement.retireAfterDrain(proof, shards: [shardID])
-            try await control.close()
+            if ownsControl { try await control.close() }
         }
     }
     private enum Entry {
@@ -83,6 +108,13 @@ actor V2DatabaseRoomActorTestRuntime {
         case stopping(Session, UUID, Task<Void, any Error>)
     }
     private var sessions: [String: Entry] = [:]
+
+    /// Real Host permits include the executing turn and admitted queued calls.
+    /// SQL lock observations cannot see commands waiting in the native lane.
+    func admittedCommandCount(shardID: String) -> Int {
+        guard case .ready(let session, _) = sessions[shardID] else { return 0 }
+        return session.budget.snapshot().commandCount
+    }
 
     private func acquire(shardID: String) async throws -> Session {
         while true {
@@ -109,7 +141,7 @@ actor V2DatabaseRoomActorTestRuntime {
                     sessions.removeValue(forKey: shardID)
                 }
             case nil:
-                sessions[shardID] = .starting(UUID(), Task { try await Session.open(shardID: shardID) })
+                sessions[shardID] = .starting(UUID(), Task { try await Session.open(shardID: shardID, retainedPlacement: retainedPlacement) })
             }
         }
     }

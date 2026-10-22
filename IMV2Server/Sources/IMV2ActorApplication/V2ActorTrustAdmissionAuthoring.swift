@@ -1,4 +1,5 @@
 import Foundation
+import IMV2ActorCluster
 import IMV2ActorContracts
 
 /// Deployment-side authoring. The resulting packet still passes the production

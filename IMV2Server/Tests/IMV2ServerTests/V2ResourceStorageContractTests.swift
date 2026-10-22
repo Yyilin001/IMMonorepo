@@ -7,6 +7,22 @@ import Testing
 @testable import IMV2ServerInfrastructure
 
 struct V2ResourceStorageContractTests {
+    @Test("Local storage rejects path-shaped and noncanonical object handles",
+          arguments: ["../outside", "/tmp/outside", "%2e%2e%2foutside", "..\\outside", "./object", "object/../outside", "invalid-uuid"])
+    func rejectsPathHandles(handle: String) async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let storage = try V2LocalResourceStorage(root: root, binding: .init(id: "local", configurationRevision: 1))
+        let reference = try V2StoredObjectReference(placementID: UUID(), binding: storage.binding, handle: Data(handle.utf8))
+        await #expect(throws: V2ResourceProviderError.configurationInvalid) { _ = try await storage.inspect(reference) }
+        await #expect(throws: V2ResourceProviderError.configurationInvalid) { _ = try await storage.read(reference) }
+        await #expect(throws: V2ResourceProviderError.configurationInvalid) { try await storage.delete(reference) }
+        let payload = Data([1, 2, 3])
+        await #expect(throws: V2ResourceProviderError.configurationInvalid) {
+            _ = try await storage.write(reference, byteCount: 3,
+                sha256: Data(SHA256.hash(data: payload)), bytes: stream(payload))
+        }
+    }
     @Test func configurationDoesNotSilentlyChooseAnInvalidOrAmbiguousRevision() throws {
         let bindings="""
         [{"id":"old","revision":1,"directory":"/tmp/old"},{"id":"next","revision":2,"directory":"/tmp/next"}]

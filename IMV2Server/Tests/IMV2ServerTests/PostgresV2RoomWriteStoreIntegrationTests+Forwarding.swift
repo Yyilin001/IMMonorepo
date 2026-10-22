@@ -47,6 +47,16 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let mentioned = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
             let lease = UUID(uuidString: "00000000-0000-0000-0000-00000000b002")!
             let now = Date(timeIntervalSince1970: 1_750_000_000)
+            // Membership alone does not establish an active account. Seed the
+            // same identity facts used by the production Policy Owner.
+            try await sql.raw("""
+                INSERT INTO im_v2.public_user_profiles
+                    (user_id, public_handle, display_name, revision, created_at, updated_at)
+                SELECT ('00000000-0000-0000-0000-' || lpad(to_hex(member_number), 12, '0'))::uuid,
+                       'capacity' || lpad(member_number::text, 6, '0'),
+                       'Capacity member ' || member_number::text, 1, \(bind: now), \(bind: now)
+                FROM generate_series(1, 100000) AS member_number
+                """).run()
             try await sql.raw("""
                 INSERT INTO im_v2.rooms (room_id, room_shard_id, capacity_profile_id, capacity_class)
                 VALUES (\(bind: room), 'hybrid-100k', 'hybrid-100k', 'large')
@@ -77,7 +87,8 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
 
             let profile = try RoomCapacityProfile(maxEligibleMembers: 100000, maxCommandsPerWindow: 1_000,    retryAfterSeconds: 1)
             let service = V2SendMessageService(
-                store: PostgresV2RoomWriteStore(database: resources.database(.psql)),
+                store: V2PolicyAuthorizedTestWriteStore(database: resources.database(.psql), controlDatabase: resources.database(.psql),
+                    store: PostgresV2RoomWriteStore(database: resources.database(.psql)), shardID: "hybrid-100k", epoch: 0),
                 capacityProfile: try .init(id: "hybrid-100k", limits: profile),
                 limits: try .init(maxUTF8Bytes: 64), now: { now }
             )
@@ -111,6 +122,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(ordinaryPage.events.first?.roomSequence == ordinary.roomSequence)
             #expect(ordinaryPage.events.first?.projectionKind == "message")
             #expect(mentionedMessage.roomSequence == 2)
+            #expect(try await count("im_v2.room_memberships", on: sql) == 100000)
+            #expect(try await count("im_v2.messages", on: sql) == 2)
+            #expect(try await count("im_v2.room_events", on: sql) == 2)
             print("V2_LOCAL_HYBRID_100K_TIMING total_wall_ms=\(v2LocalElapsedMilliseconds(since: startedAt)) schema_ms=\(schemaElapsed) seed_ms=\(seedElapsed) ordinary_accept_ms=\(ordinaryElapsed) first_pull_ms=\(pullElapsed) mention_accept_ms=\(mentionElapsed) verification_ms=\(max(0, verificationElapsed)) ordinary_fanout_targets=0 mention_fanout_targets=0")
 
             try await sql.raw("DROP SCHEMA im_v2 CASCADE").run()

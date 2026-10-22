@@ -157,6 +157,21 @@
 | 账号限流计数与日期 | [账号限流策略、计数与日期绑定边界](account-rate-limit-integer-boundaries.md) | B01 |
 | 账号证明与 Gateway 时钟 | [服务端账号证明与 Gateway 时钟整数边界](server-clock-integer-boundaries.md) | B01 |
 
+## 专项设计与验证资料
+
+以下资料补充实现边界、专项审计和特定环境的测试证据。设计建议和历史测量不等于当前发布验收通过；已标注被替代的机制不得作为现行实现要求。
+
+| 主题 | 资料 | 阅读范围 |
+| --- | --- | --- |
+| 连接与恢复所有权 | [连接恢复重构](connection-recovery-refactor.md)、[连接 Registry 与恢复管线设计](connection-recovery-refactor-design.zh-CN.md) | 以文首当前机制范围为准 |
+| 订阅读取一致性 | [只读证明](room-subscription-readonly-proof.md) | 读取快照与授权边界证明，需结合当前原生 activation 合同 |
+| 权限事实快照 | [权限版本化内存快照](policy-versioned-memory-snapshot-implementation.zh-CN.md) | Policy Owner 与房间权限执行职责 |
+| 持久提交与在线发布 | [持久变更源](room-subscription-durable-change-source.md)、[Gateway Journal 审计](gateway-journal-control-only-audit.md) | 区分房间发布与个人控制事件 |
+| 消息链路修复 | [性能修复](message-flow-performance-fixes.md)、[服务端消息链路修复方案](server-message-flow-hardening.md) | 对应阶段的实现与验证范围 |
+| 发送吞吐测量 | [2026-10-08 吞吐记录](send-throughput-5000-20261008.zh-CN.md) | 仅适用于文中版本、环境与负载 |
+| 已被替代的分区方案 | [执行分区所有权历史提案](partition-ownership-design.zh-CN.md) | 历史追溯，不是当前所有权合同 |
+| 设备字节额度 | [设备字节额度与恢复通道设计](gateway-device-credit-design.zh-CN.md) | 设计及历史审计，按文首说明区分现状与建议 |
+
 ## 维护规则
 
 - 新增或修订合同：直接改对应合同文档，**不要**在状态文档或实现状态文档里追加"最新补充"段落。

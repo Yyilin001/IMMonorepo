@@ -645,6 +645,14 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             #expect(try await service.changeMemberRole(actorUserID: senderID, command: role) == .idempotent(promoted))
             guard case .applied(let unpinned) = try await service.setPinnedMessage(actorUserID: senderID, command: .init(operationID: .init(uuid: UUID()), roomID: roomID, messageID: message.messageID, isPinned: false)) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             #expect(unpinned.roomSequence == 6 && !unpinned.isPinned)
+            // Recovering the original pin returns its proof, without restoring
+            // that historical value over the later unpin.
+            #expect(try await service.setPinnedMessage(actorUserID: senderID, command: pin) == .idempotent(pinned))
+            let currentPin = try await withRoomActivation(database: resources.database(.psql), roomID: roomID) { token in
+                try await PostgresV2GroupCapabilityOperationStore(database: resources.database(.psql), clock: { now })
+                    .pinnedBaseline(.init(roomID: roomID, actorUserID: senderID, messageID: message.messageID), token: token)
+            }
+            #expect(!currentPin.isPinned && currentPin.roomSequence == unpinned.roomSequence)
             let empty = try V2GroupRolePermissionsCommand(operationID: .init(uuid: UUID()), roomID: roomID, role: .member, permissions: [], expectedRevision: 2)
             guard case .applied(let cleared) = try await service.setRolePermissions(actorUserID: senderID, command: empty) else { throw V2GroupCapabilitiesStoreError.corruptPersistenceState }
             #expect(cleared.roomSequence == 7 && cleared.permissions.isEmpty)

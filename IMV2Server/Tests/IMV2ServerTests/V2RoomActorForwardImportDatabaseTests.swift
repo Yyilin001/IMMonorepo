@@ -39,7 +39,9 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
             let profile = try V2CapacityProfile(id: "standard", limits: .init(
                 maxEligibleMembers: 10, maxCommandsPerWindow: 10, retryAfterSeconds: 1))
             let limits = try V2MessageCommandLimits(maxUTF8Bytes: 128)
-            let send = V2SendMessageService(store: PostgresV2RoomWriteStore(database: sourceDB),
+            let send = V2SendMessageService(store: V2PolicyAuthorizedTestWriteStore(
+                database: sourceDB, controlDatabase: sourceDB,
+                store: PostgresV2RoomWriteStore(database: sourceDB), shardID: "room-a", epoch: 0),
                 capacityProfile: profile, limits: limits, now: { oldNow })
             guard case .accepted(let message) = try await send.send(.init(roomID: sourceRoom,
                 actorUserID: senderID, clientMessageID: .init(uuid: UUID()), text: "remote source")) else {
@@ -64,8 +66,13 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         throw V2ForwardExportError.corruptPersistenceState
                     }
                     let importExecutor = try V2RoomForwardDomainExecutor(database: targetDB,
-                        token: targetToken, write: PostgresV2RoomWriteStore(database: targetDB),
-                        capacityProfile: profile, limits: limits)
+                        token: targetToken, importExport: { export, token, instant in
+                            try await V2PolicyAuthorizedTestWriteStore(database: targetDB,
+                                controlDatabase: targetDB, store: PostgresV2RoomWriteStore(database: targetDB),
+                                shardID: "room-b", epoch: 0, activationToken: token)
+                                .importForwardExport(export, capacityProfile: profile, limits: limits,
+                                    identifiers: try V2AcceptanceIDFactory().make(at: instant), now: instant)
+                        })
                     let command = V2RoomForwardCommand.importExport(.init(domain: export))
                     let first = try await importExecutor.execute(command)
                     guard case .imported(.accepted(let id, let sequence)) = first else {

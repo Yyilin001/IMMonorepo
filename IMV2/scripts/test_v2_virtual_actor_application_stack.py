@@ -769,6 +769,17 @@ def main() -> int:
                            stdout=output, stderr=subprocess.PIPE, text=True, timeout=60, check=True)
         document = json.loads(compose_file.read_text())
         document["name"] = project
+        # This drill starts several real application processes with independent
+        # PostgreSQL pools. The single-service development budget cannot hold
+        # their combined backends (measured above 128 PIDs and 1 GiB).
+        document["services"]["postgres"]["pids_limit"] = 512
+        document["services"]["postgres"]["mem_limit"] = "3g"
+        result["testPostgresPIDLimit"] = 512
+        result["testPostgresMemoryLimit"] = "3g"
+        # Account intentionally waits for the Host/Gateway startup barrier below.
+        # Its healthcheck must allow that bounded wait before counting failures.
+        document["services"]["account"]["healthcheck"]["start_period"] = "120s"
+        result["testAccountStartPeriod"] = "120s"
         # Task-owned HTTPS virtual host: the gateway container resolves account
         # through Compose DNS, while Caddy still proxies its loopback-only listener.
         # The same private CA signs both localhost (host probes) and account.

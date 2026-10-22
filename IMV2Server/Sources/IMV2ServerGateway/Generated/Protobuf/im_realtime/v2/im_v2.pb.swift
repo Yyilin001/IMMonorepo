@@ -3272,6 +3272,8 @@ public nonisolated struct IMV2GroupEventAvailable: Sendable {
 
   public var roomID: String = String()
 
+  /// Known committed head; optional bodies may end below this watermark.
+  /// It never advances the applied cursor without contiguous validated bodies.
   public var highWatermark: UInt64 = 0
 
   /// Optional acceleration payload for a plain room-log event. Its absence

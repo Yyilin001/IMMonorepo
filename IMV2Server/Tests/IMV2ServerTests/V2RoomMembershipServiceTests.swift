@@ -15,12 +15,23 @@ struct V2RoomMembershipServiceTests {
         #expect(try restored.fingerprint == request.fingerprint)
     }
 
-    @Test("invalid self-targeting is rejected before the persistence boundary")
+    @Test("self-add is rejected before the persistence boundary")
     func rejectsInvalidCommandBeforeStore() throws {
         let user = UserID(uuid: UUID())
         #expect(throws: V2MembershipOperationValidationError.invalidIntent) {
             try V2MembershipIntent(roomID: .init(uuid: UUID()), actorUserID: user, operationID: .init(uuid: UUID()),
-                targetUserID: user, action: .remove, expectedMembershipRevision: 1, confirmedUntilMilliseconds: 1_750_000_120_000)
+                targetUserID: user, action: .add, expectedMembershipRevision: 1, confirmedUntilMilliseconds: 1_750_000_120_000)
         }
+    }
+
+    @Test("self-remove remains a valid immutable exit intent")
+    func acceptsSelfExitIntent() throws {
+        let user = UserID(uuid: UUID())
+        let intent = try V2MembershipIntent(roomID: .init(uuid: UUID()), actorUserID: user,
+            operationID: .init(uuid: UUID()), targetUserID: user, action: .remove,
+            expectedMembershipRevision: 1, confirmedUntilMilliseconds: 1_750_000_120_000)
+        #expect(intent.actorUserID == intent.targetUserID)
+        #expect(intent.action == .remove)
+        #expect(try JSONDecoder().decode(V2MembershipIntent.self, from: JSONEncoder().encode(intent)) == intent)
     }
 }

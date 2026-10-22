@@ -34,6 +34,7 @@
 - [ADR 登记册](../IMV2/docs/ADR-REGISTER.md)：设计决定与批准状态。
 - [开放风险登记表](../IMV2/docs/10-operations/residual-risk-register.md)：外部发布缺口与关闭条件。
 - [验证运行记录索引](reviews/verification-records.md)：每条结论对应的本机运行记录与复现命令。
+- [服务端首次验收](verification/server-functional-acceptance-2026-10-22.md)与[问题修复及复验](verification/server-remediation-2026-10-22.md)：保留原始失败证据，分开记录修复后验证与尚未闭环的范围。
 - [iOS 应用](../IMApp/README.md)、[V2 网关](../IMV2Server/README.md)：本机运行与配置说明。
 
 ## 提交前

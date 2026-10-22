@@ -468,11 +468,17 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 second = Task { try await run(!editFirst) }
                 var blocked = false
                 for _ in 0..<300 {
-                    blocked = try await sql.raw("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND \(bind: firstPID)::integer=ANY(pg_blocking_pids(pid))) AS exists").first(decoding: ExistsRow.self)?.exists == true
+                    if ["mute", "moderation-remove", "membership-remove"].contains(restriction) {
+                        // These operations share the real native room lane.
+                        // The second admitted call waits before opening SQL.
+                        blocked = await V2DatabaseRoomActorTestRuntime.shared.admittedCommandCount(shardID: "room-a") >= 2
+                    } else {
+                        blocked = try await sql.raw("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND \(bind: firstPID)::integer=ANY(pg_blocking_pids(pid))) AS exists").first(decoding: ExistsRow.self)?.exists == true
+                    }
                     if blocked { break }
                     try await Task.sleep(for: .milliseconds(10))
                 }
-                try #require(blocked, "second service must wait for the first service transaction")
+                try #require(blocked, "second service must wait in its native lane or SQL lock behind the first transaction")
                 await gate.releaseTransaction()
                 try await blocker.value
                 #expect(try await first?.value == (editFirst ? "edited" : "policy"))

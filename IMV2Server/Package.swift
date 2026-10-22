@@ -55,7 +55,7 @@ let package = Package(
     ],
     targets: [
         .executableTarget(name: "IMV2ResourceImageWorker"),
-        .executableTarget(name: "IMV2TrustAdmissionTool", dependencies: ["IMV2ActorCluster"]),
+        .executableTarget(name: "IMV2TrustAdmissionTool", dependencies: ["IMV2ActorApplication"]),
         .executableTarget(name: "IMV2PlacementControlApp",
             dependencies: ["IMV2ActorApplication", "IMV2Server", "IMV2ServerContracts", "IMV2ServerApplication",
                            .product(name: "Logging", package: "swift-log")]),

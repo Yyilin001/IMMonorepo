@@ -112,6 +112,15 @@ package actor V2PlacementControlRuntime {
 
     package func stop(deadline: ContinuousClock.Instant) async throws -> Bool {
         closing = true
+        // TERM cancels the supervisor's monitor before it closes this runtime.
+        // Cleanup must still join trust scans, RPC work and physical resources.
+        // The caller owns and awaits this task; its explicit deadline, rather
+        // than the caller's cancellation flag, bounds the drain.
+        let drain = Task { try await self.stopOwned(deadline: deadline) }
+        return try await drain.value
+    }
+
+    private func stopOwned(deadline: ContinuousClock.Instant) async throws -> Bool {
         while (starting || stopping) && ContinuousClock.now < deadline {
             do { try await Task.sleep(for: .milliseconds(5)) } catch { return false }
         }

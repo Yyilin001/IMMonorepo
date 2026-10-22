@@ -166,9 +166,11 @@ struct V2AccountDeliveryTCPTests {
         let installedFences = Mutex<[String: V2RoomSubscriptionFence]>([:])
         var ownerPumps: [V2RoomSubscriptionDeliveryPump] = []
         var router: TCPAccountClusterRouter?
+        let fixtureHost = V2ActorHostIdentity(hostID: try .init("tcp-owner"), incarnationID: UUID())
+        var gatewayIdentities: [V2GatewayRealtimeIdentity] = []
         let automaticFences = try Dictionary(uniqueKeysWithValues: (automaticAccountCoverage ? rooms : []).map { room in
             let activation = try automaticOwner?.activation ?? V2RoomActivationToken(roomID: room, owner: .init(shardID: "tcp-rooms", epoch: 1),
-                activationEpoch: try .init(1), host: .init(hostID: try .init("tcp-owner"), incarnationID: UUID()))
+                activationEpoch: try .init(1), host: fixtureHost)
             return (room, V2RoomSubscriptionFence(activation: activation, subscriptionID: UUID(), generation: 1, baselineSequence: 0))
         })
         let group = MultiThreadedEventLoopGroup(numberOfThreads: 2)
@@ -183,6 +185,7 @@ struct V2AccountDeliveryTCPTests {
             let registry = registries[gatewayIndex], ingress = ingresses[gatewayIndex]
             let gateway = await deliveryRouter?.descriptor(gateway: gatewayIndex) ?? V2GatewayRealtimeDescriptor(identity: .init(nodeID: "tcp-gateway-\(gatewayIndex)", serviceID: "tcp-gateway-\(gatewayIndex)", incarnationID: UUID()),
                 endpointReference: Data([1]), address: "127.0.0.1", port: 9000)
+            gatewayIdentities.append(gateway.identity)
             let sendDelivery: V2RoomSubscriptionDeliveryPump.Send = { delivery, shard, _ in
                 let result: V2RoomSubscriptionDeliveryResult
                 if let deliveryRouter { result = try await deliveryRouter.send(delivery, gateway: gatewayIndex) }
@@ -396,10 +399,17 @@ struct V2AccountDeliveryTCPTests {
                         if retiredActivation == nil {
                             let replacement = V2RoomSubscriptionFence(activation: .init(roomID: room,
                                 owner: oldFence.activation.owner, activationEpoch: try .init(2),
-                                host: .init(hostID: oldFence.activation.host.hostID, incarnationID: UUID())),
+                                host: oldFence.activation.host),
                                 subscriptionID: UUID(), generation: 1, baselineSequence: 0)
-                            try #require(await ingress.installTestSession(fence: replacement, sourceShardID: shard,
-                                serviceID: "owner"))
+                            if automaticAccountCoverage {
+                                let session = testDeliverySession(fence: replacement, gateway: gatewayIdentities[index],
+                                    authority: ingress.authority)
+                                try #require(await ingress.install(fence: replacement, sourceShardID: shard,
+                                    serviceID: "owner", session: session))
+                            } else {
+                                try #require(await ingress.installTestSession(fence: replacement, sourceShardID: shard,
+                                    serviceID: "owner"))
+                            }
                             let baseline = V2RoomSubscriptionDelivery(fence: replacement, deliverySequence: 1,
                                 authorizationSequence: 1, payload: .baseline(members: [member]))
                             #expect(try await remote.send(baseline, gateway: index) == .appliedThrough(1))

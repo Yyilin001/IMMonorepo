@@ -43,7 +43,7 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                         batchDeadline: cutoff, callDeadline: cutoff, ingressAt: now.addingTimeInterval(1))) }
                     let failed = await first.result
                     let recorded = await sibling.result
-                    await #expect(throws: V2RoomActorStateError.ownerChanged) { try failed.get() }
+                    await #expect(throws: V2RoomActorStateError.activationChanged) { try failed.get() }
                     guard case .record(.recorded(let receipt)) = try recorded.get() else {
                         Issue.record("current activation did not record receipt"); return
                     }

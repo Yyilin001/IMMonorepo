@@ -222,6 +222,58 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
         try await verifyPolicyProofTimestamp(kind: kind, now: Date())
     }
 
+    @Test("Opposite concurrent friend requests preserve one pending relationship and both original proofs")
+    func oppositeFriendRequestsShareRevision() async throws {
+        try await withForwardOwnerDatabases(mode: .standard) { database, _, sql, _, _ in
+            try await withFixturePolicyOwners(database: database, projectionDelivery: SuccessfulProjectionDelivery()) { owners in
+                let social = PostgresV2SocialRelationshipStore(database: database,
+                    projectionDelivery: SuccessfulProjectionDelivery(), policyOwners: owners)
+                let target = UserID(uuid: memberTwoUUID), now = Date()
+                let first = try await social.freezeSocialFixture(actorUserID: senderID, targetUserID: target,
+                    operation: .relationship(.init(uuid: UUID())), action: .relationship(.request), now: now)
+                let second = try await social.freezeSocialFixture(actorUserID: target, targetUserID: senderID,
+                    operation: .relationship(.init(uuid: UUID())), action: .relationship(.request), now: now)
+                #expect(first.expectedRevision == second.expectedRevision)
+                async let firstResult = social.submitSocialOperation(first)
+                async let secondResult = social.submitSocialOperation(second)
+                let results = try await [firstResult, secondResult]
+                let commands = [first, second]
+                var winner: V2SocialOperationCommand?
+                var conflicts = 0
+                for (command, result) in zip(commands, results) {
+                    guard case .receipt(let proof) = result else { throw CancellationError() }
+                    #expect(proof.validates(command: command))
+                    switch proof.outcome {
+                    case .applied(.relationship(let state, let revision)):
+                        #expect(state == .pending && revision == command.expectedRevision + 1)
+                        #expect(winner == nil)
+                        winner = command
+                    case .rejected(.revisionConflict(let currentRevision)):
+                        #expect(currentRevision == command.expectedRevision + 1)
+                        conflicts += 1
+                    default: Issue.record("unexpected concurrent relationship result")
+                    }
+                    #expect(try await social.submitSocialOperation(command) == result)
+                }
+                let winning = try #require(winner)
+                #expect(conflicts == 1)
+                #expect(try await count("im_v2.user_relationships WHERE state = 'pending'", on: sql) == 1)
+                #expect(try await count("im_v2.social_operation_receipts", on: sql) == 2)
+                let acceptance = try await social.executeSocialFixture(actorUserID: winning.targetUserID,
+                    targetUserID: winning.actorUserID, operation: .relationship(.init(uuid: UUID())),
+                    action: .relationship(.accept), now: Date())
+                guard case .receipt(let accepted) = acceptance,
+                      case .applied(.relationship(let state, let revision)) = accepted.outcome else { throw CancellationError() }
+                #expect(state == .accepted && revision == first.expectedRevision + 2)
+                for (command, result) in zip(commands, results) {
+                    #expect(try await social.submitSocialOperation(command) == result)
+                }
+                #expect(try await count("im_v2.user_relationships WHERE state = 'accepted'", on: sql) == 1)
+                #expect(try await count("im_v2.social_operation_receipts", on: sql) == 3)
+            }
+        }
+    }
+
     private func verifyPolicyProofTimestamp(kind: String, now: Date) async throws {
         try await withForwardOwnerDatabases(mode: .standard) { database, deliveryDB, sql, deliverySQL, _ in
             let base = ["direct", "userAdd"].contains(kind) ? Date(timeIntervalSince1970: 1_750_000_000) : now

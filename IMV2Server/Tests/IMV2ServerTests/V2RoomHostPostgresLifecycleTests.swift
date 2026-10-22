@@ -145,7 +145,7 @@ struct V2RoomHostPostgresLifecycleTests {
                 #expect(await host.snapshot().restoringRooms == 1)
                 #expect(await host.snapshot().pendingRooms == 1)
                 #expect(await host.readyTokens() == [healthy])
-                await g2ExpectFailure(.notAccepted(.overloaded), Task {
+                await g2ExpectFailure(.notAccepted(.roomCapacityExhausted), Task {
                     try await host.activate(roomID: excessRoom, owner: owner,
                         deadline: .now + .seconds(1))
                 })

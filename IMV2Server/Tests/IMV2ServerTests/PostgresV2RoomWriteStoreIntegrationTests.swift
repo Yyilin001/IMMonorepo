@@ -354,7 +354,8 @@ struct PostgresV2RoomWriteStoreIntegrationTests {
                 members: [.init(uuid: mentioned)], profile: payload, now: base)
             // 群创建本身会给初始成员建一次投递；这里只关心提及带来的增量。
             let service = V2SendMessageService(
-                store: PostgresV2RoomWriteStore(database: database),
+                store: V2PolicyAuthorizedTestWriteStore(database: database, controlDatabase: database,
+                    store: PostgresV2RoomWriteStore(database: database), shardID: "room-a", epoch: 0),
                 capacityProfile: payload,
                 limits: try .init(maxUTF8Bytes: 512),
                 now: { base }

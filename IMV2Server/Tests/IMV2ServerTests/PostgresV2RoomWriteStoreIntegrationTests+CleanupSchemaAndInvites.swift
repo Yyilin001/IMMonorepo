@@ -1302,11 +1302,11 @@ extension PostgresV2RoomWriteStoreIntegrationTests {
                 do {
                     var allWaiting = false
                     for _ in 0..<500 {
-                        let waiting = try await control.raw("SELECT COUNT(*)::bigint AS value FROM pg_locks WHERE NOT granted AND pid IN (SELECT pid FROM pg_stat_activity WHERE datname = current_database())").first(decoding: CountRow.self)?.value ?? 0
-                        if waiting >= 3 { allWaiting = true; break }
+                        let admitted = await V2DatabaseRoomActorTestRuntime.shared.admittedCommandCount(shardID: "room-a")
+                        if admitted >= 3 { allWaiting = true; break }
                         try await Task.sleep(for: .milliseconds(10))
                     }
-                    #expect(allWaiting, "Approval, competing approval and removal must all reach the real lock barrier")
+                    try #require(allWaiting, "The SQL-blocked approval must retain its turn while both competing commands are admitted to the native Host")
                     try await control.raw("SELECT pg_advisory_unlock(908260001::bigint)").run()
                     return try await (first.value, second.value, removal.value)
                 } catch {

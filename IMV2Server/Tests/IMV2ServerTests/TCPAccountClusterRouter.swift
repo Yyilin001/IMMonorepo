@@ -49,7 +49,7 @@ actor TCPAccountClusterRouter {
                 if index > 0 {
                     try await transport.configureRoomSubscription(ingresses[index - 1])
                     if !journalHandlers.isEmpty { try await transport.configureJournalProjection(journalHandlers[index - 1]) }
-                    let actorID = try JSONDecoder().decode(ClusterSystem.ActorID.self, from: transport.descriptor.endpointReference)
+                    let actorID = try V2ActorProtobuf.decode(ClusterSystem.ActorID.self, from: transport.descriptor.endpointReference)
                     let remote = try V2GatewayRealtimeEndpoint.resolve(id: actorID, using: systems[0])
                     try #require(__isRemoteActor(remote))
                     systems[0].cluster.join(host: "127.0.0.1", port: port)
