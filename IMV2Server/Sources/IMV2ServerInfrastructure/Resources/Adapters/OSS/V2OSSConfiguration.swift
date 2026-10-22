@@ -35,6 +35,9 @@ public struct V2OSSCredentialProvider: Sendable {
 
     public init(environment: any V2RuntimeEnvironment, prefix: String = "IM_V2_OSS_") {
         load = {
+            if let path = environment.value(for: prefix + "CREDENTIAL_FILE") {
+                return try Self.readRotatingCredentials(path: path)
+            }
             guard let id = environment.value(for: prefix + "ACCESS_KEY_ID"), !id.isEmpty,
                   let secret = environment.value(for: prefix + "ACCESS_KEY_SECRET"), !secret.isEmpty
             else { throw V2ResourceProviderError.configurationInvalid }
@@ -45,6 +48,33 @@ public struct V2OSSCredentialProvider: Sendable {
                 throw V2ResourceProviderError.configurationInvalid
             }
             return .init(accessKeyID: id, accessKeySecret: secret, securityToken: token)
+        }
+    }
+
+    /// A host credential agent atomically replaces this private file. Read it for
+    /// each request so ECS role rotation does not require restarting the service.
+    private static func readRotatingCredentials(path: String) throws -> V2OSSCredentials {
+        struct Document: Decodable {
+            let AccessKeyId: String
+            let AccessKeySecret: String
+            let SecurityToken: String
+            let Expiration: String
+        }
+        do {
+            guard path.hasPrefix("/"), let file = FileHandle(forReadingAtPath: path) else {
+                throw V2ResourceProviderError.configurationInvalid
+            }
+            defer { try? file.close() }
+            let data = try file.read(upToCount: 16_385) ?? Data()
+            guard data.count <= 16_384 else { throw V2ResourceProviderError.configurationInvalid }
+            let value = try JSONDecoder().decode(Document.self, from: data)
+            guard !value.AccessKeyId.isEmpty, !value.AccessKeySecret.isEmpty, !value.SecurityToken.isEmpty,
+                  ISO8601DateFormatter().date(from: value.Expiration).map({ $0 > Date().addingTimeInterval(30) }) == true
+            else { throw V2ResourceProviderError.configurationInvalid }
+            return .init(accessKeyID: value.AccessKeyId, accessKeySecret: value.AccessKeySecret, securityToken: value.SecurityToken)
+        } catch {
+            // Never include credential file contents or decoder details in errors.
+            throw V2ResourceProviderError.configurationInvalid
         }
     }
 }

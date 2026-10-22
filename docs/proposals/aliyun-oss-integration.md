@@ -24,7 +24,7 @@
 
 新资源默认改用 OSS 时，在 `IM_V2_RESOURCE_STORAGE_BINDINGS_JSON` 保留已有的本地条目与准确目录，只修改默认 binding。启动 readiness 会检查历史引用，不支持把找不到的旧对象静默映射到新 Bucket。
 
-凭据通过运行环境注入。STS 使用 `IM_V2_OSS_SECURITY_TOKEN` 和 ISO-8601 `IM_V2_OSS_CREDENTIAL_EXPIRATION`；环境变量模式的进程需要在凭据过期前轮换并重启。`V2OSSCredentialProvider(load:)` 支持由装配层注入可刷新的凭据来源；当前示例尚未提供 ECS RAM Role 元数据自动刷新。不得将本机 CLI 的临时登录当作长期部署凭据。
+凭据通过运行环境注入。STS 使用 `IM_V2_OSS_SECURITY_TOKEN` 和 ISO-8601 `IM_V2_OSS_CREDENTIAL_EXPIRATION`；环境变量模式的进程需要在凭据过期前轮换并重启。ECS RAM Role 部署可设置 `IM_V2_OSS_CREDENTIAL_FILE=/run/im-oss-role/credentials.json`：服务按请求读取有界的凭据文件，拒绝缺失、损坏或过期内容，文件配置失败时不回退到环境变量凭据。宿主机通过 `scripts/refresh_v2_ecs_oss_credentials.py --role-name <role> --output <absolute-path>` 使用 IMDSv2 获取角色凭据，原子替换权限为 0600 的文件；由 systemd timer 每 5 分钟执行。容器应只读挂载整个凭据目录，以便原子替换后的新文件立即可见。角色轮换无需重启 Account/Gateway。`V2OSSCredentialProvider(load:)` 仍支持装配层注入其他凭据来源。不得将本机 CLI 的临时登录当作长期部署凭据。
 
 运行权限应限制为目标 Bucket 的 `oss:GetBucketAcl`、`oss:GetBucketVersioning`，以及绑定 prefix 下的 `oss:GetObject`、`oss:PutObject`。Bucket 版本控制、ACL、生命周期变更不属于运行权限。
 

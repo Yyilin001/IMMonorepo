@@ -62,4 +62,35 @@ struct V2OSSConfigurationTests {
         let headers = try signer.authorization(method: "GET", key: "object", now: Date())
         #expect(headers["authorization"]?.contains("Credential=STS.example/") == true)
     }
+
+    @Test func credentialFileRotationIsObservedWithoutRecreatingProvider() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        func save(_ id: String, expiration: String = "2100-01-01T00:00:00Z") throws {
+            try JSONSerialization.data(withJSONObject: ["AccessKeyId": id, "AccessKeySecret": "test-secret",
+                "SecurityToken": "test-token", "Expiration": expiration]).write(to: file, options: .atomic)
+        }
+        let provider = V2OSSCredentialProvider(environment: V2DictionaryRuntimeEnvironment([
+            "IM_V2_OSS_CREDENTIAL_FILE": file.path]))
+        try save("STS.first")
+        #expect(try await provider.load().accessKeyID == "STS.first")
+        try save("STS.rotated")
+        #expect(try await provider.load().accessKeyID == "STS.rotated")
+        try save("STS.expired", expiration: "2000-01-01T00:00:00Z")
+        await #expect(throws: V2ResourceProviderError.configurationInvalid) { _ = try await provider.load() }
+    }
+
+    @Test func invalidCredentialFileDoesNotFallBackToEnvironmentSecrets() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let provider = V2OSSCredentialProvider(environment: V2DictionaryRuntimeEnvironment([
+            "IM_V2_OSS_CREDENTIAL_FILE": file.path,
+            "IM_V2_OSS_ACCESS_KEY_ID": "fallback", "IM_V2_OSS_ACCESS_KEY_SECRET": "fallback"]))
+        for data in [Data(), Data("invalid-json".utf8), Data(repeating: 32, count: 16_385)] {
+            try data.write(to: file, options: .atomic)
+            await #expect(throws: V2ResourceProviderError.configurationInvalid) { _ = try await provider.load() }
+        }
+        try FileManager.default.removeItem(at: file)
+        await #expect(throws: V2ResourceProviderError.configurationInvalid) { _ = try await provider.load() }
+    }
 }
