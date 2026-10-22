@@ -32,8 +32,9 @@ public enum V2ResourceJournalError: Error, Equatable, Sendable {
 }
 
 public struct V2SubmittedSendIntent: Identifiable, Equatable, Sendable {
-    public enum Status: Equatable, Sendable { case pending, acceptedAwaitingProjection, confirmingOutcome, needsAttention, expiredUnsubmitted, closed, rejected }
+    public enum Status: Equatable, Sendable { case pending, waitingForNetwork, waitingForAuthentication, acceptedAwaitingProjection, confirmingOutcome, needsAttention, expiredUnsubmitted, closed, rejected }
     public let id: UUID
+    public let createdAt: Date
     public let text: String
     public let status: Status
 }

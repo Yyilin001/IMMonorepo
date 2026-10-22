@@ -6,6 +6,168 @@ import Testing
 
 @Suite("Message send public work", .serialized)
 struct V2MessageSendWorkTests {
+    @Test("sending restores an archived conversation and preserves pin and mute settings")
+    func sendingRestoresArchivedConversation() async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let mute = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) + 3600)
+        try await f.store.enqueuePersonalPreference(accountID: f.account,
+            target: .conversation(roomID: f.room, isPinned: true, isArchived: true, muteUntil: mute))
+        try await confirmPreference(f, pinned: true, archived: true, mute: mute)
+        #expect(try await f.store.conversationState(roomID: f.room)?.isArchived == true)
+        let intent = try f.intent("resume chat")
+        try await f.store.freezeSendIntent(intent)
+        let desired = try await f.store.personalPreferenceTarget(accountID: f.account,
+            fallback: .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
+        #expect(desired == .conversation(roomID: f.room, isPinned: true, isArchived: false, muteUntil: mute))
+        // Replaying the same send must not create another preference operation.
+        try await f.store.freezeSendIntent(intent)
+        try await confirmPreference(f, pinned: true, archived: false, mute: mute)
+        let state = try #require(try await f.store.conversationState(roomID: f.room))
+        #expect(!state.isArchived && state.isPinned && state.muteUntil == mute)
+        #expect(try await f.store.preparePersonalPreferences(accountID: f.account) == 0)
+        try await f.store.close()
+    }
+
+    @Test("a send supersedes an unfrozen archive without resetting other pending settings")
+    func sendingCoalescesPendingArchive() async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let archive = try await f.store.enqueuePersonalPreference(accountID: f.account,
+            target: .conversation(roomID: f.room, isPinned: true, isArchived: true, muteUntil: nil))
+        try await f.store.freezeSendIntent(f.intent("resume pending archive"))
+        let desired = try await f.store.personalPreferenceTarget(accountID: f.account,
+            fallback: .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
+        #expect(desired == .conversation(roomID: f.room, isPinned: true, isArchived: false, muteUntil: nil))
+        let ids = try await f.store.databasePool.read { try String.fetchAll($0, sql: "SELECT intent_id FROM v2_personal_preference_intents") }
+        #expect(ids == [archive.uuidString])
+        try await f.store.close()
+    }
+
+    @Test("failure to save a send rolls back its automatic unarchive")
+    func failedSendDoesNotUnarchive() async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        try await f.store.enqueuePersonalPreference(accountID: f.account,
+            target: .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
+        try await confirmPreference(f, pinned: false, archived: true, mute: nil)
+        try await f.store.databasePool.write { db in
+            try db.execute(sql: "CREATE TRIGGER fail_send BEFORE INSERT ON v2_send_intents BEGIN SELECT RAISE(ABORT,'send storage failure'); END")
+        }
+        await #expect(throws: DatabaseError.self) { try await f.store.freezeSendIntent(f.intent("not saved")) }
+        let desired = try await f.store.personalPreferenceTarget(accountID: f.account,
+            fallback: .conversation(roomID: f.room, isPinned: false, isArchived: false, muteUntil: nil))
+        #expect(desired == .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
+        #expect(try await f.store.preparingSendIntents().isEmpty)
+        #expect(try await f.store.preparePersonalPreferences(accountID: f.account) == 0)
+        try await f.store.close()
+    }
+
+    @Test("explicit resend of a proven-unsent message also restores its archived conversation")
+    func resendingRestoresArchivedConversation() async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let original = try f.intent("retry archived chat")
+        try await f.store.freezeSendIntent(original)
+        try await f.store.handOffSendIntent(original.id)
+        let work = try await f.head()
+        guard case .expiredUnsubmitted = try await f.store.claimOperationWork(id: work.id, ownerID: UUID(), action: .submit,
+            now: Date().addingTimeInterval(2 * 86400)) else { Issue.record("Expected proven local expiry"); return }
+        try await f.store.enqueuePersonalPreference(accountID: f.account,
+            target: .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
+        try await confirmPreference(f, pinned: false, archived: true, mute: nil)
+        let replacement = try await f.store.replaceProvenUnsentSendIntent(original.id)
+        #expect(replacement != original.id)
+        let desired = try await f.store.personalPreferenceTarget(accountID: f.account,
+            fallback: .conversation(roomID: f.room, isPinned: false, isArchived: true, muteUntil: nil))
+        #expect(desired == .conversation(roomID: f.room, isPinned: false, isArchived: false, muteUntil: nil))
+        #expect(try await f.store.replaceProvenUnsentSendIntent(original.id) == replacement)
+        try await f.store.close()
+    }
+
+    private func confirmPreference(_ f: SendWorkFixture, pinned: Bool, archived: Bool, mute: Date?) async throws {
+        #expect(try await f.store.preparePersonalPreferences(accountID: f.account) == 1)
+        let work = try #require(try await f.store.dueOperationWork(now: .now, kinds: [.conversationPreference]).first)
+        _ = try await f.claim(work)
+        let command = try await f.store.personalPreferenceCommand(workID: work.id)
+        let now = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
+        let revision = command.expectedRevision.rawValue + 1
+        let receipt = try V2PersonalPreferenceReceipt(identity: work.identity, fingerprint: work.fingerprint,
+            outcome: .committed(.conversationState(.init(roomID: f.room, isPinned: pinned, isArchived: archived,
+                muteUntil: mute, updatedAt: now, revision: .init(rawValue: revision)!))),
+            resolvedAtMilliseconds: UInt64(now.timeIntervalSince1970 * 1000))
+        try await f.store.completePersonalPreference(command: command, receipt: receipt, accountID: f.account)
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "room_id": f.room.rawValue, "is_pinned": pinned, "is_archived": archived,
+            "mute_until_ms": Int64((mute?.timeIntervalSince1970 ?? 0) * 1000),
+            "updated_at_ms": Int64(now.timeIntervalSince1970 * 1000), "revision": revision
+        ])
+        _ = try await f.store.apply(.init(generation: 1,
+            records: [.init(sequence: revision, sourceEventID: .init(uuid: UUID()), projectionKind: "conversation_state", payload: payload)],
+            nextSyncToken: .init("archive-\(revision)"), receipt: .init("archive-\(revision)"), hasMore: false, capabilityProfile: "base"))
+    }
+
+    @Test("pending rows keep the original creation time through handoff and retries")
+    func pendingCreationTimeSurvivesStatusChanges() async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let created = Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) - 5)
+        let intent = try f.intent("ordered message")
+        try await f.store.freezeSendIntent(intent, now: created)
+        let preparing = try await f.store.pendingResourceSendSnapshot(in: f.room, page: 0)
+        #expect(preparing.preparing.first?.createdAt == created)
+        try await f.store.handOffSendIntent(intent.id)
+        let work = try await f.head(), claim = try await f.claim(work)
+        try await f.store.deferOperationWork(claim, until: .now, code: "UNKNOWN", scheduling: .needsAttention, nextAction: .reconcile)
+        let failed = try await f.store.pendingResourceSendSnapshot(in: f.room, page: 0)
+        #expect(failed.submitted.first?.createdAt == created)
+        try await V2MessageSendOperationService(accountID: f.account, store: f.store, client: f.remote).resumeConfirmation(intentID: intent.id)
+        #expect(try await f.store.submittedSendIntents(in: f.room).first?.createdAt == created)
+        try await f.store.close()
+    }
+
+    @Test("a send paused for manual confirmation does not block later messages", arguments: [true, false])
+    func pausedSendDoesNotFreezeConversation(paused: Bool) async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let first = try f.intent("unknown original")
+        try await f.store.freezeSendIntent(first)
+        try await f.store.handOffSendIntent(first.id)
+        let original = try await f.head(), claim = try await f.claim(original)
+        try await f.store.deferOperationWork(claim, until: Date().addingTimeInterval(600), code: "MESSAGE_SEND_UNRESOLVED",
+            scheduling: paused ? .needsAttention : .backingOff, nextAction: .reconcile)
+        let retained = try #require(try await f.store.operationWork(id: original.id))
+        let next = try f.intent("new message")
+        try await f.store.freezeSendIntent(next)
+        try await f.store.handOffSendIntent(next.id)
+        let due = try await f.store.dueOperationWork(now: .now, kinds: [.sendMessage])
+        if paused {
+            let work = try #require(due.first)
+            #expect(work.intentID == next.id)
+            let sending = try await f.claim(work)
+            let command = try await f.store.messageSendCommand(workID: work.id)
+            let receipt = try V2MessageSendOperationReceipt(identity: command.identity, fingerprint: command.fingerprint,
+                outcome: .accepted(.init(messageID: .init(uuid: UUID()), roomSequence: 3)),
+                resolvedAtMilliseconds: UInt64(Date().timeIntervalSince1970 * 1000))
+            try await f.store.completeMessageSend(command, receipt: receipt)
+            #expect(sending.work.intentID == next.id)
+            #expect(try await f.store.operationWork(id: work.id)?.execution == .committed)
+        } else {
+            // An actively recovering earlier send still preserves normal ordering.
+            #expect(due.isEmpty)
+        }
+        #expect(try await f.store.operationWork(id: original.id) == retained)
+        try await f.store.close()
+    }
+
+    @Test("pending presentation distinguishes network and authentication waits", arguments: [true, false])
+    func pendingPresentationReflectsTransport(network: Bool) async throws {
+        let f = try SendWorkFixture(); defer { f.remove() }
+        let intent = try f.intent("parked message")
+        try await f.store.freezeSendIntent(intent)
+        try await f.store.handOffSendIntent(intent.id)
+        let work = try await f.head(), claim = try await f.claim(work)
+        try await f.store.deferOperationWork(claim, until: .now, code: "WAITING",
+            scheduling: network ? .waitingForNetwork : .waitingForAuthentication, nextAction: .submit)
+        let presentation = try await f.store.submittedSendIntents(in: f.room)
+        #expect(presentation.first?.status == (network ? .waitingForNetwork : .waitingForAuthentication))
+        try await f.store.close()
+    }
+
     @Test("offline work survives reopening and resumes the frozen command without a manual retry")
     func offlineWorkResumesAfterColdConnection() async throws {
         let f = try SendWorkFixture(); defer { f.remove() }

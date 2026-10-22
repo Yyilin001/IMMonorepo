@@ -149,7 +149,8 @@ extension GRDBV2LocalSyncStore {
         }
     }
 
-    /// A deferred head blocks its key even if a younger row is already due.
+    /// Active predecessors preserve order. A send paused for explicit attention
+    /// retains its outcome identity but does not freeze later independent sends.
     /// The query returns bounded identities, never all payloads.
     public func dueOperationWork(now: Date, limit: Int = 32, kinds: Set<V2OperationKind>? = nil, firstAttemptSince: Date? = nil, excludingFirstAttemptsSince: Date? = nil) throws -> [V2OperationWork] {
         guard (1...32).contains(limit) else { throw V2OperationWorkError.invalidRecord }
@@ -451,7 +452,9 @@ extension GRDBV2LocalSyncStore {
     static let operationHeadPredicate = """
         NOT EXISTS(SELECT 1 FROM v2_operation_work predecessor
             WHERE predecessor.ordering_key=work.ordering_key AND predecessor.local_sequence<work.local_sequence
-              AND predecessor.scheduling_state<>'finished')
+              AND predecessor.scheduling_state<>'finished'
+              AND NOT (work.operation_kind='sendMessage' AND predecessor.operation_kind='sendMessage'
+                       AND predecessor.scheduling_state='needsAttention'))
         """
     static let operationDependencyPredicate = """
         NOT EXISTS(SELECT 1 FROM v2_operation_dependencies dependency

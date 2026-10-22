@@ -12,6 +12,7 @@ struct V2OfflineStartupTests {
         defer { f.removeFiles() }
         await f.app.restore()
         #expect(f.app.route == .localReadOnly(userID: f.credentials.userID.rawValue))
+        #expect(f.app.offlineStartupPresentation == .restoringSession)
         #expect(f.app.accountAccessMode == .localReadOnly)
         #expect(f.app.conversationStore == nil && f.app.avatarPipeline == nil)
         #expect(f.app.offlinePresentation?.conversations.map(\.roomID) == [f.room])
@@ -20,6 +21,7 @@ struct V2OfflineStartupTests {
         await f.refresh.waitForStart()
         await f.refresh.fail()
         try await waitUntil { f.app.authenticationMessage != nil }
+        #expect(f.app.offlineStartupPresentation == .localContent)
         #expect(f.app.accountAccessMode == .localReadOnly)
         #expect(f.app.offlinePresentation?.conversations.count == 1)
         await f.app.signOut()
@@ -101,6 +103,7 @@ struct V2OfflineStartupTests {
         defer { f.removeFiles() }
         await f.app.restore()
         let oldPresentation = try #require(f.app.offlinePresentation)
+        #expect(f.app.offlineStartupPresentation == .restoringSession)
         await f.refresh.waitForStart()
         await f.refresh.succeed(f.successor)
         try await waitUntil { f.app.accountAccessMode == .authenticated }

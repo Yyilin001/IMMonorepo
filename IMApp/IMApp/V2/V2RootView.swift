@@ -80,7 +80,9 @@ struct V2RootView: View {
                 case .authenticating:
                     ProgressView("正在验证身份…")
                 case .localReadOnly:
-                    if let presentation = store.offlinePresentation {
+                    if store.offlineStartupPresentation == .restoringSession {
+                        ProgressView("正在恢复 V2 会话…")
+                    } else if let presentation = store.offlinePresentation {
                         V2OfflineRootView(presentation: presentation,
                             retryOnline: { await store.retryOnlineFromLocalReadOnly() }, signOut: { store.requestSignOut() })
                     } else { ProgressView("正在打开本地内容…") }
@@ -435,6 +437,7 @@ struct V2SignedInRootView: View {
     let signOut: @MainActor @Sendable () async -> Void
     @State private var signOutTask: Task<Void, Never>?
     @State private var presentedSettingsSheet: PresentedSettingsSheet?
+    @State private var conversationAfterSettingsDismissal: V2ConversationRoute?
     @State var rootNavigation = V2RootNavigationStore()
     @State private var signedInProfilePageID = UUID()
 
@@ -567,12 +570,6 @@ struct V2SignedInRootView: View {
                     }
                 }
             }
-            .onChange(of: rootNavigation.conversationRequest) { _, request in
-                guard let request else { return }
-                rootNavigation.consumeConversationRequest(id: request.id)
-                rootNavigation.path = NavigationPath()
-                rootNavigation.path.append(V2ConversationRoute(roomID: request.roomID, messageID: request.messageID))
-            }
             .task(id: InvitationPresentationKey(url: pendingGroupInvitationURL, isActive: scenePhase == .active)) {
                 guard scenePhase == .active,
                       let url = pendingGroupInvitationURL, let invitations = groupInvitationStore else { return }
@@ -588,12 +585,16 @@ struct V2SignedInRootView: View {
                 pendingGroupInvitationURL = nil
             }
             .onDisappear { signOutTask?.cancel() }
-            .sheet(item: $presentedSettingsSheet) { sheet in
+            .sheet(item: $presentedSettingsSheet, onDismiss: {
+                guard let route = conversationAfterSettingsDismissal else { return }
+                conversationAfterSettingsDismissal = nil
+                rootNavigation.showConversation(roomID: route.roomID, messageID: route.messageID)
+            }) { sheet in
                 switch sheet {
                 case .favorites:
                     V2FavoriteMessagesSheet(store: conversationStore) { item in
+                        conversationAfterSettingsDismissal = .init(roomID: item.roomID, messageID: item.id)
                         presentedSettingsSheet = nil
-                        rootNavigation.showConversation(roomID: item.roomID, messageID: item.id)
                     }
 
                 case .pendingGroupAvatars:

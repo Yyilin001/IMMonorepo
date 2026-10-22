@@ -16,40 +16,44 @@ extension GRDBV2LocalSyncStore {
     /// confirmed revision. A stale page snapshot must not undo another field.
     public func personalPreferenceTarget(accountID: UserID, fallback: V2PersonalPreferenceTarget, now: Date = Date()) throws -> V2PersonalPreferenceTarget {
         try databasePool.read { db in
-            guard try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") == accountID.rawValue else { throw V2OperationWorkError.accountMismatch }
-            if let payload = try Data.fetchOne(db, sql: """
-                SELECT i.payload FROM v2_personal_preference_intents i
-                LEFT JOIN v2_operation_work w ON w.work_id=i.work_id
-                WHERE i.account_id=? AND i.ordering_key=? AND i.local_terminal IS NULL
-                  AND ((i.work_id IS NULL AND i.deadline>?) OR w.scheduling_state<>'finished')
-                ORDER BY i.local_sequence DESC LIMIT 1
-                """, arguments: [accountID.rawValue, fallback.orderingKey, now.timeIntervalSince1970]) {
-                return try JSONDecoder().decode(V2PersonalPreferenceTarget.self, from: payload)
-            }
-            let projectionRevision: Int64
-            let projected: V2PersonalPreferenceTarget
-            switch fallback {
-            case .conversation(let room, _, _, _):
-                if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_conversation_states WHERE room_id=?", arguments: [room.rawValue]) {
-                    projectionRevision = row["revision"]
-                    let mute: Double = row["mute_until"]
-                    projected = .conversation(roomID: room, isPinned: row["is_pinned"], isArchived: row["is_archived"], muteUntil: mute == 0 ? nil : Date(timeIntervalSince1970: mute))
-                } else { projectionRevision = 0; projected = fallback }
-            case .favorite(let room, let message, _):
-                if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_favorites WHERE message_id=? AND room_id=?", arguments: [message.rawValue, room.rawValue]) {
-                    projectionRevision = row["revision"]
-                    projected = .favorite(roomID: room, messageID: message, isFavorited: row["is_favorited"])
-                } else { projectionRevision = 0; projected = fallback }
-            }
-            if let row = try Row.fetchOne(db, sql: "SELECT payload,revision FROM v2_personal_preference_confirmed WHERE ordering_key=?", arguments: [fallback.orderingKey]),
-               row["revision"] as Int64 >= projectionRevision {
-                switch try JSONDecoder().decode(V2PersonalPreferenceValue.self, from: row["payload"]) {
-                case .conversationState(let value): return .conversation(roomID: value.roomID, isPinned: value.isPinned, isArchived: value.isArchived, muteUntil: value.muteUntil)
-                case .messageFavorite(let value): return .favorite(roomID: value.roomID, messageID: value.messageID, isFavorited: value.isFavorited)
-                }
-            }
-            return projected
+            try Self.personalPreferenceTarget(accountID: accountID, fallback: fallback, now: now, db: db)
         }
+    }
+
+    static func personalPreferenceTarget(accountID: UserID, fallback: V2PersonalPreferenceTarget, now: Date, db: Database) throws -> V2PersonalPreferenceTarget {
+        guard try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") == accountID.rawValue else { throw V2OperationWorkError.accountMismatch }
+        if let payload = try Data.fetchOne(db, sql: """
+            SELECT i.payload FROM v2_personal_preference_intents i
+            LEFT JOIN v2_operation_work w ON w.work_id=i.work_id
+            WHERE i.account_id=? AND i.ordering_key=? AND i.local_terminal IS NULL
+              AND ((i.work_id IS NULL AND i.deadline>?) OR w.scheduling_state<>'finished')
+            ORDER BY i.local_sequence DESC LIMIT 1
+            """, arguments: [accountID.rawValue, fallback.orderingKey, now.timeIntervalSince1970]) {
+            return try JSONDecoder().decode(V2PersonalPreferenceTarget.self, from: payload)
+        }
+        let projectionRevision: Int64
+        let projected: V2PersonalPreferenceTarget
+        switch fallback {
+        case .conversation(let room, _, _, _):
+            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_conversation_states WHERE room_id=?", arguments: [room.rawValue]) {
+                projectionRevision = row["revision"]
+                let mute: Double = row["mute_until"]
+                projected = .conversation(roomID: room, isPinned: row["is_pinned"], isArchived: row["is_archived"], muteUntil: mute == 0 ? nil : Date(timeIntervalSince1970: mute))
+            } else { projectionRevision = 0; projected = fallback }
+        case .favorite(let room, let message, _):
+            if let row = try Row.fetchOne(db, sql: "SELECT * FROM v2_message_favorites WHERE message_id=? AND room_id=?", arguments: [message.rawValue, room.rawValue]) {
+                projectionRevision = row["revision"]
+                projected = .favorite(roomID: room, messageID: message, isFavorited: row["is_favorited"])
+            } else { projectionRevision = 0; projected = fallback }
+        }
+        if let row = try Row.fetchOne(db, sql: "SELECT payload,revision FROM v2_personal_preference_confirmed WHERE ordering_key=?", arguments: [fallback.orderingKey]),
+           row["revision"] as Int64 >= projectionRevision {
+            switch try JSONDecoder().decode(V2PersonalPreferenceValue.self, from: row["payload"]) {
+            case .conversationState(let value): return .conversation(roomID: value.roomID, isPinned: value.isPinned, isArchived: value.isArchived, muteUntil: value.muteUntil)
+            case .messageFavorite(let value): return .favorite(roomID: value.roomID, messageID: value.messageID, isFavorited: value.isFavorited)
+            }
+        }
+        return projected
     }
     public nonisolated func personalPreferencePendingUpdates(accountID: UserID, limit: Int = 200) -> AsyncThrowingStream<[V2PersonalPreferencePending], any Error> {
         let pool = databasePool

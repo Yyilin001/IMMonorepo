@@ -59,44 +59,48 @@ extension GRDBV2LocalSyncStore {
     }
 
     public func enqueuePersonalPreference(accountID: UserID, target: V2PersonalPreferenceTarget, now: Date = Date()) throws -> UUID {
+        try databasePool.write { db in
+            try Self.enqueuePersonalPreference(accountID: accountID, target: target, now: now, db: db)
+        }
+    }
+
+    static func enqueuePersonalPreference(accountID: UserID, target: V2PersonalPreferenceTarget, now: Date, db: Database) throws -> UUID {
         guard let window = V2CommandPolicy.registered(for: target.kind).firstSubmissionWindowMilliseconds else {
             throw V2OperationWorkError.invalidRecord
         }
-        return try databasePool.write { db in
-            guard try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") == accountID.rawValue else { throw V2OperationWorkError.accountMismatch }
-            let existing = try Row.fetchOne(db, sql: """
-                SELECT intent_id,deadline FROM v2_personal_preference_intents
-                WHERE account_id=? AND ordering_key=? AND work_id IS NULL AND local_terminal IS NULL AND deadline>?
-                ORDER BY local_sequence DESC LIMIT 1
-                """, arguments: [accountID.rawValue, target.orderingKey, now.timeIntervalSince1970])
-            let id: UUID
-            let deadline: Date
-            if let existing {
-                guard let originalID = UUID(uuidString: existing["intent_id"]) else { throw V2OperationWorkError.invalidRecord }
-                id = originalID
-                deadline = Date(timeIntervalSince1970: existing["deadline"])
-            } else {
-                id = UUID()
-                deadline = now.addingTimeInterval(Double(V2ClientSubmissionWindow.milliseconds(maximum: window)) / 1000)
-            }
-            let encoder = JSONEncoder()
-            let bytes = try encoder.encode(target)
-            // Draft coalescing preserves its original identity and first deadline.
-            // Already frozen or unknown work is never rewritten.
-            let maximumRevision = V2PersonalPreferenceRevision(rawValue: UInt64(Int64.max) - 1)!
-            let frozenBytes = try encoder.encode(target.freeze(id: id, revision: maximumRevision, deadline: deadline))
-            let reservation = max(bytes.count, frozenBytes.count)
-            guard reservation <= 65_536 else { throw V2OperationWorkError.capacityExceeded }
-            try Self.requireOperationCapacity(adding: Int64(reservation), excludingIntent: existing == nil ? nil : id, db: db)
-            if existing != nil {
-                try db.execute(sql: "UPDATE v2_personal_preference_intents SET payload=?,payload_bytes=? WHERE intent_id=?",
-                    arguments: [bytes, reservation, id.uuidString])
-            } else {
-                try db.execute(sql: "INSERT INTO v2_personal_preference_intents(intent_id,account_id,ordering_key,payload,payload_bytes,deadline) VALUES(?,?,?,?,?,?)",
-                    arguments: [id.uuidString, accountID.rawValue, target.orderingKey, bytes, reservation, try Self.commandRetryTimestamp(deadline)])
-            }
-            return id
+        guard try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") == accountID.rawValue else { throw V2OperationWorkError.accountMismatch }
+        let existing = try Row.fetchOne(db, sql: """
+            SELECT intent_id,deadline FROM v2_personal_preference_intents
+            WHERE account_id=? AND ordering_key=? AND work_id IS NULL AND local_terminal IS NULL AND deadline>?
+            ORDER BY local_sequence DESC LIMIT 1
+            """, arguments: [accountID.rawValue, target.orderingKey, now.timeIntervalSince1970])
+        let id: UUID
+        let deadline: Date
+        if let existing {
+            guard let originalID = UUID(uuidString: existing["intent_id"]) else { throw V2OperationWorkError.invalidRecord }
+            id = originalID
+            deadline = Date(timeIntervalSince1970: existing["deadline"])
+        } else {
+            id = UUID()
+            deadline = now.addingTimeInterval(Double(V2ClientSubmissionWindow.milliseconds(maximum: window)) / 1000)
         }
+        let encoder = JSONEncoder()
+        let bytes = try encoder.encode(target)
+        // Draft coalescing preserves its original identity and first deadline.
+        // Already frozen or unknown work is never rewritten.
+        let maximumRevision = V2PersonalPreferenceRevision(rawValue: UInt64(Int64.max) - 1)!
+        let frozenBytes = try encoder.encode(target.freeze(id: id, revision: maximumRevision, deadline: deadline))
+        let reservation = max(bytes.count, frozenBytes.count)
+        guard reservation <= 65_536 else { throw V2OperationWorkError.capacityExceeded }
+        try Self.requireOperationCapacity(adding: Int64(reservation), excludingIntent: existing == nil ? nil : id, db: db)
+        if existing != nil {
+            try db.execute(sql: "UPDATE v2_personal_preference_intents SET payload=?,payload_bytes=? WHERE intent_id=?",
+                arguments: [bytes, reservation, id.uuidString])
+        } else {
+            try db.execute(sql: "INSERT INTO v2_personal_preference_intents(intent_id,account_id,ordering_key,payload,payload_bytes,deadline) VALUES(?,?,?,?,?,?)",
+                arguments: [id.uuidString, accountID.rawValue, target.orderingKey, bytes, reservation, try Self.commandRetryTimestamp(deadline)])
+        }
+        return id
     }
     static let personalPreferenceHeadPredicate = """
         i.work_id IS NULL AND i.local_terminal IS NULL AND NOT EXISTS(

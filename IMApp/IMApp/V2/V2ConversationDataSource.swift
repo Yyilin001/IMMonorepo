@@ -9,12 +9,23 @@ protocol V2ConversationTitleReading: Sendable {
     func currentTitle(in roomID: RoomID) async throws -> String?
 }
 
-actor V2GRDBConversationDataSource: V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
+protocol V2DiscoveredConversationRefreshing: Sendable {
+    func refreshDiscoveredConversations(roomIDs: [RoomID]) async throws
+}
+
+actor V2GRDBConversationDataSource: V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
     init(localStore: GRDBV2LocalSyncStore, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
         self.localStore = localStore
         self.requestLatestVisible = requestLatestVisible
+    }
+
+    func refreshDiscoveredConversations(roomIDs: [RoomID]) async throws {
+        for start in stride(from: 0, to: roomIDs.count, by: 100) {
+            try Task.checkCancellation()
+            try await requestLatestVisible(Array(roomIDs[start..<min(start + 100, roomIDs.count)]))
+        }
     }
 
     func currentTitle(in roomID: RoomID) async throws -> String? {

@@ -130,6 +130,7 @@ final class V2UserProfileActionStore {
 struct V2UserProfileSheet: View {
     let key: V2ProfileViewLookupKey
     var usesNavigationStack = true
+    var openConversation: ((String) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var context
     @State private var identity: V2PublicIdentity?
@@ -137,11 +138,19 @@ struct V2UserProfileSheet: View {
     @State private var confirmation: V2SocialOperationAction?
     @State private var nameEditor: V2NameEditorStore?
     @State private var pageID = UUID()
+    @State private var messageTask: Task<Void, Never>?
+    @State private var messageFeedback: String?
     var body: some View {
-        if usesNavigationStack {
-            NavigationStack { profileContent }
-        } else {
-            profileContent
+        Group {
+            if usesNavigationStack {
+                NavigationStack { profileContent }
+            } else {
+                profileContent
+            }
+        }
+        .onDisappear {
+            messageTask?.cancel()
+            messageTask = nil
         }
     }
     private var profileContent: some View {
@@ -221,23 +230,70 @@ struct V2UserProfileSheet: View {
         case .blocked, nil: EmptyView()
         }
         if actions.relationship != nil && actions.relationship != .blocked {
-            Button("发消息") {
-                guard let context, let identity else { return }
-                if let existing = context.conversations.items.first(where: { $0.presentationKey?.userID == key.userID }) {
-                    dismiss()
-                    if case .room(let currentRoom) = key.context, currentRoom.rawValue == existing.id { return }
-                    context.navigation.showConversation(roomID: existing.id)
-                    return
-                }
-                Task {
-                    if let room = await context.contacts.openProfileConversation(with: identity) {
-                        dismiss(); context.navigation.showConversation(roomID: room)
+            Button {
+                guard let context, let identity, messageTask == nil else { return }
+                messageFeedback = nil
+                messageTask = Task {
+                    let roomID = await context.conversations.openDirectConversation(with: identity)
+                    guard !Task.isCancelled else { return }
+                    messageTask = nil
+                    guard let roomID else {
+                        messageFeedback = context.conversations.directConversationFeedback ?? "正在打开其他会话，请稍后重试。"
+                        return
+                    }
+                    if case .room(let currentRoom) = key.context, currentRoom.rawValue == roomID,
+                       usesNavigationStack {
+                        dismiss()
+                    } else if let openConversation {
+                        openConversation(roomID)
+                    } else {
+                        // This profile is itself on the shared stack: replace the
+                        // destination without also issuing a competing pop.
+                        context.navigation.showConversation(roomID: roomID)
                     }
                 }
-            }.disabled(identity == nil).accessibilityIdentifier("v2.user.message")
+            } label: {
+                HStack {
+                    Text("发消息")
+                    if messageTask != nil { Spacer(); ProgressView() }
+                }
+            }
+            .disabled(identity == nil || context == nil || messageTask != nil)
+            .accessibilityIdentifier("v2.user.message")
+            if let messageFeedback {
+                Text(messageFeedback).font(.footnote).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("v2.user.message.feedback")
+            }
         }
     }
     private struct NameEditorPresentation: Identifiable { let store: V2NameEditorStore; var id: ObjectIdentifier { ObjectIdentifier(store) } }
 }
 
 struct V2UserProfileTarget: Identifiable { let key: V2ProfileViewLookupKey; var id: V2ProfileViewLookupKey { key } }
+
+/// Profile sheets across contacts, chat messages and group members finish their
+/// dismissal before handing a destination to the authenticated navigation stack.
+private struct V2UserProfilePresentation: ViewModifier {
+    @Binding var target: V2UserProfileTarget?
+    @Environment(\.v2UserInteractionContext) private var context
+    @State private var pendingRoomID: String?
+
+    func body(content: Content) -> some View {
+        content.sheet(item: $target, onDismiss: {
+            guard let roomID = pendingRoomID else { return }
+            pendingRoomID = nil
+            context?.navigation.showConversation(roomID: roomID)
+        }) { target in
+            V2UserProfileSheet(key: target.key, openConversation: { roomID in
+                pendingRoomID = roomID
+                self.target = nil
+            })
+        }
+    }
+}
+
+extension View {
+    func v2UserProfileSheet(item: Binding<V2UserProfileTarget?>) -> some View {
+        modifier(V2UserProfilePresentation(target: item))
+    }
+}

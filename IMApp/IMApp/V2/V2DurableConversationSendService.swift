@@ -152,6 +152,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
 
     struct Pending: Identifiable, Hashable, Sendable {
         let id: UUID
+        let createdAt: Date
         let text: String
         let completed: Int
         let total: Int
@@ -192,13 +193,15 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         let snapshot = try await store.pendingResourceSendSnapshot(in: roomID, page: page)
         for intent in snapshot.preparing {
             let status = recoveryError ?? (intent.isExpired ? "资源已过期，等待确认终态" : intent.isRejected ? "附件未通过安全处理" : intent.isPaused ? "上传已暂停，可重试" : intent.isProcessing ? "正在安全处理" : "正在准备附件")
-            result.append(.init(id: intent.id, text: intent.text, completed: intent.completed, total: intent.total,
+            result.append(.init(id: intent.id, createdAt: intent.createdAt, text: intent.text, completed: intent.completed, total: intent.total,
                                 status: status, canRetry: intent.isPaused && !intent.isExpired && !intent.isRejected,
                                 retryTitle: "重试准备", canCancel: true))
         }
         for submitted in snapshot.submitted {
             let status = switch submitted.status {
-            case .pending: "正在发送，等待服务器确认"
+            case .pending: "等待发送"
+            case .waitingForNetwork: "等待网络连接后发送"
+            case .waitingForAuthentication: "等待登录恢复后发送"
             case .acceptedAwaitingProjection: "服务器已受理，等待消息同步"
             case .confirmingOutcome: "正在确认原消息的发送结果"
             case .needsAttention: "原消息结果未知，确认已暂停"
@@ -206,7 +209,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
             case .closed: "服务器已确认这条消息未发送"
             case .rejected: "这条消息未能发送"
             }
-            result.append(.init(id: submitted.id,text: submitted.text,completed: 0,total: 0,status: status,
+            result.append(.init(id: submitted.id,createdAt: submitted.createdAt,text: submitted.text,completed: 0,total: 0,status: status,
                 canRetry: submitted.status == .closed || submitted.status == .rejected || submitted.status == .expiredUnsubmitted || submitted.status == .needsAttention,retryTitle:submitted.status == .needsAttention ? "继续确认" : "重新发送",canCancel: submitted.status == .closed || submitted.status == .rejected || submitted.status == .expiredUnsubmitted))
         }
         return .init(items:result,hasNext:snapshot.hasNext)

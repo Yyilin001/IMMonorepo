@@ -53,7 +53,7 @@ struct V2ConversationSettingsView: View {
             .navigationTitle("聊天详情")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
-            .sheet(item: $profile) { V2UserProfileSheet(key: $0.key) }
+            .v2UserProfileSheet(item: $profile)
             .task(id: context?.conversations.items) {
                 guard let context, let source = context.conversations.items.first(where: { $0.id == roomID }) ?? lastItem else { return }
                 lastItem = await context.conversations.displayedConversationState(source)

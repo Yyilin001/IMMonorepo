@@ -261,12 +261,6 @@ final class V2ContactsStore {
         return .init(target: target, manager: manager, notifier: projectionChangeNotifier)
     }
 
-    func openProfileConversation(with identity: V2PublicIdentity) async -> String? {
-        guard identity.userID != currentUserID else { return nil }
-        do { return try await directConversationOpener.openConversation(with: identity) }
-        catch { feedback = "暂时无法打开会话，请稍后重试。"; return nil }
-    }
-
     func item(userID: String) -> V2ContactListItem? {
         allItems.first { $0.id == userID }
     }
@@ -1022,28 +1016,20 @@ final class V2RootNavigationStore {
         case account
     }
 
-    struct ConversationRequest: Identifiable, Hashable {
-        let id: UUID
-        let roomID: String
-        let messageID: String?
-    }
-
     enum ConversationAction { case newDirect, newGroup, search, favorites, preferences }
     var conversationAction: ConversationAction?
     var path = NavigationPath()
     var fixtureRoomID: String?
     var selectedTab: Tab = .conversations
-    private(set) var conversationRequest: ConversationRequest?
 
     func showConversation(roomID: String, messageID: String? = nil) {
         guard (try? RoomID(roomID)) != nil else { return }
+        // Commit the cross-tab destination here, even when the tab's root view
+        // is offscreen. Popping a profile must not race an onChange consumer.
+        var destination = NavigationPath()
+        destination.append(V2ConversationRoute(roomID: roomID, messageID: messageID))
         selectedTab = .conversations
-        conversationRequest = .init(id: UUID(), roomID: roomID, messageID: messageID)
-    }
-
-    func consumeConversationRequest(id: UUID) {
-        guard conversationRequest?.id == id else { return }
-        conversationRequest = nil
+        path = destination
     }
 }
 
@@ -1236,7 +1222,7 @@ struct V2FriendRequestsView: View {
         .navigationTitle("新的朋友")
         .navigationBarTitleDisplayMode(.inline)
         .authorPresentationPage(context: .list(profilePageID))
-        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
+        .v2UserProfileSheet(item: $userProfile)
         .onDisappear { actionTask?.cancel() }
     }
 

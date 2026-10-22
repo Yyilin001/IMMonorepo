@@ -4,6 +4,7 @@ import IMV2Core
 
 public struct V2PreparingResourceSendPresentation: Sendable {
     public let id: UUID
+    public let createdAt: Date
     public let text: String
     public let completed: Int
     public let total: Int
@@ -40,7 +41,7 @@ extension GRDBV2LocalSyncStore {
                         SELECT d.intent_id, d.job_id, 'import' AS kind
                         FROM visible v JOIN v2_send_intent_import_dependencies d USING(intent_id)
                     )
-                    SELECT v.intent_id, v.text, COUNT(d.job_id) AS total,
+                    SELECT v.intent_id, v.created_at, v.text, COUNT(d.job_id) AS total,
                         SUM(CASE WHEN j.stage = 'ready' OR r.stage = 'ready' THEN 1 ELSE 0 END) AS completed,
                         MAX(v.attempts >= 5 OR COALESCE(j.stage = 'paused', 0) OR COALESCE(r.attempts >= 5, 0)) AS paused,
                         MAX(COALESCE(j.stage = 'expired', 0) OR COALESCE(j.bindable_until <= ?, 0)) AS expired,
@@ -52,7 +53,7 @@ extension GRDBV2LocalSyncStore {
                     GROUP BY v.intent_id ORDER BY v.created_at, v.intent_id
                     """, arguments: [roomID.rawValue, now.timeIntervalSince1970]).map { row in
                         guard let id = UUID(uuidString: row["intent_id"]) else { throw V2ResourceJournalError.invalidRecord }
-                        return .init(id: id, text: row["text"], completed: row["completed"], total: row["total"],
+                        return .init(id: id, createdAt: Date(timeIntervalSince1970: row["created_at"]), text: row["text"], completed: row["completed"], total: row["total"],
                                      isPaused: row["paused"], isExpired: row["expired"],
                                      isRejected: row["rejected"], isProcessing: row["processing"])
                     }

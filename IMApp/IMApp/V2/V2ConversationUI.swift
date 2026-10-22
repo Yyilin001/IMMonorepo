@@ -463,7 +463,22 @@ final class V2ConversationListStore {
     }
     private(set) var state: State = .loading
     private(set) var directConversationFeedback: String?
-    private(set) var directConversationRequests:[V2DirectRoomPending]=[]
+    private(set) var directConversationRequests: [V2DirectRoomPending] = []
+    private var discoveredDirectRoomIDs = Set<RoomID>()
+
+    var pendingDirectConversationRequests: [V2DirectRoomPending] {
+        guard !isShowingArchived else { return [] }
+        return Self.pendingDirectRequests(directConversationRequests, conversations: items)
+    }
+
+    static func pendingDirectRequests(_ requests: [V2DirectRoomPending], conversations: [V2ConversationListItem]) -> [V2DirectRoomPending] {
+        let existingPeers = Set(conversations.compactMap { $0.kind.directAccountKind != nil ? $0.presentationKey?.userID : nil })
+        var seen = existingPeers
+        return requests.sorted { $0.work.localSequence > $1.work.localSequence }.filter {
+            !$0.work.execution.isTerminal && $0.work.scheduling != .finished && $0.receipt == nil
+                && seen.insert($0.command.targetUserID).inserted
+        }
+    }
     private(set) var groupConversationFeedback: String?
     private(set) var conversationStateFeedback: String?
     private(set) var conversationRefreshFeedback: String?
@@ -642,6 +657,8 @@ final class V2ConversationListStore {
         if state != .loaded || resetWindow { state = .loading }
         let archived = isShowingArchived
         do {
+            await recoverDiscoveredDirectConversations()
+            try Task.checkCancellation()
             while true {
                 let capturedAnchorID = viewport.anchorID
                 let anchorID = capturedAnchorID ?? (hasEarlierConversations ? items.first?.id : nil)
@@ -957,10 +974,34 @@ final class V2ConversationListStore {
         do {
             for try await requests in await opener.service.updates() {
                 try Task.checkCancellation()
-                directConversationRequests=requests
+                await updateDirectConversationRequests(requests)
             }
         } catch is CancellationError { return }
         catch { directConversationFeedback="无法读取已保存的私聊请求。" }
+    }
+
+    func updateDirectConversationRequests(_ requests: [V2DirectRoomPending]) async {
+        directConversationRequests = requests
+        await refresh()
+    }
+
+    private func recoverDiscoveredDirectConversations() async {
+        guard let source = dataSource as? any V2DiscoveredConversationRefreshing else { return }
+        let known = Set(items.compactMap { try? RoomID($0.id) })
+        let opened = Set(directConversationRequests.compactMap { request -> RoomID? in
+            guard case .opened(let room, _)? = request.receipt?.outcome else { return nil }
+            return room
+        })
+        let missing = opened.subtracting(known).subtracting(discoveredDirectRoomIDs)
+        guard !missing.isEmpty else { return }
+        discoveredDirectRoomIDs.formUnion(missing)
+        do {
+            // Receipts identify rooms to query; only a fresh authorized server
+            // observation may restore them to the durable conversation list.
+            try await source.refreshDiscoveredConversations(roomIDs: Array(missing))
+        } catch {
+            discoveredDirectRoomIDs.subtract(missing)
+        }
     }
 
     func resumeDirectConversationRequest(_ request:V2DirectRoomPending) async {
@@ -999,7 +1040,7 @@ final class V2ConversationListStore {
             directConversationFeedback = "请输入对方的公开 ID。"
             return nil
         }
-        guard let directConversationOpener else {
+        guard directConversationOpener != nil else {
             directConversationFeedback = "实时网关尚未可用，无法新建会话。"
             return nil
         }
@@ -1013,19 +1054,54 @@ final class V2ConversationListStore {
         do {
             let identity = try await publicIdentityResolver.resolve(handle: target)
             try Task.checkCancellation()
-            guard identity.userID.rawValue != userID else {
-                directConversationFeedback = "不能与自己创建私聊。"
+            return await resolveDirectConversation(with: identity)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            directConversationFeedback = "无法查找用户，请检查公开 ID 和网络连接。"
+            return nil
+        }
+    }
+
+    /// All entry points register the same direct-room metadata before navigation,
+    /// including rooms that have not reached the current paginated list yet.
+    func openDirectConversation(with identity: V2PublicIdentity) async -> String? {
+        guard !isOpeningDirectConversation else { return nil }
+        isOpeningDirectConversation = true
+        defer { isOpeningDirectConversation = false }
+        return await resolveDirectConversation(with: identity)
+    }
+
+    private func resolveDirectConversation(with identity: V2PublicIdentity) async -> String? {
+        guard !Task.isCancelled else { return nil }
+        guard identity.userID.rawValue != userID else {
+            directConversationFeedback = "不能与自己创建私聊。"
+            return nil
+        }
+        do {
+            let roomID: String
+            if let existing = items.first(where: {
+                $0.kind.directAccountKind != nil && $0.presentationKey?.userID == identity.userID
+            }) {
+                roomID = existing.id
+            } else if let directConversationOpener {
+                roomID = try await directConversationOpener.openConversation(with: identity)
+            } else {
+                directConversationFeedback = "实时网关尚未可用，无法新建会话。"
                 return nil
             }
-            let roomID = try await directConversationOpener.openConversation(with: identity)
             try Task.checkCancellation()
+            guard (try? RoomID(roomID)) != nil else {
+                directConversationFeedback = "会话信息无效，请刷新后重试。"
+                return nil
+            }
             explicitRoomTitles[roomID] = identity.displayName
             explicitRoomKinds[roomID] = .direct(accountKind: identity.accountKind)
             explicitDirectPresentationKeys[roomID] = .init(userID: identity.userID, context: .directConversation)
             directConversationFeedback = nil
             return roomID
         } catch V2DirectConversationOpeningState.queued {
-            directConversationFeedback = "已保存私聊请求，完成后会显示在会话列表中。再次点击可继续核对原请求。"
+            directConversationFeedback = "连接暂未完成，请检查网络后重试；原请求会保留，不会重复创建。"
             return nil
         } catch V2DirectConversationOpeningState.expired {
             directConversationFeedback = "私聊请求已过期，可重新发起。"
@@ -1058,6 +1134,7 @@ struct V2ConversationListView: View {
     private let rootNavigation: V2RootNavigationStore
     private let groupInvitationStore: V2GroupInvitationStore?
     @State private var newConversationSheet: NewConversationSheet?
+    @State private var conversationAfterSheetDismissal: V2ConversationRoute?
     @State private var directTargetUserID: String
     @State private var groupTitle = ""
     @State private var groupMemberUserIDs = ""
@@ -1105,7 +1182,7 @@ struct V2ConversationListView: View {
                         Button("重试") { Task { await store.refresh() } }
                     }
                 case .loaded:
-                    if store.visibleItems.isEmpty && store.directConversationRequests.isEmpty {
+                    if store.visibleItems.isEmpty && store.pendingDirectConversationRequests.isEmpty {
                         V2ConversationEmptyState(
                             title: store.isShowingArchived ? "没有已归档会话" : "暂无会话",
                             symbol: store.isShowingArchived ? "archivebox" : "bubble.left.and.bubble.right",
@@ -1114,20 +1191,25 @@ struct V2ConversationListView: View {
                     } else {
                     ScrollViewReader { scrollProxy in
                     List {
-                    if !store.directConversationRequests.isEmpty {
-                        Section("私聊请求") {
-                            ForEach(store.directConversationRequests,id:\.work.id) { request in
-                                VStack(alignment:.leading,spacing:8) {
-                                    V2AuthorizedAvatarView(key:.init(userID:request.command.targetUserID,context:.directConversation),showsName:true)
-                                    Text(store.directConversationRequestStatus(request)).font(.subheadline).foregroundStyle(.secondary)
-                                    if case .opened(let roomID,_)?=request.receipt?.outcome {
-                                        NavigationLink("打开会话",value:V2ConversationRoute(roomID: roomID.rawValue))
-                                    } else if request.work.scheduling == .needsAttention {
-                                        Button("重试") { Task { await store.resumeDirectConversationRequest(request) } }
-                                    }
-                                }
+                    ForEach(store.pendingDirectConversationRequests, id: \.command.targetUserID) { request in
+                        HStack(spacing: 14) {
+                            let key = V2ProfileViewLookupKey(userID: request.command.targetUserID, context: .directConversation)
+                            V2AuthorizedAvatarView(key: key, size: 52)
+                            VStack(alignment: .leading, spacing: 5) {
+                                V2AuthorizedProfileNameView(key: key, placeholder: "资料暂不可用")
+                                    .font(.body.weight(.semibold))
+                                Text(store.directConversationRequestStatus(request))
+                                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer()
+                            if request.work.scheduling == .needsAttention {
+                                Button("重试") { Task { await store.resumeDirectConversationRequest(request) } }
+                            } else {
+                                ProgressView().accessibilityLabel("正在准备会话")
                             }
                         }
+                        .padding(.vertical, 12)
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
                     }
                     if store.hasEarlierConversations {
                         Button("查看前面的会话") { Task { await store.loadEarlierConversations() } }
@@ -1255,37 +1337,37 @@ struct V2ConversationListView: View {
                 case .preferences: isPresentingPreferenceActivity = true
                 }
             }
-            .sheet(isPresented: $isPresentingPreferenceActivity) {
+            .sheet(isPresented: $isPresentingPreferenceActivity, onDismiss: openConversationAfterSheetDismissal) {
                 if let activity = store.preferenceActivity {
                     V2PreferenceActivityView(store: activity, roomTitles: Dictionary(store.items.map { ($0.id, $0.title) }, uniquingKeysWith: { first, _ in first })) { roomID, messageID in
+                        conversationAfterSheetDismissal = .init(roomID: roomID, messageID: messageID)
                         isPresentingPreferenceActivity = false
-                        if let messageID { rootNavigation.path.append(V2ConversationRoute(roomID: roomID, messageID: messageID)) }
-                        else { rootNavigation.path.append(V2ConversationRoute(roomID: roomID)) }
                     }
                 }
             }
-            .sheet(isPresented: $isPresentingFavorites) {
+            .sheet(isPresented: $isPresentingFavorites, onDismiss: openConversationAfterSheetDismissal) {
                 V2FavoriteMessagesSheet(store: store) { item in
+                    conversationAfterSheetDismissal = .init(roomID: item.roomID, messageID: item.id)
                     isPresentingFavorites = false
-                    rootNavigation.path.append(V2ConversationRoute(roomID: item.roomID, messageID: item.id))
                 }
             }
             .task { await store.observeGroupCreation() }
             .task { await store.observeDirectConversationRequests() }
         .task { await store.observeProjectionChanges() }
             .sheet(isPresented: $isPresentingMessageSearch, onDismiss: {
+                openConversationAfterSheetDismissal()
                 messageSearchStore = nil
             }) {
                 if let messageSearchStore {
                     NavigationStack {
                         V2MessageSearchView(store: messageSearchStore) { hit in
+                            conversationAfterSheetDismissal = .init(roomID: hit.roomID.rawValue, messageID: hit.messageID.rawValue)
                             isPresentingMessageSearch = false
-                            rootNavigation.path.append(V2ConversationRoute(roomID: hit.roomID.rawValue, messageID: hit.messageID.rawValue))
                         }
                     }
                 }
             }
-            .sheet(item: $newConversationSheet) { sheet in
+            .sheet(item: $newConversationSheet, onDismiss: openConversationAfterSheetDismissal) { sheet in
                 switch sheet {
                 case .direct:
                 NavigationStack {
@@ -1319,8 +1401,8 @@ struct V2ConversationListView: View {
                                         directSubmissionTask = nil
                                         directTargetUserID = ""
                                         rootNavigation.fixtureRoomID = roomID
+                                        conversationAfterSheetDismissal = .init(roomID: roomID)
                                         newConversationSheet = nil
-                                        rootNavigation.path.append(V2ConversationRoute(roomID: roomID))
                                     } else if !Task.isCancelled {
                                         directSubmissionTask = nil
                                     }
@@ -1415,8 +1497,8 @@ struct V2ConversationListView: View {
                                         // room created by this real UI action. Keep the same
                                         // state handoff as the direct-conversation path.
                                         rootNavigation.fixtureRoomID = roomID
+                                        conversationAfterSheetDismissal = .init(roomID: roomID)
                                         newConversationSheet = nil
-                                        rootNavigation.path.append(V2ConversationRoute(roomID: roomID))
                                     } else if !Task.isCancelled {
                                         groupSubmissionTask = nil
                                     }
@@ -1445,6 +1527,12 @@ struct V2ConversationListView: View {
                 if let groupInvitationStore { V2GroupJoinSheet(store: groupInvitationStore) }
             }
         }
+    }
+
+    private func openConversationAfterSheetDismissal() {
+        guard let route = conversationAfterSheetDismissal else { return }
+        conversationAfterSheetDismissal = nil
+        rootNavigation.showConversation(roomID: route.roomID, messageID: route.messageID)
     }
 
     private var filteredConversations: [V2ConversationListItem] {
@@ -1769,7 +1857,6 @@ struct V2ConversationDetailView: View {
     @State private var focusedMessageID: String?
     @State private var showsMentionInput = false
     @State private var followsOwnSend = false
-    @State private var lastMessageBeforeSend: String?
     @State private var timelinePresentation = V2MessageTimelinePresentation()
     @State private var timelinePosition = TiledScrollState<String>(
         autoScrollsToBottomOnAppend: false, scrollsToBottomOnReplace: false
@@ -2011,26 +2098,27 @@ struct V2ConversationDetailView: View {
                                     }
                                 }.environment(\.self, environment).padding(.horizontal, 16)
                             })
-                            .onTiledUserScrollInput { focusedMessageID = nil }
+                            .onTiledUserScrollInput {
+                                focusedMessageID = nil
+                                followsOwnSend = false
+                            }
                             .onScrollFailure { _ in focusedMessageID = nil }
-                            .onChange(of: store.timeline, initial: true) { _, items in
+                            .onChange(of: V2MessageTimelinePresentation.Snapshot(
+                                timeline: store.timeline, pending: store.pendingResourceSends
+                            ), initial: true) { _, snapshot in
                                 let wasEmpty = timelinePresentation.dataSource.items.isEmpty
-                                guard timelinePresentation.apply(items, pending: store.pendingResourceSends) else { return }
+                                guard timelinePresentation.apply(snapshot.timeline, pending: snapshot.pending) else { return }
                                 if focusedMessageID != nil { scrollToFocusedMessage() }
-                                else if wasEmpty { timelinePosition.scrollTo(edge: .bottom, animated: false) }
-                                if followsOwnSend, let message = store.messages.last,
-                                   message.isOutgoing, message.id != lastMessageBeforeSend {
-                                    timelinePosition.scrollTo(id: "message-" + message.id, anchor: .bottom)
+                                else if wasEmpty || followsOwnSend {
+                                    scrollToLatestMessage()
+                                }
+                            }
+                            .onChange(of: focusedMessageID) { _, messageID in
+                                if messageID != nil {
                                     followsOwnSend = false
                                 }
+                                scrollToFocusedMessage()
                             }
-                            .onChange(of: store.pendingResourceSends, initial: true) { old, pending in
-                                guard timelinePresentation.apply(store.timeline, pending: pending) else { return }
-                                if followsOwnSend, pending.contains(where: { item in !old.contains(where: { $0.id == item.id }) }) {
-                                    timelinePosition.scrollTo(edge: .bottom)
-                                }
-                            }
-                            .onChange(of: focusedMessageID) { _, _ in scrollToFocusedMessage() }
                             .accessibilityIdentifier("v2.message.list")
                             if timelinePresentation.hasInvalidSnapshot {
                                 Text("消息列表暂时无法更新，请刷新重试。")
@@ -2041,7 +2129,7 @@ struct V2ConversationDetailView: View {
                                             Task {
                                                 await store.returnToLatestTimeline()
                                                 if !store.isBrowsingHistoricalTimeline, timelinePresentation.apply(store.timeline, pending: store.pendingResourceSends) {
-                                                    timelinePosition.scrollTo(edge: .bottom)
+                                                    scrollToLatestMessage()
                                                 }
                                             }
                                         } label: {
@@ -2142,11 +2230,12 @@ struct V2ConversationDetailView: View {
                                 } else {
                                     Button {
                                         focusedMessageID = nil
-                                        lastMessageBeforeSend = store.messages.last?.id
                                         followsOwnSend = true
                                         Task {
                                             await store.sendDraft()
-                                            if !store.draft.isEmpty { followsOwnSend = false }
+                                            if !store.draft.isEmpty {
+                                                followsOwnSend = false
+                                            }
                                         }
                                     } label: {
                                         Image(systemName: "arrow.up")
@@ -2263,7 +2352,7 @@ struct V2ConversationDetailView: View {
                 if let groupInvitationStore { V2GroupInvitationManagementSheet(store: groupInvitationStore, roomID: store.roomID) }
             }
         }
-        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
+        .v2UserProfileSheet(item: $userProfile)
         .task(id: store.presentationKey) {
             guard let key = store.presentationKey else { return }
             peerActions = userContext?.contacts.profileActions(for: key.userID)
@@ -2454,6 +2543,13 @@ struct V2ConversationDetailView: View {
     }
 
 
+    private func scrollToLatestMessage() {
+        guard let id = timelinePresentation.dataSource.items.last?.id else { return }
+        // Use one stable tail identity for both pending and confirmed rows.
+        // MessagingUI defers this command until its snapshot queue settles.
+        timelinePosition.scrollTo(id: id, anchor: .bottom, animated: false)
+    }
+
     private func scrollToFocusedMessage() {
         guard let focusedMessageID,
               let target = store.timeline.first(where: { item in
@@ -2616,7 +2712,7 @@ private struct V2ConversationMessageRow: View {
         .onTapGesture {
             if store.isSelectingMessagesForForward { store.toggleForwardSelection(for: message) }
         }
-        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
+        .v2UserProfileSheet(item: $userProfile)
         .onAppear { Task { await store.reportVisibleMessage(message) } }
         // VoiceOver message operations belong to the whole row, whose target
         // includes the complete bubble and surrounding touch area. Attaching

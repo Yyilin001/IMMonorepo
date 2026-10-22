@@ -106,7 +106,7 @@ struct V2ContactsStoreTests {
 
         #expect(await opener.openedUserIDs() == [friend.userID])
         #expect(rootNavigation.selectedTab == .conversations)
-        #expect(rootNavigation.conversationRequest?.roomID == roomID)
+        #expect(rootNavigation.path.count == 1)
     }
 
     @Test(arguments: ["edit", "expiry", "background", "exit"])

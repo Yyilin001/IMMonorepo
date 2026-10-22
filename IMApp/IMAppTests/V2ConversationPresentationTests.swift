@@ -2,11 +2,86 @@ import Foundation
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
+import SwiftUI
 @testable import IMApp
 
 @MainActor
 @Suite("Conversation selector presentation boundaries")
 struct V2ConversationPresentationTests {
+    @Test("terminal opening receipts are history; unresolved work is one row per peer")
+    func privateChatRequestRows() throws {
+        let peer = UserID(uuid: UUID())
+        let history = try (1...4).map { try directRequest(peer: peer, sequence: Int64($0), finished: true) }
+        let older = try directRequest(peer: peer, sequence: 5)
+        let latest = try directRequest(peer: peer, sequence: 6)
+        #expect(V2ConversationListStore.pendingDirectRequests(history, conversations: []).isEmpty)
+        #expect(V2ConversationListStore.pendingDirectRequests(history + [older, latest], conversations: []).map(\.work.id) == [latest.work.id])
+        let conversation = V2ConversationListItem(id: RoomID(uuid: UUID()).rawValue, title: "", preview: "", lastActivity: .now,
+            isOutgoing: false, kind: .direct(accountKind: .regular), presentationKey: .init(userID: peer, context: .directConversation))
+        #expect(V2ConversationListStore.pendingDirectRequests([latest], conversations: [conversation]).isEmpty)
+    }
+
+    @Test("repeated completed requests recover one authorized room instead of creating receipt rows")
+    func completedRequestsDiscoverOneRoom() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: "receipt-list-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let local = try GRDBV2LocalSyncStore(databaseURL: root.appending(path: "store.sqlite"), installationBinding: .init(value: UUID()))
+        let requests = DiscoveryRequests()
+        let source = V2GRDBConversationDataSource(localStore: local, requestLatestVisible: { await requests.record($0) })
+        let store = V2ConversationListStore(environment: .init(userID: UserID(uuid: UUID()).rawValue, projections: .init(dataSource: source)))
+        let peer = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
+        let history = try (1...4).map { try directRequest(peer: peer, sequence: Int64($0), finished: true, room: room) }
+        await store.updateDirectConversationRequests(history)
+        await store.updateDirectConversationRequests(history)
+        #expect(await requests.rooms == [room])
+        #expect(store.pendingDirectConversationRequests.isEmpty)
+        // A historical receipt alone must not restore room access or a list row.
+        #expect(store.items.isEmpty)
+        try await local.close()
+    }
+
+    private func directRequest(peer: UserID, sequence: Int64, finished: Bool = false, room: RoomID = .init(uuid: UUID())) throws -> V2DirectRoomPending {
+        let command = try V2DirectRoomOperationCommand(actorUserID: .init(uuid: UUID()), operationID: .init(uuid: UUID()),
+            targetUserID: peer, firstSubmissionDeadlineMilliseconds: 1_900_000_000_000)
+        let identity = try command.identity, fingerprint = try command.fingerprint
+        let work = V2OperationWork(id: UUID(), intentID: UUID(), identity: identity, fingerprint: fingerprint,
+            orderingKey: "test", localSequence: sequence, execution: finished ? .committed : .prepared,
+            scheduling: finished ? .finished : .waitingForNetwork, submissionStarted: finished,
+            attemptCount: 0, submissionRoundAttempts: 0, reconciliationRoundAttempts: 0,
+            submissionRoundDeadline: nil, reconciliationRoundDeadline: nil, nextAction: .submit,
+            nextActionAt: .now, admissionDeadline: nil, lastErrorCode: nil, revision: 1)
+        let receipt = finished ? try V2DirectRoomOperationReceipt(identity: identity, fingerprint: fingerprint,
+            outcome: .opened(roomID: room, createdAtMilliseconds: 1_750_000_000_000), resolvedAtMilliseconds: 1_750_000_000_001) : nil
+        return .init(work: work, command: command, receipt: receipt)
+    }
+
+    @Test("opening chat replaces a pushed contact route without a mounted tab observer")
+    func contactToChatNavigation() throws {
+        let navigation = V2RootNavigationStore()
+        navigation.selectedTab = .contacts
+        navigation.path.append(V2ContactsRoute.requests)
+        navigation.path.append(V2ContactsRoute.contact(UserID(uuid: UUID()).rawValue))
+        let room = RoomID(uuid: UUID()).rawValue
+        navigation.showConversation(roomID: room)
+        var expected = NavigationPath()
+        expected.append(V2ConversationRoute(roomID: room))
+        #expect(navigation.selectedTab == .conversations)
+        #expect(navigation.path == expected)
+        navigation.path.removeLast()
+        #expect(navigation.path.isEmpty)
+    }
+
+    @Test("opening another chat replaces the previous chat and preserves a message target")
+    func replaceConversationDestination() {
+        let navigation = V2RootNavigationStore()
+        navigation.showConversation(roomID: RoomID(uuid: UUID()).rawValue)
+        let room = RoomID(uuid: UUID()).rawValue
+        navigation.showConversation(roomID: room, messageID: "target-message")
+        var expected = NavigationPath()
+        expected.append(V2ConversationRoute(roomID: room, messageID: "target-message"))
+        #expect(navigation.path == expected)
+    }
+
     @Test("favorites, search routing and forward targets use identity keys rather than cached private titles")
     func productionProjectionLabels() async throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "selector-labels-\(UUID())")
@@ -52,4 +127,9 @@ struct V2ConversationPresentationTests {
             try await local.close()
         } catch { try? await local.close(); throw error }
     }
+}
+
+private actor DiscoveryRequests {
+    private(set) var rooms: [RoomID] = []
+    func record(_ values: [RoomID]) { rooms.append(contentsOf: values) }
 }

@@ -502,20 +502,43 @@ protocol V2DirectConversationRecovering:V2DirectConversationOpening {
     var service:V2DirectRoomOperationService { get }
 }
 
-struct V2OperationDirectConversationOpener:V2DirectConversationRecovering {
-    let service:V2DirectRoomOperationService
-    func openConversation(with publicIdentity:V2PublicIdentity) async throws -> String {
-        let id=try await service.enqueue(publicIdentity:publicIdentity)
+struct V2OperationDirectConversationOpener: V2DirectConversationRecovering {
+    let service: V2DirectRoomOperationService
+    var confirmationTimeout: Duration = .seconds(20)
+
+    func openConversation(with publicIdentity: V2PublicIdentity) async throws -> String {
+        let id = try await service.enqueue(publicIdentity: publicIdentity)
         try Task.checkCancellation()
-        if let receipt=try await service.receipt(id:id) {
-            switch receipt.outcome {
-            case .opened(let roomID,_):return roomID.rawValue
-            case .closed,.rejected(.firstSubmissionExpired):throw V2DirectConversationOpeningState.expired
-            case .rejected:throw V2DirectConversationOpeningState.rejected
+        if let receipt = try await service.receipt(id: id) { return try roomID(from: receipt) }
+        try await service.resumeIfNeeded(id: id)
+        do {
+            return try await V2HTTPRequestDeadline.run(until: .now.advanced(by: confirmationTimeout), service: "directConversation") {
+                // The observation's first snapshot also covers a receipt committed
+                // between enqueue and subscribing. Never consume another work ID.
+                for try await requests in await service.updates() {
+                    try Task.checkCancellation()
+                    guard let request = requests.first(where: { $0.work.id == id }) else { continue }
+                    if let receipt = request.receipt { return try roomID(from: receipt) }
+                    if request.work.execution == .expiredUnsubmitted || request.work.execution == .cancelledLocally {
+                        throw V2DirectConversationOpeningState.expired
+                    }
+                    if request.work.scheduling == .needsAttention { throw V2DirectConversationOpeningState.queued(id) }
+                }
+                try Task.checkCancellation()
+                throw V2DirectConversationOpeningState.queued(id)
             }
+        } catch let failure as V2HTTPFailure where failure.kind == .deadlineExceeded {
+            // Stop the UI waiter, retaining the original durable request for retry.
+            throw V2DirectConversationOpeningState.queued(id)
         }
-        try await service.resumeIfNeeded(id:id)
-        throw V2DirectConversationOpeningState.queued(id)
+    }
+
+    private func roomID(from receipt: V2DirectRoomOperationReceipt) throws -> String {
+        switch receipt.outcome {
+        case .opened(let roomID, _): return roomID.rawValue
+        case .closed, .rejected(.firstSubmissionExpired): throw V2DirectConversationOpeningState.expired
+        case .rejected: throw V2DirectConversationOpeningState.rejected
+        }
     }
 }
 

@@ -81,6 +81,16 @@ extension GRDBV2LocalSyncStore {
         );
         """
 
+    static func restoreArchivedConversationToInbox(roomID: RoomID, now: Date, db: Database) throws {
+        guard let rawAccount = try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1") else { return }
+        let account = try UserID(rawAccount)
+        let target = try personalPreferenceTarget(accountID: account,
+            fallback: .conversation(roomID: roomID, isPinned: false, isArchived: false, muteUntil: nil), now: now, db: db)
+        guard case .conversation(_, let pinned, true, let mute) = target else { return }
+        _ = try enqueuePersonalPreference(accountID: account,
+            target: .conversation(roomID: roomID, isPinned: pinned, isArchived: false, muteUntil: mute), now: now, db: db)
+    }
+
     public func freezeSendIntent(_ intent: V2SendIntent, resources: [V2ResourcePreparedUpload] = [], imports: [UUID: V2ResourceImportRequest] = [:], now: Date = Date()) throws {
         guard intent.stage == .preparing else { throw V2ResourceJournalError.conflict }
         guard resources.count + imports.count <= V2MessageCommandLimits.maxMediaAttachments,
@@ -102,6 +112,9 @@ extension GRDBV2LocalSyncStore {
                       existing.attachmentJobIDs == intent.attachmentJobIDs else { throw V2ResourceJournalError.conflict }
                 return
             }
+            // A send is also an explicit return to this conversation. Freeze
+            // both intents atomically, including text and attachment sends.
+            try Self.restoreArchivedConversationToInbox(roomID: intent.roomID, now: now, db: db)
             let deadline=try Self.messageSendDeadline(now:now)
             let reservation=try Self.messageSendReservation(intent,deadline:deadline,db:db)
             try Self.requireMessageRoomCapacity(room:intent.roomID,db:db)
@@ -172,7 +185,7 @@ extension GRDBV2LocalSyncStore {
 
     static func readSubmittedSendIntents(in roomID: RoomID, limit: Int, offset: Int, db: Database) throws -> [V2SubmittedSendIntent] {
         return try Row.fetchAll(db,sql:"""
-            SELECT i.intent_id,i.text,w.execution_state,w.scheduling_state FROM v2_send_intents i
+            SELECT i.intent_id,i.created_at,i.text,w.execution_state,w.scheduling_state FROM v2_send_intents i
             JOIN v2_operation_work w ON w.work_id=i.work_id
             JOIN v2_message_send_operations m ON m.work_id=w.work_id
             WHERE i.stage='handedOff' AND i.room_id=? AND \(Self.submittedSendVisibilityPredicate)
@@ -185,8 +198,10 @@ extension GRDBV2LocalSyncStore {
                 let status:V2SubmittedSendIntent.Status = state=="committed" ? .acceptedAwaitingProjection : schedule=="needsAttention" ? .needsAttention
                     : state=="closed" ? .closed : state=="expiredUnsubmitted" ? .expiredUnsubmitted
                     : state=="rejected" ? .rejected : state=="conflicted" ? .needsAttention
+                    : schedule=="waitingForNetwork" ? .waitingForNetwork
+                    : schedule=="waitingForAuthentication" ? .waitingForAuthentication
                     : state=="awaitingConfirmation" || state=="submitting" || state=="processing" ? .confirmingOutcome : .pending
-                return .init(id:id,text:row["text"],status:status)
+                return .init(id:id,createdAt:Date(timeIntervalSince1970:row["created_at"]),text:row["text"],status:status)
             }
     }
 
@@ -238,6 +253,7 @@ extension GRDBV2LocalSyncStore {
                 guard let result=UUID(uuidString:existing) else {throw V2ResourceJournalError.invalidRecord};return result
             }
             let original=try Self.requireProvenUnsentSendIntent(id,db:db)
+            try Self.restoreArchivedConversationToInbox(roomID: original.roomID, now: now, db: db)
             let replacementID=UUID(), clientID=UUID()
             let deadline=try Self.messageSendDeadline(now:now)
             try db.execute(sql:"""

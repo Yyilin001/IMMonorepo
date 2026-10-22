@@ -503,7 +503,7 @@ struct V2GroupMembersSheet: View {
                 }
             }
         }
-        .sheet(item: $userProfile) { V2UserProfileSheet(key: $0.key) }
+        .v2UserProfileSheet(item: $userProfile)
         .authorPresentationPage(context: .list(profilePageID))
     }
 

@@ -1446,6 +1446,53 @@ struct V2ConversationStoreTests {
         #expect(await synchronizer.subscriptionRequests() == ["room-direct"])
     }
 
+    @Test func profileConversationRegistersIdentityBeforeItsListProjectionArrives() async throws {
+        let peer = try V2PublicIdentity(userID: .init(uuid: UUID()), handle: .init("profile_peer"),
+            displayName: "Profile peer", accountKind: .regular)
+        let room = RoomID(uuid: UUID()).rawValue
+        let opener = V2DirectConversationOpenerFake(roomID: room)
+        let store = makeConversationListStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            userID: UserID(uuid: UUID()).rawValue, directConversationOpener: opener)
+        #expect(await store.openDirectConversation(with: peer) == room)
+        #expect(store.items.isEmpty)
+        let detail = store.detailStore(for: room)
+        #expect(detail.kind == .direct(accountKind: .regular))
+        #expect(detail.presentationKey == .init(userID: peer.userID, context: .directConversation))
+        #expect(detail.authorPresentationContext != nil)
+        #expect(await opener.targets() == [peer.userID.rawValue])
+    }
+
+    @Test func profileConversationReusesExistingDirectRoomWithoutOpeningAgain() async throws {
+        let peer = try V2PublicIdentity(userID: .init(uuid: UUID()), handle: .init("existing_peer"),
+            displayName: "Existing peer", accountKind: .regular)
+        let room = RoomID(uuid: UUID()).rawValue
+        let source = V2ConversationDataSourceFake(summaries: [
+            .init(id: room, title: "", preview: "Message", lastActivity: .now, isOutgoing: false,
+                kind: .direct(accountKind: .regular), presentationKey: .init(userID: peer.userID, context: .directConversation))
+        ], messages: [])
+        let opener = V2DirectConversationOpenerFake(roomID: RoomID(uuid: UUID()).rawValue)
+        let store = makeConversationListStore(dataSource: source, userID: UserID(uuid: UUID()).rawValue,
+            directConversationOpener: opener)
+        await store.refresh()
+        #expect(await store.openDirectConversation(with: peer) == room)
+        #expect(await opener.targets().isEmpty)
+    }
+
+    @Test func concurrentProfileAndNewChatRequestsDoNotOpenTwice() async throws {
+        let peer = try V2PublicIdentity(userID: .init(uuid: UUID()), handle: .init("busy_peer"),
+            displayName: "Busy peer", accountKind: .regular)
+        let room = RoomID(uuid: UUID()).rawValue
+        let opener = V2SuspendingDirectConversationOpener(roomID: room)
+        let store = makeConversationListStore(dataSource: V2ConversationDataSourceFake(summaries: [], messages: []),
+            userID: UserID(uuid: UUID()).rawValue, directConversationOpener: opener)
+        let opening = Task { await store.openDirectConversation(with: peer) }
+        await opener.waitUntilOpening()
+        #expect(await store.openDirectConversation(with: peer) == nil)
+        #expect(await opener.openingCount() == 1)
+        await opener.complete()
+        #expect(await opening.value == room)
+    }
+
     @Test func directConversationTrimsInputAndReturnsOpenedRoom() async {
         let source = V2ConversationDataSourceFake(summaries: [], messages: [])
         let opener = V2DirectConversationOpenerFake(roomID: "room-direct")

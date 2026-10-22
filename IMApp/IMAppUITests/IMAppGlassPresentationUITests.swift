@@ -40,6 +40,30 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     }
 
     @MainActor
+    func testConsecutiveSendsCaptureTimelinePositions() {
+        let app = launch("chat")
+        let draft = app.textFields["v2.message.draft"]
+        XCTAssertTrue(draft.waitForExistence(timeout: 10))
+        for index in 1...3 {
+            draft.tap()
+            draft.typeText("Scroll regression message \(index)")
+            app.buttons["v2.message.send"].tap()
+            let completed = NSPredicate { _, _ in
+                let send = app.buttons["v2.message.send"]
+                return send.exists && !send.isEnabled
+                    && app.staticTexts["v2.message.send-feedback"].exists
+            }
+            XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: completed, object: nil)], timeout: 10), .completed)
+            // Hosted MessagingUI cells do not expose their text to XCUI.
+            // Retain each settled frame for visual verification of the tail.
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Timeline after send \(index)"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+        }
+    }
+
+    @MainActor
     func testNativeTabsPrivacyAndChatMenusRemainReachable() {
         let app = launch()
         XCTAssertTrue(app.tabBars.buttons["联系人"].waitForExistence(timeout: 10))

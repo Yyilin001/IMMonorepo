@@ -155,6 +155,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         case unavailable(message: String)
     }
 
+    enum OfflineStartupPresentation: Equatable { case restoringSession, localContent }
+    private(set) var offlineStartupPresentation: OfflineStartupPresentation = .restoringSession
+
     enum AccountAccessMode: Equatable { case blocked, localReadOnly, authenticated }
     private(set) var accountAccessMode: AccountAccessMode = .blocked
     private(set) var offlinePresentation: V2OfflineProjectionPresentation?
@@ -445,6 +448,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                         }
                         offlineLocalStore = store; offlinePermit = permit; offlinePresentation = presentation
                         accountAccessMode = .localReadOnly
+                        offlineStartupPresentation = .restoringSession
                         route = .localReadOnly(userID: permit.identity.userID.rawValue)
                         if let authSession {
                             authenticationObserver.start(session: authSession, epoch: permit.identity.epoch) { [weak self] change in
@@ -567,6 +571,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                     do {
                         try await bootstrapper.requireLocalReadBootstrap(permit, isLocalExitPending: { try await marker.isPending() })
                         self.authenticationMessage = "暂时无法连接账户服务，本地内容仍可查看。"
+                        self.offlineStartupPresentation = .localContent
                     } catch { await self.withdrawOfflineTrust(error) }
                 } else if self.route == .launching {
                     await self.performRestore()
