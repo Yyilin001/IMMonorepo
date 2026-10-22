@@ -18,19 +18,12 @@ enum GatewayAuthorPresentationAssembly {
         }, closeReader: { await profiles.close() })
     }
 
-    /// Current deployment adapter, matching the account resource-byte endpoint.
-    /// A production adapter replaces this factory, not the runtime or chat code.
-    static func localDelivery(configuration: V2LocalFilesystemMediaRuntimeConfiguration,
-                              controlDatabase: any Database) async throws -> any V2ResourceDelivery {
-        let backends = try V2ResourceBackendConfiguration(environment: ProcessRuntimeEnvironment(),
-            defaultDirectory: configuration.rootDirectory)
-        let storages = try backends.entries.map { entry in
-            try V2LocalResourceStorage(root: URL(fileURLWithPath: entry.directory, isDirectory: true)
-                .appendingPathComponent("sealed-resources"), binding: entry.binding)
-        }
-        let registry = try V2ResourceStorageRegistry(storages: storages, defaultBinding: backends.defaultBinding)
-        try await V2ResourceStorageReadiness.verify(database: controlDatabase, registry: registry)
-        return try V2LocalResourceDelivery(registry: registry, baseURL: configuration.publicBaseURL,
+    /// Signs for the account resource-byte endpoint with the same configured backend registry.
+    static func delivery(configuration: V2ResourceRuntimeConfiguration,
+                         storage: V2ResourceStorageAssembly,
+                         controlDatabase: any Database) async throws -> any V2ResourceDelivery {
+        try await V2ResourceStorageReadiness.verify(database: controlDatabase, registry: storage.registry)
+        return try V2SignedResourceDelivery(registry: storage.registry, baseURL: configuration.publicBaseURL,
             keyID: "local-v1", keys: ["local-v1": configuration.signingKey])
     }
 }

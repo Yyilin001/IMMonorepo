@@ -360,6 +360,12 @@ private final class LiveAccountTrust: NSObject, URLSessionDelegate {
     init(anchor: Data) { self.anchor = anchor }
     func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
                     completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        // The fixture CA is scoped to localhost. Cloud upload targets use the
+        // platform's normal certificate and hostname verification.
+        if challenge.protectionSpace.host != "localhost" {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
         guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               challenge.protectionSpace.host == "localhost", let trust = challenge.protectionSpace.serverTrust,
               let certificate = SecCertificateCreateWithData(nil, anchor as CFData),

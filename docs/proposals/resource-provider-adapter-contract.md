@@ -91,7 +91,7 @@ flowchart LR
 
 当前迁移内核保留所有尚未释放的源/目标引用，readiness 和 GC 已接入这份保护。没有部署入口、定时恢复装配或旧位置释放 API；`switched` 不代表退役完成。旧适配器删除、迁移取消后的输出清理、晚签发/在途读取排空及生产维护验收仍须补齐，不能通过手动写入 `source_released_at` 绕过这些证明。
 
-当前 `V2ResourceBackendConfiguration` **仅是本地参考装配配置**，`directory` 并非运营商通用参数。下面的例子用于验证 A/B 并存：
+`V2ResourceBackendConfiguration` 支持本地与 OSS 条目混合装配。未填写 `kind` 的旧条目仍解释为本地存储；`directory` 只属于本地适配器，`kind: "oss"` 的条目改用独立 `oss` 配置。OSS 实现与实际验证边界见 [阿里云 OSS 接入与验证](aliyun-oss-integration.md)。下面的例子用于验证本地 A/B 并存：
 
 ```json
 [

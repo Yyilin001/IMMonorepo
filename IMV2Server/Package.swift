@@ -121,6 +121,7 @@ let package = Package(
         .target(
             name: "IMV2ServerInfrastructure",
             dependencies: [
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 "IMV2ServerContracts", "IMV2ServerApplication",
                 "IMV2ActorContracts", "IMV2ActorRuntime", "IMV2ActorCluster", "IMV2Core", "CIMV2Argon2",
                 .product(name: "FluentKit", package: "fluent-kit"),
