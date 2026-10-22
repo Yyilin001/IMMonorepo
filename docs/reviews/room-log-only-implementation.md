@@ -60,7 +60,7 @@ schema 35 新库初始化、转储恢复、漂移与非空库拒绝通过。Core
 
 ## 原定实施顺序与文件边界（已完成）
 
-1. **拆除服务端旧流水线。** 从 `IMV2ServerApp/main.swift` 移除旧任务后，删除仅供旧模式使用的 planner、relay、delivery、completion、NATS plan hint 和 payload backfill 实现及专用测试。清理运行配置、资源预算、健康检查和指标中对应依赖。保留房间 wake、推送、转发、媒体、审核和个人待办。
+1. **拆除服务端旧流水线。** 从 `IMV2ServerApp/IMV2ServerApp.swift` 移除旧任务后，删除仅供旧模式使用的 planner、relay、delivery、completion、NATS plan hint 和 payload backfill 实现及专用测试。清理运行配置、资源预算、健康检查和指标中对应依赖。保留房间 wake、推送、转发、媒体、审核和个人待办。
 2. **简化领域类型与协议。** 清理 Core 接受结果、write set、准入及各 Store 操作记录中的 plan ID 和目标规则，结果以命令身份、事件身份和房间序号表示接受成功。同步修改当前协议生成物与客户端。直接使用新版幂等编码，不引入历史指纹版本分支。
 3. **分离群容量。** 将 `standardFanout` / `largeGroupHybrid` 中的产品规模含义变成独立容量类别，保留原有上限与校验；所有类别使用同一房间日志模型。
 4. **清理数据库。** 以全新 schema 为准删除旧计划、目标、投递、完成和共享扇出载荷专用表、索引、外键与字段；同步 readiness、schema contract、SQL 初始化和测试夹具。逐项确认实际引用，避免误删仍用于房间消息版本、媒体或个人状态的数据。

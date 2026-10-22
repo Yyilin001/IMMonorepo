@@ -52,10 +52,10 @@
 | [PostgresV2RoomWriteStore](../../IMV2Server/Sources/IMV2ServerInfrastructure/PostgresV2RoomWriteStore.swift) | 4,051 | 权限、准入、幂等和事务的组合是否可追踪 |
 | [V2ConversationUI](../../IMApp/IMApp/V2/V2ConversationUI.swift) | 2,580 | 页面渲染与业务编排边界 |
 | [V2ProtobufSyncTransport](../../IMV2ClientKit/Sources/IMV2ClientKit/V2ProtobufSyncTransport.swift) | 2,068 | 请求生命周期、映射与错误传播 |
-| [ServerApp main](../../IMV2Server/Sources/IMV2ServerApp/main.swift) | 1,837 | 依赖组装、任务所有权与停机顺序 |
+| [ServerApp main](../../IMV2Server/Sources/IMV2ServerApp/IMV2ServerApp.swift) | 1,837 | 依赖组装、任务所有权与停机顺序 |
 | [V2ConversationDetailStore](../../IMApp/IMApp/V2/V2ConversationDetailStore.swift) | 1,800 | 状态所有权、并发动作与页面身份 |
 
-上表保留摸底时的基线行数。当前 Gateway 入口已拆分：从 [main.swift](../../IMV2Server/Sources/IMV2ServerApp/main.swift) 进入，依次审核 [GatewayRuntime](../../IMV2Server/Sources/IMV2ServerApp/GatewayRuntime.swift) 的启动与关闭顺序、[GatewayComposition](../../IMV2Server/Sources/IMV2ServerApp/GatewayComposition.swift) 的依赖组装、[GatewayDatabaseTopology](../../IMV2Server/Sources/IMV2ServerApp/GatewayDatabaseTopology.swift) 的连接池与就绪校验，以及 [GatewayBackgroundWorkers](../../IMV2Server/Sources/IMV2ServerApp/GatewayBackgroundWorkers.swift) 和 `Gateway*Workers.swift` 的任务生命周期。
+上表保留摸底时的基线行数。当前 Gateway 入口已拆分：从 [IMV2ServerApp.swift](../../IMV2Server/Sources/IMV2ServerApp/IMV2ServerApp.swift) 进入，依次审核 [GatewayRuntime](../../IMV2Server/Sources/IMV2ServerApp/GatewayRuntime.swift) 的启动与关闭顺序、[GatewayComposition](../../IMV2Server/Sources/IMV2ServerApp/GatewayComposition.swift) 的依赖组装、[GatewayDatabaseTopology](../../IMV2Server/Sources/IMV2ServerApp/GatewayDatabaseTopology.swift) 的连接池与就绪校验，以及 [GatewayBackgroundWorkers](../../IMV2Server/Sources/IMV2ServerApp/GatewayBackgroundWorkers.swift) 和 `Gateway*Workers.swift` 的任务生命周期。
 
 ## 3. 审核组织方式
 
