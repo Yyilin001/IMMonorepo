@@ -432,32 +432,18 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         do {
             if let marker = pendingCredentialDeletionStore {
                 do {
-                    let permit = try await bootstrapper.localReadBootstrap(isLocalExitPending: { try await marker.isPending() })
-                    let store = try await bootstrapper.openLocalReadSession(permit, isLocalExitPending: { try await marker.isPending() })
+                    let local = try await bootstrapper.openLocallyEstablishedSession(
+                        isLocalExitPending: { try await marker.isPending() })
                     do {
-                        let presentation = V2OfflineProjectionPresentation(userID: permit.identity.userID, store: store,
-                            validate: { try await bootstrapper.requireLocalReadBootstrap(permit, isLocalExitPending: { try await marker.isPending() }) },
-                            onTrustFailure: { [weak self] error in
-                                guard let self, self.authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration) else { return }
-                                await self.withdrawOfflineTrust(error)
-                            })
-                        try await presentation.loadConversations()
                         try Task.checkCancellation()
                         guard authenticationAttemptGate.matchesCurrentGeneration(attemptGeneration), !signOutAttemptGate.isInFlight else {
-                            presentation.invalidate(); try await bootstrapper.closeLocalStore(store); return
+                            try await bootstrapper.closeLocalStore(local.store)
+                            return
                         }
-                        offlineLocalStore = store; offlinePermit = permit; offlinePresentation = presentation
-                        accountAccessMode = .localReadOnly
-                        offlineStartupPresentation = .restoringSession
-                        route = .localReadOnly(userID: permit.identity.userID.rawValue)
-                        if let authSession {
-                            authenticationObserver.start(session: authSession, epoch: permit.identity.epoch) { [weak self] change in
-                                await self?.authenticationStateDidChange(change)
-                            }
-                        }
-                        startOfflineUpgradeIfNeeded()
+                        try await activate(localStore: local.store, authenticationAttemptGeneration: attemptGeneration,
+                            localIdentity: local.identity)
                         return
-                    } catch { try? await bootstrapper.closeLocalStore(store); throw error }
+                    } catch { try? await bootstrapper.closeLocalStore(local.store); throw error }
                 } catch V2OfflineReadBootstrapError.localStoreUnavailable {
                     // No trusted existing projection: the authenticated path may create
                     // fresh local storage, but expired offline credentials cannot do so.
@@ -932,7 +918,8 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
 
     private func activate(
         localStore: GRDBV2LocalSyncStore,
-        authenticationAttemptGeneration: UInt64? = nil
+        authenticationAttemptGeneration: UInt64? = nil,
+        localIdentity: V2LocalAccountIdentity? = nil
     ) async throws {
         guard let configuration, let authSession, let localKeychainService else {
             throw V2AppConfigurationError.invalidRealtimeEndpoint
@@ -941,9 +928,21 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             throw V2AccountLocalStoreError.staleStore
         }
         try Self.applyDatabaseStoragePolicy(databaseURL: scope.database.primary)
-        let credentials = try await authSession.realtimeCredentials()
-        let userID = credentials.userID
-        guard let authEpoch = credentials.sessionEpoch else { throw V2AuthSessionError.sessionInvalidated }
+        let userID: UserID
+        let deviceID: DeviceID
+        let authEpoch: V2AuthSessionEpoch
+        if let localIdentity {
+            try await authSession.requireAuthenticatedEpoch(localIdentity.epoch)
+            userID = localIdentity.userID
+            deviceID = localIdentity.deviceID
+            authEpoch = localIdentity.epoch
+        } else {
+            let credentials = try await authSession.realtimeCredentials()
+            userID = credentials.userID
+            deviceID = credentials.deviceID
+            guard let epoch = credentials.sessionEpoch else { throw V2AuthSessionError.sessionInvalidated }
+            authEpoch = epoch
+        }
         guard scope.accountID == userID else { throw V2AccountLocalStoreError.staleStore }
         try Task.checkCancellation()
         guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
@@ -970,7 +969,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             let realtime = try V2AppRealtimeRuntime(
                 configuration: configuration,
                 actorUserID: userID,
-                deviceID: credentials.deviceID,
+                deviceID: deviceID,
                 authSession: authSession,
                 authEpoch: authEpoch,
                 localStore: localStore,
@@ -1018,7 +1017,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             )
             let roomRecovery = realtime.roomRecovery
             let conversationDataSource = V2GRDBConversationDataSource(
-                localStore: localStore,
+                localStore: localStore, requiresLocalReadAuthorization: localIdentity != nil,
                 requestLatestVisible: { try await roomRecovery.requestLatestVisible(roomIDs: $0) }
             )
             let contactsDataSource = V2GRDBContactsDataSource(
@@ -1153,10 +1152,10 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 service: profileService, attachmentStager: attachmentStager
             )
             let remoteDeviceRevocations = V2RemoteDeviceRevocationService(
-                accountID: userID, currentDeviceID: credentials.deviceID,
+                accountID: userID, currentDeviceID: deviceID,
                 storage: V2KeychainRemoteDeviceRevocationMetadataStore(
                     installationBinding: try await localStore.boundInstallationBinding(),
-                    accountID: userID, currentDeviceID: credentials.deviceID),
+                    accountID: userID, currentDeviceID: deviceID),
                 client: try V2HTTPRemoteDeviceRevocationClient(baseURL: configuration.accountBaseURL,
                     credentials: accountHTTP, transport: accountHTTP))
             let deviceSessions = V2DeviceSessionsStore(
@@ -1186,7 +1185,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 await pushWakeSettingsStore?.stop()
                 let preferences = V2UserDefaultsPushWakePreferenceStore(key: localKeychainService + ".push-wake-enabled." + userID.rawValue)
                 let initialPreference = preferences.isEnabled()
-                let pushScope = try await localStore.pushIntentScope(deviceID: credentials.deviceID)
+                let pushScope = try await localStore.pushIntentScope(deviceID: deviceID)
                 guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
                 try await authSession.requireAuthenticatedEpoch(authEpoch)
                 let reconciler = try await V2PushIntentReconciler.activate(
@@ -1209,7 +1208,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             let presentations = realtime.profilePresentations
             let groupReader = try V2HTTPGroupAvatarPresentationClient(roomsEndpoint: configuration.endpoint("v2/rooms"),
                 actorUserID: userID, credentials: accountHTTP, transport: accountHTTP)
-            let groupPresentations = V2GroupAvatarPresentationRepository(actorUserID: userID, deviceID: credentials.deviceID,
+            let groupPresentations = V2GroupAvatarPresentationRepository(actorUserID: userID, deviceID: deviceID,
                 reader: groupReader, minimumRevision: { try await localStore.groupAvatarRevision(roomID: $0) })
             let pipeline = V2AvatarPipeline(profiles: presentations, groups: groupPresentations,
                 files: realtime.mediaCacheMaintenance, thumbnails: thumbnails,
@@ -1231,6 +1230,14 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
             try await authSession.requireAuthenticatedEpoch(authEpoch)
             try Task.checkCancellation()
+            guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
+            // Publish the normal app with its first local page already populated.
+            // Missing remote summaries are reconciled after runtime startup.
+            await conversations.refresh()
+            await contacts.loadInitialLocalContent()
+            await publicIdentitySettings.loadCachedProfile()
+            try Task.checkCancellation()
+            try await authSession.requireAuthenticatedEpoch(authEpoch)
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
             // No awaits between adoption and publishing the complete account state.
             try activation.adopt()
@@ -1287,6 +1294,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             await realtime.accountRuntime.startActivity(id: "remoteDeviceRevocations") {
                 try await remoteDeviceRevocations.run()
             }
+            await realtime.accountRuntime.startActivity(id: "localDirectMessages") {
+                try await realtime.directRoomOperations.runLocalMessagePreparation()
+            }
             await realtime.accountRuntime.startActivity(id: "profilePreparation") {
                 try await profileService.runPreparation()
             }
@@ -1331,7 +1341,9 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             startMessageSearchIndexing(localStore: localStore)
             await conversations.refresh()
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
-            await pushWakeSettings?.activate()
+            await realtime.accountRuntime.startActivity(id: "activatePushWake") {
+                await pushWakeSettings?.activate()
+            }
             guard authenticationAttemptGeneration.map(authenticationAttemptGate.matchesCurrentGeneration) ?? true else { return }
             startRealtimeIfApplicationActive(runtime: realtime.runtime, conversations: conversations)
         }

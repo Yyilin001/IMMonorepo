@@ -269,6 +269,25 @@ final class V2ContactsStore {
         updatingUserIDs.contains(item.userID)
     }
 
+    /// Seed the normal tabs before publication; this path never hydrates remotely.
+    func loadInitialLocalContent() async {
+        do {
+            let friendPage = try await dataSource.contactProjectionPage(scope: .friends, matching: nil, before: nil, limit: Self.pageSize, includeTotalCount: false)
+            let incomingPage = try await dataSource.contactProjectionPage(scope: .incomingRequests, matching: nil, before: nil, limit: Self.pageSize, includeTotalCount: true)
+            let outgoingPage = try await dataSource.contactProjectionPage(scope: .outgoingRequests, matching: nil, before: nil, limit: Self.pageSize, includeTotalCount: false)
+            try Task.checkCancellation()
+            apply(friendPage.projections, scope: .friends, appending: false)
+            apply(incomingPage.projections, scope: .incomingRequests, appending: false)
+            apply(outgoingPage.projections, scope: .outgoingRequests, appending: false)
+            friendsNextCursor = friendPage.nextCursor
+            incomingRequestsNextCursor = incomingPage.nextCursor
+            outgoingRequestsNextCursor = outgoingPage.nextCursor
+            incomingRequestCount = incomingPage.totalCount ?? incomingPage.projections.count
+            state = .loaded
+        } catch is CancellationError { }
+        catch { handleReadFailure(error) }
+    }
+
     func refresh(revalidateProfiles: Bool = false) async {
         refreshingGeneration &+= 1
         let generation = refreshingGeneration
@@ -1021,6 +1040,17 @@ final class V2RootNavigationStore {
     var path = NavigationPath()
     var fixtureRoomID: String?
     var selectedTab: Tab = .conversations
+
+    func showConversation(_ target: V2ConversationDestination) {
+        switch target {
+        case .room(let route): showConversation(roomID: route.roomID, messageID: route.messageID)
+        case .localDirect(let route):
+            var destination = NavigationPath()
+            destination.append(route)
+            selectedTab = .conversations
+            path = destination
+        }
+    }
 
     func showConversation(roomID: String, messageID: String? = nil) {
         guard (try? RoomID(roomID)) != nil else { return }

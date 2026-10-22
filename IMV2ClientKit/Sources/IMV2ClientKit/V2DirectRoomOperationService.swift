@@ -4,8 +4,8 @@ import IMV2Core
 
 /// Persists the original opening request before any network work is admitted.
 public actor V2DirectRoomOperationService {
-    private let accountID:UserID
-    private let store:GRDBV2LocalSyncStore
+    let accountID:UserID
+    let store:GRDBV2LocalSyncStore
     private let client:any V2DirectRoomOperationClient
     private var deadlines:[UUID:ContinuousClock.Instant]=[:]
 

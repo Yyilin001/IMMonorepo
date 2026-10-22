@@ -147,6 +147,25 @@ public actor V2ClientSessionBootstrapper {
         }
     }
 
+    /// Restores the device-bound account and its existing writable journal using
+    /// local evidence only. This grants no remote authorization: network clients
+    /// still obtain current credentials through the session before every request.
+    public func openLocallyEstablishedSession(
+        isLocalExitPending: @Sendable () async throws -> Bool
+    ) async throws -> (store: GRDBV2LocalSyncStore, identity: V2LocalAccountIdentity) {
+        let evidence = try await localReadBootstrap(isLocalExitPending: isLocalExitPending)
+        _ = try await authSession.restoreState()
+        try await requireLocalReadBootstrap(evidence, isLocalExitPending: isLocalExitPending)
+        try await authSession.requireAuthenticatedEpoch(evidence.identity.epoch)
+        let store = try await openLocalStore(userID: evidence.identity.userID)
+        do {
+            try await requireLocalReadBootstrap(evidence, isLocalExitPending: isLocalExitPending)
+            try await authSession.requireAuthenticatedEpoch(evidence.identity.epoch)
+            try Task.checkCancellation()
+            return (store, evidence.identity)
+        } catch { try await closeLocalStore(store); throw error }
+    }
+
     /// 恢复已有设备会话并打开其账号数据库，不启动新的账号因子流程。
     ///
     /// 获取凭据可能触发会话内部刷新；认证 epoch 在数据库打开前后核对。

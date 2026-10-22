@@ -15,6 +15,7 @@ extension GRDBV2LocalSyncStore {
                 SELECT w.work_id FROM v2_operation_work w
                 WHERE w.execution_state='committed' AND w.scheduling_state='finished'
                   AND w.completed_at<=?
+                  AND NOT EXISTS(SELECT 1 FROM v2_local_direct_messages local WHERE local.work_id=w.work_id)
                   AND NOT EXISTS(SELECT 1 FROM v2_operation_dependencies d WHERE d.parent_work_id=w.work_id)
                   AND (
                     (w.operation_kind='profileUpdate' AND EXISTS(

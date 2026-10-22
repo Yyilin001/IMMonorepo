@@ -1063,6 +1063,66 @@ final class V2ConversationListStore {
         }
     }
 
+    func openLocalFirstDirectConversation(handle: String) async -> V2ConversationDestination? {
+        let handle = handle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !handle.isEmpty, !isOpeningDirectConversation, let publicIdentityResolver else { return nil }
+        isOpeningDirectConversation = true
+        defer { isOpeningDirectConversation = false }
+        do {
+            // An unknown public handle still needs identity lookup. Once the
+            // identity is known, opening the chat never waits for room creation.
+            let identity = try await publicIdentityResolver.resolve(handle: handle)
+            try Task.checkCancellation()
+            isOpeningDirectConversation = false
+            return await openLocalFirstDirectConversation(with: identity)
+        } catch is CancellationError { return nil }
+        catch { directConversationFeedback = "无法查找用户，请检查公开 ID 和网络连接。"; return nil }
+    }
+
+    private var localDirectIdentities: [UUID: V2PublicIdentity] = [:]
+
+    func localDirectIdentity(for operationID: UUID) -> V2PublicIdentity? {
+        localDirectIdentities[operationID] ?? directConversationRequests.first { $0.work.id == operationID }?.publicIdentity
+    }
+
+    /// Opening a known contact depends only on a local durable enqueue.
+    /// Server room discovery and message delivery continue in the account runtime.
+    func openLocalFirstDirectConversation(with identity: V2PublicIdentity) async -> V2ConversationDestination? {
+        guard !isOpeningDirectConversation, identity.userID.rawValue != userID else { return nil }
+        if items.contains(where: { $0.kind.directAccountKind != nil && $0.presentationKey?.userID == identity.userID }) {
+            return await openDirectConversation(with: identity).map { .room(.init(roomID: $0)) }
+        }
+        guard let recovering = directConversationOpener as? any V2DirectConversationRecovering else {
+            return await openDirectConversation(with: identity).map { .room(.init(roomID: $0)) }
+        }
+        isOpeningDirectConversation = true
+        defer { isOpeningDirectConversation = false }
+        do {
+            if let room = try await recovering.service.existingLocalRoom(with: identity.userID) {
+                try Task.checkCancellation()
+                registerLocalDirectRoom(room.rawValue, identity: identity)
+                directConversationFeedback = nil
+                return .init(roomID: room.rawValue)
+            }
+            let id = try await recovering.service.enqueue(publicIdentity: identity)
+            try Task.checkCancellation()
+            localDirectIdentities[id] = identity
+            directConversationFeedback = nil
+            return .localDirect(.init(operationID: id))
+        } catch is CancellationError { return nil }
+        catch { directConversationFeedback = "无法保存本地会话，请重试。"; return nil }
+    }
+
+    func registerLocalDirectRoom(_ roomID: String, identity: V2PublicIdentity) {
+        explicitRoomTitles[roomID] = identity.displayName
+        explicitRoomKinds[roomID] = .direct(accountKind: identity.accountKind)
+        explicitDirectPresentationKeys[roomID] = .init(userID: identity.userID, context: .directConversation)
+    }
+
+    var localDirectConversationService: V2DirectRoomOperationService? {
+        (directConversationOpener as? any V2DirectConversationRecovering)?.service
+    }
+
     /// All entry points register the same direct-room metadata before navigation,
     /// including rooms that have not reached the current paginated list yet.
     func openDirectConversation(with identity: V2PublicIdentity) async -> String? {
@@ -1134,7 +1194,7 @@ struct V2ConversationListView: View {
     private let rootNavigation: V2RootNavigationStore
     private let groupInvitationStore: V2GroupInvitationStore?
     @State private var newConversationSheet: NewConversationSheet?
-    @State private var conversationAfterSheetDismissal: V2ConversationRoute?
+    @State private var conversationAfterSheetDismissal: V2ConversationDestination?
     @State private var directTargetUserID: String
     @State private var groupTitle = ""
     @State private var groupMemberUserIDs = ""
@@ -1192,24 +1252,22 @@ struct V2ConversationListView: View {
                     ScrollViewReader { scrollProxy in
                     List {
                     ForEach(store.pendingDirectConversationRequests, id: \.command.targetUserID) { request in
-                        HStack(spacing: 14) {
-                            let key = V2ProfileViewLookupKey(userID: request.command.targetUserID, context: .directConversation)
-                            V2AuthorizedAvatarView(key: key, size: 52)
-                            VStack(alignment: .leading, spacing: 5) {
-                                V2AuthorizedProfileNameView(key: key, placeholder: "资料暂不可用")
-                                    .font(.body.weight(.semibold))
-                                Text(store.directConversationRequestStatus(request))
-                                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
-                            }
-                            Spacer()
-                            if request.work.scheduling == .needsAttention {
-                                Button("重试") { Task { await store.resumeDirectConversationRequest(request) } }
-                            } else {
-                                ProgressView().accessibilityLabel("正在准备会话")
-                            }
+                        NavigationLink(value: V2LocalDirectConversationRoute(operationID: request.work.id)) {
+                            HStack(spacing: 14) {
+                                let key = V2ProfileViewLookupKey(userID: request.command.targetUserID, context: .relationship)
+                                V2AuthorizedAvatarView(key: key, size: 52)
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(request.publicIdentity?.displayName ?? "聊天")
+                                        .font(.body.weight(.semibold))
+                                    Text(store.directConversationRequestStatus(request))
+                                        .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                                Spacer()
+                                Image(systemName: "clock").foregroundStyle(.orange)
+                            }.padding(.vertical, 12)
                         }
-                        .padding(.vertical, 12)
                         .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
+                        .accessibilityIdentifier("v2.conversation.local.\(request.work.id.uuidString)")
                     }
                     if store.hasEarlierConversations {
                         Button("查看前面的会话") { Task { await store.loadEarlierConversations() } }
@@ -1397,11 +1455,11 @@ struct V2ConversationListView: View {
                                 guard directSubmissionTask == nil else { return }
                                 let target = directTargetUserID
                                 directSubmissionTask = Task {
-                                    if let roomID = await store.openDirectConversation(handle: target), !Task.isCancelled {
+                                    if let destination = await store.openLocalFirstDirectConversation(handle: target), !Task.isCancelled {
                                         directSubmissionTask = nil
                                         directTargetUserID = ""
-                                        rootNavigation.fixtureRoomID = roomID
-                                        conversationAfterSheetDismissal = .init(roomID: roomID)
+                                        if case .room(let route) = destination { rootNavigation.fixtureRoomID = route.roomID }
+                                        conversationAfterSheetDismissal = destination
                                         newConversationSheet = nil
                                     } else if !Task.isCancelled {
                                         directSubmissionTask = nil
@@ -1532,7 +1590,7 @@ struct V2ConversationListView: View {
     private func openConversationAfterSheetDismissal() {
         guard let route = conversationAfterSheetDismissal else { return }
         conversationAfterSheetDismissal = nil
-        rootNavigation.showConversation(roomID: route.roomID, messageID: route.messageID)
+        rootNavigation.showConversation(route)
     }
 
     private var filteredConversations: [V2ConversationListItem] {
@@ -2562,7 +2620,7 @@ struct V2ConversationDetailView: View {
 
 /// 使用可滚动编辑器，避免消息输入框在辅助功能动态字体尺寸下
 /// 因 UIKit 文本框固定高度而被裁剪。
-private struct V2ComposerTextInput: View {
+struct V2ComposerTextInput: View {
     @Binding var text: String
     let placeholder: String
     let accessibilityLabel: String

@@ -91,7 +91,7 @@ extension GRDBV2LocalSyncStore {
             target: .conversation(roomID: roomID, isPinned: pinned, isArchived: false, muteUntil: mute), now: now, db: db)
     }
 
-    public func freezeSendIntent(_ intent: V2SendIntent, resources: [V2ResourcePreparedUpload] = [], imports: [UUID: V2ResourceImportRequest] = [:], now: Date = Date()) throws {
+    public func freezeSendIntent(_ intent: V2SendIntent, resources: [V2ResourcePreparedUpload] = [], imports: [UUID: V2ResourceImportRequest] = [:], now: Date = Date(), originalCreatedAt: Date? = nil) throws {
         guard intent.stage == .preparing else { throw V2ResourceJournalError.conflict }
         guard resources.count + imports.count <= V2MessageCommandLimits.maxMediaAttachments,
               Set(imports.keys).isDisjoint(with: resources.map(\.id)),
@@ -124,7 +124,7 @@ extension GRDBV2LocalSyncStore {
                 VALUES(?,?,?,?,?,?,?,'preparing',?,?,?)
                 """, arguments: [intent.id.uuidString, intent.clientMessageID.rawValue, intent.roomID.rawValue, intent.text,
                                   try Self.encodeMentions(intent.mentions), try Self.encodeEntities(intent.entities, text: intent.text),
-                                  intent.replyTo?.messageID.rawValue, try Self.commandRetryTimestamp(now),reservation,Int64(deadline)])
+                                  intent.replyTo?.messageID.rawValue, try Self.commandRetryTimestamp(originalCreatedAt ?? now),reservation,Int64(deadline)])
             for (ordinal, job) in intent.attachmentJobIDs.enumerated() {
                 let imported = try Self.readResourceImport(job, db: db) != nil
                 if !imported {

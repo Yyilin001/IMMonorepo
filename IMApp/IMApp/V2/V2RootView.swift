@@ -74,7 +74,10 @@ struct V2RootView: View {
             Group {
                 switch store.route {
                 case .launching:
-                    ProgressView("正在恢复 V2 会话…")
+                    // Keep the native launch background until local account data
+                    // is ready; authentication recovery never becomes a page.
+                    Color(uiColor: .systemBackground).ignoresSafeArea()
+                        .accessibilityIdentifier("v2.launch.local-bootstrap")
                 case .signedOut:
                     signedOutContent
                 case .authenticating:
@@ -559,6 +562,13 @@ struct V2SignedInRootView: View {
                         initialMentionHandles: rootNavigation.fixtureRoomID == route.roomID ? localE2EConversationLaunchFixture?.initialMentionHandles : nil),
                     initiallyFocusedMessageID: route.messageID,
                     groupInvitationStore: groupInvitationStore)
+            }
+            .navigationDestination(for: V2LocalDirectConversationRoute.self) { route in
+                if let service = conversationStore.localDirectConversationService {
+                    V2LocalDirectConversationView(operationID: route.operationID,
+                        service: service, conversations: conversationStore,
+                        groupInvitations: groupInvitationStore)
+                }
             }
             .navigationDestination(for: V2ContactsRoute.self) { route in
                 switch route {

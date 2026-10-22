@@ -15,7 +15,7 @@ struct V2MockPreview: View {
 
     init() {
         let source = V2MockPreviewSource()
-        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source), messages: .init(sender: source))))
+        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source), messages: .init(sender: source), discovery: .init(directConversationOpener: source))))
         _contacts = State(initialValue: .init(dataSource: source, identityResolver: source, relationshipChanger: source,
             userBlockChanger: source, directConversationOpener: source, currentUserID: source.user))
         _privacy = State(initialValue: .init(reader: source, updater: source))

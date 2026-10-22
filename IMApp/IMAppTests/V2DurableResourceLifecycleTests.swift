@@ -8,6 +8,45 @@ import Testing
 @MainActor
 @Suite("Durable account resource closure", .timeLimit(.minutes(1)))
 struct V2DurableResourceLifecycleTests {
+    @Test("text sends recover after all account activities have registered")
+    func textRecoveryAfterAccountRegistrations() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let user = UserID(uuid: UUID()), room = RoomID(uuid: UUID())
+        let store = try GRDBV2LocalSyncStore(databaseURL: directory.appending(path: "db.sqlite"),
+            installationBinding: .init(value: UUID()), userID: user)
+        let transfers = V2ResourceTransferEngine(store: store, control: NoLifecycleUpload(), executor: NoLifecycleUpload(), directory: directory)
+        let groups = V2GroupAvatarIntentEngine(actorUserID: user, store: store, transfers: transfers, submissions: NoLifecycleGroupCommand())
+        let sender = V2DurableConversationSendService(store: store, engine: transfers,
+            messageOperations: .init(accountID: user, store: store, client: NoLifecycleMessageTransport()),
+            imports: LateResourceImport(), groupAvatars: groups)
+        let intent = try V2SendIntent(id: UUID(), roomID: room, clientMessageID: .init(uuid: UUID()), text: "saved before startup", attachmentJobIDs: [])
+        try await store.freezeSendIntent(intent)
+        #expect(try await sender.pending(in: room).first?.status == "等待发送")
+        let runtime = V2AccountRuntime()
+        for index in 0..<20 {
+            await runtime.startActivity(id: "account-\(index)") { try await Task.sleep(for: .seconds(3600)) }
+        }
+        await runtime.startActivity(id: "resourcePreparation") { try await sender.runRecovery() }
+        #expect(await runtime.activitySnapshot()["resourcePreparation"] == .running)
+        // Observe the real preparation-to-operation handoff, including saved work
+        // from before startup and a new text frozen after the owner is running.
+        for try await _ in store.resourceSendChanges(in: room) {
+            if try await store.preparingSendIntent(id: intent.id) == nil { break }
+        }
+        try await sender.freezeSend(text: "new send", mentions: [], replyTo: nil, roomID: room, attachments: [])
+        for try await _ in store.resourceSendChanges(in: room) {
+            if try await store.preparingSendIntents(in: room).isEmpty { break }
+        }
+        #expect(try await sender.pending(in: room).count == 2)
+        #expect(try await store.dueOperationWork(now: Date(), kinds: [.sendMessage]).count == 1)
+        await runtime.close()
+        #expect(await runtime.activitySnapshot()["resourcePreparation"] == .cancelled)
+        await sender.close()
+        try await store.close()
+    }
+
     @Test("cancelling an upload observer leaves the persisted account activity running")
     func observerCancellationKeepsAccountTransfer() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "durable-observer-\(UUID())")

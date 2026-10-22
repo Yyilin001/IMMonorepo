@@ -1,4 +1,6 @@
 import Foundation
+import GRDB
+import SwiftUI
 @testable import IMV2ClientKit
 import IMV2Core
 import Testing
@@ -66,6 +68,32 @@ private actor UnusedCreationRemote:V2GroupCreationOperationClient {
 @MainActor
 @Suite("Direct chat waits for its own durable confirmation", .timeLimit(.minutes(1)))
 struct V2OperationDirectConversationOpenerTests {
+    @MainActor @Test("a contact opens a durable local chat immediately without server confirmation")
+    func localFirstOpenDoesNotWaitForReceipt() async throws {
+        let f = try DirectOpenFixture(); defer { f.remove() }
+        let commandAccount = try await f.store.databasePool.read { db in
+            try String.fetchOne(db, sql: "SELECT user_id FROM v2_local_installation WHERE singleton=1")!
+        }
+        let source = V2GRDBConversationDataSource(localStore: f.store, requestLatestVisible: { _ in })
+        let conversations = V2ConversationListStore(environment: .init(userID: commandAccount,
+            projections: .init(dataSource: source), discovery: .init(directConversationOpener: f.opener)))
+        let destination = try #require(await conversations.openLocalFirstDirectConversation(with: f.peer))
+        guard case .localDirect(let route) = destination else { Issue.record("Expected a local destination"); return }
+        #expect(try await f.service.receipt(id: route.operationID) == nil)
+        #expect(await conversations.openLocalFirstDirectConversation(with: f.peer) == destination)
+        let navigation = V2RootNavigationStore()
+        navigation.path.append(V2ContactsRoute.contact(f.peer.userID.rawValue))
+        navigation.showConversation(destination)
+        var expected = NavigationPath(); expected.append(route)
+        #expect(navigation.selectedTab == .conversations && navigation.path == expected)
+        let local = V2LocalDirectConversationStore(operationID: route.operationID, service: f.service, conversations: conversations)
+        local.draft = "written before connection"
+        await local.send()
+        #expect(local.draft.isEmpty)
+        #expect(try await f.service.localMessages(workID: route.operationID).map(\.text) == ["written before connection"])
+        try await f.store.close()
+    }
+
     @Test("a queued click waits and returns the confirmed room, ignoring an older receipt")
     func waitsForExactRequest() async throws {
         let f = try DirectOpenFixture(); defer { f.remove() }

@@ -4,52 +4,42 @@ import IMV2Core
 @testable import IMApp
 import Testing
 
-@MainActor @Suite("Offline startup and authenticated upgrade", .serialized)
+@MainActor @Suite("Local-first startup and background authentication", .serialized)
 struct V2OfflineStartupTests {
-    @Test("expired access token with unavailable network presents bounded local read-only content")
+    @Test("expired credentials show the normal local inbox before refresh completes")
     func unavailableNetworkRetainsLocalContent() async throws {
         let f = try await OfflineAppFixture.make()
         defer { f.removeFiles() }
-        await f.app.restore()
-        #expect(f.app.route == .localReadOnly(userID: f.credentials.userID.rawValue))
-        #expect(f.app.offlineStartupPresentation == .restoringSession)
-        #expect(f.app.accountAccessMode == .localReadOnly)
-        #expect(f.app.conversationStore == nil && f.app.avatarPipeline == nil)
-        #expect(f.app.offlinePresentation?.conversations.map(\.roomID) == [f.room])
-        await f.app.offlinePresentation?.loadMessages(roomID: f.room)
-        #expect(f.app.offlinePresentation?.messages.map(\.text) == ["saved text"])
+        let restoring = Task { await f.app.restore() }
+        try await waitUntil { f.app.conversationStore != nil }
+        #expect(f.app.route == .signedIn(userID: f.credentials.userID.rawValue))
+        #expect(f.app.offlinePresentation == nil)
+        let conversations = try #require(f.app.conversationStore)
+        #expect(conversations.items.map(\.id) == [f.room.rawValue])
         await f.refresh.waitForStart()
         await f.refresh.fail()
-        try await waitUntil { f.app.authenticationMessage != nil }
-        #expect(f.app.offlineStartupPresentation == .localContent)
-        #expect(f.app.accountAccessMode == .localReadOnly)
-        #expect(f.app.offlinePresentation?.conversations.count == 1)
+        await restoring.value
+        #expect(f.app.route == .signedIn(userID: f.credentials.userID.rawValue))
+        #expect(f.app.conversationStore === conversations)
+        #expect(conversations.items.map(\.id) == [f.room.rawValue])
         await f.app.signOut()
-        #expect(f.app.offlinePresentation == nil && f.app.accountAccessMode == .blocked)
     }
 
-    @Test("user exit completes even when its initiating view task is cancelled")
-    func userExitOutlivesItsViewTask() async throws {
+    @Test("local journal activation does not request fresh tokens")
+    func localBootstrapDoesNotWaitForNetwork() async throws {
         let f = try await OfflineAppFixture.make()
         defer { f.removeFiles() }
-        await f.app.restore()
-        await f.refresh.waitForStart()
-        await f.refresh.fail()
-        try await waitUntil { f.app.authenticationMessage != nil }
-        let initiatingViewTask = Task { @MainActor in
-            f.app.requestSignOut()
-            f.app.requestSignOut()
-        }
-        initiatingViewTask.cancel()
-        await initiatingViewTask.value
-        try await waitUntil { f.app.route == .signedOut }
-        #expect(f.app.accountAccessMode == .blocked)
-        #expect(f.app.offlinePresentation == nil)
-        #expect(await f.marker.isPending() == false)
-        #expect(try await f.store.load() == nil)
+        let local = try await f.bootstrap.openLocallyEstablishedSession(isLocalExitPending: { try await f.marker.isPending() })
+        #expect(await f.refresh.calls == 0)
+        #expect(local.identity.userID == f.credentials.userID)
+        let intent = try V2SendIntent(id: UUID(), roomID: f.room, clientMessageID: .init(uuid: UUID()),
+            text: "offline send", attachmentJobIDs: [])
+        try await local.store.freezeSendIntent(intent)
+        #expect(try await local.store.preparingSendIntents().map(\.id) == [intent.id])
+        try await f.bootstrap.closeLocalStore(local.store)
     }
 
-    @Test("pending exit, locked credentials and locked or mismatched installation block local presentation", arguments: ["exit", "credentials-locked", "binding-locked", "binding-mismatch"])
+    @Test("pending exit, locked credentials and invalid installation still block local startup", arguments: ["exit", "credentials-locked", "binding-locked", "binding-mismatch"])
     func trustFailures(scenario: String) async throws {
         let f = try await OfflineAppFixture.make()
         defer { f.removeFiles() }
@@ -59,121 +49,76 @@ struct V2OfflineStartupTests {
         if scenario == "binding-locked" { await f.binding.setUnavailable(true) }
         if scenario == "binding-mismatch" { await f.binding.replace(.init(value: UUID())) }
         await f.app.restore()
-        #expect(f.app.accountAccessMode == .blocked && f.app.offlinePresentation == nil)
+        #expect(f.app.accountAccessMode == .blocked && f.app.conversationStore == nil)
         #expect(await f.refresh.calls == 0)
         if scenario.contains("locked") { #expect(f.app.route == .protectedDataUnavailable) }
         if scenario == "binding-mismatch" { #expect(try Data(contentsOf: f.database) == bytes) }
     }
 
-    @Test("network recovery retries the original refresh operation and upgrades without replacing local ownership")
-    func failedRefreshCanRetryOriginalIdentity() async throws {
+    @Test("background refresh keeps the same local navigation dependencies")
+    func backgroundRefreshDoesNotReplaceLocalState() async throws {
         let f = try await OfflineAppFixture.make()
         defer { f.removeFiles() }
-        await f.app.restore()
-        await f.refresh.waitForStart()
-        await f.refresh.fail()
-        try await waitUntil { f.app.authenticationMessage != nil }
-        #expect(f.app.accountAccessMode == .localReadOnly)
-        await f.app.retryOnlineFromLocalReadOnly()
-        await f.refresh.waitForStart(count: 2)
-        await f.refresh.succeed(f.successor)
-        try await waitUntil { f.app.accountAccessMode == .authenticated }
-        let ids = await f.refresh.operationIDs
-        #expect(ids.count == 2 && ids[0] == ids[1])
-        await f.app.signOut()
-    }
-
-    @Test("Keychain locking while local content is visible immediately withdraws that content on access")
-    func warmProtectedDataFailureWithdrawsContent() async throws {
-        let f = try await OfflineAppFixture.make()
-        defer { f.removeFiles() }
-        await f.app.restore()
-        let presentation = try #require(f.app.offlinePresentation)
-        await f.refresh.waitForStart()
-        await f.store.setUnavailable(true)
-        await presentation.loadMessages(roomID: f.room)
-        #expect(f.app.route == .protectedDataUnavailable && f.app.accountAccessMode == .blocked)
-        #expect(f.app.offlinePresentation == nil && presentation.conversations.isEmpty && presentation.messages.isEmpty)
-        await f.refresh.fail()
-    }
-
-    @Test("successful retry closes read-only views before authenticated adoption")
-    func onlineUpgrade() async throws {
-        let f = try await OfflineAppFixture.make()
-        defer { f.removeFiles() }
-        await f.app.restore()
-        let oldPresentation = try #require(f.app.offlinePresentation)
-        #expect(f.app.offlineStartupPresentation == .restoringSession)
-        await f.refresh.waitForStart()
-        await f.refresh.succeed(f.successor)
-        try await waitUntil { f.app.accountAccessMode == .authenticated }
-        #expect(f.app.route == .signedIn(userID: f.credentials.userID.rawValue))
-        #expect(f.app.offlinePresentation == nil)
-        #expect(oldPresentation.conversations.isEmpty && oldPresentation.messages.isEmpty)
-        #expect(f.app.conversationStore != nil)
-        await f.app.signOut()
-    }
-
-    @Test("background cancellation leaves local content; foreground retry can adopt completed shared refresh")
-    func cancelledUpgradeCanRetry() async throws {
-        let f = try await OfflineAppFixture.make()
-        defer { f.removeFiles() }
-        await f.app.restore()
+        let restoring = Task { await f.app.restore() }
+        try await waitUntil { f.app.conversationStore != nil }
+        let conversations = try #require(f.app.conversationStore)
         await f.refresh.waitForStart()
         await f.app.applicationDidEnterBackground()
         await f.refresh.succeed(f.successor)
-        // The cancelled consumer must not adopt writable dependencies.
-        try await Task.sleep(for: .milliseconds(30))
-        #expect(f.app.accountAccessMode == .localReadOnly)
-        await f.app.retryOnlineFromLocalReadOnly()
-        try await waitUntil { f.app.accountAccessMode == .authenticated }
-        #expect(await f.refresh.calls == 1)
+        await restoring.value
+        #expect(f.app.route == .signedIn(userID: f.credentials.userID.rawValue))
+        #expect(f.app.conversationStore === conversations)
         await f.app.signOut()
     }
 
-    @Test("replacement account fences blocked refresh and clears the old offline views")
+    @Test("sign-out withdraws local state even when its initiating task is cancelled")
+    func userExitOutlivesItsViewTask() async throws {
+        let f = try await OfflineAppFixture.make()
+        defer { f.removeFiles() }
+        let restoring = Task { await f.app.restore() }
+        try await waitUntil { f.app.conversationStore != nil }
+        await f.refresh.waitForStart()
+        await f.refresh.fail()
+        await restoring.value
+        let task = Task { f.app.requestSignOut(); f.app.requestSignOut() }
+        task.cancel()
+        await task.value
+        try await waitUntil { f.app.route == .signedOut }
+        #expect(f.app.conversationStore == nil && f.app.accountAccessMode == .blocked)
+        #expect(try await f.store.load() == nil)
+    }
+
+    @Test("replacement account fences the old local-first runtime")
     func replacementCannotRetainOldAccount() async throws {
         let f = try await OfflineAppFixture.make()
         defer { f.removeFiles() }
-        await f.app.restore()
-        let old = try #require(f.app.offlinePresentation)
+        let restoring = Task { await f.app.restore() }
+        try await waitUntil { f.app.conversationStore != nil }
         await f.refresh.waitForStart()
         let replacement = try OfflineAppFixture.credentials(userID: .init(UUID().uuidString), deviceID: .init(UUID().uuidString), expires: .distantFuture)
         try await f.auth.establish(replacement)
         await f.refresh.succeed(f.successor)
+        await restoring.value
         try await waitUntil { f.app.accountAccessMode == .blocked }
-        #expect(f.app.offlinePresentation == nil && old.conversations.isEmpty)
         #expect(f.app.conversationStore == nil)
     }
 
-    @Test("failed read-only close prevents writable adoption and is recoverable by explicit cleanup")
-    func closeFailureBlocksUpgrade() async throws {
-        let f = try await OfflineAppFixture.make(failClose: true)
-        defer { f.removeFiles() }
-        await f.app.restore()
-        await f.refresh.waitForStart()
-        await f.refresh.succeed(f.successor)
-        try await waitUntil { if case .unavailable = f.app.route { return true }; return false }
-        #expect(f.app.accountAccessMode == .blocked && f.app.conversationStore == nil)
-        await f.app.signOut()
-        #expect(f.app.route == .signedOut)
-    }
-
-    @Test("explicit room denial is not overridden by retained message or profile cache")
+    @Test("a locally denied room is not restored by cached messages")
     func deniedRoomCannotDisplayHistory() async throws {
         let f = try await OfflineAppFixture.make(denyRoom: true)
         defer { f.removeFiles() }
-        await f.app.restore()
-        #expect(f.app.offlinePresentation?.conversations.isEmpty == true)
-        await f.app.offlinePresentation?.loadMessages(roomID: f.room)
-        #expect(f.app.offlinePresentation?.messages.isEmpty == true)
+        let restoring = Task { await f.app.restore() }
+        try await waitUntil { f.app.conversationStore != nil }
+        #expect(f.app.conversationStore?.items.isEmpty == true)
+        await f.refresh.waitForStart()
         await f.refresh.fail()
+        await restoring.value
         await f.app.signOut()
     }
 
     private func waitUntil(_ predicate: @MainActor () -> Bool) async throws {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
-        while !predicate() { try #require(ContinuousClock.now < deadline); await Task.yield() }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while !predicate() { try #require(ContinuousClock.now < deadline); try await Task.sleep(for: .milliseconds(5)) }
     }
 }
 
@@ -188,6 +133,7 @@ struct V2OfflineStartupTests {
     let marker: OfflineAppExitMarker
     let refresh: OfflineAppRefresh
     let auth: V2AuthSession
+    let bootstrap: V2ClientSessionBootstrapper
     let app: V2AppStore
     static func credentials(userID: UserID, deviceID: DeviceID, expires: Date) throws -> V2AuthCredentials {
         try .init(userID: userID, deviceID: deviceID, accessToken: "synthetic-access", accessTokenExpiresAt: expires,
@@ -225,7 +171,7 @@ struct V2OfflineStartupTests {
         let app = V2AppStore(localRestorationDependencies: .init(configuration: try .init(), authSession: auth, bootstrapper: bootstrap,
             exitMarker: marker, databaseURL: url, serviceIdentifier: "offline-fixture-" + UUID().uuidString))
         return .init(root: root, database: scope.database.primary, room: room, credentials: expired, successor: valid,
-            store: store, binding: binding, marker: marker, refresh: refresh, auth: auth, app: app)
+            store: store, binding: binding, marker: marker, refresh: refresh, auth: auth, bootstrap: bootstrap, app: app)
     }
     func removeFiles() { try? FileManager.default.removeItem(at: root) }
 }

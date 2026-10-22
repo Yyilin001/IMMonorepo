@@ -15,9 +15,11 @@ protocol V2DiscoveredConversationRefreshing: Sendable {
 
 actor V2GRDBConversationDataSource: V2DiscoveredConversationRefreshing, V2ConversationTitleReading, V2ConversationDataSource, V2ConversationWindowReading, V2ConversationSendingCapabilityReading, V2ConversationFavoritesReading, V2ConversationMessageSearching, V2ConversationMessageSearchProgressReading, V2GroupAnnouncementReading, V2GroupRolePolicyAccessing {
     private let localStore: GRDBV2LocalSyncStore
+    private let requiresLocalReadAuthorization: Bool
     private let requestLatestVisible: @Sendable ([RoomID]) async throws -> Void
-    init(localStore: GRDBV2LocalSyncStore, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
+    init(localStore: GRDBV2LocalSyncStore, requiresLocalReadAuthorization: Bool = false, requestLatestVisible: @escaping @Sendable ([RoomID]) async throws -> Void) {
         self.localStore = localStore
+        self.requiresLocalReadAuthorization = requiresLocalReadAuthorization
         self.requestLatestVisible = requestLatestVisible
     }
 
@@ -94,15 +96,24 @@ actor V2GRDBConversationDataSource: V2DiscoveredConversationRefreshing, V2Conver
             limit: limit
         )
         let unread = await displayedUnread(roomIDs: page.entries.map(\.roomID))
-        try await requestMissingSummaries(page.entries)
-        return Self.listPage(page, userID: userID, unread: unread)
+        let allowed = try await authorizedPage(page)
+        try await requestMissingSummaries(allowed.entries)
+        return Self.listPage(allowed, userID: userID, unread: unread)
     }
 
     func conversationWindow(for userID: String, isArchived: Bool, around anchor: V2ClientConversationListCursor, limit: Int, precedingCount: Int) async throws -> V2ConversationListWindow {
         let result = try await localStore.conversationListWindow(isArchived: isArchived, around: anchor, limit: limit, precedingCount: precedingCount)
         let unread = await displayedUnread(roomIDs: result.page.entries.map(\.roomID))
-        try await requestMissingSummaries(result.page.entries)
-        return .init(page: Self.listPage(result.page, userID: userID, unread: unread), anchorID: result.anchor?.roomID.rawValue, hasEarlier: result.hasEarlier)
+        let allowed = try await authorizedPage(result.page)
+        try await requestMissingSummaries(allowed.entries)
+        return .init(page: Self.listPage(allowed, userID: userID, unread: unread), anchorID: result.anchor?.roomID.rawValue, hasEarlier: result.hasEarlier)
+    }
+
+    private func authorizedPage(_ page: V2ClientConversationListPage) async throws -> V2ClientConversationListPage {
+        guard requiresLocalReadAuthorization else { return page }
+        var entries: [V2ClientConversationListEntry] = []
+        for entry in page.entries where try await localStore.roomAllowsLocalRead(roomID: entry.roomID) { entries.append(entry) }
+        return .init(entries: entries, nextCursor: page.nextCursor)
     }
 
     private static func listPage(_ page: V2ClientConversationListPage, userID: String, unread: [RoomID: UInt64]) -> V2ConversationListPage {
@@ -198,6 +209,9 @@ actor V2GRDBConversationDataSource: V2DiscoveredConversationRefreshing, V2Conver
         limit: Int
     ) async throws -> V2ConversationTimelinePage {
         let parsedRoomID = try RoomID(roomID)
+        if requiresLocalReadAuthorization, try await !localStore.roomAllowsLocalRead(roomID: parsedRoomID) {
+            return .init(items: [], olderCursor: nil)
+        }
         let page = try await localStore.conversationTimelinePage(
             in: parsedRoomID,
             before: cursor.map {
@@ -210,6 +224,7 @@ actor V2GRDBConversationDataSource: V2DiscoveredConversationRefreshing, V2Conver
     }
 
     func timelineWindow(in roomID: String, for userID: String, around messageID: String, before: Int, after: Int) async throws -> V2ConversationTimelineLocation {
+        if requiresLocalReadAuthorization, try await !localStore.roomAllowsLocalRead(roomID: RoomID(roomID)) { return .unavailable }
         let location = try await localStore.conversationTimelineWindow(in: RoomID(roomID), for: UserID(userID), around: MessageID(messageID), before: before, after: after, aggregateReactions: true)
         switch location {
         case .unavailable: return .unavailable

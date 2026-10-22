@@ -36,6 +36,16 @@ final class V2PublicIdentitySettingsStore {
         self.attachmentStager = attachmentStager
     }
 
+    func loadCachedProfile() async {
+        do {
+            if let profile = try await service.localProfile() {
+                try Task.checkCancellation()
+                apply(profile, preserveDraft: hasEditingDraft)
+            }
+        } catch is CancellationError { }
+        catch { feedback = "无法读取本机资料，请稍后重试。" }
+    }
+
     func load() async {
         guard !isLoading else { return }
         isLoading = true

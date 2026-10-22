@@ -192,7 +192,7 @@ actor V2DurableConversationSendService: V2DurableConversationSending {
         var result: [Pending] = []
         let snapshot = try await store.pendingResourceSendSnapshot(in: roomID, page: page)
         for intent in snapshot.preparing {
-            let status = recoveryError ?? (intent.isExpired ? "资源已过期，等待确认终态" : intent.isRejected ? "附件未通过安全处理" : intent.isPaused ? "上传已暂停，可重试" : intent.isProcessing ? "正在安全处理" : "正在准备附件")
+            let status = recoveryError ?? (intent.isExpired ? "资源已过期，等待确认终态" : intent.isRejected ? "附件未通过安全处理" : intent.isPaused ? "上传已暂停，可重试" : intent.isProcessing ? "正在安全处理" : intent.total == 0 ? "等待发送" : "正在准备附件")
             result.append(.init(id: intent.id, createdAt: intent.createdAt, text: intent.text, completed: intent.completed, total: intent.total,
                                 status: status, canRetry: intent.isPaused && !intent.isExpired && !intent.isRejected,
                                 retryTitle: "重试准备", canCancel: true))

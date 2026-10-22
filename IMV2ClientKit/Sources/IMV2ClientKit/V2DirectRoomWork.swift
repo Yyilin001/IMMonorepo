@@ -6,6 +6,7 @@ public struct V2DirectRoomPending:Equatable,Sendable {
     public let work:V2OperationWork
     public let command:V2DirectRoomOperationCommand
     public let receipt:V2DirectRoomOperationReceipt?
+    public var publicIdentity: V2PublicIdentity? = nil
 }
 extension GRDBV2LocalSyncStore {
     static let directRoomWorkSchemaSQL="""
@@ -36,6 +37,9 @@ extension GRDBV2LocalSyncStore {
             let id=UUID()
             try Self.insertOperationWork(.init(id:id,intentID:id,identity:identity,fingerprint:fingerprint,orderingKey:"directRoom:"+command.actorUserID.rawValue+":"+command.targetUserID.rawValue,payloadBytes:Int64(bytes.count+profile.count)+65_536,admissionDeadline:Date(timeIntervalSince1970:Double(command.firstSubmissionDeadlineMilliseconds)/1000)),now:now,limits:.init(),db:db)
             try db.execute(sql:"INSERT INTO v2_direct_room_operations(work_id,target_user_id,command,public_identity) VALUES(?,?,?,?)",arguments:[id.uuidString,command.targetUserID.rawValue,bytes,profile])
+            // An explicit retry of a terminal opening keeps its unsent local messages.
+            try db.execute(sql: "UPDATE v2_local_direct_messages SET work_id=? WHERE work_id<>? AND work_id IN (SELECT work_id FROM v2_direct_room_operations WHERE target_user_id=?)",
+                arguments: [id.uuidString,id.uuidString,command.targetUserID.rawValue])
             return id
         }
     }
@@ -82,12 +86,14 @@ extension GRDBV2LocalSyncStore {
             let task=Task {
                 do {
                     let observation=ValueObservation.tracking { db in
-                        try Row.fetchAll(db,sql:"SELECT w.*,s.command,s.target_user_id FROM v2_direct_room_operations s JOIN v2_operation_work w USING(work_id) ORDER BY CASE WHEN w.scheduling_state<>'finished' THEN 0 ELSE 1 END,w.local_sequence DESC LIMIT 2200").map { row in
+                        try Row.fetchAll(db,sql:"SELECT w.*,s.command,s.target_user_id,s.public_identity FROM v2_direct_room_operations s JOIN v2_operation_work w USING(work_id) ORDER BY CASE WHEN w.scheduling_state<>'finished' THEN 0 ELSE 1 END,w.local_sequence DESC LIMIT 2200").map { row in
                             let work=try Self.decodeOperationWork(row),command=try JSONDecoder().decode(V2DirectRoomOperationCommand.self,from:row["command"])
                             guard try command.identity==work.identity,try command.fingerprint==work.fingerprint,command.targetUserID.rawValue==row["target_user_id"] as String else { throw V2OperationWorkError.identityConflict }
                             let receipt=try (row["terminal_receipt"] as Data?).map { try JSONDecoder().decode(V2DirectRoomOperationReceipt.self,from:$0) }
                             guard receipt?.validates(command:command) != false else { throw V2DirectRoomOperationValidationError.invalidReceipt }
-                            return V2DirectRoomPending(work:work,command:command,receipt:receipt)
+                            let profile = try JSONDecoder().decode(V2PublicIdentity.self, from: row["public_identity"])
+                            guard profile.userID == command.targetUserID else { throw V2OperationWorkError.identityConflict }
+                            return V2DirectRoomPending(work:work,command:command,receipt:receipt,publicIdentity:profile)
                         }
                     }.removeDuplicates()
                     for try await values in observation.values(in:pool,bufferingPolicy:.bufferingNewest(1)) { continuation.yield(values) }

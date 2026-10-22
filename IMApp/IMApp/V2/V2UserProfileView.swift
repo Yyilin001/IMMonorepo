@@ -130,7 +130,7 @@ final class V2UserProfileActionStore {
 struct V2UserProfileSheet: View {
     let key: V2ProfileViewLookupKey
     var usesNavigationStack = true
-    var openConversation: ((String) -> Void)? = nil
+    var openConversation: ((V2ConversationDestination) -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
     @Environment(\.v2UserInteractionContext) private var context
     @State private var identity: V2PublicIdentity?
@@ -159,7 +159,7 @@ struct V2UserProfileSheet: View {
                 Section {
                     VStack(spacing: 12) {
                         V2AuthorizedAvatarView(key: key, size: 88)
-                        V2AuthorizedProfileNameView(key: key, placeholder: "资料暂不可用").font(.title2.bold())
+                        V2AuthorizedProfileNameView(key: key, placeholder: knownIdentity?.displayName ?? "资料暂不可用").font(.title2.bold())
                         V2AuthorizedPublicHandleView(key: key, onIdentity: { identity = $0 }).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
                     }.frame(maxWidth: .infinity).padding(.vertical, 22)
                 }.listRowBackground(Color.clear)
@@ -185,6 +185,9 @@ struct V2UserProfileSheet: View {
                             .accessibilityIdentifier("v2.user.retry")
                     }
                     if let feedback = actions.feedback { Text(feedback).font(.footnote).foregroundStyle(.secondary) }
+                }
+                if knownIdentity != nil, context != nil, actions?.relationship != .blocked {
+                    Section { messageAction }
                 }
                 if let context, let item = context.contacts.item(userID: key.userID.rawValue), item.relationship == .friend {
                     Button("编辑备注") { nameEditor = context.contacts.nameEditor(for: item) }
@@ -229,41 +232,46 @@ struct V2UserProfileSheet: View {
             Button("删除好友", role: .destructive) { confirmation = .relationship(.remove) }
         case .blocked, nil: EmptyView()
         }
-        if actions.relationship != nil && actions.relationship != .blocked {
-            Button {
-                guard let context, let identity, messageTask == nil else { return }
-                messageFeedback = nil
-                messageTask = Task {
-                    let roomID = await context.conversations.openDirectConversation(with: identity)
-                    guard !Task.isCancelled else { return }
-                    messageTask = nil
-                    guard let roomID else {
-                        messageFeedback = context.conversations.directConversationFeedback ?? "正在打开其他会话，请稍后重试。"
-                        return
-                    }
-                    if case .room(let currentRoom) = key.context, currentRoom.rawValue == roomID,
-                       usesNavigationStack {
-                        dismiss()
-                    } else if let openConversation {
-                        openConversation(roomID)
-                    } else {
-                        // This profile is itself on the shared stack: replace the
-                        // destination without also issuing a competing pop.
-                        context.navigation.showConversation(roomID: roomID)
-                    }
+    }
+
+    private var knownIdentity: V2PublicIdentity? {
+        identity ?? context?.contacts.item(userID: key.userID.rawValue)?.publicIdentity
+    }
+
+    @ViewBuilder private var messageAction: some View {
+        Button {
+            guard let context, let identity = knownIdentity, messageTask == nil else { return }
+            messageFeedback = nil
+            messageTask = Task {
+                let destination = await context.conversations.openLocalFirstDirectConversation(with: identity)
+                guard !Task.isCancelled else { return }
+                messageTask = nil
+                guard let destination else {
+                    messageFeedback = context.conversations.directConversationFeedback ?? "正在打开其他会话，请稍后重试。"
+                    return
                 }
-            } label: {
-                HStack {
-                    Text("发消息")
-                    if messageTask != nil { Spacer(); ProgressView() }
+                if case .room(let route) = destination, case .room(let currentRoom) = key.context,
+                   currentRoom.rawValue == route.roomID, usesNavigationStack {
+                    dismiss()
+                } else if let openConversation {
+                    openConversation(destination)
+                } else {
+                    // This profile is itself on the shared stack: replace the
+                    // destination without also issuing a competing pop.
+                    context.navigation.showConversation(destination)
                 }
             }
-            .disabled(identity == nil || context == nil || messageTask != nil)
-            .accessibilityIdentifier("v2.user.message")
-            if let messageFeedback {
-                Text(messageFeedback).font(.footnote).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("v2.user.message.feedback")
+        } label: {
+            HStack {
+                Text("发消息")
+                if messageTask != nil { Spacer(); ProgressView() }
             }
+        }
+        .disabled(knownIdentity == nil || context == nil || messageTask != nil)
+        .accessibilityIdentifier("v2.user.message")
+        if let messageFeedback {
+            Text(messageFeedback).font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("v2.user.message.feedback")
         }
     }
     private struct NameEditorPresentation: Identifiable { let store: V2NameEditorStore; var id: ObjectIdentifier { ObjectIdentifier(store) } }
@@ -276,16 +284,16 @@ struct V2UserProfileTarget: Identifiable { let key: V2ProfileViewLookupKey; var 
 private struct V2UserProfilePresentation: ViewModifier {
     @Binding var target: V2UserProfileTarget?
     @Environment(\.v2UserInteractionContext) private var context
-    @State private var pendingRoomID: String?
+    @State private var pendingDestination: V2ConversationDestination?
 
     func body(content: Content) -> some View {
         content.sheet(item: $target, onDismiss: {
-            guard let roomID = pendingRoomID else { return }
-            pendingRoomID = nil
-            context?.navigation.showConversation(roomID: roomID)
+            guard let destination = pendingDestination else { return }
+            pendingDestination = nil
+            context?.navigation.showConversation(destination)
         }) { target in
-            V2UserProfileSheet(key: target.key, openConversation: { roomID in
-                pendingRoomID = roomID
+            V2UserProfileSheet(key: target.key, openConversation: { destination in
+                pendingDestination = destination
                 self.target = nil
             })
         }

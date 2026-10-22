@@ -5110,6 +5110,9 @@ public actor GRDBV2LocalSyncStore: V2LocalSyncStore, V2LocalGroupEventStore, V2C
         migrator.registerMigration("addV2BackgroundDownloadJobs") { db in
             try db.execute(sql: backgroundDownloadSchemaSQL)
         }
+        migrator.registerMigration("addV2LocalDirectMessages") { db in
+            try db.execute(sql: localDirectMessagesSchemaSQL)
+        }
         return migrator
     }()
 

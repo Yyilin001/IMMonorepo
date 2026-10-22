@@ -54,16 +54,16 @@ final class V2AccountActivityTests: XCTestCase, @unchecked Sendable {
         await runtime.close()
     }
 
-    func testObservationAndActivityRegistryAreBounded() async throws {
+    func testObserversAreBoundedButAllAccountActivitiesStart() async throws {
         let runtime = V2AccountRuntime()
         var streams: [AsyncStream<[String: V2AccountRuntime.ActivityState]>] = []
         for _ in 0..<8 { streams.append(try await runtime.activityUpdates()) }
         do { _ = try await runtime.activityUpdates(); XCTFail("Expected observer limit") }
         catch V2AccountRuntime.ObservationError.tooManyObservers {}
-        for index in 0..<17 { await runtime.startActivity(id: "activity-\(index)") {} }
+        for index in 0..<24 { await runtime.startActivity(id: "activity-\(index)") {} }
         let state = await runtime.activitySnapshot()
-        XCTAssertEqual(state.count, 16)
-        XCTAssertNil(state["activity-16"])
+        XCTAssertEqual(state.count, 24)
+        XCTAssertNotNil(state["activity-23"])
         await runtime.close()
         XCTAssertEqual(streams.count, 8)
     }

@@ -58,9 +58,11 @@ public actor V2AccountRuntime {
         publishActivityStates()
     }
     /// Account-owned durable loops are independent of TCP. Replacing a loop drains its old owner.
+    /// IDs come from application registrations, not remote input. Every registered
+    /// loop must start; silently capping this registry can disable durable sends.
     public func startActivity(id: String, operation: @escaping @Sendable () async throws -> Void,
                               onFailure: @escaping @Sendable (any Error) async -> Void = { _ in }) async {
-        guard !closed, activityGenerations[id] != nil || activityGenerations.count < 16 else { return }
+        guard !closed else { return }
         let generation = UUID()
         activityGenerations[id] = generation
         activityStates[id] = .starting
@@ -68,8 +70,7 @@ public actor V2AccountRuntime {
         let previous = activities.removeValue(forKey: id) ?? activityDrains[id]
         if let previous { activityDrains[id] = previous }
         previous?.cancel(); await previous?.value
-        guard !closed, activityGenerations[id] == generation,
-              activities[id] != nil || activities.count < 16 else { return }
+        guard !closed, activityGenerations[id] == generation else { return }
         activityDrains[id] = nil
         activityStates[id] = .running
         publishActivityStates()

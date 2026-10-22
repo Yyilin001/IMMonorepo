@@ -64,6 +64,25 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     }
 
     @MainActor
+    func testCachedContactCanOpenChatWithoutRelationshipRefresh() {
+        // The preview source deliberately has no remote social-baseline service.
+        let app = launch("contacts")
+        let contact = app.buttons["v2.contacts.friend.00000000-0000-0000-0000-000000000201"]
+        XCTAssertTrue(contact.waitForExistence(timeout: 10))
+        contact.tap()
+        let message = app.buttons["v2.user.message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        XCTAssertTrue(message.isEnabled)
+        message.tap()
+        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["v2.user.message"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Contact opened chat from local identity"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
+
+    @MainActor
     func testNativeTabsPrivacyAndChatMenusRemainReachable() {
         let app = launch()
         XCTAssertTrue(app.tabBars.buttons["联系人"].waitForExistence(timeout: 10))
