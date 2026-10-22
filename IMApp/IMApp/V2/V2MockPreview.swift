@@ -12,10 +12,15 @@ struct V2MockPreview: View {
     @State private var privacy: V2PrivacySettingsStore
     @State private var navigation = V2RootNavigationStore()
     @State private var screen = "messages"
+    private let source: V2MockPreviewSource
+    private let notifier: V2ProjectionChangeNotifier
 
     init() {
         let source = V2MockPreviewSource()
-        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source), messages: .init(sender: source), discovery: .init(directConversationOpener: source))))
+        let notifier = V2ProjectionChangeNotifier()
+        self.source = source
+        self.notifier = notifier
+        _conversations = State(initialValue: .init(environment: .init(userID: source.user.rawValue, projections: .init(dataSource: source), messages: .init(sender: source), discovery: .init(directConversationOpener: source), runtime: .init(projectionChangeNotifier: notifier))))
         _contacts = State(initialValue: .init(dataSource: source, identityResolver: source, relationshipChanger: source,
             userBlockChanger: source, directConversationOpener: source, currentUserID: source.user))
         _privacy = State(initialValue: .init(reader: source, updater: source))
@@ -32,7 +37,17 @@ struct V2MockPreview: View {
     var body: some View {
         Group {
             if ProcessInfo.processInfo.arguments.contains("-v2-mock-hide-controls") {
-                previewContent
+                VStack(spacing: 0) {
+                    if ProcessInfo.processInfo.arguments.contains("-v2-mock-incoming-controls") {
+                        Button("模拟收到消息") {
+                            Task {
+                                await source.receiveMessages()
+                                await notifier.publish(.init(scopes: .conversationTimeline, requiresImmediateRefresh: true))
+                            }
+                        }.accessibilityIdentifier("mock.receive-messages")
+                    }
+                    previewContent
+                }
             } else {
                 VStack(spacing: 0) { previewControls; previewContent }
             }
@@ -140,6 +155,15 @@ private actor V2MockPreviewSource: V2ConversationDataSource, V2ContactsReading, 
     func update(allowsStrangerMessages: Bool) async throws -> V2StrangerMessagePreferenceUpdateOutcome { .rejected(code: "mock-preview") }
     func groupRolePolicyState(in roomID: String) async throws -> V2ClientGroupRolePolicyState { .init(policies: [], recovery: .ready) }
     func retryGroupRolePolicyRecovery(in roomID: String) async throws -> V2ClientGroupRolePolicyState { .init(policies: [], recovery: .ready) }
+    func receiveMessages() {
+        for _ in 0..<12 {
+            let sequence = UInt64((sentMessages[Self.room]?.count ?? 0) + 6)
+            sentMessages[Self.room, default: []].append(.init(id: "incoming-\(sequence)", roomSequence: sequence,
+                revision: 1, text: "实时接收测试消息 \(sequence)", createdAt: .now,
+                isOutgoing: false, isWithdrawn: false, senderUserID: try! UserID("00000000-0000-0000-0000-000000000201")))
+        }
+    }
+
     func send(text: String, media: [V2MediaReference], in roomID: String) async throws -> V2ConversationSendOutcome {
         try await send(text: text, media: media, mentions: [], in: roomID)
     }

@@ -64,6 +64,34 @@ final class IMAppGlassPresentationUITests: XCTestCase {
     }
 
     @MainActor
+    func testIncomingMessagesFollowLatestWithoutSending() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-v2-mock-preview", "-v2-mock-hide-controls", "-v2-mock-screen", "chat", "-v2-mock-incoming-controls"]
+        app.launch()
+        XCTAssertTrue(app.textFields["v2.message.draft"].waitForExistence(timeout: 10))
+        let receive = app.buttons["mock.receive-messages"]
+        XCTAssertTrue(receive.waitForExistence(timeout: 5))
+        receive.tap()
+        // Keep actual rendered cells as evidence; hosted MessagingUI content is
+        // not fully represented by XCUI's accessibility tree.
+        let tail = app.staticTexts["实时接收测试消息 17"]
+        _ = tail.waitForExistence(timeout: 3)
+        let received = XCTAttachment(screenshot: app.screenshot())
+        received.name = "Incoming messages at latest end"
+        received.lifetime = .keepAlways
+        add(received)
+        let list = app.descendants(matching: .any)["v2.message.list"].firstMatch
+        XCTAssertTrue(list.exists)
+        list.swipeDown()
+        receive.tap()
+        _ = app.staticTexts["实时接收测试消息 29"].waitForExistence(timeout: 3)
+        let history = XCTAttachment(screenshot: app.screenshot())
+        history.name = "Incoming messages preserve history viewport"
+        history.lifetime = .keepAlways
+        add(history)
+    }
+
+    @MainActor
     func testCachedContactCanOpenChatWithoutRelationshipRefresh() {
         // The preview source deliberately has no remote social-baseline service.
         let app = launch("contacts")

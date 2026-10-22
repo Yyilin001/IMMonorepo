@@ -1917,7 +1917,7 @@ struct V2ConversationDetailView: View {
     @State private var followsOwnSend = false
     @State private var timelinePresentation = V2MessageTimelinePresentation()
     @State private var timelinePosition = TiledScrollState<String>(
-        autoScrollsToBottomOnAppend: false, scrollsToBottomOnReplace: false
+        autoScrollsToBottomOnAppend: true, scrollsToBottomOnReplace: false
     )
     private let groupInvitationStore: V2GroupInvitationStore?
 
@@ -2156,6 +2156,12 @@ struct V2ConversationDetailView: View {
                                     }
                                 }.environment(\.self, environment).padding(.horizontal, 16)
                             })
+                            .onTiledScrollGeometryChange { geometry in
+                                // Follow both incoming and outgoing messages only while
+                                // reading the tail. Browsing history keeps its anchor.
+                                timelinePosition.autoScrollsToBottomOnAppend = geometry.pointsFromBottom < 80
+                                    && !store.isBrowsingHistoricalTimeline && focusedMessageID == nil
+                            }
                             .onTiledUserScrollInput {
                                 focusedMessageID = nil
                                 followsOwnSend = false
@@ -2165,9 +2171,11 @@ struct V2ConversationDetailView: View {
                                 timeline: store.timeline, pending: store.pendingResourceSends
                             ), initial: true) { _, snapshot in
                                 let wasEmpty = timelinePresentation.dataSource.items.isEmpty
+                                let wasFollowingLatest = timelinePosition.autoScrollsToBottomOnAppend
+                                    && !store.isBrowsingHistoricalTimeline
                                 guard timelinePresentation.apply(snapshot.timeline, pending: snapshot.pending) else { return }
                                 if focusedMessageID != nil { scrollToFocusedMessage() }
-                                else if wasEmpty || followsOwnSend {
+                                else if wasEmpty || followsOwnSend || wasFollowingLatest {
                                     scrollToLatestMessage()
                                 }
                             }
