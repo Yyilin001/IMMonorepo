@@ -12,6 +12,27 @@ enum V2VisualStyle {
     static let separator = Color.primary.opacity(0.08)
     static let avatarTint = Color.secondary
 
+    enum AccountIcon {
+        static let favorites = adaptiveTint(light: 0xA86B18, dark: 0xE8B566)
+        static let resources = adaptiveTint(light: 0x3269BE, dark: 0x83B4F4)
+        static let pendingAvatars = adaptiveTint(light: 0x7957B5, dark: 0xBCA0E8)
+        static let privacy = adaptiveTint(light: 0x237D76, dark: 0x77C9BE)
+        static let devices = adaptiveTint(light: 0x57718F, dark: 0xA1B8D4)
+        static let security = adaptiveTint(light: 0x328252, dark: 0x83C99A)
+
+        private static func adaptiveTint(light: UInt32, dark: UInt32) -> Color {
+            Color(uiColor: UIColor { traits in
+                let rgb = traits.userInterfaceStyle == .dark ? dark : light
+                return UIColor(
+                    red: CGFloat((rgb >> 16) & 0xFF) / 255,
+                    green: CGFloat((rgb >> 8) & 0xFF) / 255,
+                    blue: CGFloat(rgb & 0xFF) / 255,
+                    alpha: 1
+                )
+            })
+        }
+    }
+
 }
 
 struct V2AvatarPlaceholder: View {

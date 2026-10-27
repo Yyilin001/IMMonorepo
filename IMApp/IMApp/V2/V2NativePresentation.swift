@@ -105,6 +105,7 @@ struct V2SettingsLabel: View {
     let title: String
     let symbol: String
     var tint: Color = V2VisualStyle.accent
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HStack {
@@ -112,10 +113,12 @@ struct V2SettingsLabel: View {
                 Text(title).foregroundStyle(Color.primary)
             } icon: {
                 Image(systemName: symbol)
+                    .symbolRenderingMode(.monochrome)
                     .font(.body.weight(.medium))
                     .foregroundStyle(tint)
                     .frame(width: 30, height: 30)
-                    .background(tint.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                    .background(tint.opacity(colorScheme == .dark ? 0.18 : 0.10),
+                                in: RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
             Spacer()
             Image(systemName: "chevron.right")
@@ -174,26 +177,38 @@ struct V2AccountHomeView: View {
                     }
                 }
                 Section("内容与管理") {
-                    Button(action: openFavorites) { V2SettingsLabel(title: "收藏", symbol: "star") }
+                    Button(action: openFavorites) {
+                        V2SettingsLabel(title: "收藏", symbol: "star", tint: V2VisualStyle.AccountIcon.favorites)
+                    }
                         .accessibilityIdentifier("v2.message.favorites")
                     if let openResources {
-                        Button(action: openResources) { V2SettingsLabel(title: "文件与存储", symbol: "folder") }
+                        Button(action: openResources) {
+                            V2SettingsLabel(title: "文件与存储", symbol: "folder", tint: V2VisualStyle.AccountIcon.resources)
+                        }
                             .accessibilityIdentifier("v2.resources.open")
                     }
                     if canOpenPendingAvatars {
-                        Button(action: openPendingAvatars) { V2SettingsLabel(title: "待处理群头像", symbol: "person.2") }
+                        Button(action: openPendingAvatars) {
+                            V2SettingsLabel(title: "待处理群头像", symbol: "person.2", tint: V2VisualStyle.AccountIcon.pendingAvatars)
+                        }
                             .accessibilityIdentifier("v2.group.avatar.pending.open")
                     }
                 }
                 Section("设置") {
-                    Button(action: openPrivacy) { V2SettingsLabel(title: "消息与隐私", symbol: "hand.raised") }
+                    Button(action: openPrivacy) {
+                        V2SettingsLabel(title: "消息与隐私", symbol: "hand.raised", tint: V2VisualStyle.AccountIcon.privacy)
+                    }
                         .accessibilityIdentifier("v2.privacy.open")
                     if canOpenDevices {
-                        Button(action: openDevices) { V2SettingsLabel(title: "登录设备", symbol: "iphone") }
+                        Button(action: openDevices) {
+                            V2SettingsLabel(title: "登录设备", symbol: "iphone", tint: V2VisualStyle.AccountIcon.devices)
+                        }
                             .accessibilityIdentifier("v2.device-sessions.open")
                     }
                     if canOpenSecurity {
-                        Button(action: openSecurity) { V2SettingsLabel(title: "账号安全", symbol: "lock") }
+                        Button(action: openSecurity) {
+                            V2SettingsLabel(title: "账号安全", symbol: "lock", tint: V2VisualStyle.AccountIcon.security)
+                        }
                             .accessibilityIdentifier("v2.security.open")
                     }
                 }
