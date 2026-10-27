@@ -9,7 +9,7 @@ import SwiftUI
 /// It runs exclusively behind the signed-out DEBUG test launch mode.
 struct V2GroupAvatarRecoveryUITestView: View {
     private enum State { case loading, ready(RecoveryUIFixture), failed, cleaned }
-    private enum Sheet: String, Identifiable { case pending; var id: String { rawValue } }
+    private enum Sheet: String, Identifiable { case avatar; var id: String { rawValue } }
     let scope: UUID
     let cleanup: Bool
     @State private var state: State = .loading
@@ -22,17 +22,18 @@ struct V2GroupAvatarRecoveryUITestView: View {
             case .failed: Text("测试资源初始化失败").accessibilityIdentifier("v2.resource-test.failed")
             case .cleaned: Text("测试数据已清理").accessibilityIdentifier("v2.resource-test.cleaned")
             case .ready(let fixture):
-                Text("群已离开，原操作仍待确认")
-                    .navigationTitle("资源恢复测试")
-                    .navigationBarTitleDisplayMode(.inline)
+                V2AccountHomeView(displayName: "头像测试账号", handle: "@avatar-test",
+                    canOpenPublicIdentity: false, canOpenDevices: false, canOpenSecurity: false,
+                    openPublicIdentity: {}, openDevices: {}, openPrivacy: {}, openSecurity: {},
+                    openFavorites: {}, signOut: {})
+                    .navigationTitle("我的")
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
-                            V2ConversationAccountMenu(canOpenPublicIdentity: false, canOpenDeviceSessions: false,
-                                canOpenPendingGroupAvatars: true, openPublicIdentity: {}, openDeviceSessions: {},
-                                openPendingGroupAvatars: { sheet = .pending }, openPrivacySettings: {}, openAccountSecurity: {}, signOut: {})
+                            Button("群头像") { sheet = .avatar }
+                                .accessibilityIdentifier("v2.resource-test.avatar.open")
                         }
                     }
-                    .sheet(item: $sheet) { _ in V2PendingGroupAvatarsView(store: fixture.pending) }
+                    .sheet(item: $sheet) { _ in V2GroupAvatarManagementView(store: fixture.page) }
             }
         }
         .task { await run() }
@@ -48,10 +49,9 @@ struct V2GroupAvatarRecoveryUITestView: View {
             let fixture = try await RecoveryUIFixture.make(scope: scope, directory: directory)
             if Task.isCancelled { await fixture.close(); return }
             state = .ready(fixture)
-            let lifetime = AsyncStream<Void>.makeStream()
-            await withTaskCancellationHandler {
-                for await _ in lifetime.stream { }
-            } onCancel: { lifetime.continuation.finish() }
+            do {
+                try await fixture.journal.runResourcePreparation { try await fixture.intents.recoverOnce() }
+            } catch { }
             sheet = nil; state = .loading
             await fixture.close()
         } catch { if !Task.isCancelled { state = .failed } }
@@ -60,7 +60,7 @@ struct V2GroupAvatarRecoveryUITestView: View {
 
 @MainActor
 private struct RecoveryUIFixture {
-    let pending: V2PendingGroupAvatarsStore
+    let page: V2GroupAvatarManagementStore
     let manager: V2GroupAvatarManagementService
     let intents: V2GroupAvatarIntentEngine
     let transfers: V2ResourceTransferEngine
@@ -77,7 +77,7 @@ private struct RecoveryUIFixture {
             activation.onDiscard { try await journal.close() }
             let resources = try await V2ResourceCenter.make(scope: storage, store: journal)
             activation.onDiscard { await resources.close() }
-            let boundary = RecoveryUIBoundary(actor: actor, device: device)
+            let boundary = RecoveryUIBoundary(actor: actor, device: device, resolves: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-resolve"))
             let transfers = V2ResourceTransferEngine(store: journal, control: boundary, executor: boundary, resources: resources)
             activation.onDiscard { await transfers.close() }
             let intents = V2GroupAvatarIntentEngine(actorUserID: actor, store: journal, transfers: transfers, submissions: boundary, recovery: boundary)
@@ -90,19 +90,18 @@ private struct RecoveryUIFixture {
             let command = try V2GroupAvatarCommand(operationID: .init(uuid: scope), roomID: .init(uuid: scope), expectedRevision: 0, mutation: .remove)
             if try await journal.groupAvatarIntent(command.operationID) == nil {
                 _ = try await journal.freezeGroupAvatarIntent(actorUserID: actor, command: command, uploadJobID: nil)
-                try await journal.requestGroupAvatarRecovery(command.operationID, action: .query)
+                _ = try? await intents.resume(command.operationID)
             }
-            let pending = V2PendingGroupAvatarsStore(reader: manager, notifier: notifier) { room, operation in
-                .init(roomID: room, manager: manager, stager: boundary, notifier: notifier, focusedOperationID: operation)
-            }
+            let page = V2GroupAvatarManagementStore(roomID: command.roomID, manager: manager,
+                stager: boundary, notifier: notifier)
             try Task.checkCancellation()
             try activation.adopt()
-            return .init(pending: pending, manager: manager, intents: intents, transfers: transfers, notifier: notifier, journal: journal, resources: resources)
+            return .init(page: page, manager: manager, intents: intents, transfers: transfers, notifier: notifier, journal: journal, resources: resources)
         }
     }
 
     func close() async {
-        await pending.close(); await manager.close(); await intents.close(); await transfers.close(); await notifier.finish()
+        page.suspend(); await manager.close(); await intents.close(); await transfers.close(); await notifier.finish()
         await resources.close(); try? await journal.close()
     }
 }
@@ -120,11 +119,13 @@ private struct RecoveryUIBoundary: V2GroupAvatarPresentationReading, V2ResourceC
     V2GroupAvatarCommandSubmitting, V2GroupAvatarOperationRecovering, V2ResourceUploadControlling,
     V2ResourcePlanExecuting, V2ConversationAttachmentStaging {
     let actor: UserID, device: DeviceID
+    let resolves: Bool
     func readGroupAvatar(roomID: RoomID) throws -> V2GroupAvatarPresentation { throw V2GroupAvatarReadError.forbidden }
     func capabilities() throws -> V2ResourceCapabilities { throw V2GroupAvatarManagementError.unavailable }
-    func submitGroupAvatar(_ command: V2GroupAvatarCommand) throws -> V2GroupAvatarCommandResponse { throw V2GroupAvatarSubmissionError.outcomeUnknown }
+    func submitGroupAvatar(_ command: V2GroupAvatarCommand) throws -> V2GroupAvatarCommandResponse { throw V2GroupAvatarSubmissionError.authorizationDenied }
     func recoverGroupAvatar(_ request: V2GroupAvatarRecoveryRequest) throws -> V2GroupAvatarRecoveryResponse {
-        try .init(actorUserID: actor, deviceID: device, request: request, result: request.action == .query ? .unresolved : .closed)
+        guard resolves else { throw V2GroupAvatarSubmissionError.outcomeUnknown }
+        return try .init(actorUserID: actor, deviceID: device, request: request, result: .closed)
     }
     func create(_ request: V2ResourceUploadRequest) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }
     func status(_ locator: V2ResourceUploadLocator) throws -> V2ResourceUploadSession { throw V2GroupAvatarManagementError.unavailable }

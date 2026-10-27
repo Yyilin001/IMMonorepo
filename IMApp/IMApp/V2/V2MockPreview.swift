@@ -144,7 +144,7 @@ struct V2MockPreview: View {
                 deviceSessionsStore: nil,
                 groupInvitationStore: nil,
                 pendingGroupInvitationURL: .constant(nil),
-                pendingGroupAvatarsStore: nil,
+                makeGroupAvatarManagement: nil,
                 localE2EConversationLaunchFixture: nil,
                 passwordLifecycleClient: nil,
                 signOut: { screen = "login" },

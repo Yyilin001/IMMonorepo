@@ -38,13 +38,9 @@ protocol V2GroupAvatarManaging: Sendable {
     func act(roomID: RoomID, operationID: GroupAvatarOperationID, action: V2GroupAvatarManagementAction) async throws
 }
 
-protocol V2PendingGroupAvatarReading: Sendable {
-    func pendingPage(after: V2PendingGroupAvatarPage.Cursor?) async throws -> V2PendingGroupAvatarPage
-}
-
 /// Account lifetime orchestration. Only logical commands and local asset IDs
 /// enter the journal; readers and transfer engines contain the transport choice.
-actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvatarReading {
+actor V2GroupAvatarManagementService: V2GroupAvatarManaging {
     private let actorUserID: UserID
     private let deviceID: DeviceID
     private let store: GRDBV2LocalSyncStore
@@ -103,16 +99,6 @@ actor V2GroupAvatarManagementService: V2GroupAvatarManaging, V2PendingGroupAvata
     func pendingIntent(roomID: RoomID, operationID: GroupAvatarOperationID) async throws -> V2GroupAvatarIntent? {
         try requireOpen()
         return try await operations.run { try await self.readPendingIntent(roomID: roomID, operationID: operationID) }
-    }
-
-    func pendingPage(after: V2PendingGroupAvatarPage.Cursor?) async throws -> V2PendingGroupAvatarPage {
-        try requireOpen()
-        return try await operations.run { try await self.readPendingPage(after: after) }
-    }
-
-    private func readPendingPage(after: V2PendingGroupAvatarPage.Cursor?) async throws -> V2PendingGroupAvatarPage {
-        try requireOpen()
-        return try await store.pendingGroupAvatarOperations(actorUserID: actorUserID, after: after)
     }
 
     private func readPendingIntent(roomID: RoomID, operationID: GroupAvatarOperationID) async throws -> V2GroupAvatarIntent? {

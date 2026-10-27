@@ -14,6 +14,9 @@ extension GRDBV2LocalSyncStore {
         UNION ALL SELECT MAX(retry_at,COALESCE(claim_until,0)) FROM v2_group_avatar_intents g
         WHERE stage IN ('preparing','submitted') AND (submission_started=1 OR (upload_job_id IS NULL AND import_job_id IS NULL) OR EXISTS
             (SELECT 1 FROM v2_resource_transfer_jobs r WHERE r.job_id=g.upload_job_id AND (r.stage IN ('ready','cancelled','rejected','expired') OR r.needs_attention=1)) OR EXISTS(SELECT 1 FROM v2_resource_import_jobs r WHERE r.job_id=g.import_job_id AND (r.stage IN ('ready','cancelled','failed') OR r.attempts>=5)))
+        UNION ALL SELECT MAX(retry_at,server_retry_not_before,COALESCE(claim_until,0)) FROM v2_group_avatar_intents
+        WHERE stage='needsAttention' AND submission_started=1
+        UNION ALL SELECT COALESCE(claim_until,0) FROM v2_group_avatar_intents g WHERE \(groupAvatarCleanupPredicate)
         UNION ALL SELECT 0 FROM v2_resource_transfer_jobs j WHERE \(resourceSourceReleasePredicate))
         """
     /// The account is the sole import/consumer owner. Resource byte work has a separate journal owner.

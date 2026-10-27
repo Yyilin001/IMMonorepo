@@ -136,12 +136,10 @@ struct V2AccountHomeView: View {
     let canOpenPublicIdentity: Bool
     let canOpenDevices: Bool
     let canOpenSecurity: Bool
-    let canOpenPendingAvatars: Bool
     let openPublicIdentity: () -> Void
     let openDevices: () -> Void
     let openPrivacy: () -> Void
     let openSecurity: () -> Void
-    let openPendingAvatars: () -> Void
     let openFavorites: () -> Void
     var openResources: (() -> Void)? = nil
     let signOut: () -> Void
@@ -186,12 +184,6 @@ struct V2AccountHomeView: View {
                             V2SettingsLabel(title: "文件与存储", symbol: "folder", tint: V2VisualStyle.AccountIcon.resources)
                         }
                             .accessibilityIdentifier("v2.resources.open")
-                    }
-                    if canOpenPendingAvatars {
-                        Button(action: openPendingAvatars) {
-                            V2SettingsLabel(title: "待处理群头像", symbol: "person.2", tint: V2VisualStyle.AccountIcon.pendingAvatars)
-                        }
-                            .accessibilityIdentifier("v2.group.avatar.pending.open")
                     }
                 }
                 Section("设置") {

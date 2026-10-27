@@ -45,7 +45,7 @@ struct V2GroupAvatarManagementView: View {
                     }
                 }
                 if !store.pending.isEmpty {
-                    Section("待处理更改") {
+                    Section("头像更新") {
                         ForEach(store.pending) { intent in pendingRow(intent) }
                     }
                 }
@@ -105,11 +105,11 @@ struct V2GroupAvatarManagementView: View {
             if store.isStale { Text("显示上次读取的状态，请刷新后再管理群头像。") }
             else if !authority.canManage { Text("只有群主可以更改群头像。") }
             else if let maximum = authority.maximumUploadBytes {
-                Text("JPEG 或 PNG，最大 \(ByteCountFormatter.string(fromByteCount: maximum, countStyle: .file))。关闭页面后，已保存的更改仍会继续处理。")
+                Text("JPEG 或 PNG，最大 \(ByteCountFormatter.string(fromByteCount: maximum, countStyle: .file))。")
                     .font(.footnote).foregroundStyle(.secondary)
             } else { Text("暂时无法上传新头像，请稍后刷新。") }
         } else if case .forbidden = store.snapshot?.access {
-            Text("当前无法访问群头像，已有更改仍可确认结果。")
+            Text("当前无法访问群头像。")
         } else { Text("请刷新以获取当前头像和管理权限。") }
     }
 
@@ -119,34 +119,34 @@ struct V2GroupAvatarManagementView: View {
                 Text("选中的更改").font(.caption).foregroundStyle(.secondary)
             }
             if intent.stage == .closed {
-                Text("服务器已确认这次更改未生效")
-                Button("重新提交") { store.replace(intent) }
+                Text("头像更新失败")
+                Button("重试") { store.replace(intent) }
                     .disabled(!store.canReplace(intent))
                     .accessibilityIdentifier("v2.group.avatar.retry-closed")
-                Button("放弃", role: .destructive) { store.act(intent, action: .abandon) }
+                Button("取消", role: .destructive) { store.act(intent, action: .abandon) }
                     .disabled(store.isPerformingAction)
                     .accessibilityIdentifier("v2.group.avatar.abandon")
             } else if intent.submissionStarted {
-                Text(intent.recoveryAction == .closeIfAbsent ? "正在确认这次更改能否停止" : "更改尚未确认")
-                Button("确认结果") { store.act(intent, action: .query) }
-                    .disabled(store.isPerformingAction)
-                    .accessibilityIdentifier("v2.group.avatar.query")
-                Button("停止这次更改", role: .destructive) { store.act(intent, action: .closeIfAbsent) }
-                    .disabled(store.isPerformingAction)
-                    .accessibilityIdentifier("v2.group.avatar.close")
+                ProgressView("正在更新头像…")
+                    .accessibilityIdentifier("v2.group.avatar.updating")
+                Text("网络恢复后会自动继续，可以关闭此页面。")
+                    .font(.footnote).foregroundStyle(.secondary)
             } else {
-                Text(intent.stage == .needsAttention ? "头像准备未完成" : "正在准备群头像")
                 if intent.stage == .needsAttention {
-                    Button("继续准备") { store.act(intent, action: .retry) }
-                        .disabled(store.isPerformingAction)
+                    Text("头像更新失败")
+                    Button("重试") { store.act(intent, action: .retry) }
+                        .disabled(!store.canRetryPreparation(intent))
+                        .accessibilityIdentifier("v2.group.avatar.retry")
+                } else {
+                    ProgressView("正在更新头像…")
+                        .accessibilityIdentifier("v2.group.avatar.updating")
                 }
-                Button("取消这次更改", role: .destructive) { store.act(intent, action: .cancel) }
+                Button("取消", role: .destructive) { store.act(intent, action: .cancel) }
                     .disabled(store.isPerformingAction)
                     .accessibilityIdentifier("v2.group.avatar.cancel-preparation")
             }
         }
-        // Form's automatic style treats the whole row as one action. These
-        // recovery choices must each dispatch only their own frozen operation.
+        // Keep retry and cancellation as separate hit targets inside a Form row.
         .buttonStyle(.bordered)
         .controlSize(.large)
     }

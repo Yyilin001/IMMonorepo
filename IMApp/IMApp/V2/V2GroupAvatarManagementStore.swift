@@ -149,10 +149,17 @@ final class V2GroupAvatarManagementStore {
     }
 
     func act(_ intent: V2GroupAvatarIntent, action: V2GroupAvatarManagementAction) {
+        if case .retry = action, !canRetryPreparation(intent) { return }
         startAction { epoch in
             try await self.manager.act(roomID: self.roomID, operationID: intent.id, action: action)
             await self.reload(epoch: epoch)
         }
+    }
+
+    func canRetryPreparation(_ intent: V2GroupAvatarIntent) -> Bool {
+        guard !intent.submissionStarted, intent.stage == .needsAttention,
+              !isPerformingAction, authority?.canManage == true else { return false }
+        return intent.uploadJobID == nil || authority?.maximumUploadBytes != nil
     }
 
     func canReplace(_ intent: V2GroupAvatarIntent) -> Bool {
@@ -289,11 +296,11 @@ final class V2GroupAvatarManagementStore {
     static func message(for error: any Error) -> String {
         switch error {
         case V2GroupAvatarManagementError.forbidden, V2GroupAvatarReadError.forbidden:
-            "当前无法管理群头像。已有更改仍可确认结果。"
+            "当前无法管理群头像。"
         case V2GroupAvatarManagementError.revisionChanged:
             "群头像已被更新，请刷新后再决定是否更改。"
         case V2GroupAvatarManagementError.pendingDecision:
-            "请先处理已有的头像更改。"
+            "头像正在更新，请稍后再试。"
         case V2GroupAvatarManagementError.imageUnsupported:
             "请选择 JPEG 或 PNG 图片。"
         case V2GroupAvatarManagementError.imageTooLarge:
@@ -301,7 +308,7 @@ final class V2GroupAvatarManagementStore {
         case V2ConversationAttachmentStagingError.stagingQuotaExceeded:
             "待处理的附件占用较多空间，请先处理已有更改。"
         default:
-            "暂时无法完成操作。已保存的更改会继续确认，请勿重复创建。"
+            "暂时无法更新头像，请稍后重试。"
         }
     }
 }

@@ -21,8 +21,8 @@ struct V2ResourceCenterUITestView: View {
             Group {
                 if fixture != nil {
                     V2AccountHomeView(displayName: "资源测试账号", handle: "@resource-test",
-                        canOpenPublicIdentity: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-profile-picker"), canOpenDevices: false, canOpenSecurity: false, canOpenPendingAvatars: false,
-                        openPublicIdentity: { showingProfile = true }, openDevices: {}, openPrivacy: {}, openSecurity: {}, openPendingAvatars: {},
+                        canOpenPublicIdentity: ProcessInfo.processInfo.arguments.contains("-v2-ui-testing-resource-center-profile-picker"), canOpenDevices: false, canOpenSecurity: false,
+                        openPublicIdentity: { showingProfile = true }, openDevices: {}, openPrivacy: {}, openSecurity: {},
                         openFavorites: {}, openResources: { navigation.path.append(V2ResourceRoute.home) }, signOut: {})
                 } else { Text(status).accessibilityIdentifier("v2.resources.fixture-status") }
             }

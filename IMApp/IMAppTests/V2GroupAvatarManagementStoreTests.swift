@@ -8,6 +8,25 @@ import Testing
 @MainActor
 @Suite("Group avatar page state and dismissal", .timeLimit(.minutes(1)))
 struct V2GroupAvatarManagementStoreTests {
+    @Test(arguments: [false, true])
+    func preparationRetryIsAvailableOnlyWithCurrentManagementPermission(authorized: Bool) async throws {
+        let room = RoomID(uuid: UUID())
+        let command = try V2GroupAvatarCommand(operationID: .init(uuid: UUID()), roomID: room, expectedRevision: 7, mutation: .remove)
+        let intent = V2GroupAvatarIntent(actorUserID: .init(uuid: UUID()), command: command, preparation: nil,
+            stage: .needsAttention, submissionStarted: false, recoveryAction: nil, closedDisposition: .awaitingDecision,
+            attempts: 0, retryAt: Date(), issue: .preparationUnavailable, receipt: nil, closureProof: nil)
+        let access: V2GroupAvatarManagementSnapshot.Access = authorized ? try snapshot(room: room).access : .forbidden
+        let manager = PageAvatarManager(snapshot: .init(access: access, pending: [intent]))
+        let store = V2GroupAvatarManagementStore(roomID: room, manager: manager, stager: PageAvatarStager(), notifier: nil)
+        await store.observe()
+        #expect(store.canRetryPreparation(intent) == authorized)
+        store.act(intent, action: .retry)
+        await settle(store)
+        #expect(await manager.actions.count == (authorized ? 1 : 0))
+        store.suspend()
+        #expect(!store.canRetryPreparation(intent))
+    }
+
     @Test func leaseAndCapabilityGateNewImagesWhileRemovalNeedsNoUpload() async throws {
         let clock = Mutex(ContinuousClock.now), room = RoomID(uuid: UUID())
         let manager = PageAvatarManager(snapshot: try snapshot(room: room, deadline: clock.withLock { $0 }.advanced(by: .seconds(60))))

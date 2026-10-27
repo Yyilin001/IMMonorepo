@@ -109,7 +109,7 @@ struct V2ResourceBusinessOwnersView: View {
                             .accessibilityIdentifier(Self.identifier(entry.owner))
                     }
                 } else if store.isReading { ProgressView("正在读取相关更改") }
-            } footer: { Text("打开对应更改，可确认结果、继续处理或按当前状态放弃。") }
+            } footer: { Text("打开对应更改，查看更新状态或重试失败的更改。") }
             if store.pageNumber > 1 || store.page?.nextCursor != nil {
                 Section {
                     HStack {

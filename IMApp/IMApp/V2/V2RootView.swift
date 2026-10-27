@@ -127,7 +127,7 @@ struct V2RootView: View {
                             deviceSessionsStore: store.deviceSessionsStore,
                             groupInvitationStore: store.groupInvitationStore,
                             pendingGroupInvitationURL: $pendingGroupInvitationURL,
-                            pendingGroupAvatarsStore: store.pendingGroupAvatarsStore,
+                            makeGroupAvatarManagement: store.makeGroupAvatarManagement,
                             localE2EConversationLaunchFixture: localE2EConversationLaunchFixture,
                             passwordLifecycleClient: store.passwordLifecycleClient(),
                             signOut: { store.requestSignOut() }
@@ -420,7 +420,6 @@ struct V2SignedInRootView: View {
         case privacy
         case publicIdentity
         case deviceSessions
-        case pendingGroupAvatars
         case favorites
 
         var id: String { rawValue }
@@ -436,7 +435,7 @@ struct V2SignedInRootView: View {
     let deviceSessionsStore: V2DeviceSessionsStore?
     let groupInvitationStore: V2GroupInvitationStore?
     @Binding var pendingGroupInvitationURL: URL?
-    let pendingGroupAvatarsStore: V2PendingGroupAvatarsStore?
+    let makeGroupAvatarManagement: (@MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore)?
     let localE2EConversationLaunchFixture: V2LiveLocalAccountE2EConversationLaunchFixture?
     let passwordLifecycleClient: V2PasswordLifecycleClient?
     let signOut: @MainActor @Sendable () async -> Void
@@ -471,12 +470,10 @@ struct V2SignedInRootView: View {
                 canOpenPublicIdentity: publicIdentitySettingsStore != nil,
                 canOpenDevices: deviceSessionsStore != nil,
                 canOpenSecurity: passwordLifecycleClient != nil,
-                canOpenPendingAvatars: pendingGroupAvatarsStore != nil,
                 openPublicIdentity: { presentedSettingsSheet = .publicIdentity },
                 openDevices: { presentedSettingsSheet = .deviceSessions },
                 openPrivacy: { presentedSettingsSheet = .privacy },
                 openSecurity: { presentedSettingsSheet = .accountSecurity },
-                openPendingAvatars: { presentedSettingsSheet = .pendingGroupAvatars },
                 openFavorites: { presentedSettingsSheet = .favorites },
                 openResources: appStore.resourceManagement == nil ? nil : { rootNavigation.path.append(V2ResourceRoute.home) },
                 signOut: {
@@ -567,7 +564,7 @@ struct V2SignedInRootView: View {
                     groupInvitationStore: groupInvitationStore)
             }
             .v2ResourceDestinations(service: appStore.resourceManagement, navigation: rootNavigation,
-                profile: publicIdentitySettingsStore, groups: pendingGroupAvatarsStore)
+                profile: publicIdentitySettingsStore, groups: makeGroupAvatarManagement)
             .navigationDestination(for: V2LocalDirectConversationRoute.self) { route in
                 if let service = conversationStore.localDirectConversationService {
                     V2LocalDirectConversationView(operationID: route.operationID,
@@ -613,8 +610,6 @@ struct V2SignedInRootView: View {
                         presentedSettingsSheet = nil
                     }
 
-                case .pendingGroupAvatars:
-                    if let pendingGroupAvatarsStore { V2PendingGroupAvatarsView(store: pendingGroupAvatarsStore) }
                 case .accountSecurity:
                     if let passwordLifecycleClient {
                         NavigationStack { V2AccountSecurityView(client: passwordLifecycleClient, passwordChanged: signOut) }

@@ -57,6 +57,7 @@ public actor V2GroupAvatarIntentEngine {
     private func performRecoveryPass() async throws {
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
+        if recovery != nil { try await store.reconcileGroupAvatarRecovery(now: now()) }
         for id in try await store.dueGroupAvatarIntents(now: now()) {
             try Task.checkCancellation()
             do { _ = try await resume(id) }
@@ -65,6 +66,7 @@ public actor V2GroupAvatarIntentEngine {
         }
         try Task.checkCancellation()
         guard !closed else { throw CancellationError() }
+        if recovery != nil { try await store.reconcileGroupAvatarRecovery(now: now()) }
         try await transfers.releaseFinishedSources()
     }
 

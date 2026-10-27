@@ -156,7 +156,6 @@ struct V2GroupAvatarManagementTests {
         let snapshot = try await f.manager.load(roomID: f.room)
         guard case .forbidden = snapshot.access else { Issue.record("membership denial was hidden"); try await f.close(); return }
         #expect(snapshot.pending.map(\.id) == [intent.id])
-        #expect(try await f.manager.pendingPage(after: nil).entries.map(\.id) == [intent.id])
         #expect(try await f.manager.pendingIntent(roomID: f.room, operationID: intent.id)?.id == intent.id)
         await #expect(throws: V2GroupAvatarIntentError.accountMismatch) {
             _ = try await f.manager.pendingIntent(roomID: .init(uuid: UUID()), operationID: intent.id)
@@ -170,7 +169,6 @@ struct V2GroupAvatarManagementTests {
         try await f.manager.act(roomID: f.room, operationID: intent.id, action: .abandon)
         #expect(try await f.manager.pending(roomID: f.room).isEmpty)
         #expect(try await f.store.groupAvatarIntent(intent.id)?.closedDisposition == .abandoned)
-        #expect(try await f.manager.pendingPage(after: nil).entries.isEmpty)
         #expect(try await f.manager.pendingIntent(roomID: f.room, operationID: intent.id) == nil)
         try await f.close()
     }

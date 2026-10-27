@@ -2,7 +2,7 @@ import XCTest
 
 final class IMAppResourceRecoveryUITests: XCTestCase {
     @MainActor
-    func testDepartedGroupOperationSurvivesBackgroundAndRelaunchUntilAbandoned() throws {
+    func testAvatarOutcomeRecoversWithoutAnAccountTaskOrManualConfirmation() throws {
         continueAfterFailure = false
         let app = XCUIApplication(), scope = UUID().uuidString
         let arguments = ["-v2-ui-testing-signed-out", "-v2-ui-testing-resource-scope", scope,
@@ -17,52 +17,35 @@ final class IMAppResourceRecoveryUITests: XCTestCase {
             cleanup.terminate()
         }
         app.launch()
-        openPending(app)
-        openOperation(app)
-        XCTAssertFalse(app.buttons["v2.group.avatar.choose"].isEnabled)
-        XCTAssertFalse(app.buttons["v2.group.avatar.remove"].isEnabled)
-        let query = app.buttons["v2.group.avatar.query"]
-        XCTAssertTrue(query.waitForExistence(timeout: 10))
-        query.tap()
-        waitUntilEnabled(app.buttons["v2.group.avatar.close"])
+        openAvatar(app)
+        XCTAssertTrue(app.descendants(matching: .any)["v2.group.avatar.updating"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["v2.group.avatar.query"].exists)
+        XCTAssertFalse(app.buttons["v2.group.avatar.close"].exists)
         XCUIDevice.shared.press(.home)
         app.activate()
-        let close = app.buttons["v2.group.avatar.close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 10))
-        waitUntilEnabled(close); close.tap()
-        XCTAssertTrue(app.buttons["v2.group.avatar.abandon"].waitForExistence(timeout: 10))
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "Departed group operation permanently closed"
-        screenshot.lifetime = .keepAlways; add(screenshot)
-        app.buttons["v2.group.avatar.done"].tap()
-        XCTAssertTrue(app.buttons["v2.group.avatar.pending.item"].firstMatch.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["v2.group.avatar.updating"].waitForExistence(timeout: 10))
 
-        app.terminate(); app.launch()
-        openPending(app); openOperation(app)
-        let abandon = app.buttons["v2.group.avatar.abandon"]
-        XCTAssertTrue(abandon.waitForExistence(timeout: 10))
+        app.terminate()
+        app.launchArguments = arguments + ["-v2-ui-testing-resource-resolve"]
+        app.launch()
+        openAvatar(app)
+        XCTAssertTrue(app.buttons["v2.group.avatar.retry-closed"].waitForExistence(timeout: 30))
+        // Permission loss prevents a new mutation, while account recovery still
+        // settles the original operation without any user action.
         XCTAssertFalse(app.buttons["v2.group.avatar.retry-closed"].isEnabled)
-        abandon.tap()
-        XCTAssertTrue(app.staticTexts["v2.group.avatar.focus-completed"].waitForExistence(timeout: 10))
-        app.buttons["v2.group.avatar.done"].tap()
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "v2.group.avatar.pending.empty").firstMatch.waitForExistence(timeout: 10))
-        app.buttons["v2.group.avatar.pending.done"].tap()
-        openPending(app)
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "v2.group.avatar.pending.empty").firstMatch.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["v2.group.avatar.query"].exists)
+        XCTAssertFalse(app.buttons["v2.group.avatar.close"].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Avatar outcome recovered automatically"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
     }
 
-    @MainActor private func openPending(_ app: XCUIApplication) {
-        let menu = app.buttons["v2.account-menu"]
-        XCTAssertTrue(menu.waitForExistence(timeout: 10)); menu.tap()
-        let pending = app.buttons["v2.group.avatar.pending.open"]
-        XCTAssertTrue(pending.waitForExistence(timeout: 5)); pending.tap()
-    }
-    @MainActor private func openOperation(_ app: XCUIApplication) {
-        let item = app.buttons["v2.group.avatar.pending.item"].firstMatch
-        XCTAssertTrue(item.waitForExistence(timeout: 10)); item.tap()
-    }
-    @MainActor private func waitUntilEnabled(_ element: XCUIElement) {
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == true AND enabled == true AND hittable == true"), object: element)
-        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed)
+    @MainActor private func openAvatar(_ app: XCUIApplication) {
+        let avatar = app.buttons["v2.resource-test.avatar.open"]
+        XCTAssertTrue(avatar.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["v2.group.avatar.pending.open"].exists)
+        XCTAssertFalse(app.staticTexts["待处理群头像"].exists)
+        avatar.tap()
     }
 }

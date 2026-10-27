@@ -240,7 +240,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
     private(set) var pushWakeSettingsStore: V2PushWakeSettingsStore?
     private(set) var deviceSessionsStore: V2DeviceSessionsStore?
     private(set) var groupInvitationStore: V2GroupInvitationStore?
-    private(set) var pendingGroupAvatarsStore: V2PendingGroupAvatarsStore?
+    private(set) var makeGroupAvatarManagement: (@MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore)?
 
     init(
         startupMode: StartupMode = .production,
@@ -868,9 +868,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         let closingStager = accountAttachmentStager
         let closingProfiles = accountProfileRepository
         accountProfileRepository = nil
-        let closingPendingGroupAvatars = pendingGroupAvatarsStore
-        pendingGroupAvatarsStore?.suspend()
-        pendingGroupAvatarsStore = nil
+        makeGroupAvatarManagement = nil
         mediaCacheDownloader = nil
         resourceManagement = nil
         accountAttachmentUploader = nil
@@ -891,7 +889,6 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
         deviceSessionsStore = nil
         groupInvitationStore = nil
         await closingDeviceSessions?.close()
-        await closingPendingGroupAvatars?.close()
         await closingProfiles?.close()
         await oldAvatarPipeline?.close()
         await closingAvatarInvalidations?.value
@@ -1196,8 +1193,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
                 ),operations:invitationOperations
             )
             let groupAvatarManager = realtime.groupAvatarManager, groupAvatarNotifier = realtime.projectionChangeNotifier
-            let pendingGroupAvatars = V2PendingGroupAvatarsStore(reader: groupAvatarManager,
-                notifier: groupAvatarNotifier) { roomID, operationID in
+            let makeGroupAvatarManagement: @MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore = { roomID, operationID in
                 V2GroupAvatarManagementStore(roomID: roomID, manager: groupAvatarManager,
                     stager: attachmentStager, notifier: groupAvatarNotifier, focusedOperationID: operationID)
             }
@@ -1311,7 +1307,7 @@ final class V2AppStore: V2PushDeviceTokenReceiving, V2PushWakeHandling {
             pushWakeSettingsStore = pushWakeSettings
             deviceSessionsStore = deviceSessions
             groupInvitationStore = groupInvitations
-            pendingGroupAvatarsStore = pendingGroupAvatars
+            self.makeGroupAvatarManagement = makeGroupAvatarManagement
             messageSearchLocalStore = localStore
             accountAccessMode = .authenticated
             route = .signedIn(userID: userID.rawValue)

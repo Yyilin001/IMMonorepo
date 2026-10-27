@@ -28,12 +28,9 @@ private struct V2ResourceDestinations: ViewModifier {
     let service: V2ResourceManagementService?
     let navigation: V2RootNavigationStore
     let profile: V2PublicIdentitySettingsStore?
-    let groups: V2PendingGroupAvatarsStore?
+    let groups: (@MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore)?
     @MainActor private var businessManagers: V2ResourceBusinessManagers {
-        let factory: (@MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore)?
-        if let groups { factory = { room, operation in groups.managementStore(for: .init(roomID: room, operationID: operation)) } }
-        else { factory = nil }
-        return V2ResourceBusinessManagers(profile: profile?.resourceIntentManager, group: factory)
+        V2ResourceBusinessManagers(profile: profile?.resourceIntentManager, group: groups)
     }
     func body(content: Content) -> some View {
         content.navigationDestination(for: V2ResourceRoute.self) { route in
@@ -59,7 +56,7 @@ private struct V2ResourceDestinations: ViewModifier {
 }
 extension View {
     func v2ResourceDestinations(service: V2ResourceManagementService?, navigation: V2RootNavigationStore,
-                                profile: V2PublicIdentitySettingsStore? = nil, groups: V2PendingGroupAvatarsStore? = nil) -> some View {
+                                profile: V2PublicIdentitySettingsStore? = nil, groups: (@MainActor @Sendable (RoomID, GroupAvatarOperationID) -> V2GroupAvatarManagementStore)? = nil) -> some View {
         modifier(V2ResourceDestinations(service: service, navigation: navigation, profile: profile, groups: groups))
     }
 }

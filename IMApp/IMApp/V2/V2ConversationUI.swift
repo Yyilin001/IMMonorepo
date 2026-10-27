@@ -1619,10 +1619,8 @@ extension V2AccountKind {
 struct V2ConversationAccountMenu: View {
     let canOpenPublicIdentity: Bool
     let canOpenDeviceSessions: Bool
-    let canOpenPendingGroupAvatars: Bool
     let openPublicIdentity: @MainActor () -> Void
     let openDeviceSessions: @MainActor () -> Void
-    let openPendingGroupAvatars: @MainActor () -> Void
     let openPrivacySettings: @MainActor () -> Void
     let openAccountSecurity: @MainActor () -> Void
     let signOut: @MainActor () -> Void
@@ -1636,10 +1634,6 @@ struct V2ConversationAccountMenu: View {
             if canOpenDeviceSessions {
                 Button("登录设备", action: openDeviceSessions)
                     .accessibilityIdentifier("v2.device-sessions.open")
-            }
-            if canOpenPendingGroupAvatars {
-                Button("待处理群头像", action: openPendingGroupAvatars)
-                    .accessibilityIdentifier("v2.group.avatar.pending.open")
             }
             Button("消息接收设置", action: openPrivacySettings)
                 .accessibilityIdentifier("v2.privacy.open")

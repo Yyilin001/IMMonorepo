@@ -15,7 +15,6 @@ enum V2VisualStyle {
     enum AccountIcon {
         static let favorites = adaptiveTint(light: 0xA86B18, dark: 0xE8B566)
         static let resources = adaptiveTint(light: 0x3269BE, dark: 0x83B4F4)
-        static let pendingAvatars = adaptiveTint(light: 0x7957B5, dark: 0xBCA0E8)
         static let privacy = adaptiveTint(light: 0x237D76, dark: 0x77C9BE)
         static let devices = adaptiveTint(light: 0x57718F, dark: 0xA1B8D4)
         static let security = adaptiveTint(light: 0x328252, dark: 0x83C99A)
